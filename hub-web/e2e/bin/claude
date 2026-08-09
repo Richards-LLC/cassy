@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Deterministic interactive PTY used by the Commander live-browser proof."""
+
+import os
+import signal
+import sys
+import termios
+import tty
+
+
+def size() -> tuple[int, int]:
+    value = os.get_terminal_size(sys.stdout.fileno())
+    return value.columns, value.lines
+
+
+def resized(_signal: int, _frame: object) -> None:
+    columns, rows = size()
+    print(f"\r\nH4_RESIZE cols={columns} rows={rows}\r", flush=True)
+
+
+signal.signal(signal.SIGWINCH, resized)
+original = termios.tcgetattr(sys.stdin.fileno())
+tty.setraw(sys.stdin.fileno())
+
+try:
+    print("\x1b[2J\x1b[H\x1b[31mH4_RED_VT\x1b[0m ready\r")
+    for line in range(1, 81):
+        print(f"H4_SCROLLBACK_{line:03d}\r")
+    print("H4_INPUT_PROMPT> ", end="", flush=True)
+    pending = bytearray()
+    while True:
+        data = os.read(sys.stdin.fileno(), 1)
+        if not data:
+            break
+        if data == b"\x1b":
+            pending.clear()
+            print("\r\nH4_INTERRUPT_RECEIVED\r\nH4_INPUT_PROMPT> ", end="", flush=True)
+        elif data in (b"\r", b"\n"):
+            text = pending.decode("utf-8", errors="replace")
+            pending.clear()
+            print(f"\r\nH4_INPUT_ECHO={text}\r\nH4_INPUT_PROMPT> ", end="", flush=True)
+        elif data == b"\x03":
+            break
+        else:
+            pending.extend(data)
+finally:
+    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, original)

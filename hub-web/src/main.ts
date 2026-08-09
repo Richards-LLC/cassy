@@ -17,6 +17,7 @@ const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const sessionStates = new Map<string, SessionState>();
 const paneBuffers = new Map<string, number[]>();
+const selectedPanes = new Map<string, string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
 let attention: AttentionItem[] = [];
@@ -181,6 +182,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
   const active = new Set(state.panes.filter((pane) => pane.kind !== "Director").map((pane) => pane.id));
+  const selectedKey = sessionKey(machineId, session);
+  const selectedPane = selectedPanes.get(selectedKey);
+  if (!selectedPane || !active.has(selectedPane)) {
+    const fallback = state.panes.find((pane) => pane.kind !== "Director" && pane.focused)
+      ?? state.panes.find((pane) => pane.kind !== "Director");
+    if (fallback) selectedPanes.set(selectedKey, fallback.id);
+  }
   for (const [key, surface] of surfaces) {
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) { surface.dispose(); surfaces.delete(key); }
   }
@@ -191,6 +199,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       const card = document.createElement("section");
       card.className = "pane";
       card.dataset.paneId = pane.id;
+      if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
+      card.onclick = () => {
+        selectedPanes.set(selectedKey, pane.id);
+        for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
+        card.classList.add("selected");
+        surfaces.get(key)?.focus();
+      };
       const title = document.createElement("header");
       title.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
       mount = document.createElement("div"); mount.className = "terminal-mount";
@@ -331,7 +346,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   document.querySelector<HTMLButtonElement>("#interrupt")!.onclick = () => {
     if (!selected || !selectedSession) return;
-    const pane = [...surfaces.keys()].find((key) => key.startsWith(`${selected.id}:${selectedSession}:`))?.split(":").at(-1);
+    const pane = selectedPanes.get(sessionKey(selected.id, selectedSession));
     if (pane) sendControl(selected.id, selectedSession, { InterruptPane: { pane_id: pane } });
   };
   document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => {

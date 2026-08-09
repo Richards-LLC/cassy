@@ -237,6 +237,198 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
 }
 
 #[tokio::test]
+async fn h4_real_browser_safe_reads_derive_only_a_trusted_same_origin() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing("http://127.0.0.1:4173", Scope::default_read_only(), now)
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "http://127.0.0.1:4173",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session(
+                "factory-a",
+            )])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity {
+                id: "machine-test".into(),
+            },
+            DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+            events,
+        )
+        .with_auth(auth.clone())
+        .with_effective_origin("http://127.0.0.1:4173"),
+    );
+    let authorization = format!("DPoP {}", credential.credential);
+    let proof = |method: &str, uri: &str| {
+        sign_dpop(
+            &signing,
+            &credential.credential,
+            method,
+            uri,
+            now,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    };
+
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/sessions")
+                .header("host", "127.0.0.1:4173")
+                .header("sec-fetch-site", "same-origin")
+                .header("authorization", &authorization)
+                .header("dpop", proof("GET", "/v1/sessions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    for (site, host) in [
+        (None, "127.0.0.1:4173"),
+        (Some("cross-site"), "127.0.0.1:4173"),
+        (Some("same-origin"), "127.0.0.1:9999"),
+    ] {
+        let mut request = Request::get("/v1/sessions")
+            .header("host", host)
+            .header("authorization", &authorization)
+            .header("dpop", proof("GET", "/v1/sessions"));
+        if let Some(site) = site {
+            request = request.header("sec-fetch-site", site);
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    let mutation = app
+        .oneshot(
+            Request::post("/v1/auth/websocket-ticket")
+                .header("host", "127.0.0.1:4173")
+                .header("sec-fetch-site", "same-origin")
+                .header("authorization", authorization)
+                .header("dpop", proof("POST", "/v1/auth/websocket-ticket"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"session":"factory-a"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mutation.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        std::fs::read_to_string(temp.path().join("hub/audit.jsonl"))
+            .unwrap()
+            .contains("dpop_auth"),
+        "the accepted real-browser read reaches DPoP verification and audit"
+    );
+}
+
+#[tokio::test]
+async fn h4_pairing_preflight_allows_only_the_exact_bootstrap_shape() {
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(PreAuthAuthorizer),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+        events,
+    ));
+    let preflight = |path: &str, origin: &str, method: &str, headers: &str| {
+        Request::builder()
+            .method("OPTIONS")
+            .uri(path)
+            .header("origin", origin)
+            .header("access-control-request-method", method)
+            .header("access-control-request-headers", headers)
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let allowed = app
+        .clone()
+        .oneshot(preflight(
+            "/v1/auth/pairing/exchange",
+            "http://127.0.0.1:4173",
+            "POST",
+            "content-type",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        allowed.headers()["access-control-allow-origin"],
+        "http://127.0.0.1:4173"
+    );
+    assert_eq!(allowed.headers()["vary"], "Origin");
+    assert_eq!(allowed.headers()["access-control-allow-methods"], "POST");
+    assert_eq!(
+        allowed.headers()["access-control-allow-headers"],
+        "Content-Type"
+    );
+    assert!(
+        !allowed
+            .headers()
+            .contains_key("access-control-allow-credentials")
+    );
+
+    for request in [
+        preflight(
+            "/v1/auth/pairing/exchange",
+            "http://192.168.1.8:4173",
+            "POST",
+            "content-type",
+        ),
+        preflight("/v1/auth/pairing/exchange", "null", "POST", "content-type"),
+        preflight(
+            "/v1/auth/pairing/exchange",
+            "http://127.0.0.1:4173",
+            "DELETE",
+            "content-type",
+        ),
+        preflight(
+            "/v1/auth/pairing/exchange",
+            "http://127.0.0.1:4173",
+            "POST",
+            "content-type,authorization",
+        ),
+        preflight(
+            "/v1/auth/websocket-ticket",
+            "http://127.0.0.1:4173",
+            "POST",
+            "content-type",
+        ),
+    ] {
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+#[tokio::test]
 async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions() {
     let events = MachineEventBus::new(16);
     let state = HubState::new(

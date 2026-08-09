@@ -24,6 +24,7 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .toolbar h1 { margin: 0; font-size: 18px; }.toolbar p { margin: 4px 0 0; color: #8b949e; font-size: 12px; }.actions { display: flex; gap: 8px; }.actions button { padding: 0 12px; }.danger { color: #ffa198; border-color: #da3633; }
 .pane-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); grid-auto-rows: minmax(280px, 1fr); gap: 8px; padding: 8px; overflow: auto; }
 .pane { min-height: 280px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #30363d; border-radius: 10px; background: #0d1117; box-shadow: 0 10px 32px rgba(0,0,0,.22); }
+.pane.selected { border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff, 0 10px 32px rgba(0,0,0,.22); }
 .pane > header { height: 34px; padding: 8px 10px; color: #8b949e; font: 11px ui-monospace, monospace; border-bottom: 1px solid #21262d; }
 .terminal-mount { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 .t3-ghostty-canvas { display: block; width: 100%; height: 100%; cursor: text; }.t3-ghostty-canvas.link { cursor: pointer; }

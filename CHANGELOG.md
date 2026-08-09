@@ -10,7 +10,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [2.54.1] - 2026-08-09
 
 ### Fixed
-- **The Linux x86_64 release no longer inherits AVX-512 from the build runner.** Ghostty VT now receives an explicit portable Zig target for every supported native and cross build, unknown targets fail closed instead of falling back to the host CPU, and the release path audits the finished executable for forbidden EVEX/AVX-512 instructions. Anyone who installed `2.54.0` should upgrade to `2.54.1`; the original `2.54.0` tag and artifacts remain unchanged for traceability.
+- **The Linux x86_64 release no longer inherits AVX-512 from the build runner.** Ghostty VT now receives an explicit portable Zig target for every supported native and cross build, unknown targets fail closed instead of falling back to the host CPU, and the release path audits the bundled Ghostty archive for forbidden EVEX/AVX-512 instructions. Anyone who installed `2.54.0` should upgrade to `2.54.1`; the original `2.54.0` tag and artifacts remain unchanged for traceability.
 
 ## [2.54.0] - 2026-08-09
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reject x86_64 release artifacts containing EVEX-encoded instructions.
+# Reject x86_64 Ghostty release artifacts containing EVEX instructions.
 #
 # EVEX uses opcode-map prefix 0x62 and is the encoding used by AVX-512. CAS's
 # distributed x86_64 baseline does not require AVX-512, so an EVEX instruction
@@ -8,7 +8,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: scripts/check-portable-x86_64-isa.sh <x86_64-elf>" >&2
+  echo "Usage: scripts/check-portable-x86_64-isa.sh <x86_64-elf-or-archive>" >&2
 }
 
 if [[ "$#" -ne 1 ]]; then
@@ -22,7 +22,7 @@ if [[ ! -f "$artifact" ]]; then
   exit 2
 fi
 
-for tool in file objdump awk; do
+for tool in file objdump awk grep; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "error: required ISA audit tool is unavailable: $tool" >&2
     exit 2
@@ -30,8 +30,8 @@ for tool in file objdump awk; do
 done
 
 file_description="$(file -Lb -- "$artifact")"
-if [[ "$file_description" != *"ELF 64-bit"* || "$file_description" != *"x86-64"* ]]; then
-  echo "error: ISA audit requires an x86_64 ELF artifact; got: $file_description" >&2
+if ! objdump -f -- "$artifact" 2>/dev/null | grep -qF 'architecture: i386:x86-64'; then
+  echo "error: ISA audit requires an x86_64 ELF object or archive; got: $file_description" >&2
   exit 2
 fi
 
@@ -39,7 +39,7 @@ disassembly="$(mktemp)"
 offenders="$(mktemp)"
 trap 'rm -f "$disassembly" "$offenders"' EXIT
 
-if ! LC_ALL=C objdump -d -- "$artifact" >"$disassembly"; then
+if ! LC_ALL=C objdump -d --insn-width=15 -- "$artifact" >"$disassembly"; then
   echo "error: objdump could not disassemble ISA audit input: $artifact" >&2
   exit 2
 fi
@@ -52,7 +52,16 @@ awk '
     line = $0
     sub(/^[[:space:]]*[[:xdigit:]]+:[[:space:]]*/, "", line)
     count = split(line, field, /[[:space:]]+/)
-    for (i = 1; i <= count && field[i] ~ /^[[:xdigit:]][[:xdigit:]]$/; i++) {
+    byte_count = 0
+    while (byte_count < count && field[byte_count + 1] ~ /^[[:xdigit:]][[:xdigit:]]$/) {
+      byte_count++
+    }
+    # A real decoded instruction has a mnemonic after its bytes. Ignore
+    # objdump continuation/data rows that contain bytes only.
+    if (byte_count == count || field[byte_count + 1] == "") {
+      next
+    }
+    for (i = 1; i <= byte_count; i++) {
       byte = tolower(field[i])
       if (byte == "62") {
         print $0
@@ -66,11 +75,11 @@ awk '
 ' "$disassembly" >"$offenders"
 
 if [[ -s "$offenders" ]]; then
-  echo "error: x86_64 artifact contains forbidden EVEX/AVX-512 instruction encoding: $artifact" >&2
-  echo "The portable release baseline must run without AVX-512. First findings:" >&2
+  echo "error: x86_64 Ghostty artifact contains forbidden EVEX/AVX-512 instruction encoding: $artifact" >&2
+  echo "The Ghostty portability baseline must run without AVX-512. First findings:" >&2
   head -n 10 "$offenders" >&2
   exit 1
 fi
 
 checksum="$(sha256sum -- "$artifact" | awk '{print $1}')"
-echo "portable x86_64 ISA audit passed: evex_avx512=absent sha256=$checksum artifact=$artifact"
+echo "portable x86_64 Ghostty ISA audit passed: evex_avx512=absent sha256=$checksum artifact=$artifact"

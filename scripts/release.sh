@@ -136,7 +136,12 @@ for target in "${TARGETS[@]}"; do
     if [[ "$target" == *"linux"* ]]; then
         # Cross-compile for Linux using zigbuild
         cargo zigbuild -p cas --release --target "$target"
-        ./scripts/check-portable-x86_64-isa.sh "target/$target/release/cas"
+        ghostty_archive="$(find "target/$target/release/build" -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print -quit)"
+        if [[ -z "$ghostty_archive" ]]; then
+            echo "error: built Ghostty archive not found for ISA audit" >&2
+            exit 1
+        fi
+        ./scripts/check-portable-x86_64-isa.sh "$ghostty_archive"
     else
         # Native build for macOS
         cargo build -p cas --release --target "$target"

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex factory startup SIGILL incident — 2026-08-08</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f6f2;
+      --surface: #fff;
+      --text: #20231f;
+      --muted: #59605a;
+      --border: #c9cec7;
+      --accent: #315c70;
+      --danger: #9b2f2f;
+      --warn: #805800;
+      --good: #17643a;
+      --soft-danger: #faeaea;
+      --soft-warn: #fff4d6;
+      --soft-good: #e8f4ec;
+      --code: #edf0eb;
+      --line: #91a8b1;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171a18;
+        --surface: #202522;
+        --text: #f1f3ef;
+        --muted: #bdc6bc;
+        --border: #566057;
+        --accent: #7fc0d9;
+        --danger: #ff9b9b;
+        --warn: #f3c96b;
+        --good: #79d49d;
+        --soft-danger: #402121;
+        --soft-warn: #443616;
+        --soft-good: #173b28;
+        --code: #292f2b;
+        --line: #658694;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.58;
+    }
+    a { color: var(--accent); }
+    a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: -5rem;
+      z-index: 10;
+      padding: .6rem .8rem;
+      background: var(--surface);
+      border: 2px solid var(--accent);
+    }
+    .skip-link:focus { top: 1rem; }
+    header, main, footer { width: min(1120px, calc(100% - 2rem)); margin-inline: auto; }
+    header { padding: 3rem 0 1.4rem; }
+    main { padding-bottom: 2rem; }
+    footer { padding: 1.5rem 0 3rem; border-top: 1px solid var(--border); color: var(--muted); }
+    h1 { margin: 0 0 .6rem; max-width: 23ch; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.06; letter-spacing: -.035em; }
+    h2 { margin: 2.4rem 0 .75rem; font-size: 1.6rem; line-height: 1.2; }
+    h3 { margin: 1.6rem 0 .55rem; font-size: 1.15rem; }
+    p { max-width: 80ch; }
+    li + li { margin-top: .42rem; }
+    .eyebrow { margin: 0 0 .65rem; color: var(--muted); font-size: .8rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .meta { color: var(--muted); max-width: none; }
+    .chips { display: flex; flex-wrap: wrap; gap: .55rem; margin: 1rem 0; }
+    .chip { display: inline-block; padding: .18rem .58rem; border: 1px solid currentColor; border-radius: 999px; font-weight: 750; }
+    .danger { color: var(--danger); }
+    .warn { color: var(--warn); }
+    .good { color: var(--good); }
+    .verdict {
+      max-width: none;
+      margin: 1.2rem 0 0;
+      padding: 1.05rem 1.2rem;
+      border: 1px solid var(--danger);
+      border-left: .5rem solid var(--danger);
+      background: var(--soft-danger);
+      font-size: 1.08rem;
+    }
+    .callout { max-width: none; padding: .9rem 1rem; border-left: .35rem solid var(--accent); background: var(--surface); }
+    .table-wrap { overflow-x: auto; margin: 1rem 0 1.5rem; border: 1px solid var(--border); background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    caption { padding: .7rem .85rem; text-align: left; color: var(--muted); font-weight: 700; }
+    th, td { padding: .7rem .82rem; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+    thead th { border-top: 0; background: var(--code); }
+    th[scope="row"] { width: 20%; font-weight: 700; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    code { padding: .08rem .25rem; border-radius: .2rem; background: var(--code); overflow-wrap: anywhere; word-break: break-word; }
+    pre { overflow-x: auto; padding: 1rem; border: 1px solid var(--border); background: var(--code); line-height: 1.45; }
+    pre code { padding: 0; background: transparent; overflow-wrap: normal; word-break: normal; }
+    .timeline { list-style: none; margin: 1.2rem 0 1.5rem; padding: 0 0 0 1.6rem; border-left: .22rem solid var(--line); }
+    .timeline li { position: relative; margin: 0; padding: 0 0 1.35rem 1rem; }
+    .timeline li:last-child { padding-bottom: .1rem; }
+    .timeline li::before {
+      content: "";
+      position: absolute;
+      left: -1.78rem;
+      top: .35rem;
+      width: .72rem;
+      height: .72rem;
+      border: .2rem solid var(--bg);
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .timeline time { display: block; color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; }
+    .timeline strong { display: block; margin-bottom: .12rem; }
+    .timeline p { margin: 0; }
+    .chain { counter-reset: chain; list-style: none; padding: 0; display: grid; gap: .7rem; }
+    .chain li { counter-increment: chain; padding: .8rem .9rem .8rem 3.25rem; position: relative; border: 1px solid var(--border); background: var(--surface); }
+    .chain li::before { content: counter(chain); position: absolute; left: .85rem; top: .7rem; width: 1.7rem; height: 1.7rem; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--bg); font-weight: 850; }
+    .status { display: inline-block; padding: .05rem .42rem; border: 1px solid currentColor; border-radius: 999px; font-size: .9em; font-weight: 800; white-space: nowrap; }
+    .done { color: var(--good); background: var(--soft-good); }
+    .required { color: var(--warn); background: var(--soft-warn); }
+    @media (max-width: 640px) {
+      header, main, footer { width: min(100% - 1rem, 1120px); }
+      header { padding-top: 1.5rem; }
+      th, td { padding: .55rem .62rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      :root { --bg: #fff; --surface: #fff; --text: #000; --muted: #333; --border: #777; --accent: #000; --danger: #000; --warn: #000; --good: #000; --soft-danger: #fff; --soft-warn: #fff; --soft-good: #fff; --code: #f1f1f1; --line: #555; }
+      body { background: #fff; color: #000; font-size: 10pt; }
+      header, main, footer { width: 100%; }
+      header { padding-top: 0; }
+      .skip-link { display: none; }
+      .table-wrap { overflow: visible; }
+      thead { display: table-header-group; }
+      tr, pre, .verdict, .callout, .chain li, .timeline li { break-inside: avoid; }
+      h2, h3 { break-after: avoid; }
+      a[href]::after { content: " (" attr(href) ")"; font-size: .85em; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to incident report</a>
+  <header>
+    <p class="eyebrow">Incident report · 2026-08-08</p>
+    <h1>Codex factory startup crashed on an AVX-512 instruction</h1>
+    <p class="meta">CAS 2.54.0 · Codex CLI 0.147.0 · x86_64 Linux without AVX-512</p>
+    <div class="chips" aria-label="Incident status">
+      <span class="chip danger">High impact</span>
+      <span class="chip good">Fix and gates committed</span>
+      <span class="chip warn">2.54.1 publication proof pending</span>
+    </div>
+    <p class="verdict"><strong>Root cause confirmed.</strong> A native Zig build of the statically linked Ghostty VT library inherited the release runner's CPU features. The distributed CAS executable contained an unguarded AVX-512 instruction and received <code>SIGILL</code> on a supported x86_64 host without AVX-512. Explicit target pinning removed the instruction and restored factory startup.</p>
+  </header>
+
+  <main id="content">
+    <section aria-labelledby="impact-heading">
+      <h2 id="impact-heading">Impact</h2>
+      <p><code>cas codex</code> could not start a new Codex factory on the affected machine. Startup reached <strong>Spawning agents</strong>, the CAS daemon terminated, and the client reported <code>[ERROR] Session '&lt;name&gt;' not found or not running</code>. Repeated retries failed in the same phase.</p>
+      <p>The failure was inside the installed CAS <code>2.54.0</code> binary, not the standalone Codex CLI. Direct Codex startup, <code>codex doctor</code>, authentication, and network connectivity passed. An already-running factory was unaffected. The confirmed host is an Intel Core i9-13900K x86_64 Linux machine with AVX/AVX2 but no AVX-512.</p>
+      <p class="callout"><strong>Measured window:</strong> 17 minutes 35 seconds from the first retained failure at 21:49:57 EDT to the portable release build at 22:07:32 EDT. The exact onset and external blast radius remain unknown; this number is the observed diagnostic window, not a claimed total outage duration.</p>
+    </section>
+
+    <section aria-labelledby="overview-heading">
+      <h2 id="overview-heading">Overview</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Incident facts and current disposition.</caption>
+          <tbody>
+            <tr><th scope="row">First retained failure</th><td>2026-08-08 21:49:57 EDT / 2026-08-09 01:49:57 UTC</td></tr>
+            <tr><th scope="row">Definitive detection</th><td>21:57:37 EDT; <code>coredumpctl</code> recorded signal 4 (<code>SIGILL</code>)</td></tr>
+            <tr><th scope="row">Affected software</th><td><code>cas 2.54.0 (c215061 2026-08-09)</code> with <code>codex-cli 0.147.0</code></td></tr>
+            <tr><th scope="row">Validated harness</th><td>CAS preflight reported <code>0.146.0</code>; installed <code>0.147.0</code> was marked stale but not blocked</td></tr>
+            <tr><th scope="row">Runtime host</th><td>x86_64 Linux, Intel Core i9-13900K, 32 logical CPUs; AVX/AVX2 present, AVX-512 absent</td></tr>
+            <tr><th scope="row">Root cause</th><td>Native Ghostty VT Zig build omitted an explicit target and captured release-runner AVX-512 features</td></tr>
+            <tr><th scope="row">Crash instruction</th><td><code>vcvttsd2usi %xmm0,%rcx</code> at CAS executable offset <code>0x2f24543</code></td></tr>
+            <tr><th scope="row">Local resolution</th><td>Explicit target mapping, release rebuild, installed-binary startup proof; replacement installed at 22:08:03 EDT</td></tr>
+            <tr><th scope="row">Upstream status</th><td>Fix, tests, fail-closed target policy, ISA gate, 2.54.1 bump, and release-note draft are committed on <code>factory/hv-sigill-release</code>; publication proof remains pending</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="timeline-heading">
+      <h2 id="timeline-heading">Timeline</h2>
+      <p>All displayed times are EDT (UTC-04:00). The first three were emitted in UTC by CAS and converted here.</p>
+      <ol class="timeline">
+        <li><time datetime="2026-08-08T21:49:57-04:00">21:49:57</time><strong>First retained failure</strong><p>CAS spawned the Codex PTY; about 252 ms later the boot client reported <code>Daemon closed connection during initialization</code>.</p></li>
+        <li><time datetime="2026-08-08T21:50:13-04:00">21:50:13</time><strong>Failure reproduced</strong><p>A second new factory died in the same initialization phase.</p></li>
+        <li><time datetime="2026-08-08T21:52:40-04:00">21:52:40</time><strong>Third failure</strong><p>The same daemon-disconnect pattern ruled out ordinary retry as a remedy.</p></li>
+        <li><time datetime="2026-08-08T21:56:00-04:00">Before 21:57</time><strong>Standalone Codex cleared</strong><p>The CAS-injected launch shape worked directly under a PTY; Codex runtime, config, authentication, and connectivity checks passed.</p></li>
+        <li><time datetime="2026-08-08T21:57:37-04:00">21:57:37</time><strong>Processor fault captured</strong><p><code>cas codex --new -n codex-strace-repro</code> dumped core. PID 642419 died from signal 4 at CAS + <code>0x2f24543</code>.</p></li>
+        <li><time datetime="2026-08-08T21:58:00-04:00">After 21:57</time><strong>Illegal instruction identified</strong><p>Disassembly showed an AVX-512-encoded <code>vcvttsd2usi</code>; the runtime CPU has no AVX-512 flag.</p></li>
+        <li><time datetime="2026-08-08T22:02:00-04:00">About 22:02</time><strong>Build defect fixed</strong><p>The build began passing an explicit native Zig target. The rebuilt Ghostty archive scan found no <code>vcvttsd2usi</code> or <code>zmm</code> registers.</p></li>
+        <li><time datetime="2026-08-08T22:07:32-04:00">22:07:32</time><strong>Release rebuild complete</strong><p>The 53,480,352-byte CAS binary built successfully.</p></li>
+        <li><time datetime="2026-08-08T22:08:03-04:00">22:08:03 and final proof</time><strong>Installed and recovered</strong><p>Installed and source SHA-256 values matched. A fresh factory reached <code>READY</code> and <code>SYSTEM READY</code> and was registered as running and attachable.</p></li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="root-heading">
+      <h2 id="root-heading">Root cause</h2>
+      <h3>Failure chain</h3>
+      <ol class="chain">
+        <li><code>ghostty_vt_sys/build.rs</code> used Zig <code>ReleaseFast</code> to build the statically linked Ghostty VT library.</li>
+        <li>The Zig project uses <code>b.standardTargetOptions</code>; an explicit <code>-Dtarget</code> defines the portable target baseline.</li>
+        <li>The prior Rust helper returned no mapping when Cargo target matched the build host, so native release builds omitted <code>-Dtarget</code>.</li>
+        <li>Zig optimized for the release machine. The shipped CAS executable contained an unguarded AVX-512 instruction from Ghostty VT.</li>
+        <li>Codex 0.147.0 startup output exercised that terminal-processing path on a host with AVX2 but no AVX-512.</li>
+        <li>The CPU raised <code>SIGILL</code>. The daemon vanished before normal Rust/CAS error handling, leaving only the secondary client disconnect.</li>
+      </ol>
+
+      <p>The fix always maps supported Cargo targets to Zig targets, including native builds. The mapping now lives in <code>crates/ghostty_vt_sys/build_support.rs</code>, is called from <code>build.rs:79</code>, and is covered by <code>tests/portable_target.rs</code>.</p>
+      <div class="table-wrap">
+        <table>
+          <caption>Supported portable target mappings.</caption>
+          <thead><tr><th scope="col">Cargo target</th><th scope="col">Zig target</th></tr></thead>
+          <tbody>
+            <tr><td><code>x86_64-unknown-linux-gnu</code></td><td><code>x86_64-linux-gnu</code></td></tr>
+            <tr><td><code>aarch64-unknown-linux-gnu</code></td><td><code>aarch64-linux-gnu</code></td></tr>
+            <tr><td><code>x86_64-unknown-linux-musl</code></td><td><code>x86_64-linux-musl</code></td></tr>
+            <tr><td><code>aarch64-unknown-linux-musl</code></td><td><code>aarch64-linux-musl</code></td></tr>
+            <tr><td><code>x86_64-apple-darwin</code></td><td><code>x86_64-macos</code></td></tr>
+            <tr><td><code>aarch64-apple-darwin</code></td><td><code>aarch64-macos</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Unknown triples still warn and fall back to a host build. That preserves prior unsupported-target behavior but must not be used for a distributed artifact.</p>
+
+      <h3>Evidence</h3>
+      <div class="table-wrap">
+        <table>
+          <caption>Independent observations linking the processor fault to the native Zig target omission.</caption>
+          <thead><tr><th scope="col">Observation</th><th scope="col">Result</th><th scope="col">Meaning</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Direct Codex PTY launch</th><td>Passed</td><td>Codex executable, arguments, auth, and basic terminal use were viable.</td></tr>
+            <tr><th scope="row"><code>codex doctor</code></th><td>Core checks passed</td><td>No broken install or service-access explanation.</td></tr>
+            <tr><th scope="row">Repeated CAS launches</th><td>Initialization failure</td><td>Failure localized to a deterministic CAS factory path.</td></tr>
+            <tr><th scope="row">Core dump PID 642419</th><td><code>Signal: 4 (ILL)</code></td><td>Hardware illegal-instruction trap, not a handled error.</td></tr>
+            <tr><th scope="row">Fault offset</th><td><code>0x2f24543</code></td><td>Failing code was linked into the installed CAS executable.</td></tr>
+            <tr><th scope="row">Disassembly</th><td><code>vcvttsd2usi</code></td><td>The faulting operation had an AVX-512 encoding.</td></tr>
+            <tr><th scope="row">Runtime CPU</th><td>AVX2, no AVX-512</td><td>The runtime could not execute the linked instruction.</td></tr>
+            <tr><th scope="row">Old build logic</th><td>No native Zig target</td><td>Native artifacts inherited build-host CPU selection.</td></tr>
+            <tr><th scope="row">Portable archive scan</th><td>No signature found</td><td>Explicit target removed observed AVX-512 signatures.</td></tr>
+            <tr><th scope="row">Rebuilt CAS factory</th><td>Ready and attachable</td><td>The target pin removed the user-visible failure on the same host and Codex version.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="callout"><strong>Trigger versus cause:</strong> Codex 0.147.0 exercised the bad library path and was newer than the validated 0.146.0 harness. The correctness defect remained the CAS artifact's missing CPU baseline; valid terminal output must not be able to invoke unsupported machine code.</p>
+
+      <h3>Alternatives ruled out</h3>
+      <ul>
+        <li>Bad Codex flags: the same launch shape worked directly under a PTY.</li>
+        <li>Codex authentication/connectivity: doctor checks passed.</li>
+        <li>Recoverable Rust panic: the kernel recorded <code>SIGILL</code>, with no normal panic path.</li>
+        <li>Missing general vector support: the host has AVX and AVX2; AVX-512 was the unsupported boundary.</li>
+        <li>CAS state corruption: replacing only the rebuilt binary restored fresh startup without state repair.</li>
+      </ul>
+
+      <h3>Falsification criteria and remaining uncertainty</h3>
+      <p>The diagnosis should be reopened if an explicitly targeted rebuild contains the same reachable AVX-512 instruction or reproduces <code>SIGILL</code> at the same location on this host; neither happened. The exact release-runner CPU is inferred from artifact behavior and was not inspected directly. CI reproduction on official release infrastructure remains necessary, as does measurement of any broader affected-user population.</p>
+    </section>
+
+    <section aria-labelledby="escape-heading">
+      <h2 id="escape-heading">Why this was not caught</h2>
+      <ul>
+        <li>Cross builds passed <code>-Dtarget</code>, but the common native release path silently selected build-host features.</li>
+        <li>No regression test required native Cargo targets to map to explicit Zig targets.</li>
+        <li>Release validation neither audited the native archive for out-of-baseline instructions nor ran the artifact with AVX-512 masked.</li>
+        <li>CAS had validated Codex 0.146.0. Preflight warned that installed 0.147.0 was stale but appropriately did not treat version drift alone as incompatibility.</li>
+        <li>Direct Codex version/startup/doctor checks do not execute CAS's Ghostty terminal-processing path.</li>
+        <li><code>SIGILL</code> bypassed normal panic reporting, so the user saw only a daemon-disconnect consequence until a core dump was inspected.</li>
+      </ul>
+      <p>No individual action caused the outage. The build contract and release portability gates did not define or enforce a distributed CPU baseline.</p>
+    </section>
+
+    <section aria-labelledby="actions-heading">
+      <h2 id="actions-heading">Corrective actions</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Actions, accountable owner roles, and concrete completion proofs.</caption>
+          <thead><tr><th scope="col">Status</th><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Verification</th></tr></thead>
+          <tbody>
+            <tr><td><span class="status done">DONE LOCALLY</span></td><td>Pass mapped <code>-Dtarget</code> for every supported Cargo target, including native builds.</td><td>CAS maintainers</td><td>Inspect invocation; supported build emits mapped target.</td></tr>
+            <tr><td><span class="status done">DONE</span></td><td>Extract mapping into testable Rust code and add native/cross/unknown tests.</td><td>CAS maintainers</td><td><code>cargo test -p ghostty_vt_sys</code>: 3 passed, 0 failed.</td></tr>
+            <tr><td><span class="status done">DONE LOCALLY</span></td><td>Build and install a portable CAS binary on the affected host.</td><td>Incident operator</td><td>Binary identity, matching checksum, ready/running/attachable proof.</td></tr>
+            <tr><td><span class="status required">IN PROGRESS</span></td><td>Publish committed 2.54.1 without changing 2.54.0, then install the published artifact.</td><td>Maintainers / release engineering</td><td>Published checksum and fixed installed version identity.</td></tr>
+            <tr><td><span class="status done">DONE</span></td><td>Add an x86_64 bundled-Ghostty ISA audit that rejects accidental AVX-512.</td><td>Release engineering</td><td>Baseline and built <code>libghostty_vt.a</code> accepted; incident-matching seeded <code>vcvttsd2usi</code> rejected; invalid input fails closed.</td></tr>
+            <tr><td><span class="status required">REQUIRED</span></td><td>Smoke-test the released factory with AVX-512 masked or on baseline hardware.</td><td>Release engineering</td><td>Stable Codex reaches <code>SYSTEM READY</code> and is attachable.</td></tr>
+            <tr><td><span class="status required">REQUIRED</span></td><td>Refresh conformance for the current supported Codex CLI.</td><td>Codex harness owner</td><td>Preflight no longer reports that supported version as stale.</td></tr>
+            <tr><td><span class="status warn">FOLLOW-UP</span></td><td>Surface process exit signal and core-dump guidance for abrupt daemon death.</td><td>Factory runtime owner</td><td>Controlled signal-4 test gives actionable diagnostics.</td></tr>
+            <tr><td><span class="status done">DONE</span></td><td>Make unknown release targets fail closed.</td><td>Build/release owners</td><td><code>build_support.rs</code> policy and regression test prevent silent host fallback.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="provenance-heading">
+      <h2 id="provenance-heading">Provenance</h2>
+      <p>Produced from direct local inspection and execution in <code>/home/pippenz/Petrastella/cas-src</code> at incident source commit <code>c2150616fbcabcbff8ece84ed43d5de7dca24847</code>. Portable gates are committed at <code>3d82f3f4</code>; 2.54.1 preparation is committed at <code>38bc04d6</code>. No external web claims are used.</p>
+      <h3>Primary commands</h3>
+      <pre><code>cas --version
+codex --version
+cas doctor
+cas codex preflight --json
+codex doctor
+cas codex --new -n codex-debug-repro
+strace -ff ... cas codex --new -n codex-strace-repro
+coredumpctl info 642419 --no-pager
+objdump -d &lt;installed-cas-at-failure&gt; --start-address=&lt;fault-window&gt; ...
+lscpu
+cargo test -p ghostty_vt_sys
+cargo build --release -p cas --bin cas
+objdump -d &lt;rebuilt-libghostty_vt.a&gt; | rg 'vcvttsd2usi|zmm[0-9]'
+cmp target/release/cas /home/pippenz/.local/bin/cas
+sha256sum target/release/cas /home/pippenz/.local/bin/cas
+cas codex --new -n codex-installed-proof-final
+cas list --json
+git diff --check</code></pre>
+      <h3>Verification receipt</h3>
+      <pre><code>ghostty_vt_sys tests: 2 passed; 0 failed
+portable archive scan: avx512=absent
+release build: exit 0
+binary comparison: identical
+SHA-256 (both): c7ebb290c4b38c83df23a37f032154d3ebcb1fded44f04e68e713ecc3955b3dc
+factory proof: READY; SYSTEM READY
+registry proof: is_running=true; can_attach=true
+attached-launch timeout: exit 124 (expected test bound, not a crash)</code></pre>
+      <p>The systemd core dump remains available. Temporary test factories were cleaned up; an unrelated pre-existing factory was left running. The exact release-runner CPU and number of other affected users remain unknown.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Source: <a href="./2026-08-08-codex-factory-startup-sigill.md">Markdown incident report</a>. This HTML artifact is self-contained, usable without JavaScript, responsive, and print styled.</p>
+  </footer>
+</body>
+</html>

@@ -49,7 +49,10 @@ jobs:
         run: cargo build -p cas --release --target x86_64-unknown-linux-gnu
 
       - name: Audit portable x86_64 ISA
-        run: ./scripts/check-portable-x86_64-isa.sh target/x86_64-unknown-linux-gnu/release/cas
+        run: |
+          ghostty_archive="$(find target/x86_64-unknown-linux-gnu/release/build -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print -quit)"
+          test -n "$ghostty_archive"
+          ./scripts/check-portable-x86_64-isa.sh "$ghostty_archive"
 
       - name: Package
         run: |

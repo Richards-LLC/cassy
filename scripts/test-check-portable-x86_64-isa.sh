@@ -58,7 +58,7 @@ if [[ "$wrong_arch_status" -ne 2 ]]; then
   echo "$wrong_arch_output" >&2
   exit 1
 fi
-grep -qF 'requires an x86_64 ELF artifact' <<<"$wrong_arch_output"
+grep -qF 'requires an x86_64 ELF object or archive' <<<"$wrong_arch_output"
 echo 'ok   missing or wrong artifact fails closed'
 
 echo 'PASS: portable x86_64 ISA audit behavior verified.'

@@ -3067,6 +3067,7 @@ mod tests {
                 name: name.to_string(),
                 created_at: created_at.to_string(),
                 daemon_pid: 1,
+                daemon_pid_starttime: None,
                 socket_path: "socket".to_string(),
                 ws_port: None,
                 log_dir: None,

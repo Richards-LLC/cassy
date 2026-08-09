@@ -479,13 +479,16 @@ async fn attach<R: SessionReadModel>(
         Ok(sessions) => sessions,
         Err(error) => return internal_error(error),
     };
-    let Some(port) = sessions
+    let Some(candidate) = sessions
         .into_iter()
         .find(|candidate| candidate.name == session)
-        .and_then(|candidate| candidate.ws_port)
     else {
         return generic_not_found();
     };
+    let Some(port) = candidate.ws_port else {
+        return generic_not_found();
+    };
+    let daemon_identity = candidate.daemon_identity;
     let panes: Vec<String> = query
         .panes
         .split(',')
@@ -495,7 +498,7 @@ async fn attach<R: SessionReadModel>(
     let connector = state.connector.clone();
     upgrade
         .on_upgrade(move |socket| {
-            proxy_socket(socket, connector, session, port, panes, socket_auth)
+            proxy_socket(socket, connector, session, port, panes, daemon_identity, socket_auth)
         })
         .into_response()
 }
@@ -506,9 +509,13 @@ async fn proxy_socket(
     session: String,
     port: u16,
     panes: Vec<String>,
+    daemon_identity: Option<super::DaemonIdentity>,
     auth: Option<(AuthStore, AuthContext)>,
 ) {
-    let Ok(mut viewer) = connector.attach(&session, port, panes).await else {
+    let Ok(mut viewer) = connector
+        .attach(&session, port, panes, daemon_identity)
+        .await
+    else {
         return;
     };
     let (mut sink, mut source) = socket.split();

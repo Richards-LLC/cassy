@@ -548,6 +548,7 @@ pub fn format_recently_died_while_leased(
     agent_store: &dyn AgentStore,
     factory_session: Option<&str>,
     window_secs: i64,
+    live_worker_names: &std::collections::HashSet<String>,
 ) -> String {
     let cutoff = Utc::now() - chrono::Duration::seconds(window_secs);
     let mut lines: Vec<String> = Vec::new();
@@ -564,6 +565,13 @@ pub fn format_recently_died_while_leased(
                     .and_then(|m| m.get("worker_name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(ev.entity_id.as_str());
+                // A new registration for this logical worker is currently
+                // live in the roster. The historical death is useful audit
+                // data but presenting it beside that live row is a direct
+                // contradiction and trains operators to distrust status.
+                if live_worker_names.contains(name) {
+                    continue;
+                }
                 let held = meta
                     .and_then(|m| m.get("held_tasks"))
                     .and_then(|v| v.as_array())
@@ -621,6 +629,9 @@ pub fn format_recently_died_while_leased(
                     continue;
                 }
                 if agent.role != AgentRole::Worker {
+                    continue;
+                }
+                if live_worker_names.contains(&agent.name) {
                     continue;
                 }
                 // Skip if already listed via WorkerDied event for this agent.
@@ -1061,5 +1072,39 @@ mod cas_3dcb_death_relay_tests {
         assert!(after.iter().any(|row| row.prompt.contains("cas-task-a")));
         assert!(after.iter().any(|row| row.prompt.contains("cas-task-b")));
         assert_eq!(fixture.durable_notices(), 2);
+    }
+
+    #[test]
+    fn recently_died_section_excludes_a_name_that_is_live_in_the_roster() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("returned-worker", 900);
+        let event = Event::new(
+            EventType::WorkerDied,
+            EventEntityType::Agent,
+            worker.id.clone(),
+            "returned worker died before respawn",
+        )
+        .with_metadata(serde_json::json!({
+            "worker_name": worker.name,
+            "held_tasks": ["cas-held1"],
+            "last_heartbeat": worker.last_heartbeat.to_rfc3339(),
+        }));
+        open_event_store(&fixture.cas_root)
+            .unwrap()
+            .record(&event)
+            .unwrap();
+
+        let live_names = std::collections::HashSet::from(["returned-worker".to_string()]);
+        let rendered = format_recently_died_while_leased(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            None,
+            3600,
+            &live_names,
+        );
+        assert!(
+            rendered.is_empty(),
+            "a current live row and a historical death for the same name must not render together: {rendered}"
+        );
     }
 }

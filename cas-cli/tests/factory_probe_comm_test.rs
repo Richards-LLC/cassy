@@ -627,7 +627,7 @@ fn probe_comm_cli_malformed_slo_aggregate_receipt_is_stage_failure() {
 }
 
 #[test]
-fn probe_comm_cli_recorded_adapter_applies_reaction_slo_threshold() {
+fn probe_comm_cli_recorded_adapter_reaction_sample_is_observation_only() {
     let temp = tempfile::tempdir().unwrap();
     let jsonl = temp.path().join("probe.jsonl");
     let artifacts = temp.path().join("artifacts");
@@ -647,19 +647,29 @@ fn probe_comm_cli_recorded_adapter_applies_reaction_slo_threshold() {
             "1",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("reaction_slo"));
+        .success();
 
     let lines = read_jsonl(&jsonl);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["scenario"], "codex_adapter");
-    assert_eq!(lines[0]["passed"], false);
-    assert_eq!(lines[0]["failed_stage"], "reaction_slo");
-    assert_eq!(lines[0]["stages"][0]["terminal"], "reaction_slo_failed");
+    assert_eq!(lines[0]["passed"], true);
+    assert_eq!(lines[0]["failed_stage"], Value::Null);
+    assert_eq!(lines[0]["stages"][0]["terminal"], "delivered");
+    assert_eq!(lines[0]["stages"][0]["reaction_status"], "OBSERVED");
+    assert_eq!(lines[0]["aggregate_slos"], Value::Null);
+    assert!(
+        lines[0]["stages"][0]["stage_statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|stage| !stage.to_string().contains("p95")),
+        "a single reaction observation must not be labeled as p95: {}",
+        lines[0]
+    );
 }
 
 #[test]
-fn probe_comm_cli_recorded_adapter_applies_wake_slo_threshold() {
+fn probe_comm_cli_recorded_adapter_wake_sample_is_observation_only() {
     let temp = tempfile::tempdir().unwrap();
     let jsonl = temp.path().join("probe.jsonl");
     let artifacts = temp.path().join("artifacts");
@@ -681,15 +691,25 @@ fn probe_comm_cli_recorded_adapter_applies_wake_slo_threshold() {
             "1000",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("wake_slo"));
+        .success();
 
     let lines = read_jsonl(&jsonl);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["scenario"], "codex_adapter");
-    assert_eq!(lines[0]["passed"], false);
-    assert_eq!(lines[0]["failed_stage"], "wake_slo");
-    assert_eq!(lines[0]["stages"][0]["terminal"], "wake_slo_failed");
+    assert_eq!(lines[0]["passed"], true);
+    assert_eq!(lines[0]["failed_stage"], Value::Null);
+    assert_eq!(lines[0]["stages"][0]["terminal"], "delivered");
+    assert_eq!(lines[0]["stages"][0]["wake_status"], "OBSERVED");
+    assert_eq!(lines[0]["aggregate_slos"], Value::Null);
+    assert!(
+        lines[0]["stages"][0]["stage_statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|stage| !stage.to_string().contains("p95")),
+        "a single wake observation must not be labeled as p95: {}",
+        lines[0]
+    );
 }
 
 #[test]

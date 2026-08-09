@@ -74,4 +74,11 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("replaceWith(preservedGrid)");
     expect(source).toContain("data-session-key");
   });
+
+  it("resends the live grid size when observer mode becomes controller mode", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("const becameController = state.held_by_me && !leases.get(key)?.held_by_me");
+    expect(source).toContain("if (becameController) resizeControlledPanes(machineId, session)");
+    expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
+  });
 });

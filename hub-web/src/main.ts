@@ -158,7 +158,9 @@ async function loadLease(machineId: string, session: string): Promise<void> {
     const state = await connections.get(machineId)?.lease(session);
     if (state) {
       const key = sessionKey(machineId, session);
+      const becameController = state.held_by_me && !leases.get(key)?.held_by_me;
       leases.set(key, state);
+      if (becameController) resizeControlledPanes(machineId, session);
       const expiryTimer = leaseExpiryTimers.get(key);
       if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
       if (state.expires_at) {
@@ -169,6 +171,15 @@ async function loadLease(machineId: string, session: string): Promise<void> {
     }
     render();
   } catch { /* legacy hub may not expose lease status */ }
+}
+
+function resizeControlledPanes(machineId: string, session: string): void {
+  const state = sessionStates.get(sessionKey(machineId, session));
+  if (!state) return;
+  for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
+    const surface = surfaces.get(paneKey(machineId, session, pane.id));
+    if (surface) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } });
+  }
 }
 
 async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>): Promise<void> {

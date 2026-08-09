@@ -320,6 +320,13 @@ const PROMPT_QUEUE_URGENT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Structured sender attribution for Commander semantic messages. Kept on the
+/// durable queue row so transport and recipient receipts retain the exact
+/// device/operator identity supplied on the wire.
+const PROMPT_QUEUE_ATTRIBUTION_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN attribution_json TEXT;
+"#;
+
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
 /// Partial indexes keep the path bounded to pending rows only.
 const PROMPT_QUEUE_TWO_LANE_INDEXES: &str = r#"
@@ -1145,6 +1152,32 @@ pub trait PromptQueueStore: Send + Sync {
         priority: Option<NotificationPriority>,
         urgent: bool,
     ) -> Result<EnqueueOutcome>;
+
+    /// Queue a prompt with structured sender attribution persisted on the same
+    /// durable row. Existing MCP senders pass `None`; Commander messages pass
+    /// their explicit device/operator wire object.
+    fn enqueue_attributed_urgent_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        attribution: Option<&serde_json::Value>,
+    ) -> Result<EnqueueOutcome> {
+        let _ = attribution;
+        self.enqueue_urgent_with_outcome(
+            source,
+            target,
+            prompt,
+            factory_session,
+            summary,
+            priority,
+            urgent,
+        )
+    }
 
     /// Idempotent enqueue keyed by `dedupe_key` (cas-ecff lifecycle outbox).
     ///
@@ -2122,6 +2155,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("priority", PROMPT_QUEUE_PRIORITY_MIGRATION),
                 ("acked_at", PROMPT_QUEUE_ACKED_AT_MIGRATION),
                 ("urgent", PROMPT_QUEUE_URGENT_MIGRATION),
+                ("attribution_json", PROMPT_QUEUE_ATTRIBUTION_MIGRATION),
                 ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
                 ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
                 ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
@@ -2211,6 +2245,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         priority: Option<NotificationPriority>,
         urgent: bool,
     ) -> Result<EnqueueOutcome> {
+        self.enqueue_attributed_urgent_with_outcome(
+            source,
+            target,
+            prompt,
+            factory_session,
+            summary,
+            priority,
+            urgent,
+            None,
+        )
+    }
+
+    fn enqueue_attributed_urgent_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        attribution: Option<&serde_json::Value>,
+    ) -> Result<EnqueueOutcome> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
@@ -2253,10 +2310,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 }
             }
 
+            let attribution_json = attribution.map(serde_json::to_string).transpose()?;
             tx.execute(
-            "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag],
-        )?;
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, attribution_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag, attribution_json],
+            )?;
 
             let id = tx.last_insert_rowid();
             let _ = capture_message_event(&tx, source, target);
@@ -3980,6 +4038,57 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn attributed_enqueue_persists_metadata_on_the_delivery_row() {
+        let (_temp, store) = create_test_store();
+        let attribution = serde_json::json!({
+            "device_id": "device-123",
+            "credential_id": "credential-456",
+            "device_label": "Pippenz phone",
+            "operator_label": "Pippenz",
+            "controller_origin": "https://commander.example",
+            "request_id": "request-789"
+        });
+        let id = store
+            .enqueue_attributed_urgent_with_outcome(
+                "commander:Pippenz@Pippenz phone",
+                "worker-1",
+                "Please checkpoint now",
+                Some("factory-1"),
+                Some("checkpoint request"),
+                None,
+                false,
+                Some(&attribution),
+            )
+            .unwrap()
+            .id();
+
+        let conn = store.conn.lock().unwrap();
+        let (source, target, prompt, session, urgent, stored): (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT source, target, prompt, factory_session, urgent, attribution_json FROM prompt_queue WHERE id = ?",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "commander:Pippenz@Pippenz phone");
+        assert_eq!(target, "worker-1");
+        assert_eq!(prompt, "Please checkpoint now");
+        assert_eq!(session, "factory-1");
+        assert_eq!(urgent, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+            attribution
+        );
     }
 
     /// cas-7787 (GH #160): a lifecycle wake relay that dies without transport

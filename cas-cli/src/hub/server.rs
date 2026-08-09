@@ -670,9 +670,17 @@ async fn pairing_exchange<R: SessionReadModel>(
     if origin(&headers).as_deref() != Some(exchange.controller_origin.as_str()) {
         return unauthorized();
     }
+    let bound_origin = auth
+        .pairing_exchange_matches(
+            &exchange.token,
+            &exchange.hub_id,
+            &exchange.controller_origin,
+        )
+        .unwrap_or(false);
     exchange.source = exchange.controller_origin.clone();
     match auth.exchange_pairing(exchange, chrono::Utc::now()) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(_) if bound_origin => with_cors(unauthorized(), &headers),
         Err(_) => unauthorized(),
     }
 }

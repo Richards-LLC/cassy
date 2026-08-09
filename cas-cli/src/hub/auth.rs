@@ -539,6 +539,20 @@ impl AuthStore {
         })
     }
 
+    pub fn pairing_exchange_matches(
+        &self,
+        token: &str,
+        hub_id: &str,
+        controller_origin: &str,
+    ) -> Result<bool> {
+        let token_hash = hash_b64(token.as_bytes());
+        Ok(self.lock()?.pairings.iter().any(|record| {
+            constant_time_eq(&record.token_hash, &token_hash)
+                && record.hub_id == hub_id
+                && record.controller_origin == controller_origin
+        }))
+    }
+
     pub fn authenticate_dpop(
         &self,
         authorization: &str,

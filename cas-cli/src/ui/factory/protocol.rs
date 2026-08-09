@@ -6,6 +6,73 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Original daemon protocol version used before explicit negotiation existed.
+pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
+/// Current additive daemon protocol version.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Independently negotiable daemon protocol features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolCapability {
+    TargetedInterrupt,
+    AttributedSendMessage,
+}
+
+pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
+    vec![
+        ProtocolCapability::TargetedInterrupt,
+        ProtocolCapability::AttributedSendMessage,
+    ]
+}
+
+fn legacy_protocol_version() -> u32 {
+    LEGACY_PROTOCOL_VERSION
+}
+
+/// Attribution supplied by the authenticated hub boundary for semantic messages.
+///
+/// H3 transports and persists these values but does not authenticate them; H2 owns
+/// that boundary. Every field is required on the wire. `null` means explicitly
+/// unavailable and is never interpreted as supervisor or MCP identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageAttribution {
+    pub device_id: Option<String>,
+    pub credential_id: Option<String>,
+    pub device_label: Option<String>,
+    pub operator_label: Option<String>,
+    pub controller_origin: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl MessageAttribution {
+    /// Durable prompt-queue sender label. The fixed `commander:` namespace
+    /// prevents a remote label from impersonating `supervisor` or `mcp`.
+    pub fn queue_source(&self) -> String {
+        fn component(value: Option<&str>, fallback: &str) -> String {
+            let cleaned: String = value
+                .unwrap_or(fallback)
+                .trim()
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(80)
+                .collect();
+            if cleaned.is_empty() {
+                fallback.to_string()
+            } else {
+                cleaned
+            }
+        }
+
+        let operator = component(self.operator_label.as_deref(), "unknown-operator");
+        let device = component(
+            self.device_label.as_deref().or(self.device_id.as_deref()),
+            "unknown-device",
+        );
+        format!("commander:{operator}@{device}")
+    }
+}
+
 /// Messages sent from TUI client to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -99,6 +166,21 @@ pub enum ClientMessage {
         urgent: bool,
     },
 
+    /// Break one pane's current harness turn by name. This is additive and
+    /// deliberately distinct from legacy focused-pane Ctrl+C `Interrupt`.
+    InterruptPane { pane_id: String },
+
+    /// Enqueue an attributed semantic message through the durable coordination
+    /// delivery path (inbox + wake / urgent interrupt-and-redirect machinery).
+    SendMessage {
+        target: String,
+        text: String,
+        summary: Option<String>,
+        #[serde(default)]
+        urgent: bool,
+        attribution: MessageAttribution,
+    },
+
     /// Request current state snapshot
     GetState,
 
@@ -134,6 +216,12 @@ pub enum DaemonMessage {
         state: SessionState,
         /// Scrollback buffers for each pane (if requested)
         scrollback: Option<HashMap<String, Vec<Vec<u8>>>>,
+        /// Additive version negotiation. Missing means the legacy protocol.
+        #[serde(default = "legacy_protocol_version")]
+        protocol_version: u32,
+        /// Independently negotiable features. Missing means no new controls.
+        #[serde(default)]
+        capabilities: Vec<ProtocolCapability>,
     },
 
     /// Terminal output from a pane
@@ -528,7 +616,8 @@ mod tests {
             _ => panic!("Wrong message type decoded"),
         }
 
-        let missing_attribution = r#"{"SendMessage":{"target":"worker-1","text":"hello","summary":null,"urgent":false}}"#;
+        let missing_attribution =
+            r#"{"SendMessage":{"target":"worker-1","text":"hello","summary":null,"urgent":false}}"#;
         assert!(
             serde_json::from_str::<ClientMessage>(missing_attribution).is_err(),
             "attribution is a required part of the wire contract"

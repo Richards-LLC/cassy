@@ -987,13 +987,10 @@ impl Mux {
         prompt: &str,
         floor: std::time::Duration,
     ) -> Result<()> {
-        {
-            let pane = self
-                .panes
-                .get(pane_id)
-                .ok_or_else(|| Error::pane_not_found(pane_id))?;
-            pane.break_turn().await?;
-        }
+        // Shared targeted interrupt primitive: Commander pane interrupts and
+        // coordination urgent delivery must never drift into parallel cancel
+        // implementations.
+        self.break_turn(pane_id).await?;
         self.wait_for_injection_readiness(pane_id, floor).await;
         let pane = self
             .panes

@@ -49,6 +49,13 @@ fn allow_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
         .map(str::to_string)
 }
 
+fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
+    let specific = out.hook_specific_output.as_ref()?;
+    let value = serde_json::to_value(specific).ok()?;
+    (value.get("permissionDecision")?.as_str()? == "deny")
+        .then(|| value.get("permissionDecisionReason")?.as_str()?.to_string())
+}
+
 // ============================================================================
 // Positive: factory agents get auto-approve for filesystem tool families.
 // ============================================================================
@@ -57,7 +64,7 @@ fn allow_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
 fn supervisor_write_is_auto_approved() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("supervisor"));
-    let input = input_for("Write", Some("/tmp/foo.txt"));
+    let input = input_for("Write", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     let reason = allow_reason(&out).expect("expected allow");
@@ -71,7 +78,7 @@ fn supervisor_write_is_auto_approved() {
 fn worker_write_is_auto_approved() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("worker"));
-    let input = input_for("Write", Some("/tmp/foo.txt"));
+    let input = input_for("Write", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(allow_reason(&out).is_some(), "worker Write must auto-approve");
@@ -81,7 +88,7 @@ fn worker_write_is_auto_approved() {
 fn worker_edit_is_auto_approved() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("worker"));
-    let input = input_for("Edit", Some("/tmp/foo.txt"));
+    let input = input_for("Edit", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(allow_reason(&out).is_some(), "worker Edit must auto-approve");
@@ -114,10 +121,22 @@ fn supervisor_read_is_auto_approved() {
 fn supervisor_notebook_edit_is_auto_approved() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("supervisor"));
-    let input = input_for("NotebookEdit", Some("/tmp/n.ipynb"));
+    let input = input_for("NotebookEdit", Some("/test/n.ipynb"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(allow_reason(&out).is_some());
+}
+
+#[test]
+fn factory_write_to_bare_tmp_is_denied_with_durable_remediation() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let input = input_for("Write", Some("/tmp/cas-4060-proof.txt"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    let reason = deny_reason(&out).expect("bare tmp write must be denied");
+    assert!(reason.contains("WORKSPACE CONTRACT"), "{reason}");
+    assert!(reason.contains(".cas/artifacts"), "{reason}");
 }
 
 // ============================================================================
@@ -134,7 +153,7 @@ fn supervisor_notebook_edit_is_auto_approved() {
 fn supervisor_write_is_auto_approved_without_cas_root() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("supervisor"));
-    let input = input_for("Write", Some("/tmp/foo.txt"));
+    let input = input_for("Write", Some("/test/foo.txt"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     let reason = allow_reason(&out).expect(
         "supervisor Write must auto-approve even when cas_root is None (deadlock case)",
@@ -149,7 +168,7 @@ fn supervisor_write_is_auto_approved_without_cas_root() {
 fn worker_edit_is_auto_approved_without_cas_root() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("worker"));
-    let input = input_for("Edit", Some("/tmp/foo.txt"));
+    let input = input_for("Edit", Some("/test/foo.txt"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
         allow_reason(&out).is_some(),
@@ -164,7 +183,7 @@ fn solo_user_write_without_cas_root_is_not_auto_approved() {
     // scoped to factory agents.
     let _g = super::env_lock();
     let _role = set_role_env(None);
-    let input = input_for("Write", Some("/tmp/foo.txt"));
+    let input = input_for("Write", Some("/test/foo.txt"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
         allow_reason(&out).is_none(),
@@ -182,7 +201,7 @@ fn solo_user_write_is_not_auto_approved() {
     // to Claude Code's normal flow so user-facing approvals keep working.
     let _g = super::env_lock();
     let _role = set_role_env(None);
-    let input = input_for("Write", Some("/tmp/foo.txt"));
+    let input = input_for("Write", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(

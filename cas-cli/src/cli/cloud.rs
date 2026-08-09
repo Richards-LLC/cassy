@@ -17,7 +17,7 @@ use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
 use crate::store::{
-    open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+    AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
     open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
     open_task_store_local,
 };
@@ -1361,6 +1361,29 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     fmt.write_raw(&config.endpoint)?;
                     fmt.newline()?;
 
+                    let active_team = config.active_team_id();
+                    fmt.write_muted("  Team:   ")?;
+                    if let Some(team_id) = active_team.as_deref() {
+                        let slug = config
+                            .teams
+                            .iter()
+                            .find(|team| team.id == team_id)
+                            .map(|team| team.slug.as_str())
+                            .or(config.team_slug.as_deref())
+                            .unwrap_or("configured-team");
+                        fmt.write_raw(&format!("{slug} ({team_id})"))?;
+                    } else {
+                        fmt.write_raw("personal only (no team configured)")?;
+                    }
+                    fmt.newline()?;
+                    let daemon_live = open_agent_store(cas_root)
+                        .ok()
+                        .and_then(|store| store.is_daemon_active(60).ok())
+                        .unwrap_or(false);
+                    fmt.write_muted("  Embedded daemon/cas serve: ")?;
+                    fmt.write_raw(if daemon_live { "running" } else { "not running" })?;
+                    fmt.newline()?;
+
                     if let Some(state) = body.get("sync_state") {
                         fmt.newline()?;
                         fmt.write_muted("  Entries: ")?;
@@ -1401,6 +1424,12 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     if let Ok(queue) = crate::cloud::SyncQueue::open(cas_root) {
                         if queue.init().is_ok() {
                             if let Ok(stats) = queue.stats(5) {
+                                fmt.write_muted("  Queue:  ")?;
+                                fmt.write_raw(&format!("{} pending, {} failed", stats.pending, stats.failed))?;
+                                fmt.newline()?;
+                                fmt.write_muted("  Last successful pull: ")?;
+                                fmt.write_raw(&queue.get_metadata("last_pull_at")?.unwrap_or_else(|| "never".to_string()))?;
+                                fmt.newline()?;
                                 if stats.total > 0 {
                                     fmt.newline()?;
                                     fmt.write_colored("  \u{25CF} ", warning_color)?;
@@ -1814,6 +1843,17 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
 // PULL
 // ═══════════════════════════════════════════════════════════════════════════════
 
+fn personal_pull_summary(total: usize, team_configured: bool) -> String {
+    if total > 0 {
+        format!("Personal pull: pulled {total}")
+    } else if team_configured {
+        "Personal pull: up to date (nothing newer)".to_string()
+    } else {
+        "Personal pull: up to date (nothing newer); no team configured — personal scope only"
+            .to_string()
+    }
+}
+
 fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use std::sync::Arc;
 
@@ -1947,6 +1987,10 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
             fmt.success("Pull complete")?;
+            let total = entries_count + tasks_count + rules_count + skills_count + specs_count
+                + events_count + prompts_count + file_changes_count + commit_links_count;
+            fmt.write_raw(&personal_pull_summary(total, config.active_team_id().is_some()))?;
+            fmt.newline()?;
             fmt.write_raw(&format!("    {entries_count} entries synced"))?;
             fmt.newline()?;
             fmt.write_raw(&format!("    {tasks_count} tasks synced"))?;
@@ -3612,6 +3656,24 @@ mod team_cmd_tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn personal_pull_summary_names_up_to_date_with_team() {
+        assert_eq!(
+            personal_pull_summary(0, true),
+            "Personal pull: up to date (nothing newer)"
+        );
+    }
+
+    #[test]
+    fn personal_pull_summary_names_personal_only_without_team() {
+        assert!(personal_pull_summary(0, false).contains("no team configured — personal scope only"));
+    }
+
+    #[test]
+    fn personal_pull_summary_names_pulled_total() {
+        assert_eq!(personal_pull_summary(3, false), "Personal pull: pulled 3");
+    }
 
     #[test]
     fn parse_team_uuid_accepts_canonical() {

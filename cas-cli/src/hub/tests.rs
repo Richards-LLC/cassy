@@ -577,25 +577,6 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
         Scope::default_read_only(),
     );
     exchange.public_key_jwk = public_jwk(&signing);
-    let credential = running_hub_auth.exchange_pairing(exchange, now).unwrap();
-    let proof = sign_dpop(
-        &signing,
-        &credential.credential,
-        "GET",
-        "/v1/bootstrap",
-        now,
-        "running-hub-context",
-    );
-    let context = running_hub_auth
-        .authenticate_dpop(
-            &format!("DPoP {}", credential.credential),
-            &proof,
-            "https://controller.example",
-            "GET",
-            "/v1/bootstrap",
-            now,
-        )
-        .unwrap();
 
     let daemon_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let daemon_port = daemon_listener.local_addr().unwrap().port();
@@ -636,10 +617,50 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
         events,
     )
     .with_auth(running_hub_auth.clone());
+    let app = router(state);
+    let pairing_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/pairing/exchange")
+                .header("origin", "https://controller.example")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&exchange).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pairing_response.status(), StatusCode::OK);
+    let credential: serde_json::Value = serde_json::from_slice(
+        &to_bytes(pairing_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let credential_secret = credential["credential"].as_str().unwrap();
+    let device_id = credential["device_id"].as_str().unwrap().to_owned();
+    let proof = sign_dpop(
+        &signing,
+        credential_secret,
+        "GET",
+        "/v1/bootstrap",
+        now,
+        "running-hub-context",
+    );
+    let context = running_hub_auth
+        .authenticate_dpop(
+            &format!("DPoP {credential_secret}"),
+            &proof,
+            "https://controller.example",
+            "GET",
+            "/v1/bootstrap",
+            now,
+        )
+        .unwrap();
+
     let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hub_address = hub_listener.local_addr().unwrap();
     let hub = tokio::spawn(async move {
-        axum::serve(hub_listener, router(state)).await.unwrap();
+        axum::serve(hub_listener, app).await.unwrap();
     });
 
     let endpoint = "/v1/sessions/factory-a/attach";
@@ -658,9 +679,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
         Some(Ok(WsMessage::Binary(_)))
     ));
 
-    cli_auth
-        .revoke_device(&credential.device_id, Utc::now())
-        .unwrap();
+    cli_auth.revoke_device(&device_id, Utc::now()).unwrap();
     let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match socket.next().await {

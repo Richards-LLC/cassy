@@ -2,18 +2,19 @@
 # frozen_string_literal: true
 
 # Homebrew formula for CAS - Coding Agent System
-# Install with: brew install codingagentsystem/cas/cas
+# Install with: brew install --formula ./homebrew/cas.rb
 
+# Homebrew formula for the CAS command-line application.
 class Cas < Formula
   desc "Coding Agent System - persistent memory, tasks, rules, and skills for AI agents"
-  homepage "https://github.com/codingagentsystem/cas"
-  version "0.2.1"
+  homepage "https://github.com/pippenz/cas"
+  version "2.55.5"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/codingagentsystem/cas/releases/download/v#{version}/cas-aarch64-apple-darwin.tar.gz"
-      sha256 "13ec0b8afd951c6ca75ed4149dda779d7e621336f4cbbdc3551f797d4482feae"
+      url "https://github.com/pippenz/cas/releases/download/v#{version}/cas-aarch64-apple-darwin.tar.gz"
+      sha256 "c97fb8358ed70a6d068be765cab2f30c102c8767b66a50707a4617ef8b9e34be"
     end
     on_intel do
       odie "CAS does not support Intel macOS. Please use an Apple Silicon Mac."
@@ -22,8 +23,8 @@ class Cas < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/codingagentsystem/cas/releases/download/v#{version}/cas-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "146202ab9b1bdf9c9aa8ec850f4f325b4b6acdc482b54f7fbf707e3177473926"
+      url "https://github.com/pippenz/cas/releases/download/v#{version}/cas-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "8aa2c54f313a38a8df7cb29a1974e271a3f049342911940fecc6fec4fa7feb0a"
     end
     on_arm do
       odie "CAS does not support ARM64 Linux."

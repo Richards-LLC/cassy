@@ -231,6 +231,45 @@ async fn team_delete_for_live_task_is_neutralized_without_http() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn team_delete_uses_singular_entity_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/api/teams/{TEST_TEAM}/sync/task/absent-team-task"
+        )))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    open_task_store_local(tmp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "absent-team-task",
+            SyncOperation::Delete,
+            None,
+            TEST_TEAM,
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+    tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
+}
+
 /// Isolation contract: team push HTTP failure must not block the caller's
 /// pull step. `execute_team_push` returns `Ok(())` even on 5xx; push_team
 /// marks the attempted items failed so they survive the failed attempt for

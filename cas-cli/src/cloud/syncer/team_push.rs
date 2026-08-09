@@ -459,7 +459,7 @@ impl CloudSyncer {
 
         // Delete entries
         for cas_id in &grouped.delete_entries {
-            match self.send_team_delete(team_id, "entries", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Entry, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Entry delete {cas_id}: {e}")),
             }
@@ -467,7 +467,7 @@ impl CloudSyncer {
 
         // Delete tasks
         for cas_id in &grouped.delete_tasks {
-            match self.send_team_delete(team_id, "tasks", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Task, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Task delete {cas_id}: {e}")),
             }
@@ -475,7 +475,7 @@ impl CloudSyncer {
 
         // Delete rules
         for cas_id in &grouped.delete_rules {
-            match self.send_team_delete(team_id, "rules", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Rule, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Rule delete {cas_id}: {e}")),
             }
@@ -483,7 +483,7 @@ impl CloudSyncer {
 
         // Delete skills
         for cas_id in &grouped.delete_skills {
-            match self.send_team_delete(team_id, "skills", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Skill, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Skill delete {cas_id}: {e}")),
             }
@@ -491,7 +491,7 @@ impl CloudSyncer {
 
         // Delete sessions
         for cas_id in &grouped.delete_sessions {
-            match self.send_team_delete(team_id, "sessions", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Session, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Session delete {cas_id}: {e}")),
             }
@@ -499,7 +499,7 @@ impl CloudSyncer {
 
         // Delete verifications
         for cas_id in &grouped.delete_verifications {
-            match self.send_team_delete(team_id, "verifications", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Verification, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Verification delete {cas_id}: {e}")),
             }
@@ -507,7 +507,7 @@ impl CloudSyncer {
 
         // Delete events
         for cas_id in &grouped.delete_events {
-            match self.send_team_delete(team_id, "events", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Event, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Event delete {cas_id}: {e}")),
             }
@@ -515,7 +515,7 @@ impl CloudSyncer {
 
         // Delete prompts
         for cas_id in &grouped.delete_prompts {
-            match self.send_team_delete(team_id, "prompts", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Prompt, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Prompt delete {cas_id}: {e}")),
             }
@@ -523,7 +523,7 @@ impl CloudSyncer {
 
         // Delete file changes
         for cas_id in &grouped.delete_file_changes {
-            match self.send_team_delete(team_id, "file_changes", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::FileChange, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("FileChange delete {cas_id}: {e}")),
             }
@@ -531,7 +531,7 @@ impl CloudSyncer {
 
         // Delete commit links
         for cas_id in &grouped.delete_commit_links {
-            match self.send_team_delete(team_id, "commit_links", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::CommitLink, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("CommitLink delete {cas_id}: {e}")),
             }
@@ -539,7 +539,7 @@ impl CloudSyncer {
 
         // Delete agents
         for cas_id in &grouped.delete_agents {
-            match self.send_team_delete(team_id, "agents", cas_id, token) {
+            match self.send_team_delete(team_id, EntityType::Agent, cas_id, token) {
                 Ok(()) => deleted += 1,
                 Err(e) => errors.push(format!("Agent delete {cas_id}: {e}")),
             }
@@ -552,13 +552,16 @@ impl CloudSyncer {
     fn send_team_delete(
         &self,
         team_id: &str,
-        entity_type: &str,
+        entity_type: EntityType,
         cas_id: &str,
         token: &str,
     ) -> Result<(), CasError> {
         let delete_url = format!(
             "{}/api/teams/{}/sync/{}/{}",
-            self.cloud_config.endpoint, team_id, entity_type, cas_id
+            self.cloud_config.endpoint,
+            team_id,
+            entity_type.as_str(),
+            cas_id
         );
 
         let response = ureq::delete(&delete_url)

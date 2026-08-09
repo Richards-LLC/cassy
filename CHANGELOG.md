@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.55.3] - 2026-08-09
+
+### Fixed
+- **Commander HTTPS origins now instruct browsers to stay on HTTPS for one year.** Responses reached through CAS's verified Tailscale Serve TLS path emit exactly `Strict-Transport-Security: max-age=31536000`, while the documented plaintext loopback listener cannot opt into HSTS through spoofed proxy or identity headers. The policy is bound to a separate server-owned proxy backend and preserves existing CSP, referrer, content-type, frame, authentication, and CORS behavior across successful and error responses.
+
 ## [2.55.2] - 2026-08-09
 
 ### Fixed

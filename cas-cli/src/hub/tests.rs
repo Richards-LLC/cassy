@@ -144,7 +144,7 @@ async fn h1_zero_06_read_paths_never_write_pty_or_create_logical_sessions() {
 }
 
 #[test]
-fn machine_identity_is_stable_on_disk() {
+fn h1_machine_identity_is_stable_on_disk() {
     let temp = tempfile::tempdir().unwrap();
     let store = MachineIdentityStore::new(temp.path());
 
@@ -175,7 +175,7 @@ impl HubAuthorizer for ExactOriginReadAuthorizer {
 }
 
 #[tokio::test]
-async fn http_surface_is_real_and_origin_authorized() {
+async fn h1_http_surface_is_real_and_origin_authorized() {
     let source = RecordingReadModel::with_sessions(vec![fixture_session("factory-a")]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
@@ -232,7 +232,7 @@ async fn http_surface_is_real_and_origin_authorized() {
 }
 
 #[tokio::test]
-async fn real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
+async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -315,7 +315,7 @@ async fn real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
 }
 
 #[tokio::test]
-async fn aggregate_events_cover_session_and_pane_lifecycle() {
+async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     let events = MachineEventBus::new(16);
     let mut receiver = events.subscribe();
 
@@ -347,7 +347,7 @@ async fn aggregate_events_cover_session_and_pane_lifecycle() {
 }
 
 #[test]
-fn runtime_state_is_single_instance_and_round_trips() {
+fn h1_runtime_state_is_single_instance_and_round_trips() {
     let temp = tempfile::tempdir().unwrap();
     let paths = HubRuntimePaths::new(temp.path());
     let first_lock = paths.acquire_instance_lock().unwrap();

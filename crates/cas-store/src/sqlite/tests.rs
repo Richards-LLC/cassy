@@ -58,6 +58,60 @@ fn test_sqlite_store_crud() {
     assert!(store.get(&id).is_err());
 }
 
+/// A cloud-synced row can be present without the local daily sequence having
+/// advanced past it.  The next locally-generated ID must skip every existing
+/// ID for today, not retry the stale sequence value indefinitely.
+#[test]
+fn test_generate_id_skips_foreign_same_day_entries_after_stale_sequence() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    for suffix in [16, 38, 41] {
+        let entry = Entry::new(format!("{today}-{suffix}"), "synced elsewhere".to_string());
+        store.add(&entry).unwrap();
+    }
+
+    // Simulate a restored/local sequence that has not observed the synced
+    // entries. The old implementation returned `today-38`, colliding with a
+    // row above and reproducing the live `remember` failure.
+    let sequence_name = format!("entry:{today}");
+    store.generate_id().unwrap(); // lazily creates the sequence table
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO id_sequences (name, next_val) VALUES (?1, 37)
+             ON CONFLICT(name) DO UPDATE SET next_val = excluded.next_val",
+            [&sequence_name],
+        )
+        .unwrap();
+
+    let id = store.generate_id().unwrap();
+    assert_eq!(id, format!("{today}-42"));
+    store
+        .add(&Entry::new(id, "new local memory".to_string()))
+        .unwrap();
+}
+
+#[test]
+fn test_duplicate_entry_error_names_the_colliding_id() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let entry = Entry::new(
+        "synced-collision".to_string(),
+        "existing memory".to_string(),
+    );
+    store.add(&entry).unwrap();
+
+    let error = store.add(&entry).unwrap_err();
+    assert_eq!(error.to_string(), "entry already exists: synced-collision");
+}
+
 #[test]
 fn test_recent_resurfaces_an_old_entry_updated_later() {
     let temp = TempDir::new().unwrap();

@@ -17,6 +17,8 @@ use crate::hub::{
     router, validate_control_bind,
 };
 
+const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Args, Debug, Clone)]
 pub struct HubArgs {
     /// Publish the loopback hub through tailnet-only Tailscale Serve HTTPS
@@ -110,7 +112,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Status => status(cli),
         HubCommands::Stop => stop(cli),
         HubCommands::Restart(serve) => {
-            let _ = stop(cli);
+            stop(cli)?;
             start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
         }
         HubCommands::Pair(pair) => pair_device(&pair, cli),
@@ -125,8 +127,8 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
         TransportSecurity::Plaintext,
     )?;
     crate::hub::ensure_private_dir(paths.root())?;
-    if let Ok(record) = paths.read_process_record() {
-        if record_is_live(&record) {
+    match paths.read_process_record() {
+        Ok(record) if record_is_live(&record) => {
             let endpoint = record
                 .public_url
                 .clone()
@@ -138,11 +140,17 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
                 record.version
             );
         }
-        // A killed hub cannot tear down its owned proxy. Remove only the exact
-        // unchanged mapping described by its private receipt before replacing it.
-        let _ = TailscaleServeManager::new(paths.root()).disable_owned();
-        paths.remove_process_record()?;
+        Ok(_) | Err(_) => {}
     }
+    // A missing/stale PID record is not ownership evidence. Acquire the
+    // authoritative machine lock before cleaning stale state or launching a
+    // replacement, then release it immediately before the child takes over.
+    let launch_guard = paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?;
+    // A killed hub cannot tear down its owned proxy. Once exclusive ownership
+    // is proven, remove only the exact unchanged mapping described by its
+    // private receipt; this also recovers record-absent abrupt deaths.
+    let _ = TailscaleServeManager::new(paths.root()).disable_owned();
+    paths.remove_process_record()?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -178,7 +186,8 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
             });
         }
     }
-    command.spawn().context("spawn detached cas hub")?;
+    drop(launch_guard);
+    let mut child = command.spawn().context("spawn detached cas hub")?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -201,6 +210,21 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
                 }
                 return Ok(());
             }
+        }
+        if let Some(status) = child.try_wait().context("poll detached cas hub")? {
+            if let Ok(record) = paths.read_process_record()
+                && record_is_live(&record)
+            {
+                anyhow::bail!(
+                    "another cas hub instance won the machine lock (pid {}); replacement process exited with {}",
+                    record.pid,
+                    status
+                );
+            }
+            anyhow::bail!(
+                "cas hub replacement exited with {status} before becoming ready; inspect {}",
+                paths.log_path().display()
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -538,14 +562,11 @@ fn stop(cli: &Cli) -> Result<()> {
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while process_is_running(record.pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        anyhow::ensure!(
-            !process_is_running(record.pid),
-            "cas hub did not stop cleanly"
-        );
+        wait_for_process_and_lock_release(&paths, record.pid, HUB_LIFECYCLE_TIMEOUT)?;
+    } else {
+        // Record absence does not authorize stale cleanup: a shutting-down hub
+        // may already have removed it while still holding the machine lock.
+        drop(paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?);
     }
     let tailscale_result = TailscaleServeManager::new(paths.root()).disable_owned();
     paths.remove_process_record()?;
@@ -575,6 +596,30 @@ fn stop(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn wait_for_process_and_lock_release(
+    paths: &HubRuntimePaths,
+    pid: u32,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let process_gone = !process_is_running(pid);
+        let lock = paths.try_acquire_instance_lock()?;
+        if process_gone && lock.is_some() {
+            drop(lock);
+            return Ok(());
+        }
+        drop(lock);
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "cas hub pid {pid} or its machine lock remained live after {:.1}s; no replacement was started",
+                timeout.as_secs_f64()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn process_is_running(pid: u32) -> bool {

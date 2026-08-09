@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -49,6 +50,12 @@ impl HubRuntimePaths {
     }
 
     pub fn acquire_instance_lock(&self) -> Result<HubInstanceLock> {
+        self.try_acquire_instance_lock()?.ok_or_else(|| {
+            anyhow::anyhow!("another cas hub instance already holds the machine lock")
+        })
+    }
+
+    pub fn try_acquire_instance_lock(&self) -> Result<Option<HubInstanceLock>> {
         ensure_private_dir(&self.root)?;
         let path = self.root.join("hub.lock");
         let file = OpenOptions::new()
@@ -56,9 +63,27 @@ impl HubRuntimePaths {
             .write(true)
             .create(true)
             .open(&path)?;
-        file.try_lock_exclusive()
-            .with_context(|| "another cas hub instance already holds the machine lock")?;
-        Ok(HubInstanceLock { file })
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(HubInstanceLock { file })),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error).context("acquire cas hub machine lock"),
+        }
+    }
+
+    pub fn wait_for_instance_lock(&self, timeout: Duration) -> Result<HubInstanceLock> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(lock) = self.try_acquire_instance_lock()? {
+                return Ok(lock);
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "cas hub machine lock remained held after {:.1}s; the old instance may still be shutting down and no replacement was started",
+                    timeout.as_secs_f64()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     pub fn write_process_record(&self, record: &HubProcessRecord) -> Result<()> {

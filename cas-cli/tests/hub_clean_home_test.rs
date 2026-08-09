@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -12,6 +13,16 @@ use tempfile::TempDir;
 
 fn cas_command(home: &Path, path: &OsStr) -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    command
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", path)
+        .env("CAS_SKIP_FACTORY_TOOLING", "1");
+    command
+}
+
+fn cas_process_command(home: &Path, path: &OsStr) -> std::process::Command {
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin!("cas"));
     command
         .env_clear()
         .env("HOME", home)
@@ -409,12 +420,8 @@ esac
         String::from_utf8_lossy(&initial.stderr)
     );
 
-    let mut restart = std::process::Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut restart = cas_process_command(home.path(), bin.as_os_str());
     restart
-        .env_clear()
-        .env("HOME", home.path())
-        .env("PATH", bin.as_os_str())
-        .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
         .args([
             "--json",
@@ -481,4 +488,139 @@ esac
     assert!(paths.acquire_instance_lock().is_ok());
     assert!(!home.path().join(".cas/hub/process.json").exists());
     assert!(!home.path().join("mock-serve").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_deadline_keeps_old_lock_owner_and_launches_no_replacement() {
+    use cas::hub::HubRuntimePaths;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let barrier = home.path().join("restart-lock-deadline");
+    fs::create_dir(&barrier).unwrap();
+
+    let initial = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args(["--json", "hub", "start", "--port", "0"])
+        .output()
+        .expect("start deadline fixture");
+    assert!(initial.status.success());
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let old_pid = initial["pid"].as_u64().unwrap();
+
+    let mut restart = cas_process_command(home.path(), bin.as_os_str());
+    restart
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args(["--json", "hub", "restart", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = restart.spawn().expect("spawn deadline restart");
+    let marker = barrier.join("record-removed-lock-held");
+    let marker_deadline = Instant::now() + Duration::from_secs(3);
+    while !marker.exists() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists());
+
+    let output = child.wait_with_output().expect("wait deadline restart");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("machine lock remained live after 10.0s")
+            && stderr.contains("no replacement was started"),
+        "deadline must be truthful: {stderr}"
+    );
+    assert!(!home.path().join(".cas/hub/process.json").exists());
+    let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+    assert!(paths.acquire_instance_lock().is_err());
+    assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(old_pid as i32), None).is_ok());
+
+    fs::write(barrier.join("release"), b"release\n").unwrap();
+    let release_deadline = Instant::now() + Duration::from_secs(3);
+    while paths.acquire_instance_lock().is_err() && Instant::now() < release_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(paths.acquire_instance_lock().is_ok());
+    let cleanup = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("clean deadline fixture");
+    assert!(cleanup.status.success());
+    assert!(!home.path().join(".cas/hub/process.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
+    use cas::hub::HubRuntimePaths;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let initial = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0"])
+        .output()
+        .expect("start concurrency fixture");
+    assert!(initial.status.success());
+
+    for _ in 0..5 {
+        let gate = Arc::new(Barrier::new(3));
+        let run = |action: &'static str, gate: Arc<Barrier>| {
+            let home = home.path().to_path_buf();
+            let bin = bin.clone();
+            thread::spawn(move || {
+                let mut command = cas_process_command(&home, bin.as_os_str());
+                command.args(["--json", "hub", action, "--port", "0", "--tailscale-serve"]);
+                gate.wait();
+                command.output().unwrap()
+            })
+        };
+        let start = run("start", gate.clone());
+        let restart = run("restart", gate.clone());
+        gate.wait();
+        let outputs = [start.join().unwrap(), restart.join().unwrap()];
+        assert!(
+            outputs.iter().any(|output| output.status.success()),
+            "at least one concurrent lifecycle command must complete: {:?}",
+            outputs
+                .iter()
+                .map(|output| String::from_utf8_lossy(&output.stderr))
+                .collect::<Vec<_>>()
+        );
+
+        let status = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "status"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        let pid = status["record"]["pid"].as_u64().unwrap();
+        let lock_path = home.path().join(".cas/hub/hub.lock");
+        let lock_fds = fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| fs::read_link(entry.path()).ok().as_deref() == Some(&lock_path))
+            .count();
+        assert_eq!(lock_fds, 1, "the recorded hub must own exactly one lock FD");
+        assert!(
+            HubRuntimePaths::new(home.path().join(".cas/hub"))
+                .acquire_instance_lock()
+                .is_err(),
+            "an independent contender must be excluded"
+        );
+    }
+
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "stop"])
+        .output()
+        .unwrap();
+    assert!(stop.status.success());
+    assert!(!home.path().join(".cas/hub/process.json").exists());
+    assert!(
+        HubRuntimePaths::new(home.path().join(".cas/hub"))
+            .acquire_instance_lock()
+            .is_ok()
+    );
 }

@@ -370,3 +370,164 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
     drop(first_lock);
     assert!(paths.acquire_instance_lock().is_ok());
 }
+
+#[test]
+fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
+    use chrono::{Duration, Utc};
+
+    let temp = tempfile::tempdir().unwrap();
+    let now = Utc::now();
+    let auth = AuthStore::open(temp.path(), "machine-test").unwrap();
+    let invitation = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            now,
+        )
+        .unwrap();
+    assert!(invitation.url.contains("#pair="));
+    assert!(!invitation.url.contains("?"));
+
+    let exchange = PairingExchange::test_fixture(
+        invitation.token.clone(),
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    let credential = auth.exchange_pairing(exchange.clone(), now).unwrap();
+    assert!(!credential.credential.is_empty());
+    assert!(auth.exchange_pairing(exchange, now).is_err());
+
+    let reopened = AuthStore::open(temp.path(), "machine-test").unwrap();
+    assert_eq!(reopened.list_devices().unwrap().len(), 1);
+
+    let expired = reopened
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            now,
+        )
+        .unwrap();
+    let expired_exchange = PairingExchange::test_fixture(
+        expired.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    assert!(
+        reopened
+            .exchange_pairing(expired_exchange, now + Duration::minutes(11))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
+    use chrono::{Duration, Utc};
+
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(temp.path(), "machine-test").unwrap();
+    let context = AuthContext::test_fixture(
+        "device-1",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    let now = Utc::now();
+    let ticket = auth
+        .issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now)
+        .unwrap();
+    assert_eq!(ticket.expires_at, now + Duration::minutes(5));
+
+    let first = auth.clone();
+    let second = auth.clone();
+    let raw = ticket.ticket.clone();
+    let raw_two = raw.clone();
+    let (one, two) = tokio::join!(
+        tokio::task::spawn_blocking(move || {
+            first.consume_ws_ticket(
+                &raw,
+                "https://controller.example",
+                "factory-a",
+                "/v1/sessions/factory-a/attach",
+                now,
+            )
+        }),
+        tokio::task::spawn_blocking(move || {
+            second.consume_ws_ticket(
+                &raw_two,
+                "https://controller.example",
+                "factory-a",
+                "/v1/sessions/factory-a/attach",
+                now,
+            )
+        })
+    );
+    assert_eq!(usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()), 1);
+
+    let expired = auth
+        .issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now)
+        .unwrap();
+    assert!(
+        auth.consume_ws_ticket(
+            &expired.ticket,
+            "https://controller.example",
+            "factory-a",
+            "/v1/sessions/factory-a/attach",
+            now + Duration::minutes(6),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidden() {
+    use crate::ui::factory::MessageAttribution;
+
+    let input = ClientMessage::Input {
+        pane_id: "worker-1".into(),
+        data: b"x".to_vec(),
+    };
+    let targeted = ClientMessage::InterruptPane {
+        pane_id: "worker-1".into(),
+    };
+    let semantic = ClientMessage::SendMessage {
+        target: "worker-1".into(),
+        text: "status?".into(),
+        summary: None,
+        urgent: false,
+        attribution: MessageAttribution {
+            device_id: None,
+            credential_id: None,
+            device_label: None,
+            operator_label: None,
+            controller_origin: None,
+            request_id: None,
+        },
+    };
+
+    assert_eq!(required_scope(&input), Some(Scope::PaneInput));
+    assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
+    assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
+    assert_eq!(required_scope(&ClientMessage::Interrupt), None);
+}
+
+#[test]
+fn h2_perm_01_rejects_loose_or_symlinked_machine_auth_state() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let loose = temp.path().join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(AuthStore::open(&loose, "machine-test").is_err());
+
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = temp.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(AuthStore::open(&link, "machine-test").is_err());
+    }
+}

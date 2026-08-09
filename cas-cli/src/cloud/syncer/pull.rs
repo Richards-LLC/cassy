@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use serde::de::DeserializeOwned;
+
 use crate::cloud::syncer::{
     CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult, TeamPullResponse,
     UpsertResult,
@@ -21,6 +23,25 @@ use crate::types::{
 /// through [`build_scoped_pull_url`], which is what keeps the pull scoped to
 /// the current project (cas-2eb3 / cas-ed15).
 pub(crate) const PULL_PATH: &str = "/api/sync/pull";
+
+/// Deserialize one raw pull entity while retaining its wire identifier in any
+/// error. Pull payloads are raw JSON specifically so one malformed row does
+/// not abort the rest of a sync; without this boundary the resulting warning
+/// was un-actionable because it named neither the row nor its entity type.
+fn deserialize_pulled_entity<T: DeserializeOwned>(
+    raw: serde_json::Value,
+    entity_type: &str,
+) -> Result<T, String> {
+    let id = raw
+        .get("id")
+        .or_else(|| raw.get("entity_id"))
+        .or_else(|| raw.get("commit_hash"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<missing-id>")
+        .to_owned();
+    serde_json::from_value(raw)
+        .map_err(|error| format!("{entity_type} deserialize error (id={id}): {error}"))
+}
 
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
 /// project scope cannot be resolved.
@@ -267,10 +288,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_entry, &current_project_id, "entry") {
                 continue;
             }
-            let remote_entry: Entry = match serde_json::from_value(raw_entry) {
+            let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
-                    result.errors.push(format!("Entry deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -297,10 +318,10 @@ impl CloudSyncer {
             // close — apply it authoritatively rather than via the
             // timestamp-gated upsert.
             let web_close = is_web_close_tombstone(&raw_task);
-            let remote_task: Task = match serde_json::from_value(raw_task) {
+            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
-                    result.errors.push(format!("Task deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -327,10 +348,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
                 continue;
             }
-            let remote_rule: Rule = match serde_json::from_value(raw_rule) {
+            let remote_rule: Rule = match deserialize_pulled_entity(raw_rule, "rule") {
                 Ok(r) => r,
                 Err(e) => {
-                    result.errors.push(format!("Rule deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -352,10 +373,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_skill, &current_project_id, "skill") {
                 continue;
             }
-            let remote_skill: Skill = match serde_json::from_value(raw_skill) {
+            let remote_skill: Skill = match deserialize_pulled_entity(raw_skill, "skill") {
                 Ok(s) => s,
                 Err(e) => {
-                    result.errors.push(format!("Skill deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -385,10 +406,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_spec, &current_project_id, "spec") {
                 continue;
             }
-            let remote_spec: Spec = match serde_json::from_value(raw_spec) {
+            let remote_spec: Spec = match deserialize_pulled_entity(raw_spec, "spec") {
                 Ok(s) => s,
                 Err(e) => {
-                    result.errors.push(format!("Spec deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -414,10 +435,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_event, &current_project_id, "event") {
                 continue;
             }
-            let remote_event: Event = match serde_json::from_value(raw_event) {
+            let remote_event: Event = match deserialize_pulled_entity(raw_event, "event") {
                 Ok(e) => e,
                 Err(e) => {
-                    result.errors.push(format!("Event deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -435,10 +456,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_prompt, &current_project_id, "prompt") {
                 continue;
             }
-            let remote_prompt: Prompt = match serde_json::from_value(raw_prompt) {
+            let remote_prompt: Prompt = match deserialize_pulled_entity(raw_prompt, "prompt") {
                 Ok(p) => p,
                 Err(e) => {
-                    result.errors.push(format!("Prompt deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -459,12 +480,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_fc, &current_project_id, "file_change") {
                 continue;
             }
-            let remote_fc: FileChange = match serde_json::from_value(raw_fc) {
+            let remote_fc: FileChange = match deserialize_pulled_entity(raw_fc, "file_change") {
                 Ok(f) => f,
                 Err(e) => {
-                    result
-                        .errors
-                        .push(format!("FileChange deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -487,12 +506,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_cl, &current_project_id, "commit_link") {
                 continue;
             }
-            let remote_cl: CommitLink = match serde_json::from_value(raw_cl) {
+            let remote_cl: CommitLink = match deserialize_pulled_entity(raw_cl, "commit_link") {
                 Ok(c) => c,
                 Err(e) => {
-                    result
-                        .errors
-                        .push(format!("CommitLink deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -981,10 +998,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_entry, &current_project_id, "entry") {
                 continue;
             }
-            let remote_entry: Entry = match serde_json::from_value(raw_entry) {
+            let remote_entry: Entry = match deserialize_pulled_entity(raw_entry, "entry") {
                 Ok(e) => e,
                 Err(e) => {
-                    result.errors.push(format!("Entry deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -1006,10 +1023,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
                 continue;
             }
-            let remote_task: Task = match serde_json::from_value(raw_task) {
+            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
-                    result.errors.push(format!("Task deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -1031,10 +1048,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_rule, &current_project_id, "rule") {
                 continue;
             }
-            let remote_rule: Rule = match serde_json::from_value(raw_rule) {
+            let remote_rule: Rule = match deserialize_pulled_entity(raw_rule, "rule") {
                 Ok(r) => r,
                 Err(e) => {
-                    result.errors.push(format!("Rule deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -1056,10 +1073,10 @@ impl CloudSyncer {
             if !entity_matches_project(&raw_skill, &current_project_id, "skill") {
                 continue;
             }
-            let remote_skill: Skill = match serde_json::from_value(raw_skill) {
+            let remote_skill: Skill = match deserialize_pulled_entity(raw_skill, "skill") {
                 Ok(s) => s,
                 Err(e) => {
-                    result.errors.push(format!("Skill deserialize error: {e}"));
+                    result.errors.push(e);
                     continue;
                 }
             };
@@ -1096,8 +1113,28 @@ impl CloudSyncer {
 
 #[cfg(test)]
 mod tests {
-    use super::{PULL_PATH, build_scoped_pull_url_with, entity_matches_project};
+    use super::{
+        PULL_PATH, build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
+    };
+    use crate::types::Entry;
     use serde_json::json;
+
+    #[test]
+    fn deserialize_error_names_the_wire_entity_type_and_id() {
+        let error = deserialize_pulled_entity::<Entry>(
+            json!({
+                "id": "p-malformed-created",
+                "project_id": "cas-src",
+                "content": "legacy entry without its creation timestamp",
+            }),
+            "entry",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("entry deserialize error"), "{error}");
+        assert!(error.contains("id=p-malformed-created"), "{error}");
+        assert!(error.contains("missing field `created`"), "{error}");
+    }
 
     // cas-0be9: the pull URL builder must FAIL CLOSED when the project scope
     // cannot be resolved. An unscoped `/api/sync/pull` asks the server for

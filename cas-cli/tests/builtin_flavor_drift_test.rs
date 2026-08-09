@@ -535,6 +535,40 @@ fn memory_lifecycle_reference_stays_three_way_synchronized() {
     }
 }
 
+/// cas-462a: one-shot CLI routing is a cross-harness operational contract.
+/// Keep the compact body and detailed routing reference explicitly guarded,
+/// in addition to the broad corpus walk above.
+#[test]
+fn cli_routing_skill_stays_three_way_synchronized() {
+    for rel in [
+        "skills/cli-routing/SKILL.md",
+        "skills/cli-routing/references/routing.md",
+    ] {
+        let claude = canonicalize(
+            &fs::read_to_string(flavor_path(rel, &CLAUDE))
+                .unwrap_or_else(|e| panic!("claude {rel} missing: {e}")),
+        );
+        for required in [
+            "codex exec",
+            "daniel@petrastella.io",
+            "CLAUDE_CONFIG_DIR",
+            "docs/SLACK_POSTING_RUNBOOK.md",
+        ] {
+            assert!(
+                claude.contains(required),
+                "claude {rel} missing {required:?}"
+            );
+        }
+        for twin in TWINS {
+            let body = canonicalize(
+                &fs::read_to_string(flavor_path(rel, twin))
+                    .unwrap_or_else(|e| panic!("{} {rel} missing: {e}", twin.name)),
+            );
+            assert_eq!(claude, body, "{rel} drifted for {}", twin.name);
+        }
+    }
+}
+
 /// A file present only in a twin flavor must be an explicitly sanctioned
 /// flavor-only file. Without this, drift could hide by adding a codex-only or
 /// grok-only document that the claude-rooted walk never visits.

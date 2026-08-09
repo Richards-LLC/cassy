@@ -247,6 +247,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-codex-exec/SKILL.md"),
     },
     BuiltinFile {
+        path: "skills/cli-routing/SKILL.md",
+        content: include_str!("builtins/skills/cli-routing/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cli-routing/references/routing.md",
+        content: include_str!("builtins/skills/cli-routing/references/routing.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-brainstorm/SKILL.md",
         content: include_str!("builtins/skills/cas-brainstorm/SKILL.md"),
     },
@@ -576,6 +584,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-codex-exec/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cli-routing/SKILL.md",
+        content: include_str!("builtins/codex/skills/cli-routing/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cli-routing/references/routing.md",
+        content: include_str!("builtins/codex/skills/cli-routing/references/routing.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/SKILL.md",
@@ -1126,6 +1142,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-codex-exec/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-codex-exec/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cli-routing/SKILL.md",
+        content: include_str!("builtins/grok/skills/cli-routing/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cli-routing/references/routing.md",
+        content: include_str!("builtins/grok/skills/cli-routing/references/routing.md"),
+    },
 ];
 
 /// A factory-critical capability that every harness must resolve from its own
@@ -1339,6 +1363,14 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         grok: Some("skills/cas-codex-exec"),
         note: "Runtime-bound on the `codex` CLI (same prerequisite for every \
                harness); included for Grok rather than exempted.",
+    },
+    RequiredCapability {
+        id: "cli-routing",
+        claude: Some("skills/cli-routing"),
+        codex: Some("skills/cli-routing"),
+        grok: Some("skills/cli-routing"),
+        note: "One-shot Codex-first routing with a hard Claude account gate; \
+               each harness owns the same operational guidance.",
     },
 ];
 
@@ -3574,6 +3606,39 @@ This is the body content."#;
                 claude.content.contains(required),
                 "cas-codex-exec SKILL.md missing required marker: {required:?}"
             );
+        }
+    }
+
+    #[test]
+    fn test_builtin_skills_contains_cli_routing() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/cli-routing/SKILL.md")
+                .unwrap_or_else(|| {
+                    panic!("skills/cli-routing/SKILL.md missing from {label} catalog")
+                });
+            assert!(
+                is_managed_by_cas(skill.content),
+                "{label} cli-routing SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: cli-routing",
+                "codex exec",
+                "claude auth status --json",
+                "daniel@petrastella.io",
+                "docs/SLACK_POSTING_RUNBOOK.md",
+                "release-notes",
+            ] {
+                assert!(
+                    skill.content.contains(required),
+                    "{label} cli-routing SKILL.md missing required marker: {required:?}"
+                );
+            }
         }
     }
 

@@ -31,6 +31,16 @@ const HOOK_SEMANTIC_TIMEOUT: Duration = Duration::from_millis(400);
 /// index lookups and a deterministic head window, never a corpus-wide scan.
 const SEMANTIC_CANDIDATE_CAP_PER_NAMESPACE: usize = 32;
 
+/// Lexical evidence is only a bounded fallback when semantic evidence is
+/// absent. This keeps one noisy local match from crowding out the channel that
+/// carries most recall value while preserving exact task/file bindings.
+const LEXICAL_INJECTION_CAP: usize = 3;
+
+/// A focused epic is an explicit domain signal from the factory session. A
+/// row that does not overlap that domain needs an unambiguously strong vector
+/// match before it may cross the boundary.
+const FOCUSED_EPIC_SEMANTIC_FLOOR: f64 = 0.80;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RecallRole {
@@ -174,6 +184,9 @@ pub(crate) struct EvidenceCandidate {
     pub(crate) provenance: EvidenceProvenance,
     pub(crate) relevance: f64,
     pub(crate) lexical_score: f64,
+    pub(crate) lexical_eligible: bool,
+    pub(crate) lexical_weak: bool,
+    pub(crate) focus_mismatch: bool,
     pub(crate) semantic_score: Option<f64>,
     pub(crate) structural_score: f64,
     pub(crate) role_score: f64,
@@ -199,6 +212,9 @@ pub(crate) struct RecallRequest {
     pub(crate) symbols: Vec<String>,
     pub(crate) recent_decisions: Vec<String>,
     pub(crate) seen_evidence: Vec<String>,
+    pub(crate) focus_epic_id: Option<String>,
+    pub(crate) focus_epic_title: Option<String>,
+    pub(crate) focus_epic_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +224,7 @@ pub(crate) struct RecallQuery {
     pub(crate) task_id: Option<String>,
     pub(crate) files: Vec<String>,
     pub(crate) symbols: Vec<String>,
+    pub(crate) focus_terms: Vec<String>,
 }
 
 impl RecallQuery {
@@ -220,6 +237,7 @@ impl RecallQuery {
         let labels = stable_values(&request.task_labels, 12);
         let decisions = stable_values(&request.recent_decisions, 4);
         let seen = stable_values(&request.seen_evidence, 32);
+        let focus_labels = stable_values(&request.focus_epic_labels, 12);
         // Keep ownership deterministic even when callers reuse their buffers.
         files.shrink_to_fit();
         symbols.shrink_to_fit();
@@ -249,6 +267,15 @@ impl RecallQuery {
         if !seen.is_empty() {
             lines.push(format!("already_seen={}", seen.join(",")));
         }
+        if let Some(focus_id) = request.focus_epic_id.as_deref() {
+            lines.push(format!("focus_epic={}", clean_scalar(focus_id, 80)));
+        }
+        if let Some(focus_title) = request.focus_epic_title.as_deref() {
+            lines.push(format!("focus_title={}", clean_scalar(focus_title, 240)));
+        }
+        if !focus_labels.is_empty() {
+            lines.push(format!("focus_labels={}", focus_labels.join(",")));
+        }
         let prompt = redact_prompt(&request.prompt);
         if !prompt.is_empty() {
             lines.push(format!("request={prompt}"));
@@ -256,12 +283,14 @@ impl RecallQuery {
 
         let max_chars = identity.role.policy().query_tokens.saturating_mul(4);
         let canonical = truncate_utf8(&lines.join("\n"), max_chars);
+        let focus_terms = focus_terms(request);
         Some(Self {
             canonical,
             role: identity.role,
             task_id: request.task_id.clone(),
             files,
             symbols,
+            focus_terms,
         })
     }
 }
@@ -397,6 +426,7 @@ impl RecallRetriever for SqliteRecallRetriever {
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
             .map(|row| local_candidate(row, query, &terms))
+            .filter(|candidate| candidate.lexical_eligible)
             .collect();
         candidates.sort_by(|a, b| {
             b.binding
@@ -895,7 +925,11 @@ fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
             table: "history_commits",
             surface: EvidenceSurface::History,
             id: "sha",
-            text: "trim(subject || ' ' || coalesce(body, ''))",
+            // Commit trailers are metadata, not recall evidence, and generated
+            // merge messages are routine lexical noise. Semantic history keeps
+            // its existing heuristic because a merge with real prose can still
+            // be useful there.
+            text: "trim(subject)",
             scope: "scope",
             team: "null",
             share: "null",
@@ -903,7 +937,7 @@ fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
             stale: "0",
             body_available: true,
             locator: "sha",
-            extra_scope_predicate: "1 = 1",
+            extra_scope_predicate: "is_merge = 0",
         },
         LocalSurfaceSpec {
             table: "code_symbols",
@@ -1014,6 +1048,42 @@ fn read_surface(
 }
 
 fn query_terms(canonical: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for raw in canonical
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+    {
+        let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+        if !is_content_bearing_term(&term) || terms.contains(&term) {
+            continue;
+        }
+        terms.push(term);
+        if terms.len() == 10 {
+            break;
+        }
+    }
+    terms
+}
+
+fn focus_terms(request: &RecallRequest) -> Vec<String> {
+    // The opaque epic id can help normal lexical retrieval through the
+    // canonical query, but only human-readable title/labels describe a domain.
+    let mut source = String::new();
+    if let Some(title) = request.focus_epic_title.as_deref() {
+        source.push_str(title);
+    }
+    if !request.focus_epic_labels.is_empty() {
+        if !source.is_empty() {
+            source.push(' ');
+        }
+        source.push_str(&request.focus_epic_labels.join(" "));
+    }
+    query_terms(&source)
+}
+
+/// Terms in this set have high enough document frequency in ordinary task and
+/// commit prose that they cannot, by themselves, establish relevance. Keeping
+/// this bounded static floor avoids a corpus-wide IDF scan on the hook path.
+fn is_high_document_frequency_term(term: &str) -> bool {
     const STOP: &[&str] = &[
         "role",
         "worker",
@@ -1029,27 +1099,37 @@ fn query_terms(canonical: &str) -> Vec<String> {
         "request",
         "this",
         "that",
+        "the",
+        "and",
+        "for",
         "with",
         "from",
         "into",
         "then",
+        "use",
+        "queue",
+        "new",
+        "old",
+        "first",
+        "decision",
+        "context",
+        "check",
+        "out",
+        "put",
+        "merge",
+        "branch",
         "please",
         "implement",
     ];
-    let mut terms = Vec::new();
-    for raw in canonical
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
-    {
-        let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
-        if term.len() < 3 || STOP.contains(&term.as_str()) || terms.contains(&term) {
-            continue;
-        }
-        terms.push(term);
-        if terms.len() == 10 {
-            break;
-        }
-    }
-    terms
+    STOP.contains(&term)
+}
+
+fn is_content_bearing_term(term: &str) -> bool {
+    term.len() >= 3 && !is_high_document_frequency_term(term)
+}
+
+fn lexical_match_is_eligible(matched: &[&str]) -> bool {
+    matched.iter().any(|term| is_content_bearing_term(term))
 }
 
 fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
@@ -1059,6 +1139,7 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         .filter(|term| haystack.contains(term.as_str()))
         .map(String::as_str)
         .collect();
+    let lexical_eligible = lexical_match_is_eligible(&matched);
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
     let binding = query.task_id.as_deref() == Some(row.id.as_str())
         || query.files.iter().any(|file| haystack.contains(file))
@@ -1075,6 +1156,10 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         _ => 0.08,
     };
     let structural = if binding { 1.0 } else { 0.0 };
+    let lexical_weak = !binding && matched.len() == 1;
+    let focus_mismatch = !query.focus_terms.is_empty()
+        && !binding
+        && !query.focus_terms.iter().any(|term| haystack.contains(term));
     EvidenceCandidate {
         evidence_id: row.id,
         surface: row.surface,
@@ -1082,6 +1167,8 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         snippet: clean_scalar(&row.snippet, 480),
         why_relevant: if binding {
             "exact task/file/symbol binding".into()
+        } else if lexical_weak {
+            format!("lexical(weak) match: {}", matched.join(","))
         } else {
             format!("lexical match: {}", matched.join(","))
         },
@@ -1093,6 +1180,9 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         },
         relevance: lexical * 0.66 + structural * 0.24 + role_score,
         lexical_score: lexical,
+        lexical_eligible,
+        lexical_weak,
+        focus_mismatch,
         semantic_score: None,
         structural_score: structural,
         role_score,
@@ -1239,6 +1329,21 @@ fn hook_request(
                 .map(|line| clean_scalar(line, 240))
                 .collect();
             request.recent_decisions.reverse();
+        }
+
+        // A pinned/session epic is a domain boundary, not an authorization
+        // boundary. Its title and labels make that topic available to ranking
+        // without adding another store or network read to the hook path.
+        if let Some(focus_id) = crate::ui::factory::preferred_epic_id_from_session_metadata() {
+            request.focus_epic_id = Some(focus_id.clone());
+            if let Ok((title, labels)) = conn.query_row(
+                "select title, labels from tasks where id = ?1 and task_type = 'epic'",
+                [&focus_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            ) {
+                request.focus_epic_title = Some(title);
+                request.focus_epic_labels = serde_json::from_str(&labels).unwrap_or_default();
+            }
         }
     }
 
@@ -1395,7 +1500,21 @@ pub(crate) fn render_packet(
     let mut full = header.clone();
     let mut injected = Vec::new();
     let cap = policy.injection_cap.min(delta.len());
-    for candidate in delta.iter().take(cap) {
+    // Exact task/file bindings are complementary context, not a semantic
+    // replacement; keep the bounded lexical fallback beside them. Semantic
+    // evidence is the channel that suppresses pure-lexical rows.
+    let semantic_evidence_exists = delta
+        .iter()
+        .any(|candidate| candidate.semantic_score.is_some());
+    let mut lexical_injected = 0usize;
+    for candidate in &delta {
+        if injected.len() == cap {
+            break;
+        }
+        let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
+        if lexical_only && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP) {
+            continue;
+        }
         let card = render_card(candidate);
         if full.len() + 1 + card.len() + footer_reserve > byte_budget {
             break;
@@ -1403,6 +1522,9 @@ pub(crate) fn render_packet(
         full.push('\n');
         full.push_str(&card);
         injected.push(candidate.clone());
+        if lexical_only {
+            lexical_injected += 1;
+        }
     }
     if injected.is_empty() {
         return None;
@@ -1520,6 +1642,12 @@ pub(crate) fn retrieve_candidates(
         }
     }
     let mut candidates: Vec<EvidenceCandidate> = fused.into_values().collect();
+    candidates.retain(|candidate| {
+        !candidate.focus_mismatch
+            || candidate
+                .semantic_score
+                .is_some_and(|score| score >= FOCUSED_EPIC_SEMANTIC_FLOOR)
+    });
     candidates.sort_by(|a, b| {
         b.binding
             .cmp(&a.binding)
@@ -1536,6 +1664,9 @@ pub(crate) fn retrieve_candidates(
 
 fn fuse_candidate(existing: &mut EvidenceCandidate, incoming: EvidenceCandidate) {
     existing.lexical_score = existing.lexical_score.max(incoming.lexical_score);
+    existing.lexical_eligible |= incoming.lexical_eligible;
+    existing.lexical_weak &= incoming.lexical_weak;
+    existing.focus_mismatch |= incoming.focus_mismatch;
     existing.semantic_score = match (existing.semantic_score, incoming.semantic_score) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (value @ Some(_), None) | (None, value @ Some(_)) => value,
@@ -1675,6 +1806,9 @@ mod tests {
             },
             relevance: 0.8,
             lexical_score: 0.8,
+            lexical_eligible: true,
+            lexical_weak: false,
+            focus_mismatch: false,
             semantic_score: None,
             structural_score: 0.0,
             role_score: 0.0,
@@ -2000,6 +2134,154 @@ mod tests {
         let supervisor_rows = retrieve_candidates(&supervisor, &request, &[&retriever]).unwrap();
         assert_eq!(supervisor_rows.candidates[0].evidence_id, "cas-parser");
         assert!(!dir.path().join("index/code-vectors").exists());
+    }
+
+    #[test]
+    fn lexical_quality_floor_rejects_all_stopword_match_sets() {
+        assert!(!lexical_match_is_eligible(&["the", "old", "context"]));
+        assert!(!lexical_match_is_eligible(&["use", "queue"]));
+        assert!(lexical_match_is_eligible(&["release"]));
+        assert_eq!(
+            query_terms("the old context use queue for release signing"),
+            vec!["release", "signing"]
+        );
+    }
+
+    #[test]
+    fn lexical_fixture_excludes_merge_and_trailer_noise_but_keeps_relevant_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table history_commits (
+                sha text primary key, subject text, body text, indexed_at text,
+                scope text, is_merge integer
+            );
+            insert into tasks values
+                ('cas-release', 'Mobile release signing artifact', '', '', '', null, null, 'r2', 'in_progress'),
+                ('stopword-noise', 'The old context use queue', '', '', '', null, null, 'r3', 'open');
+            insert into history_commits values
+                ('relevant', 'Fix release signing artifact', 'real implementation detail', 'r2', 'project', 0),
+                ('merge-noise', 'Merge branch main', 'release signing artifact', 'r3', 'project', 1),
+                ('trailer-noise', 'Maintenance cleanup', 'Co-Authored-By: release signing artifact', 'r3', 'project', 0);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let rows = retrieve_candidates(
+            &identity(RecallRole::Supervisor),
+            &RecallRequest {
+                prompt: "mobile release signing artifact".into(),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap();
+        let ids: Vec<&str> = rows
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence_id.as_str())
+            .collect();
+        assert!(ids.contains(&"cas-release"));
+        assert!(ids.contains(&"relevant"));
+        assert!(!ids.contains(&"stopword-noise"));
+        assert!(!ids.contains(&"merge-noise"));
+        assert!(!ids.contains(&"trailer-noise"));
+    }
+
+    #[test]
+    fn weak_lexical_survivors_are_labeled_and_capped_per_packet() {
+        let identity = identity(RecallRole::Supervisor);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "release signing artifact".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let weak = local_candidate(
+            LocalRow {
+                id: "weak-release".into(),
+                surface: EvidenceSurface::Memory,
+                scope: EvidenceScope::Project("project-a".into()),
+                snippet: "release procedure".into(),
+                revision: "r1".into(),
+                stale: false,
+                body_available: true,
+                locator: "weak-release".into(),
+            },
+            &query,
+            &query_terms(&query.canonical),
+        );
+        assert!(weak.lexical_weak);
+        assert!(weak.why_relevant.starts_with("lexical(weak)"));
+
+        let candidates = RecallCandidates {
+            candidates: (0..12)
+                .map(|index| {
+                    let mut candidate = candidate(
+                        &format!("lexical-{index}"),
+                        EvidenceScope::Project("project-a".into()),
+                    );
+                    candidate.lexical_weak = true;
+                    candidate.why_relevant = "lexical(weak) match: release".into();
+                    candidate
+                })
+                .collect(),
+            rejected_scope: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        assert_eq!(injected.len(), LEXICAL_INJECTION_CAP);
+        assert!(packet.full.contains("why=lexical(weak)"));
+        assert!(
+            packet
+                .full
+                .contains("[recall disclosure: injected=3 omitted=9")
+        );
+    }
+
+    #[test]
+    fn focus_mismatch_requires_a_strong_semantic_score() {
+        let identity = identity(RecallRole::Supervisor);
+        let mut weak_cross_domain =
+            candidate("tax-task", EvidenceScope::Project("project-a".into()));
+        weak_cross_domain.focus_mismatch = true;
+        weak_cross_domain.semantic_score = Some(FOCUSED_EPIC_SEMANTIC_FLOOR - 0.01);
+        let mut strong_cross_domain =
+            candidate("release-task", EvidenceScope::Project("project-a".into()));
+        strong_cross_domain.focus_mismatch = true;
+        strong_cross_domain.semantic_score = Some(FOCUSED_EPIC_SEMANTIC_FLOOR);
+        let retriever = FixedRetriever {
+            calls: Cell::new(0),
+            rows: vec![weak_cross_domain, strong_cross_domain],
+        };
+        let rows = retrieve_candidates(
+            &identity,
+            &RecallRequest {
+                prompt: "mobile release review".into(),
+                focus_epic_id: Some("cas-mobile".into()),
+                focus_epic_title: Some("Mobile release".into()),
+                ..Default::default()
+            },
+            &[&retriever],
+        )
+        .unwrap();
+        assert_eq!(
+            rows.candidates
+                .iter()
+                .map(|candidate| candidate.evidence_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["release-task"]
+        );
     }
 
     #[test]

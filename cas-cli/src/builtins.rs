@@ -200,6 +200,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/reminders.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/reminders.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
         content: include_str!("builtins/skills/cas-supervisor-checklist.md"),
     },
@@ -522,6 +526,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
         content: include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/reminders.md",
+        content: include_str!("builtins/codex/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
         path: "skills/cas-codex-supervisor-checklist/SKILL.md",
@@ -853,6 +861,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/reminders.md",
+        content: include_str!("builtins/grok/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",

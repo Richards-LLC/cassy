@@ -105,6 +105,60 @@ fn codex_builtin_supervisor_guide_includes_core_workflow() {
     );
 }
 
+/// cas-314d: supervisors and workers share one bounded, push-first reminder
+/// contract. The on-demand reference avoids inflating the SessionStart skill
+/// bodies, but all three installed flavors must retain identical semantics.
+#[test]
+fn reminder_discipline_reference_is_complete_and_flavor_normalized() {
+    let root = repo_root();
+    let claude = load(
+        &root.join("cas-cli/src/builtins/skills/cas-supervisor/references/reminders.md"),
+    );
+    let codex = load(
+        &root.join("cas-cli/src/builtins/codex/skills/cas-supervisor/references/reminders.md"),
+    );
+    let grok = load(
+        &root.join("cas-cli/src/builtins/grok/skills/cas-supervisor/references/reminders.md"),
+    );
+
+    for (label, content) in [("claude", &claude), ("codex", &codex), ("grok", &grok)] {
+        for required in [
+            "## Decision table",
+            "Push First, One Bounded Checkpoint",
+            "exactly **one** trigger",
+            "remind_delay_secs",
+            "remind_event=task_completed",
+            "remind_ttl_secs",
+            "remind_cancel",
+            "One active reminder per task/phase",
+            "authoritative task/worker state",
+            "MERGE REQUIRED",
+            "Context-pressure handoff",
+            "Blocked worker recovery",
+            "detached command",
+        ] {
+            assert!(content.contains(required), "{label} reminder reference missing {required:?}");
+        }
+    }
+
+    assert_eq!(claude.replace("mcp__cas__", "mcp__cs__"), codex);
+    assert_eq!(claude.replace("mcp__cas__", "cas__"), grok);
+
+    for path in [
+        "cas-cli/src/builtins/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/codex/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/grok/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/skills/cas-worker.md",
+        "cas-cli/src/builtins/codex/skills/cas-worker.md",
+        "cas-cli/src/builtins/grok/skills/cas-worker.md",
+    ] {
+        assert!(
+            load(&root.join(path)).contains("reminders.md"),
+            "{path} must point to the shared reminder discipline reference"
+        );
+    }
+}
+
 #[test]
 fn supervisor_skill_mirrors_include_implementation_unit_template() {
     // After cas-61af split cas-supervisor.md into a main file + references,

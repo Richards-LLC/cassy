@@ -412,6 +412,18 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<IdRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: req.id,
+            brief: None,
+        }))
+        .await
+    }
+
+    /// Start a task with optional context-affordable output.
+    pub async fn cas_task_start_with_options(
+        &self,
+        Parameters(req): Parameters<TaskStartRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -663,6 +675,7 @@ impl CasCore {
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
+        let brief = req.brief.unwrap_or(false);
         let mut parent_worktree_info: Option<String> = None;
         let mut epic_ownership_info: Option<String> = None;
         let mut sibling_notes_info: Option<String> = None;
@@ -674,20 +687,25 @@ impl CasCore {
                         if parent.task_type == crate::types::TaskType::Epic {
                             let _ = agent_store.add_working_epic(&agent_id, &parent.id);
 
-                            // Fetch sibling task notes for epic context
-                            if let Ok(sibling_notes) =
-                                task_store.get_sibling_notes(&parent.id, &req.id)
-                            {
-                                if !sibling_notes.is_empty() {
-                                    let mut notes_output = String::from(
-                                        "\n\n📋 SIBLING TASK NOTES (from other workers on this epic):",
-                                    );
-                                    for (task_id, title, notes) in sibling_notes {
-                                        notes_output.push_str(&format!(
-                                            "\n\n**[{task_id}] {title}**\n{notes}"
-                                        ));
+                            // Brief start is deliberately own-task-only. It
+                            // still records the working epic, but avoids even
+                            // fetching sibling notes so large sibling payloads
+                            // cannot consume worker context (cas-0447).
+                            if !brief {
+                                if let Ok(sibling_notes) =
+                                    task_store.get_sibling_notes(&parent.id, &req.id)
+                                {
+                                    if !sibling_notes.is_empty() {
+                                        let mut notes_output = String::from(
+                                            "\n\n📋 SIBLING TASK NOTES (from other workers on this epic):",
+                                        );
+                                        for (task_id, title, notes) in sibling_notes {
+                                            notes_output.push_str(&format!(
+                                                "\n\n**[{task_id}] {title}**\n{notes}"
+                                            ));
+                                        }
+                                        sibling_notes_info = Some(notes_output);
                                     }
-                                    sibling_notes_info = Some(notes_output);
                                 }
                             }
 
@@ -746,18 +764,20 @@ impl CasCore {
                                 } else {
                                     ""
                                 };
-                                epic_ownership_info = Some(format!(
-                                    "\n\n📋 EPIC OWNERSHIP: You are now responsible for epic [{}] {}{}\n   Subtasks: {} total | Status: {}",
-                                    parent.id,
-                                    parent.title,
-                                    started_note,
-                                    subtask_count,
-                                    epic_claim_status
-                                ));
+                                if !brief {
+                                    epic_ownership_info = Some(format!(
+                                        "\n\n📋 EPIC OWNERSHIP: You are now responsible for epic [{}] {}{}\n   Subtasks: {} total | Status: {}",
+                                        parent.id,
+                                        parent.title,
+                                        started_note,
+                                        subtask_count,
+                                        epic_claim_status
+                                    ));
+                                }
                             }
 
                             // Look up the parent epic's worktree
-                            if let Some(ref worktree_id) = parent.worktree_id {
+                            if !brief && let Some(ref worktree_id) = parent.worktree_id {
                                 if let Ok(wt_store) = self.open_worktree_store() {
                                     if let Ok(worktree) = wt_store.get(worktree_id) {
                                         if worktree.path.exists() {
@@ -920,6 +940,38 @@ impl CasCore {
                 ("assignee", task.assignee.as_deref().unwrap_or("")),
             ],
         );
+
+        if brief {
+            // Bound the complete variable portion of the brief response. The
+            // fixed header/claim/warning/push text remains small, while own
+            // notes are capped to 4 KiB and sibling/epic/workflow payloads are
+            // omitted entirely.
+            let own_notes = if task.notes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n📋 TASK NOTES:\n{}",
+                    crate::mcp::tools::truncate_str(&task.notes, 4_093)
+                )
+            };
+            let response = format!(
+                "Started task: {} - {}{}{}{}{}",
+                req.id,
+                crate::mcp::tools::truncate_str(&task.title, 509),
+                claim_info.unwrap_or_default(),
+                crate::mcp::tools::truncate_str(
+                    &unanchored_warning.unwrap_or_default(),
+                    765,
+                ),
+                own_notes,
+                push_note,
+            );
+            // `truncate_str` appends three bytes when it truncates, hence the
+            // 6_141 payload bound for a hard 6 KiB response ceiling.
+            return Ok(Self::success(crate::mcp::tools::truncate_str(
+                &response, 6_141,
+            )));
+        }
 
         Ok(Self::success(format!(
             "Started task: {} - {}{}{}{}{}{}{}{}",

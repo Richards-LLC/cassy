@@ -142,6 +142,12 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         ),
     },
     BuiltinFile {
+        path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
+        content: include_str!(
+            "builtins/skills/cas-memory-management/references/lifecycle-and-storage.md"
+        ),
+    },
+    BuiltinFile {
         path: "skills/cas-search/SKILL.md",
         content: include_str!("builtins/skills/cas-search.md"),
     },
@@ -468,6 +474,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/overlap-detection.md",
         content: include_str!(
             "builtins/codex/skills/cas-memory-management/references/overlap-detection.md"
+        ),
+    },
+    BuiltinFile {
+        path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
+        content: include_str!(
+            "builtins/codex/skills/cas-memory-management/references/lifecycle-and-storage.md"
         ),
     },
     BuiltinFile {
@@ -910,6 +922,12 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-memory-management/references/overlap-detection.md",
         content: include_str!(
             "builtins/grok/skills/cas-memory-management/references/overlap-detection.md"
+        ),
+    },
+    BuiltinFile {
+        path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
+        content: include_str!(
+            "builtins/grok/skills/cas-memory-management/references/lifecycle-and-storage.md"
         ),
     },
     BuiltinFile {

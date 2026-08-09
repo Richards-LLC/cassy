@@ -150,3 +150,4 @@ Phase 1 enforces the overlap check in Rust at the `action=remember` entry point 
 - [`references/schema.yaml`](references/schema.yaml) — canonical frontmatter schema, enum values, validation rules
 - [`references/body-templates.md`](references/body-templates.md) — bug + knowledge body templates and guidance
 - [`references/overlap-detection.md`](references/overlap-detection.md) — 4-step duplicate prevention workflow
+- [`references/lifecycle-and-storage.md`](references/lifecycle-and-storage.md) — recent ordering, lifecycle guidance, and when to use memory, tasks, knowledge, or specs

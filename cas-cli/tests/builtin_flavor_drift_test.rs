@@ -496,6 +496,45 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
     );
 }
 
+/// cas-c7c2: memory lifecycle guidance is intentionally a reference file so
+/// the always-loaded skill body stays compact. Keep that file's decision table
+/// present and normalized across Claude, Codex, and Grok rather than relying on
+/// the broad corpus walk alone to make its contract visible.
+#[test]
+fn memory_lifecycle_reference_stays_three_way_synchronized() {
+    const REL: &str = "skills/cas-memory-management/references/lifecycle-and-storage.md";
+    let claude = canonicalize(
+        &fs::read_to_string(flavor_path(REL, &CLAUDE)).expect("claude memory lifecycle reference"),
+    );
+
+    for required in [
+        "recent_at desc, id desc",
+        "valid_until",
+        "| Need | Use | Why |",
+        "**Memory**",
+        "**Task**",
+        "**Knowledge**",
+        "**Spec / ADR**",
+    ] {
+        assert!(
+            claude.contains(required),
+            "memory lifecycle reference missing required marker: {required:?}"
+        );
+    }
+
+    for twin in TWINS {
+        let twin_content = canonicalize(
+            &fs::read_to_string(flavor_path(REL, twin))
+                .unwrap_or_else(|e| panic!("{} memory lifecycle reference: {e}", twin.name)),
+        );
+        assert_eq!(
+            twin_content, claude,
+            "memory lifecycle reference drifted between claude and {}",
+            twin.name
+        );
+    }
+}
+
 /// A file present only in a twin flavor must be an explicitly sanctioned
 /// flavor-only file. Without this, drift could hide by adding a codex-only or
 /// grok-only document that the claude-rooted walk never visits.

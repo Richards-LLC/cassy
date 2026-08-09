@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{MachineEventBus, ProxyFrame, SessionMultiplexer, ViewerReceiver};
@@ -13,6 +13,7 @@ use crate::ui::factory::{ClientMessage, DaemonMessage};
 struct UpstreamSlot {
     running: AtomicBool,
     starts: AtomicUsize,
+    sender: Mutex<Option<mpsc::Sender<ClientMessage>>>,
 }
 
 #[derive(Clone)]
@@ -45,6 +46,7 @@ impl DaemonConnector {
                     Arc::new(UpstreamSlot {
                         running: AtomicBool::new(false),
                         starts: AtomicUsize::new(0),
+                        sender: Mutex::new(None),
                     })
                 })
                 .clone()
@@ -55,11 +57,13 @@ impl DaemonConnector {
             .is_ok()
         {
             slot.starts.fetch_add(1, Ordering::Relaxed);
+            let (sender, receiver) = mpsc::channel(64);
+            *slot.sender.lock().await = Some(sender);
             let session = session.to_owned();
             let mux = self.mux.clone();
             let events = self.events.clone();
             tokio::spawn(async move {
-                if let Err(error) = run_upstream(&session, port, &mux, &events).await {
+                if let Err(error) = run_upstream(&session, port, &mux, &events, receiver).await {
                     tracing::warn!(session, %error, "Commander hub daemon upstream closed");
                 }
                 slot.running.store(false, Ordering::Release);
@@ -76,6 +80,26 @@ impl DaemonConnector {
             .get(session)
             .map_or(0, |slot| slot.starts.load(Ordering::Relaxed))
     }
+
+    pub async fn send(&self, session: &str, message: ClientMessage) -> Result<()> {
+        let slot = self
+            .slots
+            .lock()
+            .await
+            .get(session)
+            .cloned()
+            .context("session has no Commander upstream")?;
+        let sender = slot
+            .sender
+            .lock()
+            .await
+            .clone()
+            .context("session upstream is not ready")?;
+        sender
+            .send(message)
+            .await
+            .context("session upstream closed")
+    }
 }
 
 async fn run_upstream(
@@ -83,6 +107,7 @@ async fn run_upstream(
     port: u16,
     mux: &SessionMultiplexer,
     events: &MachineEventBus,
+    mut controls: mpsc::Receiver<ClientMessage>,
 ) -> Result<()> {
     let url = format!("ws://127.0.0.1:{port}");
     let (mut socket, _) = tokio_tungstenite::connect_async(&url)
@@ -96,8 +121,21 @@ async fn run_upstream(
         )?))
         .await?;
 
-    while let Some(message) = socket.next().await {
-        let bytes = match message? {
+    loop {
+        let message = tokio::select! {
+            message = socket.next() => match message {
+                Some(message) => message?,
+                None => break,
+            },
+            control = controls.recv() => match control {
+                Some(control) => {
+                    socket.send(Message::Binary(serde_json::to_vec(&control)?)).await?;
+                    continue;
+                }
+                None => break,
+            }
+        };
+        let bytes = match message {
             Message::Binary(bytes) => bytes,
             Message::Text(text) => text.as_bytes().to_vec(),
             Message::Close(_) => break,

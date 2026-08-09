@@ -26,6 +26,7 @@ impl MachineIdentityStore {
         ensure_private_dir(&self.state_dir)?;
         let path = self.state_dir.join("machine-id");
         if path.exists() {
+            ensure_private_file(&path)?;
             let id = fs::read_to_string(&path)
                 .with_context(|| format!("read hub machine identity at {}", path.display()))?;
             let id = id.trim().to_owned();
@@ -57,11 +58,52 @@ impl MachineIdentityStore {
 }
 
 pub(crate) fn ensure_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+            "hub state path is not a real directory"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            anyhow::ensure!(
+                metadata.mode() & 0o777 == 0o700,
+                "hub state directory must have mode 0700"
+            );
+            anyhow::ensure!(
+                metadata.uid() == unsafe { libc::geteuid() },
+                "hub state directory has the wrong owner"
+            );
+        }
+        return Ok(());
+    }
+    fs::create_dir(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn ensure_private_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "hub machine identity is not a regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(
+            metadata.mode() & 0o777 == 0o600,
+            "hub machine identity must have mode 0600"
+        );
+        anyhow::ensure!(
+            metadata.uid() == unsafe { libc::geteuid() },
+            "hub machine identity has the wrong owner"
+        );
     }
     Ok(())
 }

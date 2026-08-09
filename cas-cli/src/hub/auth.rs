@@ -226,6 +226,20 @@ pub struct DeviceSession {
     public_key_thumbprint: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DeviceSummary {
+    pub device_id: String,
+    pub credential_id: String,
+    pub device_label: String,
+    pub operator_label: String,
+    pub controller_origin: String,
+    pub scopes: BTreeSet<Scope>,
+    pub issued_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthContext {
     pub device_id: String,
@@ -507,22 +521,6 @@ impl AuthStore {
                 && device.controller_origin == origin,
             "authentication refused"
         );
-        let verified = verify_dpop(
-            proof,
-            credential,
-            &device.public_key,
-            &device.public_key_thumbprint,
-            method,
-            target_uri,
-            now,
-        )?;
-        state.dpop_jtis.retain(|entry| entry.expires_at >= now);
-        anyhow::ensure!(
-            !state.dpop_jtis.iter().any(|entry| {
-                entry.credential_id == device.credential_id && entry.jti == verified.jti
-            }),
-            "authentication refused"
-        );
         let context = AuthContext {
             device_id: device.device_id.clone(),
             credential_id: device.credential_id.clone(),
@@ -532,6 +530,32 @@ impl AuthStore {
             scopes: device.scopes.clone(),
             request_id: uuid::Uuid::new_v4().to_string(),
         };
+        let verified = match verify_dpop(
+            proof,
+            credential,
+            &device.public_key,
+            &device.public_key_thumbprint,
+            method,
+            target_uri,
+            now,
+        ) {
+            Ok(verified) => verified,
+            Err(error) => {
+                drop(state);
+                self.audit(Some(&context), "denied", "dpop_auth", None, None, now)?;
+                return Err(error);
+            }
+        };
+        state.dpop_jtis.retain(|entry| entry.expires_at >= now);
+        if state
+            .dpop_jtis
+            .iter()
+            .any(|entry| entry.credential_id == device.credential_id && entry.jti == verified.jti)
+        {
+            drop(state);
+            self.audit(Some(&context), "denied", "dpop_replay", None, None, now)?;
+            anyhow::bail!("authentication refused")
+        }
         state.dpop_jtis.push(ReplayRecord {
             credential_id: context.credential_id.clone(),
             jti: verified.jti,
@@ -539,6 +563,8 @@ impl AuthStore {
         });
         state.devices[device_index].last_used_at = now;
         self.persist(&state)?;
+        drop(state);
+        self.audit(Some(&context), "allowed", "dpop_auth", None, None, now)?;
         Ok(context)
     }
 
@@ -598,8 +624,33 @@ impl AuthStore {
         Ok(context)
     }
 
-    pub fn list_devices(&self) -> Result<Vec<DeviceSession>> {
-        Ok(self.lock()?.devices.clone())
+    pub fn list_devices(&self) -> Result<Vec<DeviceSummary>> {
+        Ok(self
+            .lock()?
+            .devices
+            .iter()
+            .map(|device| DeviceSummary {
+                device_id: device.device_id.clone(),
+                credential_id: device.credential_id.clone(),
+                device_label: device.device_label.clone(),
+                operator_label: device.operator_label.clone(),
+                controller_origin: device.controller_origin.clone(),
+                scopes: device.scopes.clone(),
+                issued_at: device.issued_at,
+                last_used_at: device.last_used_at,
+                expires_at: device.expires_at,
+                revoked_at: device.revoked_at,
+            })
+            .collect())
+    }
+
+    pub fn is_paired_origin(&self, origin: &str, now: DateTime<Utc>) -> Result<bool> {
+        Ok(self.lock()?.devices.iter().any(|device| {
+            device.controller_origin == origin
+                && device.revoked_at.is_none()
+                && device.expires_at >= now
+                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
+        }))
     }
 
     pub fn revoke_device(&self, device_id: &str, now: DateTime<Utc>) -> Result<()> {

@@ -9,9 +9,9 @@ use clap::{Args, Subcommand};
 
 use crate::cli::Cli;
 use crate::hub::{
-    DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
+    AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus, MachineIdentityStore,
-    PreAuthAuthorizer, SessionCatalog, SessionMultiplexer, TransportSecurity, router,
+    PreAuthAuthorizer, Scope, SessionCatalog, SessionMultiplexer, TransportSecurity, router,
     validate_control_bind,
 };
 
@@ -34,6 +34,38 @@ pub enum HubCommands {
     Stop,
     /// Stop and start the hub while preserving machine identity
     Restart(HubServeArgs),
+    /// Mint a ten-minute one-time browser pairing invitation
+    Pair(HubPairArgs),
+    /// List or revoke paired Commander devices
+    Auth(HubAuthArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HubPairArgs {
+    /// Exact controller origin to authorize (scheme, host, and port)
+    #[arg(long)]
+    pub origin: String,
+    /// Maximum scopes the pairing exchange may request
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "machine:read,session:read,pane:read"
+    )]
+    pub scopes: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HubAuthArgs {
+    #[command(subcommand)]
+    pub command: HubAuthCommands,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum HubAuthCommands {
+    /// List paired devices without credentials or key material
+    List,
+    /// Revoke a device immediately and disconnect its live sockets
+    Revoke { device_id: String },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -69,6 +101,8 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             let _ = stop(cli);
             start(&serve, cli)
         }
+        HubCommands::Pair(pair) => pair_device(&pair, cli),
+        HubCommands::Auth(auth) => manage_auth(&auth, cli),
     }
 }
 
@@ -152,6 +186,7 @@ fn serve_foreground(args: &HubServeArgs) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     let _lock = paths.acquire_instance_lock()?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
+    let auth = AuthStore::open(paths.root(), machine.id.clone())?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -180,7 +215,8 @@ fn serve_foreground(args: &HubServeArgs) -> Result<()> {
             machine,
             connector,
             events.clone(),
-        );
+        )
+        .with_auth(auth);
         let event_catalog = catalog.clone();
         let event_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -202,6 +238,83 @@ fn serve_foreground(args: &HubServeArgs) -> Result<()> {
         paths.remove_process_record()?;
         result
     })
+}
+
+fn auth_store() -> Result<AuthStore> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
+    AuthStore::open(paths.root(), machine.id)
+}
+
+fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
+    let scopes = args
+        .scopes
+        .iter()
+        .map(|scope| Scope::parse(scope))
+        .collect::<Result<_>>()?;
+    let invitation = auth_store()?.mint_pairing(&args.origin, scopes, chrono::Utc::now())?;
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "url": invitation.url,
+                "expires_at": invitation.expires_at,
+                "scopes": invitation.scopes,
+            })
+        );
+    } else {
+        println!(
+            "Pair Commander before {}",
+            invitation.expires_at.to_rfc3339()
+        );
+        println!("{}", invitation.url);
+        let code = qrcode::QrCode::new(invitation.url.as_bytes())?;
+        println!(
+            "{}",
+            code.render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .build()
+        );
+    }
+    Ok(())
+}
+
+fn manage_auth(args: &HubAuthArgs, cli: &Cli) -> Result<()> {
+    let auth = auth_store()?;
+    match &args.command {
+        HubAuthCommands::List => {
+            let devices = auth.list_devices()?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&devices)?);
+            } else if devices.is_empty() {
+                println!("No paired Commander devices");
+            } else {
+                for device in devices {
+                    println!(
+                        "{}  {} / {}  {}  {}",
+                        device.device_id,
+                        device.operator_label,
+                        device.device_label,
+                        device.controller_origin,
+                        if device.revoked_at.is_some() {
+                            "revoked"
+                        } else {
+                            "active"
+                        }
+                    );
+                }
+            }
+        }
+        HubAuthCommands::Revoke { device_id } => {
+            auth.revoke_device(device_id, chrono::Utc::now())?;
+            if cli.json {
+                println!("{}", serde_json::json!({"revoked":device_id}));
+            } else {
+                println!("Revoked Commander device {device_id}");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn shutdown_signal() {

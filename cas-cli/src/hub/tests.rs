@@ -149,7 +149,8 @@ async fn h1_zero_06_read_paths_never_write_pty_or_create_logical_sessions() {
 #[test]
 fn h1_machine_identity_is_stable_on_disk() {
     let temp = tempfile::tempdir().unwrap();
-    let store = MachineIdentityStore::new(temp.path());
+    let state_dir = temp.path().join("hub");
+    let store = MachineIdentityStore::new(&state_dir);
 
     let first = store.load_or_create().unwrap();
     let second = store.load_or_create().unwrap();
@@ -157,7 +158,7 @@ fn h1_machine_identity_is_stable_on_disk() {
     assert_eq!(first, second);
     assert!(!first.id.is_empty());
     assert_eq!(
-        std::fs::read_to_string(temp.path().join("machine-id")).unwrap(),
+        std::fs::read_to_string(state_dir.join("machine-id")).unwrap(),
         first.id
     );
 }
@@ -354,7 +355,7 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
 #[test]
 fn h1_runtime_state_is_single_instance_and_round_trips() {
     let temp = tempfile::tempdir().unwrap();
-    let paths = HubRuntimePaths::new(temp.path());
+    let paths = HubRuntimePaths::new(temp.path().join("hub"));
     let first_lock = paths.acquire_instance_lock().unwrap();
     assert!(paths.acquire_instance_lock().is_err());
 
@@ -535,4 +536,157 @@ fn h2_perm_01_rejects_loose_or_symlinked_machine_auth_state() {
         symlink(&target, &link).unwrap();
         assert!(AuthStore::open(&link, "machine-test").is_err());
     }
+}
+
+#[test]
+fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            now,
+        )
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let authorization = format!("DPoP {}", credential.credential);
+    let proof = sign_dpop(
+        &signing,
+        &credential.credential,
+        "GET",
+        "/v1/sessions",
+        now,
+        "jti-1",
+    );
+    assert!(
+        auth.authenticate_dpop(
+            &authorization,
+            &proof,
+            "https://controller.example",
+            "GET",
+            "/v1/sessions",
+            now,
+        )
+        .is_ok()
+    );
+    assert!(
+        auth.authenticate_dpop(
+            &authorization,
+            &proof,
+            "https://controller.example",
+            "GET",
+            "/v1/sessions",
+            now,
+        )
+        .is_err(),
+        "a DPoP jti is accepted once"
+    );
+    let wrong_method = sign_dpop(
+        &signing,
+        &credential.credential,
+        "GET",
+        "/v1/sessions",
+        now,
+        "jti-2",
+    );
+    assert!(
+        auth.authenticate_dpop(
+            &authorization,
+            &wrong_method,
+            "https://controller.example",
+            "POST",
+            "/v1/sessions",
+            now,
+        )
+        .is_err()
+    );
+
+    let mut revoked = auth.subscribe_revocations();
+    auth.revoke_device(&credential.device_id, now).unwrap();
+    assert_eq!(revoked.try_recv().unwrap(), credential.device_id);
+    let after_revoke = sign_dpop(
+        &signing,
+        &credential.credential,
+        "GET",
+        "/v1/sessions",
+        now,
+        "jti-3",
+    );
+    assert!(
+        auth.authenticate_dpop(
+            &authorization,
+            &after_revoke,
+            "https://controller.example",
+            "GET",
+            "/v1/sessions",
+            now,
+        )
+        .is_err(),
+        "revocation takes effect on the next request"
+    );
+
+    let audit = std::fs::read_to_string(temp.path().join("hub/audit.jsonl")).unwrap();
+    assert!(audit.contains("dpop_replay") && audit.contains("device_revoke"));
+    assert!(!audit.contains(&credential.credential));
+}
+
+fn public_jwk(signing: &p256::ecdsa::SigningKey) -> PublicJwk {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let point = signing.verifying_key().to_encoded_point(false);
+    PublicJwk {
+        kty: "EC".into(),
+        crv: "P-256".into(),
+        x: URL_SAFE_NO_PAD.encode(point.x().unwrap()),
+        y: URL_SAFE_NO_PAD.encode(point.y().unwrap()),
+    }
+}
+
+fn sign_dpop(
+    signing: &p256::ecdsa::SigningKey,
+    credential: &str,
+    method: &str,
+    uri: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    jti: &str,
+) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use p256::ecdsa::signature::Signer;
+    use sha2::{Digest, Sha256};
+
+    let header = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "typ":"dpop+jwt", "alg":"ES256", "jwk":public_jwk(signing)
+        }))
+        .unwrap(),
+    );
+    let claims = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "htm":method,
+            "htu":uri,
+            "iat":now.timestamp(),
+            "jti":jti,
+            "ath":URL_SAFE_NO_PAD.encode(Sha256::digest(credential.as_bytes())),
+        }))
+        .unwrap(),
+    );
+    let input = format!("{header}.{claims}");
+    let signature: p256::ecdsa::Signature = signing.sign(input.as_bytes());
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
 }

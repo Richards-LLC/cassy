@@ -836,7 +836,10 @@ impl CasCore {
             return Ok(Self::success("No entries found"));
         }
 
-        let mut output = format!("Recent entries ({}):\n\n", entries.len());
+        let mut output = format!(
+            "Recent entries ({}):\nordered_by: recent_at desc, id desc\n\n",
+            entries.len()
+        );
         for entry in entries {
             let recent_at = store.recent_timestamp(&entry).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,

@@ -392,7 +392,7 @@ impl SqliteStore {
              belief_type, confidence, domain, branch, scope, team_id, share
              FROM entries
              WHERE archived = 0
-             ORDER BY MAX(created, COALESCE(updated_at, created)) DESC
+             ORDER BY MAX(created, COALESCE(updated_at, created)) DESC, id DESC
              LIMIT ?",
         )?;
 

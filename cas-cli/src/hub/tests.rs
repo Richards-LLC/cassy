@@ -635,6 +635,143 @@ async fn h4_pairing_preflight_allows_only_the_exact_bootstrap_shape() {
 }
 
 #[tokio::test]
+async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
+    use chrono::Utc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let origin = "https://controller.example";
+    let events = MachineEventBus::new(16);
+    let app = router(
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity {
+                id: "machine-test".into(),
+            },
+            DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+            events,
+        )
+        .with_auth(auth.clone())
+        .with_response_transport(TransportSecurity::TrustedLoopbackTlsProxy),
+    );
+
+    let preflight = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/auth/pairing/exchange")
+                .header("origin", origin)
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+    assert_eq!(preflight.headers()["access-control-allow-origin"], origin);
+    assert_eq!(preflight.headers()["vary"], "Origin");
+    assert_eq!(
+        preflight.headers()["strict-transport-security"],
+        "max-age=31536000"
+    );
+
+    let refused_invitation = auth
+        .mint_pairing(origin, Scope::default_read_only(), now)
+        .unwrap();
+    let mut refused_exchange = PairingExchange::test_fixture(
+        refused_invitation.token,
+        "machine-test",
+        origin,
+        Scope::default_read_only(),
+    );
+    refused_exchange.requested_scopes.insert(Scope::HubAdmin);
+    assert!(auth.list_devices().unwrap().is_empty());
+    let refused = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/pairing/exchange")
+                .header("origin", origin)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&refused_exchange).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        refused.headers()["access-control-allow-origin"],
+        origin,
+        "a browser must be able to read the generic refusal for its exactly bound pairing"
+    );
+    assert_eq!(refused.headers()["vary"], "Origin");
+    assert_eq!(
+        refused.headers()["strict-transport-security"],
+        "max-age=31536000"
+    );
+    assert!(
+        !refused
+            .headers()
+            .contains_key("access-control-allow-credentials")
+    );
+    assert!(auth.list_devices().unwrap().is_empty());
+
+    let hostile = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/pairing/exchange")
+                .header("origin", "https://evil.example")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&PairingExchange {
+                        controller_origin: "https://evil.example".into(),
+                        ..refused_exchange.clone()
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hostile.status(), StatusCode::UNAUTHORIZED);
+    assert!(!hostile.headers().contains_key("access-control-allow-origin"));
+    assert!(auth.list_devices().unwrap().is_empty());
+
+    let accepted_invitation = auth
+        .mint_pairing(origin, Scope::default_read_only(), now)
+        .unwrap();
+    let accepted_exchange = PairingExchange::test_fixture(
+        accepted_invitation.token,
+        "machine-test",
+        origin,
+        Scope::default_read_only(),
+    );
+    let accepted_request = || {
+        Request::post("/v1/auth/pairing/exchange")
+            .header("origin", origin)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&accepted_exchange).unwrap(),
+            ))
+            .unwrap()
+    };
+    let accepted = app.clone().oneshot(accepted_request()).await.unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(accepted.headers()["access-control-allow-origin"], origin);
+    assert_eq!(accepted.headers()["vary"], "Origin");
+    assert_eq!(auth.list_devices().unwrap().len(), 1);
+
+    let replay = app.oneshot(accepted_request()).await.unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(replay.headers()["access-control-allow-origin"], origin);
+    assert_eq!(replay.headers()["vary"], "Origin");
+    assert_eq!(auth.list_devices().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions() {
     let events = MachineEventBus::new(16);
     let state = HubState::new(

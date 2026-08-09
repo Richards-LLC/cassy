@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     AuthContext, AuthStore, DaemonConnector, HealthResponse, HubAction, HubAuthorizer, HubRequest,
     HubSession, MachineEventBus, MachineIdentity, MachineMetadata, PairingExchange, Scope,
-    SessionCatalog, SessionReadModel, ViewerRecvError, required_scope,
+    SessionCatalog, SessionReadModel, TransportSecurity, ViewerRecvError, required_scope,
 };
 use crate::ui::factory::{ClientMessage, MessageAttribution};
 
@@ -32,6 +32,7 @@ pub struct HubState<R: SessionReadModel> {
     auth: Option<AuthStore>,
     metadata: MachineMetadata,
     effective_origins: Vec<String>,
+    response_transport: TransportSecurity,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -51,6 +52,7 @@ impl<R: SessionReadModel> HubState<R> {
             auth: None,
             metadata: MachineMetadata::default(),
             effective_origins: Vec::new(),
+            response_transport: TransportSecurity::Plaintext,
         }
     }
 
@@ -68,9 +70,16 @@ impl<R: SessionReadModel> HubState<R> {
         self.effective_origins.push(origin.into());
         self
     }
+
+    /// Bind response policy to the server-owned listener, never request headers.
+    pub fn with_response_transport(mut self, transport: TransportSecurity) -> Self {
+        self.response_transport = transport;
+        self
+    }
 }
 
 pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
+    let response_transport = state.response_transport;
     Router::new()
         .route("/", get(commander_index))
         .route("/commander", get(commander_index))
@@ -109,7 +118,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            response_transport,
+            security_headers,
+        ))
 }
 
 fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
@@ -166,9 +178,22 @@ async fn commander_symbols_font() -> Response {
     )
 }
 
-async fn security_headers(request: Request<Body>, next: Next) -> Response {
+async fn security_headers(
+    State(transport): State<TransportSecurity>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    if matches!(
+        transport,
+        TransportSecurity::Tls13 | TransportSecurity::TrustedLoopbackTlsProxy
+    ) {
+        headers.insert(
+            "strict-transport-security",
+            HeaderValue::from_static("max-age=31536000"),
+        );
+    }
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert(
         "x-content-type-options",

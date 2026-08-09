@@ -95,25 +95,64 @@ impl TailscaleServeManager {
             );
             false
         };
-        let after = self.serve_status()?;
-        anyhow::ensure!(
-            handlers_on_port(&after, https_port) == vec![("/".to_owned(), local_target.clone())],
-            "tailscale Serve did not install the requested CAS proxy"
-        );
-        let receipt = TailscaleServeReceipt {
-            schema_version: 1,
-            public_url,
-            local_target,
-            https_port,
-            created_by_cas,
-            status_before: before,
-            status_after: after,
-            recorded_at: chrono::Utc::now().to_rfc3339(),
+        let finish = || -> Result<TailscaleServeReceipt> {
+            let after = self.serve_status()?;
+            anyhow::ensure!(
+                handlers_on_port(&after, https_port)
+                    == vec![("/".to_owned(), local_target.clone())],
+                "tailscale Serve did not install the requested CAS proxy"
+            );
+            let receipt = TailscaleServeReceipt {
+                schema_version: 1,
+                public_url,
+                local_target: local_target.clone(),
+                https_port,
+                created_by_cas,
+                status_before: before,
+                status_after: after,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if created_by_cas {
+                write_private_json(&self.state_dir.join(RECEIPT_FILE), &receipt)?;
+            }
+            Ok(receipt)
         };
-        if created_by_cas {
-            write_private_json(&self.state_dir.join(RECEIPT_FILE), &receipt)?;
+        match finish() {
+            Ok(receipt) => Ok(receipt),
+            Err(error) if created_by_cas => {
+                match self.rollback_created(https_port, &local_target) {
+                    Ok(()) => Err(error.context("Tailscale Serve setup rolled back")),
+                    Err(rollback) => Err(error.context(format!(
+                        "Tailscale Serve setup failed and rollback was refused: {rollback}"
+                    ))),
+                }
+            }
+            Err(error) => Err(error),
         }
-        Ok(receipt)
+    }
+
+    fn rollback_created(&self, https_port: u16, local_target: &str) -> Result<()> {
+        let current = self.serve_status()?;
+        let handlers = handlers_on_port(&current, https_port);
+        if handlers.is_empty() {
+            remove_receipt_if_present(&self.state_dir.join(RECEIPT_FILE))?;
+            return Ok(());
+        }
+        anyhow::ensure!(
+            handlers == vec![("/".to_owned(), local_target.to_owned())],
+            "Tailscale Serve mapping changed during setup; leaving it untouched"
+        );
+        self.run(&[
+            "serve".into(),
+            format!("--https={https_port}"),
+            "off".into(),
+        ])?;
+        anyhow::ensure!(
+            handlers_on_port(&self.serve_status()?, https_port).is_empty(),
+            "Tailscale Serve rollback did not remove the CAS mapping"
+        );
+        remove_receipt_if_present(&self.state_dir.join(RECEIPT_FILE))?;
+        Ok(())
     }
 
     /// Disable only a mapping CAS created and only while it is still unchanged.
@@ -282,6 +321,14 @@ fn write_private_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+fn remove_receipt_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +410,76 @@ mod tests {
         let error = manager.ensure(4173, 443).unwrap_err().to_string();
         assert!(error.contains("already owned"));
         assert!(!fs::read_to_string(calls).unwrap().contains("serve --bg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_post_creation_verification_rolls_back_without_receipt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("tailscale");
+        let calls = temp.path().join("calls");
+        let count = temp.path().join("status-count");
+        let state = temp.path().join("serve-state");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n'status --json') printf '%s' '{{\"Self\":{{\"DNSName\":\"node.tail.ts.net.\"}}}}' ;;\n'serve status --json') n=0; [ -f '{}' ] && n=$(/bin/cat '{}'); n=$((n+1)); printf '%s' \"$n\" > '{}'; case \"$n\" in 1|2|4) printf '%s' '{{}}' ;; 3) printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:4173\"}}}}}}}}}}' ;; esac ;;\n'serve --bg --yes --https=443 http://127.0.0.1:4173') touch '{}' ;;\n'serve --https=443 off') rm -f '{}' ;;\n*) exit 9 ;;\nesac\n",
+            calls.display(),
+            count.display(),
+            count.display(),
+            count.display(),
+            state.display(),
+            state.display(),
+        );
+        fs::write(&binary, script).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let hub = temp.path().join("hub");
+        let manager = TailscaleServeManager::with_executable(&hub, &binary);
+
+        let error = manager.ensure(4173, 443).unwrap_err().to_string();
+        assert!(error.contains("setup rolled back"), "{error}");
+        let calls = fs::read_to_string(calls).unwrap();
+        assert_eq!(calls.matches("serve --bg").count(), 1);
+        assert_eq!(calls.matches("serve --https=443 off").count(), 1);
+        assert!(!state.exists());
+        assert!(!hub.join(RECEIPT_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_teardown_refuses_externally_altered_mapping_and_keeps_receipt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("tailscale");
+        let calls = temp.path().join("calls");
+        let state = temp.path().join("serve-state");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n'status --json') printf '%s' '{{\"Self\":{{\"DNSName\":\"node.tail.ts.net.\"}}}}' ;;\n'serve status --json') if [ -f '{}' ]; then if /bin/grep -q 9999 '{}'; then printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:9999\"}}}}}}}}}}'; else printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:4173\"}}}}}}}}}}'; fi; else printf '%s' '{{}}'; fi ;;\n'serve --bg --yes --https=443 http://127.0.0.1:4173') printf '%s' 4173 > '{}' ;;\n'serve --https=443 off') rm -f '{}' ;;\n*) exit 9 ;;\nesac\n",
+            calls.display(),
+            state.display(),
+            state.display(),
+            state.display(),
+            state.display(),
+        );
+        fs::write(&binary, script).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let hub = temp.path().join("hub");
+        let manager = TailscaleServeManager::with_executable(&hub, &binary);
+
+        assert!(manager.ensure(4173, 443).unwrap().created_by_cas);
+        fs::write(&state, "9999").unwrap();
+        let error = manager.disable_owned().unwrap_err().to_string();
+        assert!(error.contains("mapping changed"), "{error}");
+        assert!(hub.join(RECEIPT_FILE).exists());
+        fs::remove_file(&state).unwrap();
+        let stale = manager.disable_owned().unwrap_err().to_string();
+        assert!(stale.contains("mapping changed"), "{stale}");
+        assert!(hub.join(RECEIPT_FILE).exists());
+        assert!(
+            !fs::read_to_string(calls)
+                .unwrap()
+                .contains("serve --https=443 off")
+        );
     }
 }

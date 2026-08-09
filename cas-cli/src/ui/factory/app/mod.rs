@@ -1032,6 +1032,11 @@ impl FactoryApp {
         } else {
             self.refresh_branch_visibility_cache();
             self.last_refresh = Instant::now();
+            // Worker holds live in session metadata rather than cas.db. They
+            // must therefore be reconciled even on the common unchanged-DB
+            // refresh path; otherwise a just-written hold leaks one more
+            // WorkerIdle event before unrelated database activity occurs.
+            self.apply_session_metadata_worker_holds();
             return Ok(Vec::new());
         }
 
@@ -3193,6 +3198,50 @@ mod tests {
         assert!(
             metadata.held_workers.is_empty(),
             "worker removal must clear durable state so a reused name cannot inherit it"
+        );
+    }
+
+    /// A hold update touches session metadata, not cas.db. The ordinary
+    /// unchanged-DB refresh must still synchronize it before the detector can
+    /// produce its next idle event.
+    #[test]
+    fn unchanged_db_refresh_reconciles_worker_holds_before_idle_detection() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", "worker-hold-fast-path"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let worker = "lively-crow";
+        let session = "worker-hold-fast-path";
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[worker.to_string()],
+            None,
+            None,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.cas_dir = cas_dir.clone();
+        app.factory_session = Some(session.to_string());
+        app.worker_names = vec![worker.to_string()];
+        app.event_detector.add_worker(worker.to_string());
+        app.director_data.git_loaded = true;
+        app.last_db_fingerprint = Some(super::CasDbFingerprint::from_cas_dir(&cas_dir));
+        app.last_git_refresh = std::time::Instant::now();
+
+        assert!(app.refresh_data().unwrap().is_empty());
+        assert!(
+            app.event_detector.is_worker_held(worker),
+            "unchanged-DB refresh must apply the durable hold before idle detection"
         );
     }
 

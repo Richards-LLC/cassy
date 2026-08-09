@@ -253,6 +253,13 @@ pub trait ReminderStore: Send + Sync {
     /// Cancel a reminder (must belong to the given owner)
     fn cancel(&self, id: i64, owner_id: &str) -> Result<()>;
 
+    /// Permanently cancel every pending reminder that targets an agent.
+    ///
+    /// Used by the factory worker-hold gate: a hold is a deliberate pause,
+    /// so pre-armed one-shot wakeups must not fire through it or revive later
+    /// with stale context after release.
+    fn cancel_pending_for_target(&self, target_id: &str) -> Result<usize>;
+
     /// Expire reminders past their TTL, returns count expired
     fn expire_stale(&self) -> Result<usize>;
 
@@ -599,6 +606,17 @@ impl ReminderStore for SqliteReminderStore {
         }
 
         Ok(())
+    }
+
+    fn cancel_pending_for_target(&self, target_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
+             WHERE status = 'pending' AND (target_id = ?2 OR (target_id IS NULL AND supervisor_id = ?2))",
+            params![now, target_id],
+        )?;
+        Ok(rows)
     }
 
     fn expire_stale(&self) -> Result<usize> {

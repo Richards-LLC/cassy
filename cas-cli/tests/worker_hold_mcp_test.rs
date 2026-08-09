@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use cas::mcp::{CasCore, CasService};
-use cas::store::{init_cas_dir, open_agent_store};
+use cas::store::{ReminderTriggerType, init_cas_dir, open_agent_store, open_reminder_store};
 use cas::types::Agent;
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_types::AgentRole;
@@ -36,12 +36,13 @@ impl TestEnv {
         }
     }
 
-    fn register_worker(&self, name: &str, factory_session: &str) {
+    fn register_worker(&self, name: &str, factory_session: &str) -> String {
         let store = open_agent_store(&self.cas_root).unwrap();
         let mut agent = Agent::new(Agent::generate_fallback_id(), name.to_string());
         agent.role = AgentRole::Worker;
         agent.factory_session = Some(factory_session.to_string());
         store.register(&agent).unwrap();
+        agent.id
     }
 }
 
@@ -132,15 +133,33 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
         ("CAS_FACTORY_SESSION", session),
     ]);
     let env = TestEnv::new();
-    env.register_worker(worker, session);
+    let worker_id = env.register_worker(worker, session);
     let path = write_metadata(&env, session, &[worker.to_string()]);
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    reminders
+        .create(
+            "hold-test-supervisor",
+            Some(&worker_id),
+            "watch worker after hold",
+            ReminderTriggerType::Time,
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            None,
+            None,
+            3600,
+            Some(session),
+        )
+        .unwrap();
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
 
     let result = env
         .service
         .coordination(Parameters(request("hold_worker", worker)))
         .await
         .expect("public hold action");
-    assert!(result_text(&result).contains(worker));
+    let hold_result = result_text(&result);
+    assert!(hold_result.contains(worker));
+    assert!(hold_result.contains("Cancelled 1 pending reminder"), "{hold_result}");
+    assert!(reminders.list_pending_for_target(&worker_id).unwrap().is_empty());
     let held: cas::ui::factory::SessionMetadata =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(held.held_workers, vec![worker.to_string()]);
@@ -160,6 +179,10 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     let released: cas::ui::factory::SessionMetadata =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(released.held_workers.is_empty());
+    assert!(
+        reminders.list_pending_for_target(&worker_id).unwrap().is_empty(),
+        "release must not revive cancelled one-shot watchdog reminders"
+    );
 }
 
 #[tokio::test]

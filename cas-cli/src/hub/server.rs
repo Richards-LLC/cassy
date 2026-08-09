@@ -6,7 +6,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{OriginalUri, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -31,6 +31,7 @@ pub struct HubState<R: SessionReadModel> {
     events: MachineEventBus,
     auth: Option<AuthStore>,
     metadata: MachineMetadata,
+    effective_origins: Vec<String>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -49,6 +50,7 @@ impl<R: SessionReadModel> HubState<R> {
             events,
             auth: None,
             metadata: MachineMetadata::default(),
+            effective_origins: Vec::new(),
         }
     }
 
@@ -59,6 +61,11 @@ impl<R: SessionReadModel> HubState<R> {
 
     pub fn with_machine_metadata(mut self, metadata: MachineMetadata) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    pub fn with_effective_origin(mut self, origin: impl Into<String>) -> Self {
+        self.effective_origins.push(origin.into());
         self
     }
 }
@@ -77,17 +84,27 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health))
-        .route("/v1/auth/pairing/exchange", post(pairing_exchange::<R>))
-        .route("/v1/auth/websocket-ticket", post(websocket_ticket::<R>))
-        .route("/v1/machine", get(machine::<R>))
-        .route("/v1/sessions", get(sessions::<R>))
-        .route("/v1/events", get(events::<R>))
-        .route("/v1/sessions/{session}/status", get(status::<R>))
+        .route(
+            "/v1/auth/pairing/exchange",
+            post(pairing_exchange::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/auth/websocket-ticket",
+            post(websocket_ticket::<R>).options(preflight::<R>),
+        )
+        .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
+        .route("/v1/sessions", get(sessions::<R>).options(preflight::<R>))
+        .route("/v1/events", get(events::<R>).options(preflight::<R>))
+        .route(
+            "/v1/sessions/{session}/status",
+            get(status::<R>).options(preflight::<R>),
+        )
         .route(
             "/v1/sessions/{session}/lease",
             get(lease_status::<R>)
                 .post(acquire_lease::<R>)
-                .delete(release_lease::<R>),
+                .delete(release_lease::<R>)
+                .options(preflight::<R>),
         )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route("/{*path}", options(preflight::<R>))
@@ -167,11 +184,15 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
 
 async fn preflight<R: SessionReadModel>(
     State(state): State<HubState<R>>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
     let Some(origin) = origin(&headers) else {
         return unauthorized();
     };
+    if uri.path() == "/v1/auth/pairing/exchange" {
+        return pairing_preflight(&origin, &headers);
+    }
     let allowed = state.auth.as_ref().is_some_and(|auth| {
         auth.is_paired_origin(&origin, chrono::Utc::now())
             .unwrap_or(false)
@@ -194,6 +215,69 @@ async fn preflight<R: SessionReadModel>(
         HeaderValue::from_static("Authorization, DPoP, Content-Type"),
     );
     response
+}
+
+fn pairing_preflight(origin: &str, headers: &HeaderMap) -> Response {
+    let requested_method = headers
+        .get("access-control-request-method")
+        .and_then(|value| value.to_str().ok());
+    let requested_headers = headers
+        .get("access-control-request-headers")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|item| item.trim().to_ascii_lowercase())
+                .filter(|item| !item.is_empty())
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+    if !valid_pairing_origin(origin)
+        || requested_method != Some("POST")
+        || requested_headers.as_ref().is_none_or(|headers| {
+            headers != &std::collections::BTreeSet::from(["content-type".to_owned()])
+        })
+    {
+        return unauthorized();
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    let output = response.headers_mut();
+    output.insert(
+        "access-control-allow-origin",
+        HeaderValue::from_str(origin).expect("validated origin is a valid header value"),
+    );
+    output.insert("vary", HeaderValue::from_static("Origin"));
+    output.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("POST"),
+    );
+    output.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("Content-Type"),
+    );
+    response
+}
+
+fn valid_pairing_origin(origin: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return false;
+    };
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => true,
+        "http" => parsed
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback()),
+        _ => false,
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -724,8 +808,8 @@ fn authorize<R: SessionReadModel>(
     method: &str,
     target_uri: &str,
 ) -> anyhow::Result<Option<AuthContext>> {
+    let origin = request_origin(state, action, headers, method)?;
     if let Some(auth) = &state.auth {
-        let origin = origin(headers).context("origin required")?;
         let authorization = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -744,11 +828,54 @@ fn authorize<R: SessionReadModel>(
         )?;
         anyhow::ensure!(context.has(scope), "scope denied");
         Ok(Some(context))
-    } else if authorized(state, action, headers) {
+    } else if state
+        .authorizer
+        .authorize(&HubRequest {
+            action,
+            origin: Some(origin),
+        })
+        .is_allowed()
+    {
         Ok(None)
     } else {
         anyhow::bail!("unauthorized")
     }
+}
+
+fn request_origin<R: SessionReadModel>(
+    state: &HubState<R>,
+    action: HubAction,
+    headers: &HeaderMap,
+    method: &str,
+) -> anyhow::Result<String> {
+    if let Some(origin) = origin(headers) {
+        return Ok(origin);
+    }
+    anyhow::ensure!(
+        action != HubAction::Mutation && matches!(method, "GET" | "HEAD"),
+        "origin required"
+    );
+    anyhow::ensure!(
+        headers
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+            == Some("same-origin"),
+        "origin required"
+    );
+    let host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .context("host required")?;
+    state
+        .effective_origins
+        .iter()
+        .find(|effective| {
+            url::Url::parse(effective)
+                .ok()
+                .is_some_and(|parsed| format!("{}://{host}", parsed.scheme()) == **effective)
+        })
+        .cloned()
+        .context("effective origin mismatch")
 }
 
 fn origin(headers: &HeaderMap) -> Option<String> {
@@ -777,10 +904,7 @@ fn authorized<R: SessionReadModel>(
     action: HubAction,
     headers: &HeaderMap,
 ) -> bool {
-    let origin = headers
-        .get("origin")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let origin = request_origin(state, action, headers, "GET").ok();
     state
         .authorizer
         .authorize(&HubRequest { action, origin })

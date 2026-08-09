@@ -262,7 +262,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             },
             cloud_devices: load_cloud_device_suggestions(),
         };
-        let state = HubState::new(
+        let mut state = HubState::new(
             catalog.clone(),
             Arc::new(PreAuthAuthorizer),
             machine,
@@ -270,7 +270,11 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             events.clone(),
         )
         .with_auth(auth)
+        .with_effective_origin(format!("http://{actual}"))
         .with_machine_metadata(metadata);
+        if let Some(public_url) = tailscale.as_ref().map(|receipt| &receipt.public_url) {
+            state = state.with_effective_origin(public_url.trim_end_matches('/'));
+        }
         let event_catalog = catalog.clone();
         let event_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));

@@ -1051,3 +1051,148 @@ mod factory_epic_owner_tests {
         assert_eq!(owner, "agent-uuid");
     }
 }
+
+/// Regression coverage for the full amendment path in GH #55 / cas-8d47.
+///
+/// `request_changes` preserves the original assignee by design, but a
+/// supervisor may explicitly reassign the now-Open task to a replacement
+/// worker. The replacement must be able to start it; this guards against the
+/// former AwaitingMerge-only restart gate reappearing after the task has been
+/// reopened and reassigned.
+#[cfg(test)]
+mod amendment_reassignment_tests {
+    use crate::mcp::server::CasCore;
+    use crate::mcp::tools::types::TaskStartRequest;
+    use crate::store::AgentStore;
+    use crate::types::{Agent, AgentRole, AgentType, EventEntityType, Task, TaskStatus};
+    use cas_store::{
+        build_worker_completion_receipt, create_worker_delivery_with_dispatch,
+        request_changes_for_parked_delivery, resolve_verification_dispatch_with_conn,
+        transition_worker_delivery,
+    };
+    use cas_types::{WorkerCompletionReceiptInput, WorkerDeliveryState};
+    use chrono::Utc;
+    use rmcp::handler::server::wrapper::Parameters;
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    fn register_worker(store: &dyn AgentStore, id: &str, name: &str) {
+        let mut agent = Agent::new(id.to_string(), name.to_string());
+        agent.role = AgentRole::Worker;
+        agent.agent_type = AgentType::Worker;
+        store.register(&agent).expect("register worker");
+    }
+
+    #[tokio::test]
+    async fn merged_amendment_reopens_and_reassigned_worker_can_start() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("open task store");
+        let agent_store = core.open_agent_store().expect("open agent store");
+        task_store.init().expect("init task store");
+        agent_store.init().expect("init agent store");
+        register_worker(agent_store.as_ref(), "original-agent", "original-worker");
+        register_worker(
+            agent_store.as_ref(),
+            "replacement-agent",
+            "replacement-worker",
+        );
+
+        let mut task = Task::new("cas-amendment".into(), "amend merged work".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("original-worker".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task_store.add(&task).expect("parked task");
+
+        let receipt = build_worker_completion_receipt(
+            &WorkerCompletionReceiptInput {
+                task_id: task.id.clone(),
+                worker_agent_id: "original-agent".into(),
+                repo_selector: "repo".into(),
+                source_branch: "factory/original-worker".into(),
+                commit_sha: "a".repeat(40),
+                merge_base_sha: "b".repeat(40),
+                target_branch: "main".into(),
+                target_sha: "c".repeat(40),
+                proof_reference: "cargo test --lib".into(),
+                scope_summary: "amendment regression".into(),
+            },
+            "original-worker",
+            Utc::now(),
+        );
+        let (delivery, dispatch) = create_worker_delivery_with_dispatch(
+            temp.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingMerge,
+            "original-agent",
+            "supervisor-agent",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("create parked delivery");
+        let conn = Connection::open(temp.path().join("cas.db")).expect("open verification db");
+        resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "supervisor-agent",
+            None,
+            true,
+        )
+        .expect("resolve review dispatch");
+        drop(conn);
+        transition_worker_delivery(
+            temp.path(),
+            &delivery.id,
+            &[WorkerDeliveryState::AwaitingMerge],
+            WorkerDeliveryState::Merged,
+            "supervisor-agent",
+            Some("supervisor-agent"),
+            None,
+            Some(&"d".repeat(40)),
+            None,
+        )
+        .expect("record completed merge");
+
+        let outcome = request_changes_for_parked_delivery(
+            temp.path(),
+            &task.id,
+            "supervisor-agent",
+            "Amendment required after merge: restore the trailing summary row.",
+        )
+        .expect("merged amendment has a sanctioned exit");
+        assert_eq!(outcome.boundary, cas_store::RequestChangesBoundary::Merged);
+
+        // Model the supervisor's explicit reassignment after the audited
+        // reopen, then prove the replacement worker reaches InProgress via
+        // the real MCP start handler rather than a forced status update.
+        let mut reopened = task_store.get(&task.id).expect("reopened task");
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee.as_deref(), Some("original-worker"));
+        assert!(reopened.notes.contains("Decision: changes requested"));
+        let audit_events = crate::store::open_event_store(temp.path())
+            .expect("open event store")
+            .list_for_entity(EventEntityType::Task, &task.id, 10)
+            .expect("list task audit events");
+        assert!(
+            audit_events
+                .iter()
+                .any(|event| event.summary.contains("Decision: changes requested")),
+            "the amendment reopen must leave a task audit event"
+        );
+        reopened.assignee = Some("replacement-worker".into());
+        task_store
+            .update(&reopened)
+            .expect("reassign reopened task");
+
+        core.set_agent_id_for_testing("replacement-agent".into());
+        core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: task.id.clone(),
+            brief: None,
+        }))
+        .await
+        .expect("replacement worker starts amended task");
+
+        let started = task_store.get(&task.id).expect("started task");
+        assert_eq!(started.status, TaskStatus::InProgress);
+        assert_eq!(started.assignee.as_deref(), Some("replacement-worker"));
+    }
+}

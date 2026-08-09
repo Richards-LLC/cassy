@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code-history epic release-readiness gate — 2026-08-08</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f4;
+      --surface: #ffffff;
+      --text: #20231f;
+      --muted: #565d55;
+      --border: #c8cec6;
+      --accent: #245f75;
+      --good: #17643a;
+      --warn: #815700;
+      --soft-good: #e8f4ec;
+      --soft-warn: #fff4d6;
+      --code: #eff2ee;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171a18;
+        --surface: #202522;
+        --text: #f1f3ef;
+        --muted: #bdc6bc;
+        --border: #566057;
+        --accent: #77bdd5;
+        --good: #79d49d;
+        --warn: #f3c96b;
+        --soft-good: #173b28;
+        --soft-warn: #443616;
+        --code: #292f2b;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.55;
+    }
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: -4rem;
+      padding: .6rem .8rem;
+      background: var(--surface);
+      color: var(--text);
+      border: 2px solid var(--accent);
+      z-index: 10;
+    }
+    .skip-link:focus { top: 1rem; }
+    a { color: var(--accent); }
+    a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    header, main, footer { width: min(1120px, calc(100% - 2rem)); margin-inline: auto; }
+    header { padding: 3rem 0 1.25rem; }
+    main { padding-bottom: 2rem; }
+    footer { padding: 1.5rem 0 3rem; color: var(--muted); border-top: 1px solid var(--border); }
+    h1 { margin: 0 0 .5rem; font-size: clamp(2rem, 5vw, 3.4rem); line-height: 1.08; letter-spacing: -.035em; }
+    h2 { margin: 2.25rem 0 .7rem; font-size: 1.55rem; line-height: 1.2; }
+    h3 { margin: 1.5rem 0 .5rem; font-size: 1.12rem; }
+    p { max-width: 78ch; }
+    .eyebrow { margin: 0 0 .6rem; color: var(--muted); font-size: .82rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+    .verdict {
+      margin: 1.2rem 0 0;
+      padding: 1.1rem 1.2rem;
+      background: var(--soft-good);
+      border: 1px solid var(--good);
+      border-left: .5rem solid var(--good);
+      font-size: 1.12rem;
+      max-width: none;
+    }
+    .verdict strong { color: var(--good); }
+    .meta { color: var(--muted); }
+    .table-wrap { overflow-x: auto; margin: 1rem 0 1.5rem; border: 1px solid var(--border); background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    caption { padding: .75rem 1rem; text-align: left; color: var(--muted); font-weight: 700; }
+    th, td { padding: .72rem .85rem; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+    thead th { background: var(--code); border-top: 0; position: sticky; top: 0; }
+    th[scope="row"] { font-weight: 650; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .status { display: inline-block; padding: .08rem .45rem; border: 1px solid currentColor; border-radius: 999px; font-weight: 750; white-space: nowrap; }
+    .pass { color: var(--good); }
+    .waiver { color: var(--warn); background: var(--soft-warn); }
+    .callout { padding: .9rem 1rem; border-left: .35rem solid var(--accent); background: var(--surface); }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    code { background: var(--code); padding: .08rem .25rem; border-radius: .2rem; overflow-wrap: anywhere; word-break: break-word; }
+    pre { overflow-x: auto; padding: 1rem; background: var(--code); border: 1px solid var(--border); line-height: 1.45; }
+    pre code { padding: 0; background: transparent; overflow-wrap: normal; word-break: normal; }
+    li + li { margin-top: .45rem; }
+    .recommendation { margin-top: 2rem; padding: 1rem 1.2rem; border: 2px solid var(--good); background: var(--soft-good); }
+    .recommendation h2 { margin-top: 0; }
+    .source { color: var(--muted); font-size: .9rem; }
+    @media (max-width: 600px) {
+      header, main, footer { width: min(100% - 1rem, 1120px); }
+      header { padding-top: 1.5rem; }
+      th, td { padding: .55rem .65rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      :root { --bg: #fff; --surface: #fff; --text: #000; --muted: #333; --border: #777; --accent: #000; --good: #000; --warn: #000; --soft-good: #fff; --soft-warn: #fff; --code: #f2f2f2; }
+      body { background: #fff; color: #000; font-size: 10pt; }
+      header, main, footer { width: 100%; }
+      header { padding-top: 0; }
+      .skip-link { display: none; }
+      .table-wrap { overflow: visible; border-color: #777; }
+      thead { display: table-header-group; }
+      tr, .verdict, .callout, .recommendation, pre { break-inside: avoid; }
+      a[href]::after { content: " (" attr(href) ")"; font-size: .85em; }
+      h2, h3 { break-after: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to report</a>
+  <header>
+    <p class="eyebrow">Release-readiness receipt · 2026-08-08</p>
+    <h1>Code-history epic release-readiness gate</h1>
+    <p class="meta">Practitioner report for assembled commit <code>8ab2804673c811f6553d65b40a7c16e0ae4ed61e</code></p>
+    <p class="verdict"><strong>GO.</strong> Merge the assembled commit to main. Every software, migration, privacy, live-runtime, branch, and diff gate passed. The operator explicitly waived the unavailable Claude cross-vendor review lane for this release only after all supplemental review findings were repaired.</p>
+  </header>
+
+  <main id="content">
+    <section aria-labelledby="overview-heading">
+      <h2 id="overview-heading">Overview</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Final workstream status. Labels and borders carry status without relying on color.</caption>
+          <thead><tr><th scope="col">Workstream</th><th scope="col">Status</th><th scope="col">Owner</th><th scope="col">Target</th><th scope="col">Change since the rejected tip</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Assembled branch</th><td><span class="status pass">PASS</span></td><td>Release gate</td><td><code>8ab28046</code></td><td>Origin main, merge base, local epic, and origin epic are pinned; every child has <code>Unmerged=0</code>.</td></tr>
+            <tr><th scope="row">Review disposition</th><td><span class="status waiver">PASS WITH WAIVER</span></td><td>Release operator</td><td>This release only</td><td>Supplemental review's 2 P1 and 6 P2 findings were repaired; the unavailable Claude lane received an explicit operator waiver.</td></tr>
+            <tr><th scope="row">Prior-release migration</th><td><span class="status pass">PASS</span></td><td>Migration runtime</td><td>schema v225 → v229</td><td>False <code>m225=BOOTSTRAP</code> state reconciles safely and audibly; repeat run applies zero.</td></tr>
+            <tr><th scope="row">Full software matrix</th><td><span class="status pass">PASS</span></td><td>Workspace</td><td>All crates and targets</td><td>One final workspace run and one all-target check passed on the assembled tip.</td></tr>
+            <tr><th scope="row">History and code paths</th><td><span class="status pass">PASS</span></td><td>History/index runtime</td><td>Isolated repository</td><td>Status, text and exact-symbol search, provenance, epochs, verdict, indexing, and reconciliation contracts passed.</td></tr>
+            <tr><th scope="row">Ambient recall and vectors</th><td><span class="status pass">PASS</span></td><td>Recall runtime</td><td>Isolated provider run</td><td>One query vector per event fanned out across Knowledge, History, and Code; no private hit; backlog drained to zero.</td></tr>
+            <tr><th scope="row">Hook budgets and privacy</th><td><span class="status pass">PASS</span></td><td>Hook runtime</td><td>SessionStart and UserPromptSubmit</td><td>SessionStart was 11,089 bytes; UserPromptSubmit emitted zero; neither auto-stored or leaked the concrete path.</td></tr>
+            <tr><th scope="row">Artifact and diff hygiene</th><td><span class="status pass">PASS</span></td><td>Release gate</td><td><code>origin/main...8ab28046</code></td><td>No private paths, credentials, external report assets, changed-code shortcuts, whitespace errors, or uncommitted changes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="changes-heading">
+      <h2 id="changes-heading">Changes since the last rejected gate</h2>
+      <ul>
+        <li><strong>Migration cursor could advance past a lower gap → ordered-prefix truth.</strong> Detection stops at the first missing lower migration and later detection is reconsidered only after lower work succeeds.</li>
+        <li><strong>A released <code>m225=BOOTSTRAP</code> row could conceal a missing column → safe recorded-migration reconciliation.</strong> False recorded predicates replay only provably additive or <code>IF NOT EXISTS</code> statements; prior evidence stays in <code>cas_migration_reconciliations</code>.</li>
+        <li><strong>Missing knowledge attribution could survive an advertised v229 ledger → final schema convergence.</strong> The exact v225 database gains <code>origin</code> and <code>origin_project_id</code>; production reads succeed.</li>
+        <li><strong>SessionStart protected context exceeded 12 KiB → 1,199-byte margin.</strong> Required worker lifecycle guidance remains present at 11,089 bytes.</li>
+        <li><strong>Eight supplemental findings → bounded repairs.</strong> Ambient latency/corpus bounds, executable epoch honesty, reconciliation/watcher/vector races, lag aging, exact-symbol priority, path sanitation, and the verification fixture are ancestors of the final tip.</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="evidence-heading">
+      <h2 id="evidence-heading">Gate evidence</h2>
+
+      <h3>Branch and review</h3>
+      <div class="table-wrap">
+        <table>
+          <caption>Branch and review evidence from a fresh fetch and epic status query.</caption>
+          <thead><tr><th scope="col">Evidence</th><th scope="col" class="num">Result</th><th scope="col">Source</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Final local HEAD equals origin epic</th><td class="num"><span class="status pass">PASS</span></td><td>Both <code>8ab2804673c811f6553d65b40a7c16e0ae4ed61e</code>.</td></tr>
+            <tr><th scope="row">Current main is merge base and ancestor</th><td class="num"><span class="status pass">PASS</span></td><td><code>8f6b557db7c3b994edfe23efa643dda1760e2bc0</code>.</td></tr>
+            <tr><th scope="row">Child factory branches stranded</th><td class="num"><strong>0</strong></td><td>Fresh epic status: all 27 child lanes show <code>Unmerged=0</code>.</td></tr>
+            <tr><th scope="row">Unresolved supplemental P0/P1</th><td class="num"><strong>0</strong></td><td>All bounded repair commits are ancestors of the final tip.</td></tr>
+            <tr><th scope="row">Claude cross-vendor review</th><td class="num"><span class="status waiver">WAIVED</span></td><td>Explicit operator decision recorded on the gate and epic; this release only.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Exact released-v225 migration</h3>
+      <p>The fixture came from exact released binary <code>cas 2.53.0 (93e139d)</code>, not current-schema SQL. It began with 173 migration rows, maximum ID 225, m225 recorded as <code>BOOTSTRAP</code>, no <code>commit_links.link_method</code>, and neither knowledge attribution column. Legacy knowledge and commit-link rows existed before the current binary opened it.</p>
+      <div class="table-wrap">
+        <table>
+          <caption>Measured schema transition from the exact v225 fixture; extracted 2026-08-08.</caption>
+          <thead><tr><th scope="col">Check</th><th scope="col" class="num">Before</th><th scope="col" class="num">First current run</th><th scope="col" class="num">Second current run</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Advertised schema version</th><td class="num">225</td><td class="num"><strong>229</strong></td><td class="num"><strong>229</strong></td></tr>
+            <tr><th scope="row">Migrations applied</th><td class="num">n/a</td><td class="num"><strong>5</strong></td><td class="num"><strong>0</strong></td></tr>
+            <tr><th scope="row"><code>commit_links.link_method</code></th><td class="num">absent</td><td class="num">present</td><td class="num">present</td></tr>
+            <tr><th scope="row">Knowledge attribution columns</th><td class="num">0 of 2</td><td class="num"><strong>2 of 2</strong></td><td class="num"><strong>2 of 2</strong></td></tr>
+            <tr><th scope="row">m225 reconciliation audit</th><td class="num">absent</td><td class="num"><code>BOOTSTRAP</code> preserved</td><td class="num">unchanged</td></tr>
+            <tr><th scope="row">Legacy knowledge/provenance</th><td class="num">present</td><td class="num">preserved</td><td class="num">preserved</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Production knowledge listing, history backfill, status, and text search with provenance all exited zero. The preserved commit resolved to the original session and agent through a high-confidence <code>hook_observed</code> edge.</p>
+
+      <h3>Full software and live-runtime matrix</h3>
+      <div class="table-wrap">
+        <table>
+          <caption>Fresh final-tip commands and receipts; raw output is retained in temporary staging.</caption>
+          <thead><tr><th scope="col">Gate</th><th scope="col" class="num">Result</th><th scope="col">Fresh receipt on <code>8ab28046</code></th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Workspace tests</th><td class="num"><span class="status pass">PASS</span></td><td>Exit 0; cas lib 4,230 passed / 0 failed / 6 ignored; cas-store 616 / 0; component output 12 / 0; all remaining integrations and doctests completed without failure.</td></tr>
+            <tr><th scope="row">All-target check</th><td class="num"><span class="status pass">PASS</span></td><td>Exit 0 in 26.74 s; existing warnings only.</td></tr>
+            <tr><th scope="row">Workflow JavaScript</th><td class="num"><span class="status pass">121 / 121</span></td><td>Fresh on final tip.</td></tr>
+            <tr><th scope="row">Current-main update helper</th><td class="num"><span class="status pass">10 / 10</span></td><td>Fresh on final tip.</td></tr>
+            <tr><th scope="row">Release migration guard</th><td class="num"><span class="status pass">PASS</span></td><td>All four self-test paths.</td></tr>
+            <tr><th scope="row">Isolated code/history index</th><td class="num"><span class="status pass">PASS</span></td><td>Two commits, lag 0; one Rust symbol indexed and mapped; exact-symbol search returned mapped commit and high-confidence provenance.</td></tr>
+            <tr><th scope="row">Epoch/verdict honesty</th><td class="num"><span class="status pass">PASS</span></td><td>Empty epoch source returned empty; verdict returned <code>FIXED-UNVERIFIED</code> with explicit no-running-fix-epoch rationale.</td></tr>
+            <tr><th scope="row">Reconciliation and fallback</th><td class="num"><span class="status pass">PASS</span></td><td>Workspace run includes stopped-daemon file retirement, empty-repository retirement, initial watcher reconciliation, logged-out scope-safe lexical fallback, and one-query three-namespace fan-out.</td></tr>
+            <tr><th scope="row">Authenticated ambient live</th><td class="num"><span class="status pass">1 / 1</span></td><td>Four units in three drain requests, pending 0; two role events made exactly two query requests; all namespaces present; forbidden private hits 0.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="callout">Authenticated receipt: <code>cas-embed-v1</code>, 1,024 dimensions; drain 2,350 ms; worker and supervisor query events 276 ms and 495 ms. Worker ranked Code first; supervisor ranked History first. The endpoint exposes no billed-token or price field, so no monetary cost is invented.</p>
+
+      <h3>Hook and privacy envelope</h3>
+      <div class="table-wrap">
+        <table>
+          <caption>Production-shaped isolated hook measurements on the final assembled binary.</caption>
+          <thead><tr><th scope="col">Check</th><th scope="col" class="num">Result</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">SessionStart context</th><td class="num"><strong>11,089 bytes</strong></td></tr>
+            <tr><th scope="row">Hard boundary</th><td class="num">12,288 bytes</td></tr>
+            <tr><th scope="row">Margin</th><td class="num"><strong>1,199 bytes</strong></td></tr>
+            <tr><th scope="row">UserPromptSubmit context</th><td class="num"><strong>0 bytes</strong></td></tr>
+            <tr><th scope="row">Memory entries</th><td class="num"><strong>0 → 0</strong></td></tr>
+            <tr><th scope="row">Knowledge pages</th><td class="num"><strong>0 → 0</strong></td></tr>
+            <tr><th scope="row">Concrete private-path hits</th><td class="num"><strong>0</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The diagnostic remains truthful: every degradable section was dropped and protected context exceeds the internal 9,216-byte target. That warning does not violate the 12,288-byte hard gate and does not truncate required lifecycle guidance.</p>
+
+      <h3>Whole-diff hygiene</h3>
+      <p>Fresh scans over <code>origin/main...8ab28046</code> found zero concrete absolute user-home paths, zero AWS/OpenAI/GitHub/private-key credential markers, zero external HTML runtime assets, and zero shortcut/incomplete markers in changed code. <code>git diff --check</code> passed.</p>
+    </section>
+
+    <section aria-labelledby="fresh-heading">
+      <h2 id="fresh-heading">Fresh versus inherited evidence</h2>
+      <p>Every release-decisive command was rerun after the final repair landed: branch pinning, migration, production knowledge/history/code paths, workspace tests, all-target check, authenticated ambient live run, hook budgets/no-store, fast gates, privacy scans, and diff hygiene. Earlier child-task receipts explain why repairs exist and confirm their ancestry; they do not replace the final pass.</p>
+    </section>
+
+    <section aria-labelledby="skips-heading">
+      <h2 id="skips-heading">Ignored and skipped proof</h2>
+      <ul>
+        <li>The workspace run reports six ignored cas library tests. The credential-gated ambient test was then run explicitly and passed. Other ignored cases are platform, destructive, or manual harness tests and do not substitute for an acceptance criterion.</li>
+        <li>External CI was not rerun per operator direction. One complete local workspace run and one all-target check were executed; identical 45-minute matrices were intentionally not repeated.</li>
+        <li>The Claude cross-vendor persona lane was unavailable because authentication was absent. The explicit, release-only operator waiver is an accepted exception, not a claim that the lane ran.</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="risks-heading">
+      <h2 id="risks-heading">Risks</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Residual release risks, sorted by impact.</caption>
+          <thead><tr><th scope="col">Risk</th><th scope="col">Likelihood</th><th scope="col">Impact</th><th scope="col">Owner</th><th scope="col">Mitigation</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Waived review could have found an issue outside the supplemental review and matrix</th><td>Unknown</td><td>High</td><td>Release operator</td><td>Waiver is explicit and scoped; supplemental findings were repaired; final software, migration, privacy, and live gates are green.</td></tr>
+            <tr><th scope="row">SessionStart has less than 1.2 KiB hard-budget margin</th><td>Medium</td><td>Medium</td><td>Hook maintainers</td><td>Production-shaped regression enforces margin; internal-target warning remains visible.</td></tr>
+            <tr><th scope="row">Live provider latency varies</th><td>Medium</td><td>Low</td><td>Recall maintainers</td><td>One request per event is enforced; lexical fallback remains; timeout and corpus bounds are tested.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="recommendation" aria-labelledby="recommendation-heading">
+      <h2 id="recommendation-heading">Release recommendation</h2>
+      <p><strong>GO.</strong> Merge <code>8ab2804673c811f6553d65b40a7c16e0ae4ed61e</code> to main. No unresolved software, migration, privacy, live-runtime, branch, or diff blocker remains. Preserve the operator's waiver in the release record and do not generalize it to later releases.</p>
+    </section>
+
+    <section aria-labelledby="provenance-heading">
+      <h2 id="provenance-heading">Provenance</h2>
+      <ul>
+        <li>Analysis commit: <code>8ab2804673c811f6553d65b40a7c16e0ae4ed61e</code>.</li>
+        <li>Comparison base: <code>origin/main</code> at <code>8f6b557db7c3b994edfe23efa643dda1760e2bc0</code>.</li>
+        <li>Evidence window: 2026-08-08 20:44–21:07 America/New_York.</li>
+        <li>Markdown source: <a href="2026-08-08-code-history-release-readiness.md">2026-08-08-code-history-release-readiness.md</a>.</li>
+        <li>Raw outputs: temporary release-gate staging outside the repository; not committed.</li>
+      </ul>
+      <p>Principal commands, with private checkout locations normalized:</p>
+      <pre><code>git fetch origin epic/code-history-search-v1-full-m1-m9-git-pr-issue-ind-cas-6212 main
+git rev-parse HEAD origin/epic/code-history-search-v1-full-m1-m9-git-pr-issue-ind-cas-6212 origin/main
+git merge-base HEAD origin/main
+cas update --schema-only --json
+cas knowledge list --json
+cas index code --json
+cas history backfill --force --json
+cas history status --json
+cas history search "release gate provenance sentinel" --include-provenance --json
+cas history search --symbol release_gate_symbol --include-provenance --json
+cas history epochs --backfill --json
+cas history verdict "release gate missing symptom" --fix-commit &lt;fixture-commit&gt; --threshold 1 --json
+env ZIG=&lt;repo-zig&gt; CARGO_TARGET_DIR=&lt;shared-target&gt; cargo test --workspace --no-fail-fast
+env ZIG=&lt;repo-zig&gt; CARGO_TARGET_DIR=&lt;shared-target&gt; cargo check --workspace --all-targets
+env ZIG=&lt;repo-zig&gt; CARGO_TARGET_DIR=&lt;shared-target&gt; CAS_AMBIENT_LIVE_CONFIG_DIR=&lt;authenticated-config&gt; cargo test -p cas --lib -- ambient_recall::tests::authenticated_isolated_live_provider_receipt --ignored --nocapture --test-threads=1
+node --test .claude/workflows/*.test.js
+bash contrib/shell-helpers/tests/cas-update-test.sh
+bash scripts/test-check-release-migration-snapshots.sh
+git diff --check origin/main...HEAD</code></pre>
+    </section>
+  </main>
+
+  <footer>
+    <p>Source: <a href="2026-08-08-code-history-release-readiness.md">paired Markdown report</a>. Figures and tables derive from the commands and commits named above. No external assets or runtime requests are used.</p>
+  </footer>
+</body>
+</html>

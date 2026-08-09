@@ -491,6 +491,19 @@ impl FromStr for VerificationRecoveryAction {
     }
 }
 
+/// Immutable snapshot of the repository state inspected by a verifier.
+///
+/// The digest covers the exact worktree contents (including untracked files)
+/// while deliberately excluding CAS's own `.cas` state. The canonical paths
+/// prevent a proof captured in one worktree from being replayed in another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryProofBoundary {
+    pub repository_root: String,
+    pub worktree_root: String,
+    pub head_commit: String,
+    pub state_digest: String,
+}
+
 /// Immutable external identity attached to a verification proof cycle.
 ///
 /// A task-only close has neither delivery field; the dispatch ID itself is
@@ -501,6 +514,8 @@ pub struct VerificationProofBoundary {
     pub receipt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_transaction_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RepositoryProofBoundary>,
 }
 
 impl VerificationProofBoundary {
@@ -512,6 +527,14 @@ impl VerificationProofBoundary {
         Self {
             receipt_id: Some(receipt_id),
             delivery_transaction_id: Some(delivery_transaction_id),
+            repository: None,
+        }
+    }
+
+    pub fn task_at(repository: RepositoryProofBoundary) -> Self {
+        Self {
+            repository: Some(repository),
+            ..Self::default()
         }
     }
 }
@@ -530,6 +553,9 @@ pub struct VerificationDispatch {
     /// Exact delivery transaction advanced by this dispatch's verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_transaction_id: Option<String>,
+    /// Exact repository state inspected by a legacy task verifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RepositoryProofBoundary>,
     pub requester_agent_id: String,
     pub owner_agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

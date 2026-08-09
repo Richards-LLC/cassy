@@ -6,7 +6,224 @@ use cas::store::{
 };
 use cas::types::{AgentRole, EventType, TaskStatus, Verification, VerificationType, Worktree};
 use rmcp::handler::server::wrapper::Parameters;
+use std::process::Command;
 use tempfile::TempDir;
+
+fn proof_boundary_git(path: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .env("GIT_AUTHOR_NAME", "CAS Test")
+        .env("GIT_AUTHOR_EMAIL", "cas@example.test")
+        .env("GIT_COMMITTER_NAME", "CAS Test")
+        .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn legacy_repository_proof_rejects_drift(isolated: bool) {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n",
+    )
+    .expect("legacy verification config");
+
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(temp.path().join("reviewed.txt"), "reviewed\n").unwrap();
+    proof_boundary_git(temp.path(), &["add", ".gitignore", "reviewed.txt"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "seed"]);
+
+    let isolated_dir = isolated.then(TempDir::new).transpose().unwrap();
+    let proof_root = if let Some(dir) = isolated_dir.as_ref() {
+        proof_boundary_git(temp.path(), &["branch", "factory/proof-worker"]);
+        proof_boundary_git(
+            temp.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                dir.path().to_str().unwrap(),
+                "factory/proof-worker",
+            ],
+        );
+        dir.path()
+    } else {
+        temp.path()
+    };
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req(if isolated {
+            "Isolated legacy repository proof"
+        } else {
+            "Shared legacy repository proof with docs-only code review skip"
+        })))
+        .await
+        .expect("create reviewed task");
+    let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
+        .await
+        .expect("start reviewed task");
+
+    if isolated {
+        let store = open_worktree_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let worktree_id = Worktree::generate_id();
+        store
+            .add(&Worktree::new(
+                worktree_id.clone(),
+                "factory/proof-worker".to_string(),
+                "main".to_string(),
+                proof_root.to_path_buf(),
+            ))
+            .unwrap();
+        let task_store = open_task_store(&cas_dir).unwrap();
+        let mut task = task_store.get(&task_id).unwrap();
+        task.worktree_id = Some(worktree_id);
+        task_store.update(&task).unwrap();
+    }
+
+    let other = service
+        .cas_task_create(Parameters(simple_task_req("Unrelated mutable task")))
+        .await
+        .expect("create unrelated task");
+    let other_id = extract_task_id(&extract_text(other)).unwrap().to_string();
+
+    let close = |reason: &str| TaskCloseRequest {
+        id: task_id.clone(),
+        reason: Some(reason.to_string()),
+        bypass_code_review: None,
+        code_review_findings: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close("review this exact repository state")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let first_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("first dispatch");
+
+    service
+        .cas_task_update(Parameters(task_status_update(
+            &other_id,
+            None,
+            Some("unrelated work remains available during review"),
+        )))
+        .await
+        .expect("unrelated task update during review");
+
+    std::fs::write(proof_root.join("reviewed.txt"), "mutated during review\n").unwrap();
+    let supervisor_id = if isolated {
+        "proof-supervisor-isolated"
+    } else {
+        "proof-supervisor-shared"
+    };
+    let mut supervisor =
+        cas::types::Agent::new(supervisor_id.to_string(), supervisor_id.to_string());
+    supervisor.role = AgentRole::Supervisor;
+    open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing(supervisor_id.to_string());
+    let verdict = |dispatch_id: String| VerificationAddRequest {
+        task_id: task_id.clone(),
+        status: "approved".to_string(),
+        summary: "reviewed exact repository state".to_string(),
+        confidence: Some(0.99),
+        issues: None,
+        files_reviewed: Some("reviewed.txt".to_string()),
+        duration_ms: Some(5),
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: Some(dispatch_id),
+    };
+    let during_error = supervisor_core
+        .cas_verification_add(Parameters(verdict(first_dispatch.id.clone())))
+        .await
+        .expect_err("repository drift during review must reject approval");
+    assert!(during_error.message.contains("repository proof"));
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &first_dispatch.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Invalidated
+    );
+
+    std::fs::write(proof_root.join("reviewed.txt"), "reviewed\n").unwrap();
+    let retry = extract_text(
+        service
+            .cas_task_close(Parameters(close("re-review restored state")))
+            .await
+            .expect("fresh close cycle"),
+    );
+    assert!(retry.contains("VERIFICATION REQUIRED"), "{retry}");
+    let approved_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("fresh dispatch");
+    assert_ne!(approved_dispatch.id, first_dispatch.id);
+    supervisor_core
+        .cas_verification_add(Parameters(verdict(approved_dispatch.id.clone())))
+        .await
+        .expect("unchanged repository proof approves");
+
+    if isolated {
+        std::fs::write(proof_root.join("reviewed.txt"), "mutated after approval\n").unwrap();
+    } else {
+        proof_boundary_git(
+            proof_root,
+            &["commit", "-q", "--allow-empty", "-m", "post-review drift"],
+        );
+    }
+    let post_review = extract_text(
+        service
+            .cas_task_close(Parameters(close("must not reuse stale approval")))
+            .await
+            .expect("post-review close"),
+    );
+    assert!(
+        post_review.contains("VERIFICATION REQUIRED")
+            && !post_review.contains("Closed task:")
+            && !post_review.contains("CODE_REVIEW_REQUIRED"),
+        "post-review mutation must require a fresh repository proof before code review: {post_review}"
+    );
+    let post_review_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("post-review dispatch");
+    assert_ne!(post_review_dispatch.id, approved_dispatch.id);
+
+    service
+        .cas_task_update(Parameters(task_status_update(
+            &other_id,
+            None,
+            Some("unrelated work remains available after review"),
+        )))
+        .await
+        .expect("unrelated task update after review");
+}
+
+#[tokio::test]
+async fn test_legacy_nonisolated_verdict_is_bound_to_repository_proof() {
+    legacy_repository_proof_rejects_drift(false).await;
+}
+
+#[tokio::test]
+async fn test_legacy_isolated_verdict_is_bound_to_repository_proof() {
+    legacy_repository_proof_rejects_drift(true).await;
+}
 
 #[tokio::test]
 async fn test_worker_main_loop_cannot_self_attest_verification() {

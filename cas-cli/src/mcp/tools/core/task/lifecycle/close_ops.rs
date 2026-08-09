@@ -1816,7 +1816,7 @@ impl CasCore {
                 } else {
                     verification_store.get_latest_for_task(&req.id)
                 };
-                let typed_dispatch =
+                let mut typed_dispatch =
                     match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                         Ok(dispatch) => dispatch,
                         Err(error) => {
@@ -1828,6 +1828,31 @@ impl CasCore {
                             )));
                         }
                     };
+
+                // Revalidate repository-bound legacy proof even after a verdict
+                // was recorded. This prevents an approval from authorizing file
+                // or Git changes made after the verifier finished. Invalidation
+                // is exact and task-scoped; this close can create a fresh cycle.
+                if let Some(dispatch) = typed_dispatch.as_ref()
+                    && let Some(repository) = dispatch.repository.as_ref()
+                    && crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
+                        repository,
+                    )
+                    .is_err()
+                {
+                    cas_store::invalidate_verification_dispatch_for_repository_drift(
+                        &self.cas_root,
+                        &dispatch.id,
+                    )
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to invalidate changed repository proof: {error}"
+                        )),
+                        data: None,
+                    })?;
+                    typed_dispatch = None;
+                }
 
                 // Whether a prior verification row (of any status) already
                 // exists. Used below to decide whether to persist a fresh
@@ -2252,6 +2277,44 @@ impl CasCore {
                             // No clean envelope from a factory worker: proceed with
                             // the standard verification-jail path.
 
+                            // Capture the repository boundary before mutating the task
+                            // or its lease. If Git inspection fails, the close remains
+                            // failure-atomic instead of leaving a pending task without a
+                            // dispatch.
+                            let proof_worktree = self
+                                .resolve_worker_worktree_path(
+                                    &task,
+                                    declared_repo_context.as_ref(),
+                                )
+                                .map_err(|error| McpError {
+                                    code: ErrorCode::INVALID_PARAMS,
+                                    message: Cow::from(format!(
+                                        "Failed to resolve verification worktree: {error}"
+                                    )),
+                                    data: None,
+                                })?
+                                .unwrap_or_else(|| close_project_root.clone());
+                            let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
+                                &proof_worktree,
+                            ) {
+                                let repository_proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof(
+                                    &close_project_root,
+                                    &proof_worktree,
+                                )
+                                .map_err(|error| McpError {
+                                    code: ErrorCode::INVALID_PARAMS,
+                                    message: Cow::from(format!(
+                                        "Failed to capture verification repository proof: {error}"
+                                    )),
+                                    data: None,
+                                })?;
+                                cas_types::VerificationProofBoundary::task_at(repository_proof)
+                            } else {
+                                // Lightweight stores may intentionally have no Git
+                                // repository, leaving no repository state to bind.
+                                cas_types::VerificationProofBoundary::task()
+                            };
+
                             // Only auto-claim if the closing agent is the task's assignee.
                             // If a supervisor closes a worker's task, skip the lease to avoid
                             // locking the task to the supervisor.
@@ -2341,7 +2404,7 @@ impl CasCore {
                                 &req.id,
                                 &requester_id,
                                 &owner_id,
-                                &cas_types::VerificationProofBoundary::task(),
+                                &proof_boundary,
                                 chrono::Utc::now()
                                     + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
                                 supervisor_recovery,

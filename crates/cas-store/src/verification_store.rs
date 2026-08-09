@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS verification_dispatches (
     task_id TEXT NOT NULL,
     receipt_id TEXT,
     delivery_transaction_id TEXT,
+    repository_proof TEXT,
     requester_agent_id TEXT NOT NULL,
     owner_agent_id TEXT NOT NULL,
     verifier_agent_id TEXT,
@@ -812,15 +813,27 @@ fn parse_dispatch(row: &rusqlite::Row) -> rusqlite::Result<VerificationDispatch>
             })
             .transpose()
     };
-    let state_value: String = row.get(8)?;
+    let repository = row
+        .get::<_, Option<String>>(4)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+    let state_value: String = row.get(9)?;
     let state = VerificationDispatchState::from_str(&state_value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error))
     })?;
-    let recovery_value: String = row.get(12)?;
+    let recovery_value: String = row.get(13)?;
     let recovery_action =
         VerificationRecoveryAction::from_str(&recovery_value).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                12,
+                13,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
@@ -830,14 +843,15 @@ fn parse_dispatch(row: &rusqlite::Row) -> rusqlite::Result<VerificationDispatch>
         task_id: row.get(1)?,
         receipt_id: row.get(2)?,
         delivery_transaction_id: row.get(3)?,
-        requester_agent_id: row.get(4)?,
-        owner_agent_id: row.get(5)?,
-        verifier_agent_id: row.get(6)?,
-        capability_id: row.get(7)?,
+        repository,
+        requester_agent_id: row.get(5)?,
+        owner_agent_id: row.get(6)?,
+        verifier_agent_id: row.get(7)?,
+        capability_id: row.get(8)?,
         state,
-        requested_at: parse_time(9)?,
-        deadline_at: parse_time(10)?,
-        resolved_at: parse_optional_time(11)?,
+        requested_at: parse_time(10)?,
+        deadline_at: parse_time(11)?,
+        resolved_at: parse_optional_time(12)?,
         recovery_action,
     })
 }
@@ -847,7 +861,7 @@ pub fn get_latest_verification_dispatch_with_conn(
     task_id: &str,
 ) -> Result<Option<VerificationDispatch>> {
     conn.query_row(
-        "SELECT id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+        "SELECT id, task_id, receipt_id, delivery_transaction_id, repository_proof, requester_agent_id,
                 owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
                 deadline_at, resolved_at, recovery_action
          FROM verification_dispatches
@@ -876,7 +890,7 @@ pub fn get_verification_dispatch_with_conn(
     dispatch_id: &str,
 ) -> Result<VerificationDispatch> {
     conn.query_row(
-        "SELECT id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+        "SELECT id, task_id, receipt_id, delivery_transaction_id, repository_proof, requester_agent_id,
                 owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
                 deadline_at, resolved_at, recovery_action
          FROM verification_dispatches WHERE id = ?1",
@@ -1071,6 +1085,7 @@ fn create_verification_dispatch_bound_in_transaction(
             && existing.owner_agent_id == owner_agent_id
             && existing.receipt_id == boundary.receipt_id
             && existing.delivery_transaction_id == boundary.delivery_transaction_id
+            && existing.repository == boundary.repository
         {
             return Ok(existing);
         }
@@ -1094,6 +1109,7 @@ fn create_verification_dispatch_bound_in_transaction(
         task_id: task_id.to_string(),
         receipt_id: boundary.receipt_id.clone(),
         delivery_transaction_id: boundary.delivery_transaction_id.clone(),
+        repository: boundary.repository.clone(),
         requester_agent_id: requester_agent_id.to_string(),
         owner_agent_id: owner_agent_id.to_string(),
         verifier_agent_id: None,
@@ -1106,15 +1122,21 @@ fn create_verification_dispatch_bound_in_transaction(
     };
     conn.execute(
         "INSERT INTO verification_dispatches
-         (id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+         (id, task_id, receipt_id, delivery_transaction_id, repository_proof, requester_agent_id,
           owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
           deadline_at, resolved_at, recovery_action)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, ?8, ?9, NULL, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, NULL, ?11)",
         params![
             dispatch.id,
             dispatch.task_id,
             dispatch.receipt_id,
             dispatch.delivery_transaction_id,
+            dispatch
+                .repository
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| StoreError::Parse(format!("invalid repository proof: {error}")))?,
             dispatch.requester_agent_id,
             dispatch.owner_agent_id,
             dispatch.state.to_string(),
@@ -1307,6 +1329,80 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
     let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, &dispatch.id)?;
     tx.commit()?;
     Ok(Some(dispatch))
+}
+
+/// Invalidate one exact legacy repository proof after its reviewed worktree drifts.
+///
+/// This transition is deliberately task-scoped: it consumes only authority
+/// attached to the named dispatch and clears only that task's pending flag.
+pub fn invalidate_verification_dispatch_for_repository_drift(
+    cas_dir: &Path,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
+        .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
+    if latest.id != dispatch.id
+        || dispatch.receipt_id.is_some()
+        || dispatch.delivery_transaction_id.is_some()
+        || dispatch.repository.is_none()
+    {
+        return Err(StoreError::Parse(
+            "repository proof invalidation requires the latest task-only repository dispatch"
+                .to_string(),
+        ));
+    }
+    if dispatch.state == VerificationDispatchState::Invalidated {
+        tx.commit()?;
+        return Ok(dispatch);
+    }
+    if !matches!(
+        dispatch.state,
+        VerificationDispatchState::Pending
+            | VerificationDispatchState::Claimed
+            | VerificationDispatchState::Resolved
+            | VerificationDispatchState::TimedOut
+    ) {
+        return Err(StoreError::Parse(
+            "repository proof dispatch cannot be invalidated from its current state".to_string(),
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    if let Some(capability_id) = dispatch.capability_id.as_deref() {
+        tx.execute(
+            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2)
+             WHERE id = ?1",
+            params![capability_id, now],
+        )?;
+        tx.execute(
+            "UPDATE verification_handoffs
+             SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
+             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
+            params![capability_id, now],
+        )?;
+    }
+    let changed = tx.execute(
+        "UPDATE verification_dispatches
+         SET state = 'invalidated', resolved_at = ?2
+         WHERE id = ?1 AND state IN ('pending', 'claimed', 'resolved', 'timed_out')",
+        params![dispatch.id, now],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "repository proof invalidation raced".to_string(),
+        ));
+    }
+    tx.execute(
+        "UPDATE tasks SET pending_verification = 0, updated_at = ?2 WHERE id = ?1",
+        params![dispatch.task_id, now],
+    )?;
+    let invalidated = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    tx.commit()?;
+    Ok(invalidated)
 }
 
 /// Reopen a closed task and invalidate its reusable proof as one durable mutation.

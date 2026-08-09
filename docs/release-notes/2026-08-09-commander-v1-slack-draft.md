@@ -1,10 +1,12 @@
-# Commander v1 runtime release — v2.55.0 unposted Slack drafts
+# Commander v1 runtime release — v2.55.1 unposted Slack drafts
 
-> **DO NOT POST.** `v2.55.0` is the policy-derived release candidate, not a published Commander
-> version. The H7 verdict remains **NOT YET RELEASABLE**. Release ownership must first merge the
-> reviewed commit to `main`, publish a new immutable `v2.55.0` tag whose peeled commit contains
-> `bfa1e0af`, record both asset digests, install the same public Linux asset on two real machines, and
-> receive a green assembled acceptance report. Re-review this file only after all of those gates pass.
+> **DO NOT POST.** The immutable public `v2.55.0` Linux artifact fails the final-executable portable
+> x86_64 audit and is superseded before installation; its tag, release, and assets remain unchanged.
+> `v2.55.1` is only the corrective candidate. The H7 verdict remains **NOT YET RELEASABLE**.
+> Release ownership must first merge the reviewed commit to `main`, publish a new immutable `v2.55.1`
+> tag whose peeled commit contains `bfa1e0af`, record both asset digests, install the same public Linux
+> asset on two real machines, and receive a green assembled acceptance report. Re-review this file
+> only after all of those gates pass.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -12,7 +14,7 @@ replies. Status: **unposted**.
 
 ## User-perspective top-level post
 
-**Live on production · User · v2.55.0**
+**Live on production · User · v2.55.1**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
@@ -25,7 +27,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · v2.55.0**
+**Live on production · Dev · v2.55.1**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -43,10 +45,17 @@ daemon session, and bounded downstream fan-out.
 - Release acceptance covers two real machines, a 390×844 Chrome viewport, hostile browser cases,
   restart/crash truthfulness, old/new compatibility, portable x86_64 ISA, and unchanged model/session
   counts.
+- The Linux artifact uses CAS's selected ring TLS provider only. The unused AWS-LC provider (including
+  its post-quantum-capable and AVX-512 runtime-dispatch code) is no longer linked, and the exact staged
+  executable must pass the strict no-EVEX audit before upload. BLAKE3 keeps its SSE through AVX2
+  accelerated paths; an audited 1.8.6 build override prevents its upstream runtime-only `no_avx512`
+  switch from compiling the inactive AVX-512 archive into the portable artifact. Fingerprints remain
+  byte-identical, while AVX-512-capable machines may see lower BLAKE3-heavy indexing throughput.
 
 ## Pre-post fill and verification
 
-- [ ] Confirm the immutable published tag is exactly `v2.55.0`; do not reuse or move an earlier tag.
+- [ ] Confirm the immutable corrective tag is exactly `v2.55.1`; do not reuse or move `v2.55.0` or an
+      earlier tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the

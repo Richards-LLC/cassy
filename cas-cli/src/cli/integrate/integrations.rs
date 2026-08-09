@@ -436,6 +436,9 @@ mod tests {
 
     #[test]
     fn run_in_non_interactive_mode_does_not_prompt() {
+        // The binary installs this before dispatch; this standalone library test
+        // exercises reqwest without passing through main.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Smoke: run() in NonInteractive mode must complete without ever
         // calling inquire::Confirm (which would block on stdin in CI).
         // The fact that this test runs to completion under `cargo test`

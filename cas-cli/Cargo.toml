@@ -1,6 +1,6 @@
 [package]
 name = "cas"
-version = "2.55.0"
+version = "2.55.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -142,8 +142,9 @@ axum = { version = "0.8", features = ["ws"] }
 # at startup. rustls 0.23 refuses to auto-select a provider from feature flags
 # in some dep-graph unifications, panicking inside tokio-tungstenite's TLS
 # handshake. Installing `ring` once in main() prevents the daemon from
-# crashing on its first cloud WebSocket connect.
-rustls = { version = "0.23", features = ["ring"] }
+# crashing on its first cloud WebSocket connect. Disable rustls defaults so
+# the unused AWS-LC provider and its AVX-512 assembly are not linked too.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # LRU cache (for playback engine)
 lru = "0.12"
@@ -158,7 +159,7 @@ posthog-rs = { version = "0.3", default-features = false }
 claude_rs = { git = "https://github.com/codingagentsystem/claude_rs", branch = "main" }
 
 # MCP Server (always available; the factory requires `cas serve`)
-rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 schemars = { version = "1.0" }
 cas-mcp = { path = "../crates/cas-mcp" }
 

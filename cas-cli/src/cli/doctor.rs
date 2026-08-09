@@ -2078,6 +2078,9 @@ mod tests {
     /// in CI environments without an MCP server.
     #[test]
     fn integration_checks_neon_mcp_unreachable_is_skipped_not_error() {
+        // The binary installs this before dispatch; this standalone library test
+        // exercises reqwest without passing through main.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let repo = TempDir::new().unwrap();
         let neon_skill = repo.path().join(".claude/skills/neon-database/SKILL.md");
         fs::create_dir_all(neon_skill.parent().unwrap()).unwrap();

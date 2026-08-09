@@ -9,4 +9,13 @@ jobs = 16
 
 [target.x86_64-unknown-linux-gnu]
 linker = "gcc"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags = [
+    "-C", "target-cpu=x86-64",
+    "-C", "link-arg=-fuse-ld=mold",
+]
+
+[env]
+# Native C/C++ contributors must use the same portable baseline as rustc.
+# Target-qualified variables keep these flags out of macOS and ARM builds.
+CFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }
+CXXFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }

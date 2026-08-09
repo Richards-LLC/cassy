@@ -134,6 +134,16 @@ These require a major version bump:
 6. Prefer `./scripts/release.sh --publish` for the local release path. It runs
    the same guard before it can create or push a tag, so the check is enforced
    even if the checklist step is missed.
-7. For a manual release, only after the guard passes: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+7. Create an annotated tag, then run the fast release preflight **before pushing it**:
+
+   ```bash
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   ./scripts/check-release-preflight.sh vX.Y.Z
+   ```
+
+   This rejects a dirty tree, a lightweight/stale tag, mismatched release-train
+   crate versions, a missing changelog heading, or lockfile drift before the
+   expensive release builds begin. `release.sh` runs the same guard automatically
+   for non-`--build-only` releases.
 8. Push: `git push && git push --tags`.
 9. Create GitHub release: `gh release create vX.Y.Z --generate-notes`.

@@ -92,6 +92,15 @@ if ! "$BUILD_ONLY" && ! command -v gh &>/dev/null; then
     exit 1
 fi
 
+ensure_release_tag() {
+    if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+        echo "Creating annotated tag $TAG on HEAD before release build..."
+        git tag -a "$TAG" -m "$TAG"
+    fi
+
+    ./scripts/check-release-preflight.sh "$TAG"
+}
+
 # A registered migration changes the doctor/status component snapshots, while
 # the scoped release suites do not build that integration test.  Keep this
 # before builds and, crucially, before create_release can create or push TAG.
@@ -106,6 +115,14 @@ if [ ! -x ".context/zig/zig" ]; then
 fi
 export ZIG="$REPO_ROOT/.context/zig/zig"
 echo "Zig: $("$ZIG" version)"
+
+# A local release must reject lockfile/version/changelog/tag mistakes before
+# starting the expensive artifact builds. Build-only remains a packaging aid,
+# not a release action, so it deliberately does not create a tag. This runs
+# after Zig is available because cargo check builds the native Ghostty layer.
+if ! "$BUILD_ONLY"; then
+    ensure_release_tag
+fi
 
 # ---------------------------------------------------------------------------
 # Ensure git submodules
@@ -176,12 +193,6 @@ if "$BUILD_ONLY"; then
 fi
 
 create_release() {
-    # Ensure the tag exists locally
-    if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-        echo "Tag $TAG does not exist. Creating it on HEAD..."
-        git tag "$TAG"
-    fi
-
     # Push the tag
     echo "Pushing tag $TAG..."
     git push origin "$TAG"

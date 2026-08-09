@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.56.0] - 2026-08-09
+
+### Added
+- **Cloud sync now exposes configurable queue-health warnings before work is stranded.** `cloud.queue_pending_warning` and `cloud.queue_oldest_warning_secs` make factory preflight report a growing or aging sync backlog while preserving safe defaults.
+
+### Changed
+- **An active CAS daemon now drains cloud work on its regular cadence even when no new activity arrives.** A queued update therefore continues toward the cloud after the event that created it, rather than waiting for a later local action.
+
+### Fixed
+- **Cloud deletions now preserve current local truth and record failed deletes for retry.** A stale tombstone is neutralized when its task or entry exists locally again; successful delete routes, already-absent remote rows, personal/team queues, and skipped upserts now converge consistently instead of silently losing or retaining work.
+
 ## [2.55.5] - 2026-08-09
 
 ### Fixed

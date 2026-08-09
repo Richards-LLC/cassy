@@ -356,6 +356,46 @@ pub(crate) fn recipient_config_dir(spec: &cas_mux::WorkerSpec) -> Option<String>
 }
 
 impl FactoryDaemon {
+    /// Enqueue a Commander semantic message through the same durable prompt
+    /// queue drained by MCP coordination messages. Delivery therefore reuses
+    /// the existing inbox+wake and urgent interrupt-and-redirect machinery.
+    pub(crate) fn enqueue_attributed_message(
+        &self,
+        target: &str,
+        text: &str,
+        summary: Option<&str>,
+        urgent: bool,
+        attribution: &crate::ui::factory::protocol::MessageAttribution,
+    ) -> anyhow::Result<cas_store::EnqueueOutcome> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        let attribution_json = serde_json::to_value(attribution)?;
+        let priority = urgent.then_some(cas_store::NotificationPriority::Critical);
+        let outcome = queue.enqueue_attributed_urgent_with_outcome(
+            &attribution.queue_source(),
+            target,
+            text,
+            Some(self.session_name.as_str()),
+            summary,
+            priority,
+            urgent,
+            Some(&attribution_json),
+        )?;
+
+        // Match coordination's best-effort wake signal. This daemon will also
+        // observe the row on its next queue pass if signaling is unavailable.
+        if matches!(outcome, cas_store::EnqueueOutcome::Created(_)) {
+            let _ = cas_factory::notify_daemon(self.app.cas_dir());
+        }
+        Ok(outcome)
+    }
+
+    /// Targeted Commander interrupt. Coordination urgent delivery enters the
+    /// same canonical `Mux::break_turn` primitive before injecting its message.
+    pub(crate) async fn interrupt_pane_turn(&self, pane_id: &str) -> anyhow::Result<()> {
+        let actual = self.resolve_pane_name(pane_id);
+        self.app.mux.break_turn(&actual).await.map_err(Into::into)
+    }
+
     /// cas-c73d (GH #177): the Agent-Teams tree the RECIPIENT's harness really
     /// reads, when that is not the daemon's own.
     ///

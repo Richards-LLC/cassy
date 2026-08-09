@@ -35,6 +35,8 @@ impl FactoryDaemon {
                         session_name: self.session_name.clone(),
                         state,
                         scrollback: Some(scrollback),
+                        protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                        capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                     };
 
                     let frame = match encode_frame(&welcome) {
@@ -277,6 +279,8 @@ impl FactoryDaemon {
                     session_name: self.session_name.clone(),
                     state,
                     scrollback: Some(scrollback),
+                    protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                    capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                 };
                 if let Some(frame) = encode_frame(&welcome) {
                     if let Some(client) = self.gui_clients.get_mut(&client_id) {
@@ -429,6 +433,38 @@ impl FactoryDaemon {
                             None,
                         )
                         .await;
+                }
+            }
+            ClientMessage::InterruptPane { pane_id } => {
+                if let Err(error) = self.interrupt_pane_turn(&pane_id).await {
+                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                        message: format!("targeted interrupt failed: {error}"),
+                    }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                    {
+                        queue_frame(client, &frame);
+                    }
+                }
+            }
+            ClientMessage::SendMessage {
+                target,
+                text,
+                summary,
+                urgent,
+                attribution,
+            } => {
+                if let Err(error) = self.enqueue_attributed_message(
+                    &target,
+                    &text,
+                    summary.as_deref(),
+                    urgent,
+                    &attribution,
+                ) {
+                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                        message: format!("semantic message enqueue failed: {error}"),
+                    }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                    {
+                        queue_frame(client, &frame);
+                    }
                 }
             }
             ClientMessage::GetState => {

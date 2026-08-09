@@ -42,6 +42,8 @@ impl FactoryDaemon {
                 session_name: self.session_name.clone(),
                 state,
                 scrollback: Some(scrollback),
+                protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                capabilities: crate::ui::factory::protocol::daemon_capabilities(),
             };
 
             if let Some(frame) = ws_encode(&welcome) {
@@ -206,6 +208,8 @@ impl FactoryDaemon {
                     session_name: self.session_name.clone(),
                     state,
                     scrollback: Some(scrollback),
+                    protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                    capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                 };
                 if let Some(frame) = ws_encode(&welcome) {
                     if let Some(client) = self.ws_clients.get_mut(&client_id) {
@@ -355,6 +359,36 @@ impl FactoryDaemon {
                             None,
                         )
                         .await;
+                }
+            }
+            ClientMessage::InterruptPane { pane_id } => {
+                if let Err(error) = self.interrupt_pane_turn(&pane_id).await
+                    && let Some(frame) = ws_encode(&DaemonMessage::Error {
+                        message: format!("targeted interrupt failed: {error}"),
+                    })
+                    && let Some(client) = self.ws_clients.get_mut(&client_id)
+                {
+                    let _ = client.sink.feed(frame).now_or_never();
+                }
+            }
+            ClientMessage::SendMessage {
+                target,
+                text,
+                summary,
+                urgent,
+                attribution,
+            } => {
+                if let Err(error) = self.enqueue_attributed_message(
+                    &target,
+                    &text,
+                    summary.as_deref(),
+                    urgent,
+                    &attribution,
+                ) && let Some(frame) = ws_encode(&DaemonMessage::Error {
+                    message: format!("semantic message enqueue failed: {error}"),
+                }) && let Some(client) = self.ws_clients.get_mut(&client_id)
+                {
+                    let _ = client.sink.feed(frame).now_or_never();
                 }
             }
             ClientMessage::GetState => {

@@ -43,6 +43,15 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Build and test Commander web assets
+        working-directory: hub-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+          git diff --exit-code -- dist
+
       - name: Check
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig

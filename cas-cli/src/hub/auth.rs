@@ -279,6 +279,14 @@ pub struct WsTicket {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LeaseSummary {
+    pub controller_device_id: Option<String>,
+    pub controller_label: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub held_by_me: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PersistedState {
     pairings: Vec<PairingRecord>,
@@ -725,11 +733,25 @@ impl AuthStore {
         session: &str,
         now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>> {
+        self.acquire_or_force_lease(context, session, now, false)
+    }
+
+    pub fn acquire_or_force_lease(
+        &self,
+        context: &AuthContext,
+        session: &str,
+        now: DateTime<Utc>,
+        force: bool,
+    ) -> Result<DateTime<Utc>> {
         let mut state = self.lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
+        anyhow::ensure!(
+            !force || context.has(Scope::HubAdmin),
+            "authorization refused"
+        );
         if let Some(existing) = state.leases.get(session) {
             anyhow::ensure!(
-                existing.expires_at < now || existing.device_id == context.device_id,
+                force || existing.expires_at < now || existing.device_id == context.device_id,
                 "controller lease held by another device"
             );
         }
@@ -743,6 +765,53 @@ impl AuthStore {
         );
         self.persist(&state)?;
         Ok(expires_at)
+    }
+
+    pub fn lease_status(
+        &self,
+        context: &AuthContext,
+        session: &str,
+        now: DateTime<Utc>,
+    ) -> Result<LeaseSummary> {
+        let state = self.lock()?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
+        let active = state
+            .leases
+            .get(session)
+            .filter(|lease| lease.expires_at >= now);
+        let controller = active.and_then(|lease| {
+            state
+                .devices
+                .iter()
+                .find(|device| device.device_id == lease.device_id)
+                .map(|device| (lease, device))
+        });
+        Ok(LeaseSummary {
+            controller_device_id: controller.map(|(_, device)| device.device_id.clone()),
+            controller_label: controller.map(|(_, device)| device.device_label.clone()),
+            expires_at: controller.map(|(lease, _)| lease.expires_at),
+            held_by_me: controller.is_some_and(|(_, device)| device.device_id == context.device_id),
+        })
+    }
+
+    pub fn release_lease(
+        &self,
+        context: &AuthContext,
+        session: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
+        let lease = state
+            .leases
+            .get(session)
+            .context("controller lease unavailable")?;
+        anyhow::ensure!(
+            lease.device_id == context.device_id,
+            "authorization refused"
+        );
+        state.leases.remove(session);
+        self.persist(&state)
     }
 
     pub fn has_active_lease(

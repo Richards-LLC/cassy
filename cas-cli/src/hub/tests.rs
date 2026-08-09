@@ -237,6 +237,54 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
 }
 
 #[tokio::test]
+async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
+    let events = MachineEventBus::new(4);
+    let state = HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(PreAuthAuthorizer),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(4), events.clone()),
+        events,
+    );
+    let response = router(state)
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/html; charset=utf-8"
+    );
+    let csp = response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap();
+    for required in [
+        "default-src 'none'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'none'",
+        "worker-src 'none'",
+    ] {
+        assert!(csp.contains(required), "missing CSP directive {required}");
+    }
+    assert!(!csp.contains("'unsafe-inline'"));
+    assert!(!csp.contains("'unsafe-eval'"));
+    assert!(csp.contains("http://127.0.0.1:*"));
+    assert!(csp.contains("ws://127.0.0.1:*"));
+    assert!(!csp.contains(" http: "));
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("/commander/app.js"));
+    assert!(!html.contains("https://"));
+    assert!(!html.contains("<script>"), "inline scripts are forbidden");
+}
+
+#[tokio::test]
 async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -774,6 +822,85 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);
+}
+
+#[test]
+fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeover() {
+    use chrono::{Duration, Utc};
+
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let scopes: std::collections::BTreeSet<Scope> = [
+        Scope::MachineRead,
+        Scope::SessionRead,
+        Scope::PaneRead,
+        Scope::PaneInput,
+        Scope::HubAdmin,
+    ]
+    .into_iter()
+    .collect();
+    let pair = |label: &str| {
+        let invitation = auth
+            .mint_pairing("https://controller.example", scopes.clone(), now)
+            .unwrap();
+        let mut exchange = PairingExchange::test_fixture(
+            invitation.token,
+            "machine-test",
+            "https://controller.example",
+            scopes.clone(),
+        );
+        exchange.device_label = label.into();
+        let credential = auth.exchange_pairing(exchange, now).unwrap();
+        AuthContext {
+            device_id: credential.device_id,
+            credential_id: credential.credential_id,
+            device_label: label.into(),
+            operator_label: "test operator".into(),
+            controller_origin: "https://controller.example".into(),
+            scopes: scopes.clone(),
+            request_id: format!("request-{label}"),
+        }
+    };
+    let phone = pair("phone");
+    let laptop = pair("laptop");
+
+    auth.acquire_lease(&phone, "factory-a", now).unwrap();
+    assert!(
+        auth.lease_status(&phone, "factory-a", now)
+            .unwrap()
+            .held_by_me
+    );
+    let observed = auth.lease_status(&laptop, "factory-a", now).unwrap();
+    assert_eq!(observed.controller_label.as_deref(), Some("phone"));
+    assert!(!observed.held_by_me);
+    assert!(auth.acquire_lease(&laptop, "factory-a", now).is_err());
+
+    auth.acquire_or_force_lease(&laptop, "factory-a", now, true)
+        .unwrap();
+    assert_eq!(
+        auth.lease_status(&phone, "factory-a", now)
+            .unwrap()
+            .controller_label
+            .as_deref(),
+        Some("laptop")
+    );
+    auth.release_lease(&laptop, "factory-a", now).unwrap();
+    assert!(
+        auth.lease_status(&phone, "factory-a", now)
+            .unwrap()
+            .controller_device_id
+            .is_none()
+    );
+
+    auth.acquire_lease(&phone, "factory-a", now).unwrap();
+    assert!(
+        auth.lease_status(&laptop, "factory-a", now + Duration::seconds(31))
+            .unwrap()
+            .controller_device_id
+            .is_none(),
+        "expired leases stop enabling every viewer"
+    );
 }
 
 #[test]

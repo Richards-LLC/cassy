@@ -53,7 +53,7 @@ export class HubConnectionSupervisor {
     } catch (error) {
       if (!this.desired || error instanceof DOMException && error.name === "AbortError") return;
       if (error instanceof AuthenticationError) {
-        this.callbacks.onState("auth-blocked", error.message);
+        this.blockAuthentication(error.message);
         return;
       }
       if (!navigator.onLine) this.callbacks.onState("offline", "browser offline");
@@ -153,13 +153,45 @@ export class HubConnectionSupervisor {
     socket.onerror = () => this.callbacks.onSocketError(session, "terminal transport error");
   }
 
-  private handleAttachFailure(session: string, error: unknown): void {
+  private async handleAttachFailure(session: string, error: unknown): Promise<void> {
     if (error instanceof AuthenticationError) {
-      this.callbacks.onState("auth-blocked", error.message);
-      this.callbacks.onSocketError(session, "authentication blocked; re-pair to reconnect");
+      this.blockAuthentication(error.message, session);
+      return;
+    }
+    // A revoked origin is rejected at CORS preflight before the authenticated
+    // request can expose its 401/403 status. Distinguish that terminal policy
+    // refusal from an offline hub with a credential-free opaque health probe.
+    if (await this.hubIsReachable()) {
+      this.blockAuthentication("pairing expired or was revoked", session);
       return;
     }
     this.scheduleAttach(session);
+  }
+
+  private async hubIsReachable(): Promise<boolean> {
+    try {
+      await fetch(new URL("/v1/health", this.machine.baseUrl), {
+        method: "GET",
+        mode: "no-cors",
+        cache: "no-store",
+        credentials: "omit",
+        signal: AbortSignal.timeout(3_000),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private blockAuthentication(detail: string, session?: string): void {
+    this.desired = false;
+    this.eventAbort?.abort();
+    if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
+    this.sockets.clear();
+    this.callbacks.onState("auth-blocked", detail);
+    if (session) this.callbacks.onSocketError(session, "authentication blocked; re-pair to reconnect");
   }
 
   private scheduleAttach(session: string): void {

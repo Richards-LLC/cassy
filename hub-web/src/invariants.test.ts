@@ -81,4 +81,14 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("if (becameController) resizeControlledPanes(machineId, session)");
     expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
   });
+
+  it("turns a reachable revoked hub into a terminal auth stop", async () => {
+    const source = await readFile(new URL("connection.ts", import.meta.url), "utf8");
+    expect(source).toContain('new URL("/v1/health", this.machine.baseUrl)');
+    expect(source).toContain('mode: "no-cors"');
+    expect(source).toContain("if (await this.hubIsReachable())");
+    expect(source).toContain("this.desired = false");
+    expect(source).toContain("this.eventAbort?.abort()");
+    expect(source).toContain('this.callbacks.onState("auth-blocked", detail)');
+  });
 });

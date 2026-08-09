@@ -8,6 +8,13 @@ fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
     serde_json::to_vec(msg).ok().map(WsMessage::Binary)
 }
 
+/// WebSocket transport adapter for the shared Commander control dispatcher.
+pub(super) fn commander_control_from_ws_message(
+    message: &ClientMessage,
+) -> Option<super::delivery::CommanderControl> {
+    super::delivery::commander_control_from_message(message)
+}
+
 impl FactoryDaemon {
     /// Accept new WebSocket client connections (non-blocking).
     pub(super) async fn accept_ws_clients(&mut self) -> bool {
@@ -42,6 +49,8 @@ impl FactoryDaemon {
                 session_name: self.session_name.clone(),
                 state,
                 scrollback: Some(scrollback),
+                protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                capabilities: crate::ui::factory::protocol::daemon_capabilities(),
             };
 
             if let Some(frame) = ws_encode(&welcome) {
@@ -198,6 +207,19 @@ impl FactoryDaemon {
     /// Handle a single ClientMessage from a WebSocket client.
     /// Reuses handle_gui_message logic but routes responses to the WS client.
     async fn handle_ws_message(&mut self, client_id: usize, msg: ClientMessage) {
+        if let Some(control) = commander_control_from_ws_message(&msg) {
+            let error_prefix = control.error_prefix();
+            if let Err(error) = self.dispatch_commander_control(control).await
+                && let Some(frame) = ws_encode(&DaemonMessage::Error {
+                    message: format!("{error_prefix}: {error}"),
+                })
+                && let Some(client) = self.ws_clients.get_mut(&client_id)
+            {
+                let _ = client.sink.feed(frame).now_or_never();
+            }
+            return;
+        }
+
         match msg {
             ClientMessage::Attach { .. } => {
                 let state = self.build_session_state();
@@ -206,6 +228,8 @@ impl FactoryDaemon {
                     session_name: self.session_name.clone(),
                     state,
                     scrollback: Some(scrollback),
+                    protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                    capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                 };
                 if let Some(frame) = ws_encode(&welcome) {
                     if let Some(client) = self.ws_clients.get_mut(&client_id) {
@@ -356,6 +380,9 @@ impl FactoryDaemon {
                         )
                         .await;
                 }
+            }
+            ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
+                unreachable!("Commander controls return through the shared dispatcher")
             }
             ClientMessage::GetState => {
                 let state = self.build_session_state();

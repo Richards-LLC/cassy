@@ -46,19 +46,25 @@ jobs:
       - name: Build
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --release --target x86_64-unknown-linux-gnu
-
-      - name: Audit portable x86_64 ISA
         run: |
-          ghostty_archive="$(find target/x86_64-unknown-linux-gnu/release/build -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print -quit)"
-          test -n "$ghostty_archive"
-          ./scripts/check-portable-x86_64-isa.sh "$ghostty_archive"
+          # The subsequent build-input audit must inspect this build, never a
+          # stale BLAKE3 output restored from the target cache.
+          cargo clean -p blake3 --release --target x86_64-unknown-linux-gnu
+          cargo build -p cas --release --target x86_64-unknown-linux-gnu --locked
 
-      - name: Package
+      - name: Stage package
         run: |
           mkdir -p package
           cp target/x86_64-unknown-linux-gnu/release/cas package/
           cp LICENSE package/
+
+      - name: Audit exact packaged Linux executable
+        run: |
+          ./scripts/check-blake3-no-avx512-build.sh target/x86_64-unknown-linux-gnu/release/build
+          ./scripts/test-check-portable-x86_64-isa.sh package/cas
+
+      - name: Package
+        run: |
           cd package
           tar -czvf cas-x86_64-unknown-linux-gnu.tar.gz cas LICENSE
           mv cas-x86_64-unknown-linux-gnu.tar.gz ../

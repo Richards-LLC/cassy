@@ -14,6 +14,13 @@ fn queue_frame(client: &mut GuiConnection, frame: &[u8]) {
     client.write_buf.extend(frame);
 }
 
+/// GUI transport adapter for the shared Commander control dispatcher.
+pub(super) fn commander_control_from_gui_message(
+    message: &ClientMessage,
+) -> Option<super::delivery::CommanderControl> {
+    super::delivery::commander_control_from_message(message)
+}
+
 impl FactoryDaemon {
     /// Accept new GUI client connections (non-blocking).
     pub(super) fn accept_gui_clients(&mut self) -> bool {
@@ -35,6 +42,8 @@ impl FactoryDaemon {
                         session_name: self.session_name.clone(),
                         state,
                         scrollback: Some(scrollback),
+                        protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                        capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                     };
 
                     let frame = match encode_frame(&welcome) {
@@ -269,6 +278,19 @@ impl FactoryDaemon {
 
     /// Handle a single ClientMessage from a GUI client.
     async fn handle_gui_message(&mut self, client_id: usize, msg: ClientMessage) {
+        if let Some(control) = commander_control_from_gui_message(&msg) {
+            let error_prefix = control.error_prefix();
+            if let Err(error) = self.dispatch_commander_control(control).await {
+                if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                    message: format!("{error_prefix}: {error}"),
+                }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                {
+                    queue_frame(client, &frame);
+                }
+            }
+            return;
+        }
+
         match msg {
             ClientMessage::Attach { .. } => {
                 let state = self.build_session_state();
@@ -277,6 +299,8 @@ impl FactoryDaemon {
                     session_name: self.session_name.clone(),
                     state,
                     scrollback: Some(scrollback),
+                    protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
+                    capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                 };
                 if let Some(frame) = encode_frame(&welcome) {
                     if let Some(client) = self.gui_clients.get_mut(&client_id) {
@@ -430,6 +454,9 @@ impl FactoryDaemon {
                         )
                         .await;
                 }
+            }
+            ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
+                unreachable!("Commander controls return through the shared dispatcher")
             }
             ClientMessage::GetState => {
                 let state = self.build_session_state();

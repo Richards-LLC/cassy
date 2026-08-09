@@ -1149,6 +1149,10 @@ mod tests {
     use std::borrow::Cow;
     use std::sync::Arc;
 
+    fn install_test_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     fn make_tool(name: &str, description: &str) -> Tool {
         Tool {
             name: Cow::Owned(name.to_string()),
@@ -1164,6 +1168,7 @@ mod tests {
     }
 
     fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {
+        install_test_crypto_provider();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -1351,7 +1356,8 @@ mod tests {
     /// Before the fix, rmcp's `transport-streamable-http-client-reqwest` feature pulled in
     /// `reqwest` with `default-features = false` and no TLS backend, so any https upstream
     /// (Vercel, Context7, GitHub Copilot, …) failed immediately with
-    /// `invalid URL, scheme is not http`. Enabling rmcp's `reqwest` feature adds rustls and
+    /// `invalid URL, scheme is not http`. Enabling rmcp's `reqwest-tls-no-provider` feature adds
+    /// rustls transport support while leaving CAS's process-wide ring provider in control, and
     /// lets the transport actually attempt the TLS handshake.
     ///
     /// This test points at an unreachable local port so no network is required. It passes as
@@ -1359,6 +1365,7 @@ mod tests {
     /// rejection — i.e. TLS support is compiled in.
     #[tokio::test(flavor = "current_thread")]
     async fn https_upstream_is_not_rejected_by_scheme() {
+        install_test_crypto_provider();
         let mut configs = HashMap::new();
         configs.insert(
             "https-regression".to_string(),

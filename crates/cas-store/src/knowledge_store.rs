@@ -2396,6 +2396,13 @@ mod tests {
 
     #[test]
     fn blake3_helper_is_stable_and_matches_file_hash() {
+        // Official BLAKE3 empty-input vector. ISA/provider changes may change
+        // throughput, never the canonical content identity stored on disk.
+        assert_eq!(
+            blake3_hex(b""),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("f.txt");
         std::fs::write(&path, b"hello knowledge").unwrap();

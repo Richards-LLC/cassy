@@ -317,6 +317,90 @@ pub(crate) fn frame_pty_payload(harness: SupervisorCli, source: &str, text: &str
     }
 }
 
+/// Commander controls that both daemon client transports route through the
+/// same execution seam. Keeping this owned makes the GUI and WebSocket
+/// dispatchers thin adapters: neither transport can grow a second interrupt or
+/// semantic-message implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CommanderControl {
+    InterruptPane {
+        pane_id: String,
+    },
+    SendMessage {
+        target: String,
+        text: String,
+        summary: Option<String>,
+        urgent: bool,
+        attribution: crate::ui::factory::protocol::MessageAttribution,
+    },
+}
+
+impl CommanderControl {
+    /// Preserve the reviewed per-verb daemon error wording across both
+    /// transports while sharing the execution path itself.
+    pub(super) fn error_prefix(&self) -> &'static str {
+        match self {
+            Self::InterruptPane { .. } => "targeted interrupt failed",
+            Self::SendMessage { .. } => "semantic message enqueue failed",
+        }
+    }
+}
+
+/// Recognize the additive Commander controls without changing the legacy
+/// `ClientMessage::Interrupt` path.
+pub(super) fn commander_control_from_message(
+    message: &crate::ui::factory::protocol::ClientMessage,
+) -> Option<CommanderControl> {
+    use crate::ui::factory::protocol::ClientMessage;
+
+    match message {
+        ClientMessage::InterruptPane { pane_id } => Some(CommanderControl::InterruptPane {
+            pane_id: pane_id.clone(),
+        }),
+        ClientMessage::SendMessage {
+            target,
+            text,
+            summary,
+            urgent,
+            attribution,
+        } => Some(CommanderControl::SendMessage {
+            target: target.clone(),
+            text: text.clone(),
+            summary: summary.clone(),
+            urgent: *urgent,
+            attribution: attribution.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Store one Commander semantic message in the exact prompt queue drained by
+/// coordination delivery. Split from the daemon method so parity tests can
+/// compare a Commander row with an MCP coordination row in one isolated DB.
+pub(super) fn enqueue_commander_message(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    target: &str,
+    text: &str,
+    summary: Option<&str>,
+    urgent: bool,
+    attribution: &crate::ui::factory::protocol::MessageAttribution,
+) -> anyhow::Result<cas_store::EnqueueOutcome> {
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let attribution_json = serde_json::to_value(attribution)?;
+    let priority = urgent.then_some(cas_store::NotificationPriority::Critical);
+    Ok(queue.enqueue_attributed_urgent_with_outcome(
+        &attribution.queue_source(),
+        target,
+        text,
+        Some(factory_session),
+        summary,
+        priority,
+        urgent,
+        Some(&attribution_json),
+    )?)
+}
+
 /// cas-c73d (GH #177): which Claude config dir does this worker's harness run
 /// under, if not the daemon's?
 ///
@@ -356,6 +440,71 @@ pub(crate) fn recipient_config_dir(spec: &cas_mux::WorkerSpec) -> Option<String>
 }
 
 impl FactoryDaemon {
+    /// Execute a Commander control after either client transport recognizes it.
+    /// Targeted interrupt reaches the same `Mux::break_turn` primitive used by
+    /// urgent coordination delivery, and semantic messages reach the same
+    /// durable queue consumed by `process_prompt_queue`.
+    pub(super) async fn dispatch_commander_control(
+        &self,
+        control: CommanderControl,
+    ) -> anyhow::Result<()> {
+        match control {
+            CommanderControl::InterruptPane { pane_id } => self.interrupt_pane_turn(&pane_id).await,
+            CommanderControl::SendMessage {
+                target,
+                text,
+                summary,
+                urgent,
+                attribution,
+            } => {
+                self.enqueue_attributed_message(
+                    &target,
+                    &text,
+                    summary.as_deref(),
+                    urgent,
+                    &attribution,
+                )?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Enqueue a Commander semantic message through the same durable prompt
+    /// queue drained by MCP coordination messages. Delivery therefore reuses
+    /// the existing inbox+wake and urgent interrupt-and-redirect machinery.
+    pub(crate) fn enqueue_attributed_message(
+        &self,
+        target: &str,
+        text: &str,
+        summary: Option<&str>,
+        urgent: bool,
+        attribution: &crate::ui::factory::protocol::MessageAttribution,
+    ) -> anyhow::Result<cas_store::EnqueueOutcome> {
+        let outcome = enqueue_commander_message(
+            self.app.cas_dir(),
+            &self.session_name,
+            target,
+            text,
+            summary,
+            urgent,
+            attribution,
+        )?;
+
+        // Match coordination's best-effort wake signal. This daemon will also
+        // observe the row on its next queue pass if signaling is unavailable.
+        if matches!(outcome, cas_store::EnqueueOutcome::Created(_)) {
+            let _ = cas_factory::notify_daemon(self.app.cas_dir());
+        }
+        Ok(outcome)
+    }
+
+    /// Targeted Commander interrupt. Coordination urgent delivery enters the
+    /// same canonical `Mux::break_turn` primitive before injecting its message.
+    pub(crate) async fn interrupt_pane_turn(&self, pane_id: &str) -> anyhow::Result<()> {
+        let actual = self.resolve_pane_name(pane_id);
+        self.app.mux.break_turn(&actual).await.map_err(Into::into)
+    }
+
     /// cas-c73d (GH #177): the Agent-Teams tree the RECIPIENT's harness really
     /// reads, when that is not the daemon's own.
     ///
@@ -808,6 +957,58 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn commander_attribution() -> crate::ui::factory::protocol::MessageAttribution {
+        crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("device-123".to_string()),
+            credential_id: Some("credential-456".to_string()),
+            device_label: Some("Pippenz phone".to_string()),
+            operator_label: Some("Pippenz".to_string()),
+            controller_origin: Some("https://commander.example".to_string()),
+            request_id: Some("request-789".to_string()),
+        }
+    }
+
+    /// cas-f65d: exercise the exact transport adapters called by each daemon
+    /// client handler. Both must produce the same shared control value for both
+    /// additive verbs, while legacy Interrupt remains outside this dispatcher.
+    #[test]
+    fn gui_and_websocket_route_commander_controls_through_one_dispatch_contract() {
+        use crate::ui::factory::protocol::ClientMessage;
+
+        let controls = [
+            ClientMessage::InterruptPane {
+                pane_id: "worker-1".to_string(),
+            },
+            ClientMessage::SendMessage {
+                target: "worker-1".to_string(),
+                text: "checkpoint now".to_string(),
+                summary: Some("checkpoint".to_string()),
+                urgent: true,
+                attribution: commander_attribution(),
+            },
+        ];
+
+        for message in &controls {
+            let gui = super::super::gui_client::commander_control_from_gui_message(message)
+                .expect("GUI must recognize Commander control");
+            let ws = super::super::ws_client::commander_control_from_ws_message(message)
+                .expect("WebSocket must recognize Commander control");
+            assert_eq!(gui, ws, "both transports must enter one dispatcher");
+            assert_eq!(gui, commander_control_from_message(message).unwrap());
+        }
+
+        assert!(
+            super::super::gui_client::commander_control_from_gui_message(&ClientMessage::Interrupt)
+                .is_none(),
+            "legacy focused-pane Interrupt keeps its original transport path"
+        );
+        assert!(
+            super::super::ws_client::commander_control_from_ws_message(&ClientMessage::Interrupt)
+                .is_none(),
+            "legacy focused-pane Interrupt keeps its original transport path"
+        );
+    }
 
     #[test]
     fn codex_recipient_always_pty_even_under_teams() {

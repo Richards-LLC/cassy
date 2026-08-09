@@ -6,6 +6,12 @@
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
+    println!("cargo:rerun-if-changed=../hub-web/dist/app.js");
+    println!("cargo:rerun-if-changed=../hub-web/dist/app.css");
+    println!("cargo:rerun-if-changed=../hub-web/dist/ghostty-vt.wasm");
+    println!("cargo:rerun-if-changed=../hub-web/dist/ghostty-write-pty.wasm");
+    println!("cargo:rerun-if-changed=../hub-web/dist/symbols.woff2");
     // Load .env file if present (for telemetry keys)
     load_env_file();
 

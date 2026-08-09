@@ -95,7 +95,8 @@ pub use daemon::{
 pub use layout::{Direction, MissionControlLayout, PANE_SIDECAR, PaneGrid};
 pub use notification::{Notifier, NotifyBackend, NotifyConfig};
 pub use protocol::{
-    ClientMessage, DaemonMessage, PaneInfo, PaneKind, SessionMetadata, SessionState,
+    ClientMessage, DaemonMessage, MessageAttribution, PROTOCOL_VERSION, PaneInfo, PaneKind,
+    SessionMetadata, SessionState, daemon_capabilities,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{

@@ -1,11 +1,17 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
 import { createDeviceKey, dpopHeaders } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import type { StoredMachine } from "./types";
 
 Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("binding Commander browser invariants", () => {
   it("H4-CATALOG-01 consumes pairing fragments synchronously and preserves no capability in the URL", () => {
@@ -86,9 +92,65 @@ describe("binding Commander browser invariants", () => {
     const source = await readFile(new URL("connection.ts", import.meta.url), "utf8");
     expect(source).toContain('new URL("/v1/health", this.machine.baseUrl)');
     expect(source).toContain('mode: "no-cors"');
-    expect(source).toContain("if (await this.hubIsReachable())");
+    expect(source).toContain("const reachable = await this.hubIsReachable()");
+    expect(source).toContain("if (reachable)");
     expect(source).toContain("this.desired = false");
     expect(source).toContain("this.eventAbort?.abort()");
     expect(source).toContain('this.callbacks.onState("auth-blocked", detail)');
+  });
+
+  it.each(["stop", "auth-block"] as const)("cancels a scheduled attach retry on %s", async (terminalAction) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    const fetchMock = vi.fn(async () => ({ status: 200, ok: true, json: async () => ({ ticket: "unused" }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const socketOpened = vi.fn();
+    class FakeWebSocket {
+      static readonly OPEN = 1;
+      static readonly CONNECTING = 0;
+      readonly readyState = FakeWebSocket.OPEN;
+      binaryType = "";
+      onopen: (() => void) | null = null;
+      onmessage: ((message: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor() { socketOpened(); }
+      close(): void {}
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["pane-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    const internals = supervisor as unknown as {
+      desired: boolean;
+      scheduleAttach(session: string): void;
+      blockAuthentication(detail: string, session?: string): void;
+      attachRetryTimers: Map<string, number>;
+      socketAttempts: Map<string, number>;
+    };
+    internals.desired = true;
+    internals.scheduleAttach("factory-a");
+    internals.scheduleAttach("factory-a");
+
+    expect(vi.getTimerCount()).toBe(1);
+    if (terminalAction === "stop") supervisor.stop();
+    else internals.blockAuthentication("revoked", "factory-a");
+    await vi.advanceTimersByTimeAsync(20_000);
+    await supervisor.attach("factory-a");
+
+    expect(internals.attachRetryTimers.size).toBe(0);
+    expect(internals.socketAttempts.size).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(socketOpened).not.toHaveBeenCalled();
   });
 });

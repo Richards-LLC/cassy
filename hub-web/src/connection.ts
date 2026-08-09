@@ -23,6 +23,7 @@ export class HubConnectionSupervisor {
   private retryTimer?: number;
   private readonly sockets = new Map<string, WebSocket>();
   private readonly socketAttempts = new Map<string, number>();
+  private readonly attachRetryTimers = new Map<string, number>();
 
   constructor(readonly machine: StoredMachine, private readonly callbacks: HubCallbacks) {}
 
@@ -36,6 +37,8 @@ export class HubConnectionSupervisor {
     this.desired = false;
     this.eventAbort?.abort();
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.clearAttachRetries();
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
     this.callbacks.onState("idle");
@@ -60,7 +63,10 @@ export class HubConnectionSupervisor {
       const delay = RETRY_DELAYS[Math.min(this.attempt, RETRY_DELAYS.length - 1)];
       this.attempt += 1;
       this.callbacks.onState("reconnecting", `retrying in ${delay / 1000}s`);
-      this.retryTimer = window.setTimeout(() => void this.connect(), delay);
+      this.retryTimer = window.setTimeout(() => {
+        this.retryTimer = undefined;
+        if (this.desired) void this.connect();
+      }, delay);
     }
   }
 
@@ -134,9 +140,16 @@ export class HubConnectionSupervisor {
   }
 
   async attach(session: string): Promise<void> {
+    if (!this.desired) return;
+    const retryTimer = this.attachRetryTimers.get(session);
+    if (retryTimer !== undefined) {
+      window.clearTimeout(retryTimer);
+      this.attachRetryTimers.delete(session);
+    }
     const existing = this.sockets.get(session);
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
     const ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", { session });
+    if (!this.desired) return;
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
@@ -154,6 +167,7 @@ export class HubConnectionSupervisor {
   }
 
   private async handleAttachFailure(session: string, error: unknown): Promise<void> {
+    if (!this.desired) return;
     if (error instanceof AuthenticationError) {
       this.blockAuthentication(error.message, session);
       return;
@@ -161,7 +175,9 @@ export class HubConnectionSupervisor {
     // A revoked origin is rejected at CORS preflight before the authenticated
     // request can expose its 401/403 status. Distinguish that terminal policy
     // refusal from an offline hub with a credential-free opaque health probe.
-    if (await this.hubIsReachable()) {
+    const reachable = await this.hubIsReachable();
+    if (!this.desired) return;
+    if (reachable) {
       this.blockAuthentication("pairing expired or was revoked", session);
       return;
     }
@@ -188,6 +204,7 @@ export class HubConnectionSupervisor {
     this.eventAbort?.abort();
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
+    this.clearAttachRetries();
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
     this.callbacks.onState("auth-blocked", detail);
@@ -195,11 +212,22 @@ export class HubConnectionSupervisor {
   }
 
   private scheduleAttach(session: string): void {
-    if (!this.desired) return;
+    if (!this.desired || this.attachRetryTimers.has(session)) return;
     const attempt = this.socketAttempts.get(session) ?? 0;
     const delay = RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)];
     this.socketAttempts.set(session, attempt + 1);
-    window.setTimeout(() => void this.attach(session).catch((error) => this.handleAttachFailure(session, error)), delay);
+    const timer = window.setTimeout(() => {
+      this.attachRetryTimers.delete(session);
+      if (!this.desired) return;
+      void this.attach(session).catch((error) => this.handleAttachFailure(session, error));
+    }, delay);
+    this.attachRetryTimers.set(session, timer);
+  }
+
+  private clearAttachRetries(): void {
+    for (const timer of this.attachRetryTimers.values()) window.clearTimeout(timer);
+    this.attachRetryTimers.clear();
+    this.socketAttempts.clear();
   }
 
   send(session: string, message: unknown): boolean {

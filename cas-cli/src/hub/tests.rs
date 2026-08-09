@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use super::*;
-use crate::ui::factory::protocol::DaemonMessage;
+use crate::ui::factory::DaemonMessage;
 
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
@@ -61,7 +61,10 @@ async fn h1_mux_03_two_viewers_three_panes_share_one_upstream() {
     assert_eq!(first.recv().await.unwrap().bytes, worker_one.bytes);
     assert_eq!(second.recv().await.unwrap().bytes, worker_one.bytes);
     assert_eq!(second.recv().await.unwrap().bytes, worker_two.bytes);
-    assert!(first.try_recv().is_err(), "pane filtering happens in the hub");
+    assert!(
+        first.try_recv().is_err(),
+        "pane filtering happens in the hub"
+    );
 }
 
 #[tokio::test]
@@ -83,7 +86,10 @@ async fn h1_bp_04_slow_viewer_lags_without_new_upstream_or_harming_fast_viewer()
         let _ = fast.recv().await.unwrap();
     }
 
-    assert!(matches!(slow.recv().await, Err(ViewerRecvError::Lagged { .. })));
+    assert!(matches!(
+        slow.recv().await,
+        Err(ViewerRecvError::Lagged { .. })
+    ));
     assert_eq!(mux.upstream_start_count("factory-a").await, 1);
     assert!(fast.try_recv().is_err());
 }

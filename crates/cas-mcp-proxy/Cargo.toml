@@ -22,3 +22,5 @@ cas-types = { path = "../cas-types" }
 
 [dev-dependencies]
 tempfile = "3.14"
+# Standalone transport tests must emulate cas main's process-wide provider.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

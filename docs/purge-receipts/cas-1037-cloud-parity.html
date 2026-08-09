@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAS-1037 cloud parity repair receipt — 2026-08-09</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #17202a;
+  --muted: #52606d;
+  --border: #b8c2cc;
+  --accent: #145da0;
+  --accent-soft: #e7f1fb;
+  --good: #176b3a;
+  --good-soft: #e7f5ec;
+  --warn: #855b00;
+  --warn-soft: #fff4d6;
+  --bad: #9c2f2f;
+  --shadow: 0 1px 3px rgba(0, 0, 0, .10);
+}
+* { box-sizing: border-box; }
+html { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+a { color: var(--accent); }
+a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.skip-link { position: absolute; left: -999px; top: 0; background: var(--surface); padding: .7rem 1rem; z-index: 2; }
+.skip-link:focus { left: 1rem; top: 1rem; }
+header, main, footer { width: min(1120px, calc(100% - 2rem)); margin-inline: auto; }
+header { padding: 3rem 0 1.4rem; }
+.eyebrow { color: var(--accent); font-weight: 750; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+h1 { margin: .35rem 0 .8rem; font-size: clamp(2rem, 6vw, 3.7rem); line-height: 1.04; max-width: 17ch; }
+h2 { margin-top: 0; font-size: 1.55rem; }
+h3 { font-size: 1.08rem; }
+.verdict { font-size: 1.18rem; max-width: 78ch; margin: 0; }
+.confidence { display: inline-flex; align-items: center; gap: .45rem; margin-top: 1rem; padding: .35rem .7rem; border: 1px solid var(--good); border-radius: 999px; color: var(--good); font-weight: 700; background: var(--good-soft); }
+.confidence::before { content: "✓"; font-weight: 900; }
+section { background: var(--surface); border: 1px solid var(--border); border-radius: .65rem; box-shadow: var(--shadow); padding: clamp(1rem, 3vw, 1.6rem); margin: 0 0 1rem; }
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; margin: 1rem 0; }
+.metric { border: 1px solid var(--border); border-radius: .5rem; padding: .9rem; background: var(--surface); }
+.metric .value { font-size: 1.75rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.metric .label { color: var(--muted); font-size: .9rem; }
+.metric.good { border-left: .45rem solid var(--good); }
+.metric.warn { border-left: .45rem dashed var(--warn); }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .94rem; }
+caption { text-align: left; color: var(--muted); padding: 0 0 .6rem; font-size: .88rem; }
+th, td { border-bottom: 1px solid var(--border); padding: .65rem .7rem; vertical-align: top; text-align: left; }
+thead th { background: var(--accent-soft); position: sticky; top: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+.total th, .total td { font-weight: 800; border-top: 2px solid var(--text); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; background: var(--accent-soft); padding: .08rem .25rem; border-radius: .2rem; }
+pre { overflow-x: auto; padding: 1rem; border: 1px solid var(--border); background: var(--bg); border-radius: .45rem; }
+pre code { padding: 0; background: transparent; }
+.callout { border-left: .45rem dashed var(--warn); background: var(--warn-soft); padding: .85rem 1rem; margin: 1rem 0; }
+.source { color: var(--muted); font-size: .82rem; margin-top: .65rem; }
+ol, ul { padding-left: 1.35rem; }
+li + li { margin-top: .35rem; }
+footer { color: var(--muted); padding: .8rem 0 3rem; font-size: .9rem; }
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10151b;
+    --surface: #18212a;
+    --text: #edf2f7;
+    --muted: #b9c4cf;
+    --border: #536273;
+    --accent: #7ab8f5;
+    --accent-soft: #183550;
+    --good: #73d69b;
+    --good-soft: #173b28;
+    --warn: #f0c35b;
+    --warn-soft: #3b3017;
+    --bad: #ff9696;
+    --shadow: none;
+  }
+}
+@media (max-width: 720px) {
+  .grid { grid-template-columns: 1fr; }
+  header, main, footer { width: min(100% - 1rem, 1120px); }
+  th, td { padding: .55rem; }
+}
+@media print {
+  :root {
+    --bg: #fff; --surface: #fff; --text: #000; --muted: #333; --border: #777;
+    --accent: #064f8b; --accent-soft: #eef4f8; --good: #174f2d; --good-soft: #fff;
+    --warn: #604100; --warn-soft: #fff; --shadow: none;
+  }
+  body { background: #fff; font-size: 10.5pt; }
+  header, main, footer { width: 100%; }
+  header { padding-top: 0; }
+  section, .metric, .callout { break-inside: avoid; box-shadow: none; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+  a[href]::after { content: " (" attr(href) ")"; font-size: .8em; }
+  .skip-link { display: none; }
+  pre { white-space: pre-wrap; word-break: break-word; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to report</a>
+<header>
+  <div class="eyebrow">Cloud parity repair · 2026-08-09</div>
+  <h1>Destructive cleanup is clean.</h1>
+  <p class="verdict"><strong>All 315 verified fixture tasks are gone.</strong> Fresh project-scoped pulls contain no cloud-only rows, and the queue is empty. Fifty-five local-only rows remain isolated because server-side global-ID collisions make client repair unsafe.</p>
+  <div class="confidence">High confidence</div>
+</header>
+<main id="main">
+  <section aria-labelledby="overview">
+    <h2 id="overview">Overview</h2>
+    <div class="grid" aria-label="Key outcomes">
+      <div class="metric good"><div class="value">315 / 315</div><div class="label">verified fixtures deleted</div></div>
+      <div class="metric good"><div class="value">0 / 0</div><div class="label">queue pending / failed</div></div>
+      <div class="metric warn"><div class="value">55</div><div class="label">collision-blocked local rows retained</div></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <caption>Investigation scope and conclusion. Source: live local store and CAS Cloud pulls, 2026-08-09.</caption>
+        <tbody>
+          <tr><th scope="row">Question</th><td>Can this machine hand off a clean <code>cas-src</code> cloud snapshot without deleting legitimate data?</td></tr>
+          <tr><th scope="row">Verdict</th><td>Yes for cloud cleanup; 55 collision-blocked local rows require server repair before exact two-way parity.</td></tr>
+          <tr><th scope="row">Confidence</th><td>High</td></tr>
+          <tr><th scope="row">Scope</th><td>Entries, tasks, rules, skills, knowledge pages, and the live sync queue.</td></tr>
+          <tr><th scope="row">Data window</th><td>Baseline and repair pulls on 2026-08-09; five-pull close-gate series 13:39:11–13:39:36 EDT.</td></tr>
+          <tr><th scope="row">Author</th><td>CAS factory worker <code>loyal-koala-52</code>, task <code>cas-1037</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="baseline">
+    <h2 id="baseline">Baseline</h2>
+    <p>The initial fresh, project-scoped personal and team pulls were compared by entity ID against the live local project store. The combined cloud set had 2,438 entries and 2,490 tasks; the local store had 2,449 entries and 2,219 tasks. Exact set differences were 11 local-only entries, 44 local-only tasks, zero cloud-only entries, and 315 cloud-only tasks.</p>
+    <p class="source">Source: baseline scoped pull and SQLite ID-set comparison, 2026-08-09.</p>
+  </section>
+
+  <section aria-labelledby="evidence">
+    <h2 id="evidence">Evidence</h2>
+    <div class="table-wrap">
+      <table>
+        <caption>Evidence chain supporting the cleanup and collision verdicts.</caption>
+        <thead><tr><th scope="col">Observation</th><th scope="col">Source</th><th scope="col">What it proves</th></tr></thead>
+        <tbody>
+          <tr><td>All 315 cloud-only tasks passed every fixture predicate and had zero local overlap.</td><td><code>cas-1037-cloud-task-manifest.tsv</code>; fresh pre-delete <code>cas-src</code> team pull.</td><td>The deletion set was fully enumerated and no candidate was inferred from title alone.</td></tr>
+          <tr><td>The fixed binary drained 315 team task-delete tombstones and the queue reached <code>total=0</code>, <code>pending=0</code>, <code>failed=0</code>.</td><td><code>./target/debug/cas --json cloud sync</code>; <code>./target/debug/cas --json cloud queue</code>.</td><td>The intended delete operations completed without a stranded or failed queue row.</td></tr>
+          <tr><td>Five consecutive post-delete pulls have zero cloud-only tasks and zero cloud-only entries.</td><td>Personal/team pull series from 13:39:11–13:39:36 EDT; ID-set comparison against SQLite.</td><td>The purge removed the complete candidate set and did not leave new cloud leakage.</td></tr>
+          <tr><td>Three valid team entry copies appeared transiently at 13:34, then disappeared by 13:38; a personal entry visible at 13:26 also disappeared.</td><td>Scoped pull comparison for IDs <code>2026-07-31-6</code>, <code>2026-08-01-1</code>, <code>2026-08-01-2</code>, and <code>2026-08-09-18</code>; queue stayed empty.</td><td>Entry identity and visibility is eventually or inconsistently scoped; a single snapshot is not a trustworthy backfill receipt.</td></tr>
+          <tr><td>Team upserts resolved canonical project ID <code>cas-src</code> but each missing task returned a nested skip.</td><td>Captured team response: <code>synced.tasks.skipped=1</code>, <code>canonical_id=cas-src</code>.</td><td>The task residual is not caused by this client pushing under the wrong current canonical ID.</td></tr>
+          <tr><td>Direct legacy ID lookups show 11 still-missing foreign entries, 24 foreign tasks, and 20 same-identity tasks hidden under divergent or unscoped bindings.</td><td><code>cas-1037-operator-review-residual.tsv</code>.</td><td>Retrying, deleting, or replacing these global IDs could overwrite another project's data.</td></tr>
+          <tr><td>The client now retains nested and malformed skip responses for retry instead of marking them synced.</td><td>Commit <code>6754d146</code>; scoped push/team-sync tests.</td><td>The live response shape can no longer silently discard a skipped upsert.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="gate">
+    <h2 id="gate">Fixture deletion gate</h2>
+    <p>Every cloud-only task had to pass every predicate below before deletion:</p>
+    <ul>
+      <li>absent from the local <code>tasks</code> table;</li>
+      <li>project ID exactly <code>cas-src</code>;</li>
+      <li>created from 2026-03-20 through 2026-06-07;</li>
+      <li>status <code>open</code>, task type <code>task</code>, priority 2;</li>
+      <li>empty description, acceptance criteria, and labels;</li>
+      <li>title exactly one of <code>MCP Protocol Test Task</code>, <code>Context test task</code>, <code>Consolidated task test</code>, or <code>Test task for notification test</code>.</li>
+    </ul>
+    <p>All 315 rows passed. Counts by title were 81, 79, 76, and 79 respectively. The per-row evidence and final <code>deleted</code> result are in <code>cas-1037-cloud-task-manifest.tsv</code>. No fixture candidate failed verification, so the deletion-gate operator-review residual is empty.</p>
+    <p class="source">Source: per-row manifest and fresh pre-delete scoped pull, 2026-08-09.</p>
+  </section>
+
+  <section aria-labelledby="result">
+    <h2 id="result">Repair result</h2>
+    <p>A fresh, project-scoped pull immediately before deletion reproduced the manifest exactly: 315 of 315 candidate IDs were present in the <code>cas-src</code> team pull, absent locally and from the personal pull, and passed every fixture predicate. The fixed worktree binary (<code>cas 2.55.5</code>, commit <code>6754d146</code>) then drained exactly 315 team task-delete tombstones. A fresh pull after the drain found zero cloud-only tasks and zero cloud-only entries. The queue finished with <code>total=0</code>, <code>pending=0</code>, and <code>failed=0</code>.</p>
+    <div class="table-wrap">
+      <table>
+        <caption>Final project-scoped parity counts. Source: SQLite and five fresh cloud pulls, 2026-08-09 13:39:11–13:39:36 EDT.</caption>
+        <thead><tr><th scope="col">Entity</th><th class="num" scope="col">Local</th><th class="num" scope="col">Cloud</th><th class="num" scope="col">Local-only</th><th class="num" scope="col">Cloud-only</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Entries</th><td class="num">2,449</td><td class="num">2,438</td><td class="num">11</td><td class="num">0</td></tr>
+          <tr><th scope="row">Tasks</th><td class="num">2,219</td><td class="num">2,175</td><td class="num">44</td><td class="num">0</td></tr>
+          <tr><th scope="row">Rules</th><td class="num">173</td><td class="num">173</td><td class="num">0</td><td class="num">0</td></tr>
+          <tr><th scope="row">Skills</th><td class="num">3</td><td class="num">3</td><td class="num">0</td><td class="num">0</td></tr>
+          <tr><th scope="row">Knowledge pages</th><td class="num">107</td><td class="num">107</td><td class="num">0</td><td class="num">0</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><strong>Operator-review residual:</strong> Seven of the baseline's 11 local-only entries were safely backfilled. Project-scoped visibility exposed additional global short-ID collisions, leaving eleven entry residuals. All 44 task backfills remain server-blocked.</div>
+  </section>
+
+  <section aria-labelledby="reasoning">
+    <h2 id="reasoning">Reasoning chain</h2>
+    <ol>
+      <li>The pre-delete manifest was regenerated from a fresh scoped pull and matched all 315 IDs exactly, ruling out queue pollution or a stale snapshot.</li>
+      <li>Every row passed independent local-presence, project, date, shape, and title gates. The destructive set was bounded before any tombstone was enqueued.</li>
+      <li>The fixed worktree binary drained exactly that bounded set. A second scoped pull contained none of the IDs and showed no new cloud-only rows, while the queue was empty.</li>
+      <li>Backfill retries returned structured skips even though the team response echoed canonical project <code>cas-src</code>. Direct ID lookups then exposed either a foreign entity or the same task under a non-<code>cas-src</code> binding.</li>
+      <li>That evidence rules out client repinning as a safe complete repair. The only safe remaining action is a server-side project-scoped identity migration; the 55 rows remain local and are listed individually.</li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="falsify">
+    <h2 id="falsify">What would falsify this</h2>
+    <p>The cleanup verdict would be overturned by any fresh <code>cas-src</code> pull containing one of the 315 manifest IDs, any new cloud-only row absent from the final receipt, or any nonzero pending/failed queue count. The collision verdict would be overturned if a project-scoped server lookup showed that one of the 55 residual IDs is unoccupied in <code>cas-src</code> and can be inserted without touching a foreign row.</p>
+  </section>
+
+  <section aria-labelledby="actions">
+    <h2 id="actions">Next actions</h2>
+    <ol>
+      <li>The <code>petra-stella-cloud</code> owner should implement the project-scoped identity and migration request in <a href="../requests/2026-08-09-project-scoped-entity-identity-collisions.md">the server request</a>.</li>
+      <li>An operator should rerun the 55-row residual manifest after that migration and confirm exact local/cloud parity before the Mac handoff.</li>
+      <li>Keep the skip-parser fix from commit <code>6754d146</code> deployed so future unknown or nested skip signals remain retryable.</li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="provenance">
+    <h2 id="provenance">Provenance</h2>
+    <ul>
+      <li>Markdown source: <a href="cas-1037-cloud-parity.md">cas-1037-cloud-parity.md</a></li>
+      <li>Row evidence: <a href="cas-1037-cloud-task-manifest.tsv">cas-1037-cloud-task-manifest.tsv</a> and <a href="cas-1037-operator-review-residual.tsv">cas-1037-operator-review-residual.tsv</a></li>
+      <li>Code examined and fixed at commit: <code>6754d146</code></li>
+      <li>Repeated close-gate extraction: 2026-08-09 13:39:11–13:39:36 EDT (five pulls)</li>
+      <li>Cloud scope: team <code>2a57bec9-5dfa-4a8f-b711-31f9aeb8d6cb</code>, canonical project <code>cas-src</code></li>
+    </ul>
+    <h3>Commands and queries</h3>
+    <pre><code>sqlite3 /home/pippenz/Petrastella/cas-src/.cas/cas.db
+curl -fsS -H "Authorization: Bearer $CAS_CLOUD_TOKEN" \
+  "$CAS_CLOUD_ENDPOINT/api/sync/pull?types=entries,tasks,rules,skills&amp;project_id=cas-src"
+curl -fsS -H "Authorization: Bearer $CAS_CLOUD_TOKEN" \
+  "$CAS_CLOUD_ENDPOINT/api/teams/2a57bec9-5dfa-4a8f-b711-31f9aeb8d6cb/sync/pull?project_id=cas-src"
+curl -fsS -H "Authorization: Bearer $CAS_CLOUD_TOKEN" \
+  "$CAS_CLOUD_ENDPOINT/api/sync/pull?types=knowledge_pages&amp;team_id=2a57bec9-5dfa-4a8f-b711-31f9aeb8d6cb&amp;project_id=cas-src"
+comm -23 final-local-*-ids.txt final-cloud-*-ids.txt
+./target/debug/cas --json cloud sync
+./target/debug/cas --json cloud queue</code></pre>
+    <p>The installed daemon at <code>/home/pippenz/.local/bin/cas</code> (2.55.5, PID 3983675) was known to perform automatic drains with the pre-fix delete behavior during the investigation. The destructive purge itself was explicitly executed by the fixed worktree binary after the live queue was confirmed exclusive. The fresh cloud pull and empty-queue receipt independently verify the result.</p>
+  </section>
+</main>
+<footer>
+  <p>CAS cloud parity repair receipt · 2026-08-09 · Source of truth: <a href="cas-1037-cloud-parity.md">Markdown report</a></p>
+</footer>
+</body>
+</html>

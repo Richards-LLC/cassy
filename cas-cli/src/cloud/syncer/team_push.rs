@@ -212,13 +212,31 @@ impl CloudSyncer {
                 git_remote,
             ) {
                 Ok(response) => {
-                    synced += response
-                        .as_ref()
-                        .map(|body| Self::team_count_for(body, entity_key))
-                        .unwrap_or(sent_count);
-
                     if let Some(body) = response.as_ref() {
                         self.maybe_adopt_team_canonical_id(body);
+                    }
+
+                    let (accepted, skipped) = match response.as_ref() {
+                        Some(body) => match Self::team_counts_for(body, entity_key) {
+                            Ok(Some(counts)) => counts,
+                            Ok(None) => (sent_count, 0),
+                            Err(error) => {
+                                errors.push(format!(
+                                    "{entity_key} push returned an unrecognized count/skip signal: {error}; leaving sub-batch un-synced for retry"
+                                ));
+                                continue;
+                            }
+                        },
+                        None => (sent_count, 0),
+                    };
+                    synced += accepted;
+
+                    if skipped > 0 {
+                        errors.push(format!(
+                            "cloud skipped {skipped} of {} team {entity_key} row(s); leaving sub-batch un-synced for retry",
+                            batch_items.len()
+                        ));
+                        continue;
                     }
 
                     for item in &batch_items {
@@ -316,22 +334,62 @@ impl CloudSyncer {
         Err(last_error.unwrap_or_else(|| CasError::Other("Team push failed".to_string())))
     }
 
-    fn team_count_for(response: &TeamPushResponse, entity_key: &str) -> usize {
-        match entity_key {
-            "entries" => response.synced.entries,
-            "tasks" => response.synced.tasks,
-            "rules" => response.synced.rules,
-            "skills" => response.synced.skills,
-            "sessions" => response.synced.sessions,
-            "verifications" => response.synced.verifications,
-            "events" => response.synced.events,
-            "prompts" => response.synced.prompts,
-            "file_changes" => response.synced.file_changes,
-            "commit_links" => response.synced.commit_links,
-            "agents" => response.synced.agents,
-            "worktrees" => response.synced.worktrees,
-            _ => 0,
+    /// Return `(accepted, skipped)` for one entity in a team push response.
+    /// `None` means an older response omitted the entity entirely, preserving
+    /// the historical trust-the-2xx fallback. A present but unknown shape is
+    /// an error so queue rows remain retryable.
+    fn team_counts_for(
+        response: &TeamPushResponse,
+        entity_key: &str,
+    ) -> Result<Option<(usize, usize)>, String> {
+        fn count(value: &serde_json::Value, location: &str) -> Result<usize, String> {
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| format!("unrecognized count at {location}: {value}"))
         }
+
+        let synced = response
+            .synced
+            .as_object()
+            .ok_or_else(|| format!("synced is not an object: {}", response.synced))?;
+        let Some(entity) = synced.get(entity_key) else {
+            return Ok(None);
+        };
+
+        if entity.is_number() {
+            return count(entity, &format!("synced.{entity_key}")).map(|n| Some((n, 0)));
+        }
+
+        let detail = entity
+            .as_object()
+            .ok_or_else(|| format!("synced.{entity_key} is not a count object: {entity}"))?;
+        let inserted = detail
+            .get("inserted")
+            .map(|value| count(value, &format!("synced.{entity_key}.inserted")))
+            .transpose()?
+            .unwrap_or(0);
+        let updated = detail
+            .get("updated")
+            .map(|value| count(value, &format!("synced.{entity_key}.updated")))
+            .transpose()?
+            .unwrap_or(0);
+        let skipped = detail
+            .get("skipped")
+            .map(|value| count(value, &format!("synced.{entity_key}.skipped")))
+            .transpose()?
+            .unwrap_or(0);
+
+        if !detail.contains_key("inserted")
+            && !detail.contains_key("updated")
+            && !detail.contains_key("skipped")
+        {
+            return Err(format!(
+                "synced.{entity_key} has no inserted, updated, or skipped count"
+            ));
+        }
+
+        Ok(Some((inserted.saturating_add(updated), skipped)))
     }
 
     fn add_team_count(result: &mut SyncResult, entity_key: &str, count: usize) {

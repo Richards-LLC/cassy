@@ -110,6 +110,48 @@ async fn team_push_drains_queue_when_team_configured() {
     assert_eq!(remaining.len(), 0, "team queue should be drained");
 }
 
+#[tokio::test]
+async fn team_push_nested_skip_response_leaves_queue_pending() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "entries": { "inserted": 0, "updated": 0, "skipped": 1 }
+            },
+            "canonical_id": "cas-src",
+            "git_remote": "github.com/pippenz/cas"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cfg = make_cloud_config(server.uri());
+    let tmp = make_cas_root_with_team_item();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    let syncer = CloudSyncer::new(queue.clone(), cfg, CloudSyncerConfig::default());
+
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .expect("team push should return a retryable result");
+
+    assert_eq!(result.pushed_entries, 0);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.contains("skipped 1")),
+        "skip must be surfaced: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().len(),
+        1,
+        "server-skipped team rows must remain pending"
+    );
+}
+
 /// No team configured → early return, zero HTTP traffic, `Ok(())`.
 #[tokio::test]
 async fn team_push_no_op_when_no_team_configured() {

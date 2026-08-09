@@ -475,7 +475,11 @@ pub struct TeamProject {
 /// Response from team push endpoint
 #[derive(Debug, Deserialize)]
 struct TeamPushResponse {
-    synced: SyncedCounts,
+    /// Legacy servers returned integer counts per entity. The live server
+    /// returns `{inserted, updated, skipped}` objects instead. Keep the wire
+    /// value raw so the team path can recognize both and fail closed on a
+    /// malformed-but-present skip signal.
+    synced: serde_json::Value,
     /// cas-8ca5 / contract §5: the canonical project id the server's resolver
     /// mapped this push to. `None` on older cloud builds that predate the
     /// resolver echo — the client then leaves its local pin untouched.
@@ -508,66 +512,69 @@ struct TeamPushResponse {
 /// 2. Leave the affected local queue items un-marked-synced so they remain
 ///    retryable instead of being silently dropped from the local sync queue.
 ///
-/// The shape is a `HashMap<String, usize>` (rather than a fixed-field struct)
-/// so the wire format can grow new entity types without forcing a
-/// client-version bump. Keys are the same entity-type strings the client
-/// already uses (`"entries"`, `"tasks"`, `"rules"`, `"skills"`, etc.).
+/// Both the proposed top-level map and the live per-entity result objects are
+/// accepted so the wire format can evolve without silently losing skips.
 ///
 /// See cas-f645 for the client defensive read; cas-d656 for the server.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct PushResponse {
-    /// Per-entity-type count of rows the server skipped (cross-project
-    /// conflicts). `None` when the server build predates this field.
+    /// Forward-looking top-level per-entity skip map. Kept as raw JSON so a
+    /// malformed-but-present skip signal cannot deserialize away into the
+    /// legacy "no skip report" path.
     #[serde(default)]
-    pub skipped: Option<HashMap<String, usize>>,
+    pub skipped: Option<serde_json::Value>,
+
+    /// Current cloud responses report counts inside each entity object, for
+    /// example `{"tasks":{"inserted":0,"updated":0,"skipped":1}}`.
+    /// Flattening preserves that shape alongside the older top-level map.
+    #[serde(flatten)]
+    pub fields: HashMap<String, serde_json::Value>,
 }
 
 impl PushResponse {
     /// Number of rows the server reported skipped for `entity_type`.
     ///
-    /// Returns `0` both when no skip was reported for that entity type and
-    /// when the server omitted the `skipped` field entirely (older build).
-    /// Callers cannot distinguish "no skip" from "old server" — that
-    /// ambiguity is intentional: under either condition the safe behavior
-    /// is the legacy mark-synced path. The server-side schema NOT-NULL
-    /// constraint from cas-d656 + the route-level rejection from cas-0bdc
-    /// remain the actual guards; this client read is a defensive cross-check.
-    pub fn skipped_count_for(&self, entity_type: &str) -> usize {
-        self.skipped
-            .as_ref()
-            .and_then(|m| m.get(entity_type))
-            .copied()
-            .unwrap_or(0)
-    }
-}
+    /// Both the older proposed top-level map and the live nested entity shape
+    /// are accepted. Absence remains backward-compatible (`Ok(0)`), but a
+    /// present skip signal with an unknown type or contradictory counts is an
+    /// error. Callers must then retain the queue row/watermark for retry.
+    pub fn skipped_count_for(&self, entity_type: &str) -> Result<usize, String> {
+        fn count(value: &serde_json::Value, location: &str) -> Result<usize, String> {
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| format!("unrecognized cloud skip count at {location}: {value}"))
+        }
 
-/// Sync counts in push response
-#[derive(Debug, Default, Deserialize)]
-struct SyncedCounts {
-    #[serde(default)]
-    entries: usize,
-    #[serde(default)]
-    tasks: usize,
-    #[serde(default)]
-    rules: usize,
-    #[serde(default)]
-    skills: usize,
-    #[serde(default)]
-    sessions: usize,
-    #[serde(default)]
-    verifications: usize,
-    #[serde(default)]
-    events: usize,
-    #[serde(default)]
-    prompts: usize,
-    #[serde(default)]
-    file_changes: usize,
-    #[serde(default)]
-    commit_links: usize,
-    #[serde(default)]
-    agents: usize,
-    #[serde(default)]
-    worktrees: usize,
+        let top_level = match self.skipped.as_ref() {
+            None => None,
+            Some(serde_json::Value::Object(by_entity)) => by_entity
+                .get(entity_type)
+                .map(|value| count(value, &format!("skipped.{entity_type}")))
+                .transpose()?,
+            Some(value) => {
+                return Err(format!(
+                    "unrecognized cloud skip report at skipped: {value}"
+                ));
+            }
+        };
+
+        let nested = self
+            .fields
+            .get(entity_type)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|entity| entity.get("skipped"))
+            .map(|value| count(value, &format!("{entity_type}.skipped")))
+            .transpose()?;
+
+        match (top_level, nested) {
+            (Some(top), Some(nested)) if top != nested => Err(format!(
+                "conflicting cloud skip counts for {entity_type}: top-level={top}, nested={nested}"
+            )),
+            (Some(value), _) | (_, Some(value)) => Ok(value),
+            (None, None) => Ok(0),
+        }
+    }
 }
 
 /// Response from team memories endpoint

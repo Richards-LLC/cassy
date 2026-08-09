@@ -348,6 +348,15 @@ impl CloudSyncer {
                         // entirely, in which case `skipped_count` is 0 and
                         // we fall through to the legacy mark-synced path.
                         let skipped_count = response.skipped_count_for(entity_type);
+                        if let Err(error) = &skipped_count {
+                            warn!(
+                                entity_type = entity_type,
+                                error = error,
+                                "Cloud response contained an unrecognized skip signal; leaving sub-batch un-synced for retry",
+                            );
+                            continue;
+                        }
+                        let skipped_count = skipped_count.unwrap_or_default();
                         if skipped_count > 0 {
                             let batch_size = batch_items.len();
                             warn!(

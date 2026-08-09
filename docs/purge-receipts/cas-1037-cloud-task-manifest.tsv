@@ -1,0 +1,316 @@
+id	created_at	title	status	local_presence	fixture_gate	delete_result
+cas-7254	2026-03-20T14:16:36.707635603Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-e8eb	2026-03-20T14:20:00.646469606Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-4df3	2026-03-20T14:25:34.636558052Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-10c1	2026-03-20T15:04:45.336102448Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-00e3	2026-03-20T15:13:38.645802524Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a661	2026-05-04T20:49:24.975269421Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-9059	2026-05-04T20:49:24.995810835Z	Context test task	open	absent	pass	deleted
+cas-4ed33	2026-05-04T20:49:25.036661164Z	Consolidated task test	open	absent	pass	deleted
+cas-c2af	2026-05-04T20:51:39.181469864Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-5d14	2026-05-04T20:51:39.186366645Z	Test task for notification test	open	absent	pass	deleted
+cas-415f	2026-05-04T20:51:39.265746254Z	Context test task	open	absent	pass	deleted
+cas-6640	2026-05-04T20:52:19.809810318Z	Consolidated task test	open	absent	pass	deleted
+cas-445b	2026-05-04T20:52:19.826624834Z	Test task for notification test	open	absent	pass	deleted
+cas-cdd2	2026-05-04T20:52:19.836515933Z	Context test task	open	absent	pass	deleted
+cas-91bd	2026-05-04T20:52:19.848239169Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-d8e8	2026-05-04T20:53:11.128628021Z	Consolidated task test	open	absent	pass	deleted
+cas-f8ed	2026-05-04T20:53:11.132695285Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-c2ec	2026-05-04T20:53:11.238395775Z	Test task for notification test	open	absent	pass	deleted
+cas-ed13	2026-05-04T20:53:11.291078178Z	Context test task	open	absent	pass	deleted
+cas-d5ad	2026-05-04T20:55:26.261350953Z	Context test task	open	absent	pass	deleted
+cas-7aee	2026-05-04T20:55:26.432462768Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-c098d	2026-05-04T20:55:26.460527252Z	Test task for notification test	open	absent	pass	deleted
+cas-b6ca	2026-05-04T20:55:26.488216438Z	Consolidated task test	open	absent	pass	deleted
+cas-259e	2026-05-04T20:56:12.908822884Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-53fb	2026-05-04T20:56:13.059946076Z	Test task for notification test	open	absent	pass	deleted
+cas-d670	2026-05-04T22:06:30.842095725Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-99a5	2026-05-04T22:06:30.949760770Z	Consolidated task test	open	absent	pass	deleted
+cas-d7372	2026-05-04T22:06:30.951405358Z	Context test task	open	absent	pass	deleted
+cas-b394	2026-05-04T22:06:31.023799695Z	Test task for notification test	open	absent	pass	deleted
+cas-6a6e	2026-05-04T22:31:36.014738984Z	Consolidated task test	open	absent	pass	deleted
+cas-a5d1a	2026-05-04T22:31:36.136725008Z	Context test task	open	absent	pass	deleted
+cas-42c4	2026-05-04T22:31:36.157326138Z	Test task for notification test	open	absent	pass	deleted
+cas-96b1	2026-05-04T22:32:21.282663865Z	Consolidated task test	open	absent	pass	deleted
+cas-341a	2026-05-04T22:32:21.319923852Z	Context test task	open	absent	pass	deleted
+cas-6c09	2026-05-04T22:32:21.328624822Z	Test task for notification test	open	absent	pass	deleted
+cas-72bf	2026-05-04T22:32:21.445890272Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-05b7	2026-05-13T18:43:07.463068760Z	Test task for notification test	open	absent	pass	deleted
+cas-5171	2026-05-13T18:43:07.530680202Z	Context test task	open	absent	pass	deleted
+cas-56cd	2026-05-13T18:43:07.548798999Z	Consolidated task test	open	absent	pass	deleted
+cas-9e37	2026-05-13T18:43:07.607264206Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-0aca	2026-05-13T18:43:38.337518925Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-85a5	2026-05-13T18:43:38.346495141Z	Consolidated task test	open	absent	pass	deleted
+cas-688f	2026-05-13T18:43:38.380781158Z	Test task for notification test	open	absent	pass	deleted
+cas-7208	2026-05-13T18:43:38.574133453Z	Context test task	open	absent	pass	deleted
+cas-71e1	2026-05-13T18:44:08.535841213Z	Consolidated task test	open	absent	pass	deleted
+cas-d2ff	2026-05-13T18:44:08.551663914Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-58a7	2026-05-13T18:44:08.602272184Z	Test task for notification test	open	absent	pass	deleted
+cas-6b10	2026-05-13T18:44:08.614240838Z	Context test task	open	absent	pass	deleted
+cas-4d3b	2026-05-13T19:50:27.261451336Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a775	2026-05-13T19:50:27.314759467Z	Context test task	open	absent	pass	deleted
+cas-2f97	2026-05-13T19:50:27.391415847Z	Test task for notification test	open	absent	pass	deleted
+cas-7569	2026-05-13T19:50:27.576697568Z	Consolidated task test	open	absent	pass	deleted
+cas-7e96	2026-05-13T19:51:00.101839180Z	Consolidated task test	open	absent	pass	deleted
+cas-ebaf	2026-05-13T19:51:00.135325452Z	Context test task	open	absent	pass	deleted
+cas-fec5	2026-05-13T19:51:01.037745627Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a3e0	2026-05-13T19:51:01.222813866Z	Test task for notification test	open	absent	pass	deleted
+cas-6e5c	2026-05-13T19:51:31.740328673Z	Consolidated task test	open	absent	pass	deleted
+cas-b411	2026-05-13T19:51:31.855587426Z	Context test task	open	absent	pass	deleted
+cas-11bc	2026-05-13T19:51:31.894677317Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-12c3	2026-05-13T19:51:31.915797304Z	Test task for notification test	open	absent	pass	deleted
+cas-4b7e	2026-05-13T19:52:01.847835911Z	Consolidated task test	open	absent	pass	deleted
+cas-3554	2026-05-13T19:52:01.894485500Z	Test task for notification test	open	absent	pass	deleted
+cas-5b15	2026-05-13T19:52:01.922261678Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a79d	2026-05-13T19:52:01.995807926Z	Context test task	open	absent	pass	deleted
+cas-b273	2026-05-13T19:52:32.722761613Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-edf7	2026-05-13T19:52:32.733151198Z	Consolidated task test	open	absent	pass	deleted
+cas-a468	2026-05-13T19:52:32.745863904Z	Context test task	open	absent	pass	deleted
+cas-1429	2026-05-13T19:52:32.783931332Z	Test task for notification test	open	absent	pass	deleted
+cas-88c7	2026-05-13T20:34:15.400521991Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-1e01	2026-05-13T20:34:15.445964493Z	Context test task	open	absent	pass	deleted
+cas-39d7	2026-05-13T20:34:15.714460423Z	Test task for notification test	open	absent	pass	deleted
+cas-83d0	2026-05-14T13:24:29.272040250Z	Consolidated task test	open	absent	pass	deleted
+cas-4b54	2026-05-14T13:24:29.359060964Z	Test task for notification test	open	absent	pass	deleted
+cas-aade	2026-05-14T13:24:29.364752803Z	Context test task	open	absent	pass	deleted
+cas-8073	2026-05-14T13:24:29.406974996Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-4776	2026-05-14T13:25:01.491732388Z	Consolidated task test	open	absent	pass	deleted
+cas-ae0a	2026-05-14T13:25:01.579841524Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-6ae1	2026-05-14T13:25:01.604107140Z	Test task for notification test	open	absent	pass	deleted
+cas-bac1	2026-05-14T13:25:01.648155306Z	Context test task	open	absent	pass	deleted
+cas-01815	2026-05-18T19:36:31.908225437Z	Consolidated task test	open	absent	pass	deleted
+cas-7496	2026-05-18T19:36:31.921102213Z	Context test task	open	absent	pass	deleted
+cas-aeb2	2026-05-18T19:36:31.966288129Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-cbc0	2026-05-18T19:36:31.986009879Z	Test task for notification test	open	absent	pass	deleted
+cas-49ad	2026-05-18T19:37:15.473824815Z	Consolidated task test	open	absent	pass	deleted
+cas-b3bf	2026-05-18T19:37:15.487351929Z	Context test task	open	absent	pass	deleted
+cas-8477	2026-05-18T19:37:15.503199585Z	Test task for notification test	open	absent	pass	deleted
+cas-31ed	2026-06-02T11:59:18.413154408Z	Consolidated task test	open	absent	pass	deleted
+cas-cc84	2026-06-02T11:59:19.201374988Z	Context test task	open	absent	pass	deleted
+cas-6111	2026-06-02T11:59:22.569111883Z	Test task for notification test	open	absent	pass	deleted
+cas-d2dd	2026-06-02T11:59:26.362924413Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-cba8	2026-06-02T12:11:12.457521228Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-ab70	2026-06-02T12:11:12.533077534Z	Context test task	open	absent	pass	deleted
+cas-ee4c	2026-06-02T12:11:12.631076273Z	Consolidated task test	open	absent	pass	deleted
+cas-256a	2026-06-02T12:11:12.685679426Z	Test task for notification test	open	absent	pass	deleted
+cas-9577	2026-06-02T12:32:17.086767302Z	Consolidated task test	open	absent	pass	deleted
+cas-4522	2026-06-02T12:32:17.088079014Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-6c7d	2026-06-02T12:32:17.133542122Z	Context test task	open	absent	pass	deleted
+cas-b2f9	2026-06-02T12:32:17.168838566Z	Test task for notification test	open	absent	pass	deleted
+cas-f174	2026-06-02T12:35:44.720421943Z	Consolidated task test	open	absent	pass	deleted
+cas-8592	2026-06-02T12:35:45.641967736Z	Context test task	open	absent	pass	deleted
+cas-c3eb	2026-06-02T12:35:49.502631094Z	Test task for notification test	open	absent	pass	deleted
+cas-bf51	2026-06-02T12:35:56.773849319Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a659	2026-06-02T12:41:32.635234056Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-423a	2026-06-02T12:41:32.753184032Z	Consolidated task test	open	absent	pass	deleted
+cas-2810	2026-06-02T12:41:32.766500271Z	Context test task	open	absent	pass	deleted
+cas-323a	2026-06-02T12:41:32.782320210Z	Test task for notification test	open	absent	pass	deleted
+cas-4464	2026-06-02T12:46:26.067588220Z	Consolidated task test	open	absent	pass	deleted
+cas-2989	2026-06-02T12:46:27.150051637Z	Context test task	open	absent	pass	deleted
+cas-086b	2026-06-02T12:46:30.977334819Z	Test task for notification test	open	absent	pass	deleted
+cas-f5be	2026-06-02T12:46:35.454259560Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-99b5	2026-06-02T13:02:15.479113464Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-49fd8	2026-06-02T13:02:15.494203849Z	Context test task	open	absent	pass	deleted
+cas-35a5	2026-06-02T13:02:15.520203419Z	Test task for notification test	open	absent	pass	deleted
+cas-cbc6	2026-06-02T13:02:15.715839594Z	Consolidated task test	open	absent	pass	deleted
+cas-14ec	2026-06-02T13:03:42.037676215Z	Consolidated task test	open	absent	pass	deleted
+cas-89d7	2026-06-02T13:03:42.081731162Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-bff1	2026-06-02T13:03:42.283235097Z	Context test task	open	absent	pass	deleted
+cas-8e3e	2026-06-02T13:21:47.191286841Z	Consolidated task test	open	absent	pass	deleted
+cas-56ea	2026-06-02T13:21:47.194624088Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-e60c	2026-06-02T13:21:47.227052987Z	Test task for notification test	open	absent	pass	deleted
+cas-e00f	2026-06-02T13:22:49.120399629Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-69c3	2026-06-02T13:22:49.242245995Z	Context test task	open	absent	pass	deleted
+cas-cb07	2026-06-02T13:22:49.268686705Z	Consolidated task test	open	absent	pass	deleted
+cas-41ea	2026-06-02T13:22:49.575740770Z	Test task for notification test	open	absent	pass	deleted
+cas-e330	2026-06-02T13:25:12.528035133Z	Consolidated task test	open	absent	pass	deleted
+cas-dffa	2026-06-02T13:25:12.604505282Z	Context test task	open	absent	pass	deleted
+cas-c386	2026-06-02T13:25:12.611668083Z	Test task for notification test	open	absent	pass	deleted
+cas-ebbf	2026-06-02T13:25:12.623585249Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-ddf9	2026-06-02T14:15:25.907831218Z	Context test task	open	absent	pass	deleted
+cas-0afc	2026-06-02T14:15:26.223358418Z	Consolidated task test	open	absent	pass	deleted
+cas-09b0	2026-06-02T14:15:26.227057623Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-63a3	2026-06-02T14:15:26.775921272Z	Test task for notification test	open	absent	pass	deleted
+cas-61c8	2026-06-02T14:25:12.038433413Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-d5f9	2026-06-02T14:25:12.076439087Z	Consolidated task test	open	absent	pass	deleted
+cas-9127	2026-06-02T14:25:12.101637157Z	Test task for notification test	open	absent	pass	deleted
+cas-92e2	2026-06-02T14:30:42.948818803Z	Consolidated task test	open	absent	pass	deleted
+cas-82590	2026-06-02T14:30:42.952900903Z	Context test task	open	absent	pass	deleted
+cas-0650	2026-06-02T14:30:42.965744111Z	Test task for notification test	open	absent	pass	deleted
+cas-a8f5	2026-06-02T14:30:42.971055959Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-e68a	2026-06-02T14:31:32.663110419Z	Context test task	open	absent	pass	deleted
+cas-8863	2026-06-02T14:31:32.663657271Z	Consolidated task test	open	absent	pass	deleted
+cas-f9c4	2026-06-02T14:31:32.711296151Z	Test task for notification test	open	absent	pass	deleted
+cas-58d5	2026-06-02T14:31:32.864279847Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-9e95	2026-06-02T14:33:29.804878774Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-5188	2026-06-02T14:33:29.835294953Z	Consolidated task test	open	absent	pass	deleted
+cas-82ef	2026-06-02T14:33:29.844587823Z	Test task for notification test	open	absent	pass	deleted
+cas-3025	2026-06-02T14:33:29.848337925Z	Context test task	open	absent	pass	deleted
+cas-ee7d	2026-06-07T16:34:00.471960025Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-b33c	2026-06-07T16:34:00.517840398Z	Test task for notification test	open	absent	pass	deleted
+cas-c603	2026-06-07T16:34:00.607294013Z	Consolidated task test	open	absent	pass	deleted
+cas-06c0	2026-06-07T16:34:01.060759997Z	Context test task	open	absent	pass	deleted
+cas-bbf9	2026-06-07T16:34:33.365736342Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-0d07	2026-06-07T16:34:33.382132420Z	Consolidated task test	open	absent	pass	deleted
+cas-e4f6	2026-06-07T16:34:33.419627491Z	Context test task	open	absent	pass	deleted
+cas-2f89	2026-06-07T16:34:33.502771305Z	Test task for notification test	open	absent	pass	deleted
+cas-8fcc	2026-06-07T16:35:06.352304936Z	Consolidated task test	open	absent	pass	deleted
+cas-ea9c	2026-06-07T16:35:06.372509538Z	Test task for notification test	open	absent	pass	deleted
+cas-807f	2026-06-07T16:35:06.378554866Z	Context test task	open	absent	pass	deleted
+cas-ce43	2026-06-07T16:35:06.444646313Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-16e9	2026-06-07T16:36:15.657404281Z	Consolidated task test	open	absent	pass	deleted
+cas-17d2	2026-06-07T16:36:15.740268305Z	Context test task	open	absent	pass	deleted
+cas-57cc	2026-06-07T16:36:15.787359835Z	Test task for notification test	open	absent	pass	deleted
+cas-9b69	2026-06-07T16:43:56.095675122Z	Consolidated task test	open	absent	pass	deleted
+cas-b034	2026-06-07T16:43:56.132033262Z	Context test task	open	absent	pass	deleted
+cas-8dfb	2026-06-07T16:43:56.187609215Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-bd20	2026-06-07T16:43:56.232317017Z	Test task for notification test	open	absent	pass	deleted
+cas-e131	2026-06-07T16:44:43.316139907Z	Consolidated task test	open	absent	pass	deleted
+cas-de5c	2026-06-07T16:44:43.327369683Z	Test task for notification test	open	absent	pass	deleted
+cas-ad30	2026-06-07T16:44:43.373347814Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-8588	2026-06-07T16:44:43.380296210Z	Context test task	open	absent	pass	deleted
+cas-d76f	2026-06-07T16:46:20.383347618Z	Consolidated task test	open	absent	pass	deleted
+cas-e4c6	2026-06-07T16:46:20.412028045Z	Test task for notification test	open	absent	pass	deleted
+cas-515e	2026-06-07T16:46:20.415811824Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-cf9e	2026-06-07T16:46:20.645256414Z	Context test task	open	absent	pass	deleted
+cas-8010	2026-06-07T16:47:08.494505287Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-4569	2026-06-07T16:47:08.615858130Z	Consolidated task test	open	absent	pass	deleted
+cas-0368	2026-06-07T16:47:09.771966794Z	Test task for notification test	open	absent	pass	deleted
+cas-2f61	2026-06-07T16:47:10.800528156Z	Context test task	open	absent	pass	deleted
+cas-64a4	2026-06-07T16:47:58.959805412Z	Context test task	open	absent	pass	deleted
+cas-43b6	2026-06-07T16:47:58.982649522Z	Test task for notification test	open	absent	pass	deleted
+cas-acd0	2026-06-07T16:47:59.054708777Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-6ea4	2026-06-07T16:49:12.466004108Z	Test task for notification test	open	absent	pass	deleted
+cas-1784	2026-06-07T16:49:12.536275517Z	Consolidated task test	open	absent	pass	deleted
+cas-fbc7	2026-06-07T16:49:12.545250376Z	Context test task	open	absent	pass	deleted
+cas-3a8f	2026-06-07T16:49:12.572003227Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-0a99	2026-06-07T16:49:44.609269915Z	Consolidated task test	open	absent	pass	deleted
+cas-7280	2026-06-07T16:49:44.612831506Z	Test task for notification test	open	absent	pass	deleted
+cas-128e	2026-06-07T16:49:44.667810838Z	Context test task	open	absent	pass	deleted
+cas-ed1d	2026-06-07T16:51:15.863258997Z	Consolidated task test	open	absent	pass	deleted
+cas-3b72	2026-06-07T16:51:15.893810633Z	Test task for notification test	open	absent	pass	deleted
+cas-4ce7	2026-06-07T16:51:15.944614203Z	Context test task	open	absent	pass	deleted
+cas-b0f3	2026-06-07T16:51:15.965099308Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-45b9	2026-06-07T16:52:49.644776288Z	Context test task	open	absent	pass	deleted
+cas-8681	2026-06-07T16:52:49.662305451Z	Consolidated task test	open	absent	pass	deleted
+cas-d255	2026-06-07T16:52:49.671998355Z	Test task for notification test	open	absent	pass	deleted
+cas-7310	2026-06-07T16:54:08.088751050Z	Consolidated task test	open	absent	pass	deleted
+cas-f05c	2026-06-07T16:54:08.100161240Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-eb21	2026-06-07T16:54:08.104642391Z	Test task for notification test	open	absent	pass	deleted
+cas-417e	2026-06-07T16:54:08.118347100Z	Context test task	open	absent	pass	deleted
+cas-93c5	2026-06-07T16:54:42.656110098Z	Test task for notification test	open	absent	pass	deleted
+cas-fe0b	2026-06-07T16:54:42.661660648Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-6a9b	2026-06-07T16:54:42.669241327Z	Consolidated task test	open	absent	pass	deleted
+cas-02b8	2026-06-07T16:54:42.695455091Z	Context test task	open	absent	pass	deleted
+cas-8147	2026-06-07T16:55:40.747651812Z	Test task for notification test	open	absent	pass	deleted
+cas-27f7	2026-06-07T16:55:40.751446234Z	Consolidated task test	open	absent	pass	deleted
+cas-955a	2026-06-07T16:55:40.948699530Z	Context test task	open	absent	pass	deleted
+cas-92e99	2026-06-07T16:55:40.954539786Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-de42	2026-06-07T16:55:42.125192315Z	Consolidated task test	open	absent	pass	deleted
+cas-006a	2026-06-07T16:55:42.142395109Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-e9ac	2026-06-07T16:55:42.158585679Z	Test task for notification test	open	absent	pass	deleted
+cas-6d8e	2026-06-07T16:55:42.163609913Z	Context test task	open	absent	pass	deleted
+cas-9e2d	2026-06-07T16:56:34.291022520Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-b1a5	2026-06-07T16:56:34.302773892Z	Consolidated task test	open	absent	pass	deleted
+cas-e317	2026-06-07T16:56:34.358774719Z	Context test task	open	absent	pass	deleted
+cas-79cb8	2026-06-07T16:56:34.393909087Z	Test task for notification test	open	absent	pass	deleted
+cas-3e12	2026-06-07T16:56:34.934396563Z	Consolidated task test	open	absent	pass	deleted
+cas-a3dd	2026-06-07T16:56:34.946106727Z	Context test task	open	absent	pass	deleted
+cas-c6b9	2026-06-07T16:56:34.957609031Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a5e3	2026-06-07T16:56:34.971421751Z	Test task for notification test	open	absent	pass	deleted
+cas-3e80	2026-06-07T16:57:20.461602679Z	Context test task	open	absent	pass	deleted
+cas-afcc	2026-06-07T16:57:20.486165952Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-73f4	2026-06-07T16:57:20.498378935Z	Test task for notification test	open	absent	pass	deleted
+cas-85ee	2026-06-07T16:59:04.766443543Z	Consolidated task test	open	absent	pass	deleted
+cas-3ab9	2026-06-07T16:59:04.781462120Z	Context test task	open	absent	pass	deleted
+cas-de52	2026-06-07T16:59:04.801565734Z	Test task for notification test	open	absent	pass	deleted
+cas-d2b8	2026-06-07T16:59:04.882132353Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a341	2026-06-07T16:59:54.171821370Z	Context test task	open	absent	pass	deleted
+cas-f1cf	2026-06-07T16:59:54.192575896Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-22c2	2026-06-07T16:59:54.204177920Z	Consolidated task test	open	absent	pass	deleted
+cas-f55c	2026-06-07T16:59:54.218540898Z	Test task for notification test	open	absent	pass	deleted
+cas-9bb4	2026-06-07T17:01:06.590100973Z	Test task for notification test	open	absent	pass	deleted
+cas-bc7f	2026-06-07T17:01:06.601270816Z	Consolidated task test	open	absent	pass	deleted
+cas-3917	2026-06-07T17:01:06.616747386Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-a63d	2026-06-07T17:01:06.673067658Z	Context test task	open	absent	pass	deleted
+cas-14db	2026-06-07T17:02:14.928701466Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-720c	2026-06-07T17:02:14.935272876Z	Context test task	open	absent	pass	deleted
+cas-be12	2026-06-07T17:02:14.972259152Z	Test task for notification test	open	absent	pass	deleted
+cas-7825	2026-06-07T17:02:15.082749421Z	Consolidated task test	open	absent	pass	deleted
+cas-9e4e	2026-06-07T17:03:07.473092961Z	Consolidated task test	open	absent	pass	deleted
+cas-9c5f	2026-06-07T17:03:07.564329244Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-05d8	2026-06-07T17:03:07.597284683Z	Context test task	open	absent	pass	deleted
+cas-5d143	2026-06-07T17:04:34.743522333Z	Context test task	open	absent	pass	deleted
+cas-456d	2026-06-07T17:04:34.770467309Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-ef1c	2026-06-07T17:04:34.801878031Z	Consolidated task test	open	absent	pass	deleted
+cas-4ddc	2026-06-07T17:04:35.054808713Z	Test task for notification test	open	absent	pass	deleted
+cas-66ca	2026-06-07T17:11:00.352624186Z	Context test task	open	absent	pass	deleted
+cas-0cec	2026-06-07T17:11:00.411071952Z	Test task for notification test	open	absent	pass	deleted
+cas-f544	2026-06-07T17:11:00.459138032Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-d13c	2026-06-07T17:11:00.463763296Z	Consolidated task test	open	absent	pass	deleted
+cas-2c7c	2026-06-07T17:11:52.677042719Z	Context test task	open	absent	pass	deleted
+cas-8a2d	2026-06-07T17:11:52.718524304Z	Test task for notification test	open	absent	pass	deleted
+cas-10d4	2026-06-07T17:11:52.720326072Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-55c7	2026-06-07T17:11:52.734606848Z	Consolidated task test	open	absent	pass	deleted
+cas-9d44	2026-06-07T17:12:47.760087214Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-c963	2026-06-07T17:12:47.760827711Z	Consolidated task test	open	absent	pass	deleted
+cas-684b	2026-06-07T17:12:47.788487716Z	Test task for notification test	open	absent	pass	deleted
+cas-1579	2026-06-07T17:12:48.125861457Z	Context test task	open	absent	pass	deleted
+cas-f2b5	2026-06-07T17:12:53.279076334Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-ba5d	2026-06-07T17:12:53.306192444Z	Consolidated task test	open	absent	pass	deleted
+cas-154e	2026-06-07T17:12:53.318346170Z	Test task for notification test	open	absent	pass	deleted
+cas-a0f4	2026-06-07T17:12:53.456636832Z	Context test task	open	absent	pass	deleted
+cas-65fe	2026-06-07T17:39:32.280854069Z	Consolidated task test	open	absent	pass	deleted
+cas-9cfa	2026-06-07T17:39:32.355008368Z	Context test task	open	absent	pass	deleted
+cas-2726	2026-06-07T17:39:32.361466851Z	Test task for notification test	open	absent	pass	deleted
+cas-19db	2026-06-07T17:39:32.381661556Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-93d1	2026-06-07T17:40:18.255012290Z	Test task for notification test	open	absent	pass	deleted
+cas-f575	2026-06-07T17:40:18.293042200Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-977b	2026-06-07T17:40:18.324893782Z	Context test task	open	absent	pass	deleted
+cas-1c1e3	2026-06-07T17:40:18.328838290Z	Consolidated task test	open	absent	pass	deleted
+cas-b741	2026-06-07T17:41:03.713675052Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-bc7fc	2026-06-07T17:41:03.767168349Z	Context test task	open	absent	pass	deleted
+cas-3824	2026-06-07T17:41:03.772100604Z	Consolidated task test	open	absent	pass	deleted
+cas-89f4	2026-06-07T17:41:04.048962059Z	Test task for notification test	open	absent	pass	deleted
+cas-bca3	2026-06-07T17:41:50.637930500Z	Consolidated task test	open	absent	pass	deleted
+cas-53c7	2026-06-07T17:41:50.674871870Z	Test task for notification test	open	absent	pass	deleted
+cas-a622	2026-06-07T17:41:50.708998085Z	Context test task	open	absent	pass	deleted
+cas-fa1d3	2026-06-07T17:43:14.702788465Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-679c	2026-06-07T17:43:14.788247794Z	Context test task	open	absent	pass	deleted
+cas-697f	2026-06-07T17:43:14.818592789Z	Consolidated task test	open	absent	pass	deleted
+cas-a669	2026-06-07T17:43:14.946002089Z	Test task for notification test	open	absent	pass	deleted
+cas-fba3	2026-06-07T17:48:02.229062779Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-d3ee	2026-06-07T17:48:02.250916088Z	Context test task	open	absent	pass	deleted
+cas-91b1	2026-06-07T17:48:02.266816722Z	Test task for notification test	open	absent	pass	deleted
+cas-323f	2026-06-07T17:48:02.341207054Z	Consolidated task test	open	absent	pass	deleted
+cas-5897	2026-06-07T17:50:16.713567366Z	Consolidated task test	open	absent	pass	deleted
+cas-63eb	2026-06-07T17:50:16.746822482Z	Context test task	open	absent	pass	deleted
+cas-cba5	2026-06-07T17:50:16.780768962Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-bcf6	2026-06-07T17:50:16.797141572Z	Test task for notification test	open	absent	pass	deleted
+cas-f63f	2026-06-07T17:51:42.975638628Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-0289	2026-06-07T17:51:43.004920033Z	Test task for notification test	open	absent	pass	deleted
+cas-513f	2026-06-07T17:51:43.043326229Z	Context test task	open	absent	pass	deleted
+cas-a453	2026-06-07T17:51:43.219167198Z	Consolidated task test	open	absent	pass	deleted
+cas-6f03	2026-06-07T17:52:28.141241521Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-7b30	2026-06-07T17:52:28.141583297Z	Consolidated task test	open	absent	pass	deleted
+cas-2e7b	2026-06-07T17:52:28.153668706Z	Context test task	open	absent	pass	deleted
+cas-6bb4	2026-06-07T17:52:28.164750947Z	Test task for notification test	open	absent	pass	deleted
+cas-aa76	2026-06-07T17:53:11.481793762Z	Consolidated task test	open	absent	pass	deleted
+cas-e674	2026-06-07T17:53:11.487081481Z	Context test task	open	absent	pass	deleted
+cas-3927	2026-06-07T17:53:11.540302955Z	Test task for notification test	open	absent	pass	deleted
+cas-513d	2026-06-07T17:53:11.589646739Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-5e81	2026-06-07T18:21:11.943177173Z	Test task for notification test	open	absent	pass	deleted
+cas-177d	2026-06-07T18:21:11.949063971Z	Context test task	open	absent	pass	deleted
+cas-9890	2026-06-07T18:21:11.996764500Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-2c40	2026-06-07T18:21:12.001441714Z	Consolidated task test	open	absent	pass	deleted
+cas-f6ca	2026-06-07T18:22:03.888572326Z	Consolidated task test	open	absent	pass	deleted
+cas-e1b8	2026-06-07T18:22:03.933366771Z	Context test task	open	absent	pass	deleted
+cas-90d0	2026-06-07T18:22:03.954935618Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-ec1f	2026-06-07T18:22:04.526010676Z	Test task for notification test	open	absent	pass	deleted
+cas-d15b	2026-06-07T18:22:51.931355054Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-4329	2026-06-07T18:22:52.004844229Z	Context test task	open	absent	pass	deleted
+cas-564f	2026-06-07T18:22:52.052408394Z	Test task for notification test	open	absent	pass	deleted
+cas-b047	2026-06-07T18:29:02.331309623Z	Consolidated task test	open	absent	pass	deleted
+cas-944c	2026-06-07T18:29:02.425035079Z	MCP Protocol Test Task	open	absent	pass	deleted
+cas-b708	2026-06-07T18:29:02.455566357Z	Context test task	open	absent	pass	deleted
+cas-d266	2026-06-07T18:29:02.462286459Z	Test task for notification test	open	absent	pass	deleted

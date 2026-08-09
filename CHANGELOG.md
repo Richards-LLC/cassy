@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.57.0] - 2026-08-09
+
+### Added
+- **Memory can now consolidate an overlapping entry in one explicit, safe operation.** The opt-in merge returns the surviving identity and receipt, while concurrent edits are detected rather than silently overwritten.
+- **Memory recency is now deterministic and self-describing.** Recent results state their ordering and use a stable tie-break; lifecycle guidance explains when to merge, archive, or expire a durable memory instead of creating parallel records.
+
+### Changed
+- **A full cloud sync now deliberately re-reads prior history when requested.** `cas cloud sync --full` resets the pull watermark and empty-result streak so recovery starts from a known clean scope.
+- **Cloud sync now explains healthy no-op pulls and the active sync state.** Pull output distinguishes up-to-date, personal-only, and fetched work; status names the active team or personal scope, daemon liveness, queue health, and the last successful pull.
+- **Factory halt responses now lead with a bounded, actionable exit brief.** Operators get the essential stop context without spending the remaining turn budget on repeated coordination detail.
+
+### Fixed
+- **Network probe latency remains an observation, not a one-sample release gate.** Probe conformance now preserves useful p95 telemetry without treating an isolated sample as a verdict.
+- **Cloud pull failures now identify the malformed entity that could not be decoded.** Recovery messages name the affected record instead of leaving a generic parse error.
+- **Knowledge and team sync now converge more reliably.** Missing knowledge attribution schema is repaired safely, team pulls retain required skills, and the pull-url guard ignores inline test scaffolding while continuing to detect production callers.
+- **Supervisor review and amendment flows retain their correct delivery boundary.** Review dispatch binds atomically to the delivery it approves, legacy verification proves the intended repository state, and an amendment stays pinned to its original work.
+- **Memory recall returns cleaner, more useful context.** Lexical fallback no longer lets same-session echoes or low-value ambient matches crowd out relevant context.
+- **Factory presence and control surfaces now report a truer state.** Held workers stay quiet, duplicate roster entries reconcile to one identity, and repeated startup no longer creates a second visible worker.
+- **Reminder guidance now makes bounded waiting explicit.** Long-running operations preserve a reachable session instead of silently occupying the worker pane.
+
 ## [2.56.0] - 2026-08-09
 
 ### Added

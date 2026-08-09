@@ -570,7 +570,7 @@ impl CloudSyncer {
             .call();
 
         match response {
-            Ok(resp) if resp.status() == 200 || resp.status() == 404 => Ok(()),
+            Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.into_string().unwrap_or_default();
@@ -578,6 +578,7 @@ impl CloudSyncer {
                     "Delete failed with status {status}: {body}"
                 )))
             }
+            Err(ureq::Error::Status(404, _)) => Ok(()),
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 Err(CasError::Other(format!(

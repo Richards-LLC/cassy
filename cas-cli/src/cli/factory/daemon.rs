@@ -294,6 +294,8 @@ pub(super) fn run_factory_with_daemon(
             sock_path,
             daemon_pid,
         } => {
+            let _daemon_reaper =
+                crate::hub::supervise_forked_daemon(session_name.clone(), daemon_pid);
             let boot_config = BootConfig {
                 supervisor_name,
                 worker_names,

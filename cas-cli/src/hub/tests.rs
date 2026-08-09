@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
@@ -109,11 +110,11 @@ async fn h1_bp_04_slow_viewer_lags_without_new_upstream_or_harming_fast_viewer()
 #[test]
 fn h1_death_05_reports_clean_signal_sigill_and_unknown_without_invention() {
     assert_eq!(
-        diagnose_daemon_death(Some(ProcessExit::Code(0)), true).cause,
+        diagnose_daemon_death(Some(ProcessExit::Code(0)), Some(true)).cause,
         DaemonDeathCause::CleanExit { code: 0 }
     );
     assert_eq!(
-        diagnose_daemon_death(Some(ProcessExit::Signal(4)), true).cause,
+        diagnose_daemon_death(Some(ProcessExit::Signal(4)), Some(true)).cause,
         DaemonDeathCause::Signal {
             signal: 4,
             name: Some("SIGILL".into()),
@@ -121,7 +122,7 @@ fn h1_death_05_reports_clean_signal_sigill_and_unknown_without_invention() {
         }
     );
     assert_eq!(
-        diagnose_daemon_death(Some(ProcessExit::Signal(15)), false).cause,
+        diagnose_daemon_death(Some(ProcessExit::Signal(15)), Some(false)).cause,
         DaemonDeathCause::Signal {
             signal: 15,
             name: Some("SIGTERM".into()),
@@ -129,9 +130,214 @@ fn h1_death_05_reports_clean_signal_sigill_and_unknown_without_invention() {
         }
     );
     assert_eq!(
-        diagnose_daemon_death(None, false).cause,
+        diagnose_daemon_death(Some(ProcessExit::Signal(9)), None).cause,
+        DaemonDeathCause::Signal {
+            signal: 9,
+            name: Some("SIGKILL".into()),
+            core_dumped: None,
+        }
+    );
+    assert_eq!(
+        diagnose_daemon_death(Some(ProcessExit::Code(7)), None).cause,
+        DaemonDeathCause::ExitCode { code: 7 }
+    );
+    assert_eq!(
+        diagnose_daemon_death(None, None).cause,
         DaemonDeathCause::Unknown
     );
+    assert!(
+        diagnose_daemon_death(Some(ProcessExit::Signal(4)), Some(false))
+            .next_action
+            .contains("portable release artifact")
+    );
+}
+
+#[test]
+fn h1_death_05_fixture_process_entry() {
+    let Ok(port_file) = std::env::var("CAS_H1_DEATH_FIXTURE_PORT_FILE") else {
+        return;
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        std::fs::write(port_file, listener.local_addr().unwrap().port().to_string()).unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let welcome = DaemonMessage::Welcome {
+            session_name: "death-fixture".into(),
+            state: SessionState {
+                focused_pane: None,
+                panes: vec![],
+                epic_id: None,
+                epic_title: None,
+                cols: 120,
+                rows: 40,
+            },
+            scrollback: None,
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: daemon_capabilities(),
+        };
+        socket
+            .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
+            .await
+            .unwrap();
+        futures_util::future::pending::<()>().await;
+    });
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_multiplication() {
+    let temp = tempfile::tempdir().unwrap();
+    let port_file = temp.path().join("port");
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "hub::tests::h1_death_05_fixture_process_entry",
+            "--nocapture",
+        ])
+        .env("CAS_H1_DEATH_FIXTURE_PORT_FILE", &port_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let store = DaemonExitEvidenceStore::new(temp.path().join("daemon-exits"));
+    let (identity, reaper) = supervise_spawned_daemon("death-fixture", child, store.clone())
+        .expect("Linux fixture has a process-start fingerprint");
+
+    let port = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(value) = std::fs::read_to_string(&port_file) {
+                break value.parse::<u16>().unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let source = RecordingReadModel::with_sessions(vec![fixture_session("death-fixture")]);
+    let catalog = SessionCatalog::new(source.clone());
+    assert_eq!(catalog.list().await.unwrap().len(), 1);
+    let events = MachineEventBus::new(8);
+    let mut event_rx = events.subscribe();
+    let connector = DaemonConnector::new(SessionMultiplexer::new(8), events)
+        .with_exit_evidence_store(store);
+    let mut viewer = connector
+        .attach("death-fixture", port, std::iter::empty::<String>(), Some(identity.clone()))
+        .await
+        .unwrap();
+    let welcome = viewer.recv().await.unwrap();
+    assert!(matches!(
+        serde_json::from_slice::<DaemonMessage>(&welcome.bytes).unwrap(),
+        DaemonMessage::Welcome { .. }
+    ));
+    assert_eq!(connector.upstream_connection_count("death-fixture").await, 1);
+
+    // SAFETY: exact child pid is fingerprinted above and owned by this test.
+    assert_eq!(unsafe { libc::kill(identity.pid as i32, libc::SIGILL) }, 0);
+    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = event_rx.recv().await.unwrap();
+            if event.kind == MachineEventKind::DaemonDisconnected {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let diagnostic = disconnected.diagnostic.unwrap();
+    assert_eq!(
+        diagnostic.cause,
+        DaemonDeathCause::Signal {
+            signal: libc::SIGILL,
+            name: Some("SIGILL".into()),
+            core_dumped: Some(true),
+        }
+    );
+    assert!(diagnostic.next_action.contains("portable release artifact"));
+    reaper.join().unwrap();
+
+    assert_eq!(source.model_call_count(), 0);
+    assert_eq!(source.logical_session_create_count(), 0);
+    assert_eq!(catalog.list().await.unwrap().len(), 1);
+    assert_eq!(connector.upstream_connection_count("death-fixture").await, 1);
+}
+
+#[tokio::test]
+async fn h1_death_05_receipts_distinguish_exit_and_signal_and_reject_stale_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = DaemonExitEvidenceStore::new(temp.path());
+    let identity = DaemonIdentity {
+        session: "factory-a".into(),
+        pid: 100,
+        pid_starttime: 200,
+    };
+    store
+        .write(&DaemonExitReceipt {
+            identity: identity.clone(),
+            exit: ProcessExit::Code(0),
+            core_dumped: None,
+            observed_at: "2026-08-09T00:00:00Z".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        super::death::diagnose_disconnect(Some(&identity), Some(&store))
+            .await
+            .cause,
+        DaemonDeathCause::CleanExit { code: 0 }
+    );
+
+    store
+        .write(&DaemonExitReceipt {
+            identity: identity.clone(),
+            exit: ProcessExit::Signal(15),
+            core_dumped: Some(false),
+            observed_at: "2026-08-09T00:00:01Z".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        super::death::diagnose_disconnect(Some(&identity), Some(&store))
+            .await
+            .cause,
+        DaemonDeathCause::Signal {
+            signal: 15,
+            name: Some("SIGTERM".into()),
+            core_dumped: Some(false),
+        }
+    );
+
+    let replacement_epoch = DaemonIdentity {
+        pid_starttime: identity.pid_starttime + 1,
+        ..identity
+    };
+    assert!(store.read_matching(&replacement_epoch).is_none());
+    assert_eq!(
+        super::death::diagnose_disconnect(Some(&replacement_epoch), Some(&store))
+            .await
+            .cause,
+        DaemonDeathCause::Unknown
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn h1_death_05_live_fingerprinted_daemon_is_transport_loss_not_a_signal() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = DaemonIdentity {
+        session: "factory-a".into(),
+        pid: std::process::id(),
+        pid_starttime: crate::mcp::daemon::read_pid_starttime(std::process::id()).unwrap(),
+    };
+    let diagnostic = super::death::diagnose_disconnect(
+        Some(&identity),
+        Some(&DaemonExitEvidenceStore::new(temp.path())),
+    )
+    .await;
+    assert_eq!(diagnostic.cause, DaemonDeathCause::TransportLost);
 }
 
 #[tokio::test]
@@ -590,13 +796,13 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
     let events = MachineEventBus::new(16);
     let connector = DaemonConnector::new(SessionMultiplexer::new(8), events);
     let mut first = connector
-        .attach("factory-a", port, ["worker-1"])
+        .attach("factory-a", port, ["worker-1"], None)
         .await
         .unwrap();
     assert_eq!(first.recv().await.unwrap().bytes, welcome_bytes);
 
     let mut second = connector
-        .attach("factory-a", port, ["worker-1"])
+        .attach("factory-a", port, ["worker-1"], None)
         .await
         .unwrap();
     assert_eq!(

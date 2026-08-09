@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use super::identity::ensure_private_dir;
+use super::ensure_private_dir;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubProcessRecord {

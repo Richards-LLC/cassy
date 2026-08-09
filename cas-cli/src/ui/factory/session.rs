@@ -397,6 +397,7 @@ pub fn create_metadata(
         name: session_name.to_string(),
         created_at: Local::now().to_rfc3339(),
         daemon_pid,
+        daemon_pid_starttime: crate::mcp::daemon::read_pid_starttime(daemon_pid),
         socket_path: socket_path(session_name).to_string_lossy().to_string(),
         ws_port,
         log_dir: Some(log_dir.to_string_lossy().to_string()),

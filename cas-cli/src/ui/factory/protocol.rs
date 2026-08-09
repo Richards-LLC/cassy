@@ -370,6 +370,9 @@ pub struct SessionMetadata {
     pub created_at: String,
     /// Daemon process ID
     pub daemon_pid: u32,
+    /// OS process-start fingerprint paired with `daemon_pid` to reject reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_pid_starttime: Option<u64>,
     /// Socket path
     pub socket_path: String,
     /// WebSocket server port (for client connections)

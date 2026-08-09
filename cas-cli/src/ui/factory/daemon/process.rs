@@ -57,11 +57,15 @@ pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
     // Spawn daemon process (redirect stderr to log file for debugging)
     let log_path = daemon_log_path(&config.session_name);
     let log_file = open_log_file_append(&log_path)?;
-    let _child = cmd
+    let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file))
         .spawn()?;
+
+    if let Some(store) = crate::hub::DaemonExitEvidenceStore::default_for_user() {
+        let _ = crate::hub::supervise_spawned_daemon(&config.session_name, child, store);
+    }
 
     Ok(())
 }

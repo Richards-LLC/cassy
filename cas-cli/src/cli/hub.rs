@@ -119,6 +119,11 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
 
 fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
+    validate_control_bind(
+        SocketAddr::new(args.bind, args.port),
+        TransportSecurity::Plaintext,
+    )?;
+    crate::hub::ensure_private_dir(paths.root())?;
     if let Ok(record) = paths.read_process_record() {
         if record_is_live(&record) {
             let endpoint = record
@@ -134,12 +139,6 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
         }
         paths.remove_process_record()?;
     }
-    validate_control_bind(
-        SocketAddr::new(args.bind, args.port),
-        TransportSecurity::Plaintext,
-    )?;
-
-    crate::hub::ensure_private_dir(paths.root())?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)

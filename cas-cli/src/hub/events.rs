@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
-use super::{DaemonDeathDiagnostic, diagnose_daemon_death};
+use super::DaemonDeathDiagnostic;
 use crate::ui::factory::DaemonMessage;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,12 +89,16 @@ impl MachineEventBus {
         self.emit(kind, Some(session.to_owned()), pane_id, None);
     }
 
-    pub(crate) fn daemon_disconnected(&self, session: &str) {
+    pub(crate) fn daemon_disconnected(
+        &self,
+        session: &str,
+        diagnostic: DaemonDeathDiagnostic,
+    ) {
         self.emit(
             MachineEventKind::DaemonDisconnected,
             Some(session.to_owned()),
             None,
-            Some(diagnose_daemon_death(None, false)),
+            Some(diagnostic),
         );
     }
 

@@ -53,4 +53,11 @@ describe("binding Commander browser invariants", () => {
     }
     expect(joined).toContain("indexedDB.open");
   });
+
+  it("targets interrupt at the explicitly selected pane rather than render order", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("selectedPanes.get(sessionKey(selected.id, selectedSession))");
+    expect(source).toContain("{ InterruptPane: { pane_id: pane } }");
+    expect(source).not.toContain("[...surfaces.keys()].find");
+  });
 });

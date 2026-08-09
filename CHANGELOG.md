@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.54.0] - 2026-08-09
+
+### Added
+- **Relevant project context now arrives automatically at the start of a turn.** CAS creates one bounded query vector and searches knowledge, code history, and the current source index together, then presents only the best role-relevant matches. The path is on by default for authenticated installs, has explicit latency and corpus limits, falls back safely when semantic search is unavailable, and does not turn prompts into stored memory.
+- **The live source tree is now a first-class semantic search corpus.** Code files are reconciled automatically, embedded through their own queue and cache, and retired from every index when deleted. Exact-symbol history queries now prioritize the commit that actually touched the requested symbol instead of merely mentioning the same text.
+- **"Is this fixed?" can now be answered against the binaries that actually ran.** CAS records executable epochs for its background processes and separates pre-fix, mixed-version, and clean post-fix evidence. Verdicts always include the observed sample size and say when the post-fix window is too small or has not begun, rather than returning an unsupported bare "fixed".
+- **The developer updater is now tracked, installable, and safe around running CAS processes.** `contrib/shell-helpers/install.sh` installs `cas-update`; plain `cas-update` builds, installs, migrates, syncs, and turns over only processes whose executable bytes and process-start fingerprint match the replaced binary. `--no-restart`, `--build-only`, `--sync-only`, and `--dry-run` provide explicit narrower modes.
+
+### Fixed
+- **Cloud knowledge sync now preserves ownership and deletion truth.** Personal pushes are incremental and carry their repository identity, team pulls and pushes stay within the active team, foreign pages are rejected at ingest, and tombstones propagate deletions instead of allowing removed pages to return.
+- **Migration discovery can no longer skip a lower gap or trust a false ledger row forever.** Detection stops at the first missing migration, safe additive migrations recorded without their actual schema effect are reconciled with an audit trail, and the release path automatically runs component-output snapshots whenever the migration registry changes.
+- **History and source indexes no longer publish partially reconciled state.** Watcher, vector, and deletion races are closed; doctor reports missing or stale history tables instead of treating them as an empty repository; lag continues to age honestly; and provenance coverage remains visible even on warning paths.
+
 ## [2.53.0] - 2026-08-08
 
 ### Added

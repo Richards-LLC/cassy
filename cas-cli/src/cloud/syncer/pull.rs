@@ -598,7 +598,13 @@ impl CloudSyncer {
                     Ok(UpsertResult::Skipped)
                 }
             }
-            Err(cas_store::StoreError::SkillNotFound(_)) => {
+            // SqliteSkillStore::get reports a missing row as the generic
+            // `NotFound`, while some store implementations use the older
+            // skill-specific variant. Both mean a team member has not pulled
+            // this shared skill yet and must take the insert path.
+            Err(
+                cas_store::StoreError::SkillNotFound(_) | cas_store::StoreError::NotFound(_),
+            ) => {
                 store.add(&skill)?;
                 Ok(UpsertResult::Created)
             }
@@ -746,7 +752,11 @@ impl CloudSyncer {
                     ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
                 }
             }
-            Err(cas_store::StoreError::SkillNotFound(_)) => {
+            // Keep team and personal pulls aligned: a fresh local store may
+            // represent an absent skill with either missing-row variant.
+            Err(
+                cas_store::StoreError::SkillNotFound(_) | cas_store::StoreError::NotFound(_),
+            ) => {
                 store.add(&skill)?;
                 Ok(UpsertResult::Created)
             }

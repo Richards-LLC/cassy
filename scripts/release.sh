@@ -136,6 +136,7 @@ for target in "${TARGETS[@]}"; do
     if [[ "$target" == *"linux"* ]]; then
         # Cross-compile for Linux using zigbuild
         cargo zigbuild -p cas --release --target "$target"
+        ./scripts/check-portable-x86_64-isa.sh "target/$target/release/cas"
     else
         # Native build for macOS
         cargo build -p cas --release --target "$target"

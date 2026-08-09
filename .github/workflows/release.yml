@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y gcc mold
+          sudo apt-get install -y binutils file gcc mold
           gcc --version
           mold --version
 
@@ -47,6 +47,9 @@ jobs:
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --release --target x86_64-unknown-linux-gnu
+
+      - name: Audit portable x86_64 ISA
+        run: ./scripts/check-portable-x86_64-isa.sh target/x86_64-unknown-linux-gnu/release/cas
 
       - name: Package
         run: |

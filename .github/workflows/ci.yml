@@ -48,6 +48,9 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas
 
+      - name: Test portable x86_64 ISA audit
+        run: ./scripts/test-check-portable-x86_64-isa.sh
+
       - name: Build (without MCP proxy)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig

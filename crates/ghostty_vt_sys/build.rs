@@ -9,6 +9,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_support;
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -58,6 +60,7 @@ fn main() {
     println!("cargo:rerun-if-changed=zig/build.zig");
     println!("cargo:rerun-if-changed=zig/build.zig.zon");
     println!("cargo:rerun-if-changed=zig/lib.zig");
+    println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=include/ghostty_vt.h");
     println!(
         "cargo:rerun-if-changed={}",
@@ -73,12 +76,16 @@ fn main() {
         .arg("--prefix")
         .arg(&zig_out);
 
-    // Pass cross-compilation target to Zig when the Cargo target differs from host
-    if let Ok(target) = env::var("TARGET")
-        && let Some(zig_target) = rust_target_to_zig(&target)
-    {
-        cmd.arg(format!("-Dtarget={zig_target}"));
-    }
+    // Always pass an explicit Zig target, including for native builds. Leaving
+    // Zig's target unspecified enables every instruction supported by the build
+    // host. A release runner with AVX-512 can otherwise produce a CAS binary
+    // that SIGILLs on another supported x86_64 machine inside Ghostty.
+    let target = env::var("TARGET").expect(
+        "Cargo did not provide TARGET; refusing to build ghostty_vt_sys without an explicit portable Zig target",
+    );
+    let zig_target =
+        build_support::rust_target_to_zig(&target).unwrap_or_else(|message| panic!("{message}"));
+    cmd.arg(format!("-Dtarget={zig_target}"));
 
     let status = cmd.status().expect("Failed to execute zig build");
 
@@ -93,62 +100,6 @@ fn main() {
 
     // Link C standard library
     println!("cargo:rustc-link-lib=c");
-}
-
-/// Map Rust target triple to Zig target triple for cross-compilation.
-/// Returns None for native builds (no -Dtarget needed).
-fn rust_target_to_zig(rust_target: &str) -> Option<String> {
-    // Only pass -Dtarget when cross-compiling (target != host)
-    let host = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        return None;
-    };
-
-    let host_os = if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        return None;
-    };
-
-    // Parse the Rust target triple: arch-vendor-os[-env]
-    let parts: Vec<&str> = rust_target.split('-').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let target_arch = parts[0];
-    let target_os_part = if parts.len() >= 4 { parts[2] } else { parts[1] };
-
-    // Check if this is a native build
-    let is_native = target_arch == host
-        && ((host_os == "darwin" && target_os_part == "apple")
-            || (host_os == "linux" && target_os_part == "linux"));
-
-    if is_native {
-        return None;
-    }
-
-    // Map to Zig target
-    match rust_target {
-        "x86_64-unknown-linux-gnu" => Some("x86_64-linux-gnu".to_string()),
-        "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu".to_string()),
-        "x86_64-unknown-linux-musl" => Some("x86_64-linux-musl".to_string()),
-        "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl".to_string()),
-        "x86_64-apple-darwin" => Some("x86_64-macos".to_string()),
-        "aarch64-apple-darwin" => Some("aarch64-macos".to_string()),
-        _ => {
-            eprintln!(
-                "cargo:warning=Unknown target triple for Zig mapping: {rust_target}, \
-                 building for host"
-            );
-            None
-        }
-    }
 }
 
 /// Find the Zig compiler

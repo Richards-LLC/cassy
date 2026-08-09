@@ -1,4 +1,4 @@
-# Commander v1 runtime release — future corrective version, unposted Slack drafts
+# Commander v1 runtime release — v2.55.5 candidate, unposted Slack drafts
 
 > **DO NOT POST.** The immutable public `v2.55.4` artifact is authentic and identically installed on
 > two real machines, but its assembled H7 verdict is **NOT RELEASABLE**. In two fresh Chrome 151
@@ -6,9 +6,11 @@
 > returned the exact controller origin, but the subsequent cross-origin pairing exchange failed in
 > Chrome with `MissingAllowOriginHeader`. Direct multi-machine pairing never completed, so the gate
 > stopped before later acceptance rows. All published tags, releases, and assets remain unchanged.
-> **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after a new immutable
-> corrective release is independently verified and passes the complete two-machine H7 matrix from its
-> exact public bytes. Slack remains unposted until the user elects to post after a green gate.
+> Source candidate `v2.55.5` contains the reviewed controller-origin CORS correction; it is not
+> tagged, published, installed, or accepted yet. **H7 remains NOT YET RELEASABLE. Do not post these
+> drafts.** Re-review only after a new immutable corrective release is independently verified and
+> passes the complete two-machine H7 matrix from its exact public bytes. Slack remains unposted until
+> the user elects to post after a green gate.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -45,7 +47,8 @@ daemon session, and bounded downstream fan-out.
 - Exact Origin/CORS handling, DPoP method/URI/credential binding, replay caches, per-operation scopes,
   revocation, and attributed audit fail closed.
 - Cross-origin pairing exchanges carry the exact authorized controller-origin CORS grant on both
-  successful and generic denied responses, so controller-origin Chrome can pair each target directly.
+  successful and bound generic denied responses, so controller-origin Chrome can pair each target
+  directly while unrelated refused requests stay fail-closed.
 - The verified Tailscale Serve TLS path uses a separate server-owned loopback backend and emits exactly
   `Strict-Transport-Security: max-age=31536000` across success, auth-error, catch-all, and preflight
   responses; the documented plaintext listener ignores spoofed proxy and identity headers.

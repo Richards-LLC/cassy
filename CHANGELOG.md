@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.55.5] - 2026-08-09
+
+### Fixed
+- **Commander pairing now returns the exact authorized CORS origin when a bound cross-machine pairing exchange is refused.** A controller-origin browser can read both the successful credential and a generic refusal for its own pairing capability, while unbound, mismatched-origin, or otherwise invalid exchanges remain fail-closed without exposing an allow-origin header.
+
 ## [2.55.4] - 2026-08-09
 
 ### Fixed

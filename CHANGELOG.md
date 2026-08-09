@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.55.1] - 2026-08-09
+
+### Fixed
+- **Do not install the Linux `2.55.0` artifact; use `2.55.1` instead.** The `2.55.0` workflow checked an intermediate Ghostty archive while the final linked executable still contained runtime-dispatched AVX-512 assembly from AWS-LC and BLAKE3. CAS already selects ring as its process-wide TLS provider, so the unused AWS-LC provider is no longer compiled into Linux releases; this intentionally omits AWS-LC's post-quantum-capable paths, which CAS did not exercise. BLAKE3 keeps its portable, SSE, SSE4.1, and AVX2 paths, while an audited 1.8.6 build override makes its upstream runtime-only `no_avx512` feature omit the inactive AVX-512 archive entirely. Explicit portable Rust, C, C++, and Zig targets cover the remaining final-link contributors. Hashes and stored fingerprints are unchanged; AVX-512-capable hosts may see lower throughput only in BLAKE3-heavy indexing and fingerprinting. The strict ISA scanner remains unchanged; the workflow now also checks the locked release features and audits the exact staged executable before it can be uploaded. The immutable `2.55.0` tag, release, and assets remain unchanged for traceability.
+
 ## [2.55.0] - 2026-08-09
 
 ### Added

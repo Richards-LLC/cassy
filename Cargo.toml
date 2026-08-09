@@ -20,6 +20,12 @@ members = [
     "crates/ghostty_vt",
 ]
 
+# Exact crates.io 1.8.6 source with one build.rs correction: when cas-store
+# enables no_avx512, do not compile/link the otherwise runtime-disabled AVX-512
+# archive. See docs/third-party/blake3-1.8.6.md.
+[patch.crates-io]
+blake3 = { path = "vendor/blake3-1.8.6" }
+
 [profile.release]
 lto = true
 codegen-units = 1

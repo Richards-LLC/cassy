@@ -1,6 +1,6 @@
 [package]
 name = "cas-store"
-version = "2.55.0"
+version = "2.55.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Storage layer for CAS (Coding Agent System)"
@@ -34,8 +34,9 @@ fs2 = "0.4"
 # Utilities
 rand = "0.9.2"
 sha2 = "0.10"
-# Content-hash identity for the knowledge source ledger (cas-cbf1)
-blake3 = "1.5"
+# Content-hash identity for the knowledge source ledger. Keep portable through
+# AVX2 dispatch, but do not link the AVX-512 path into release executables.
+blake3 = { version = "1.5", features = ["no_avx512"] }
 
 # Logging
 tracing = "0.1"

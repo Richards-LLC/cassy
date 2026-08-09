@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reject x86_64 Ghostty release artifacts containing EVEX instructions.
+# Reject final x86_64 release artifacts containing EVEX instructions.
 #
 # EVEX uses opcode-map prefix 0x62 and is the encoding used by AVX-512. CAS's
 # distributed x86_64 baseline does not require AVX-512, so an EVEX instruction
@@ -75,11 +75,11 @@ awk '
 ' "$disassembly" >"$offenders"
 
 if [[ -s "$offenders" ]]; then
-  echo "error: x86_64 Ghostty artifact contains forbidden EVEX/AVX-512 instruction encoding: $artifact" >&2
-  echo "The Ghostty portability baseline must run without AVX-512. First findings:" >&2
+  echo "error: x86_64 release artifact contains forbidden EVEX/AVX-512 instruction encoding: $artifact" >&2
+  echo "The portable x86_64 release baseline must run without AVX-512. First findings:" >&2
   head -n 10 "$offenders" >&2
   exit 1
 fi
 
 checksum="$(sha256sum -- "$artifact" | awk '{print $1}')"
-echo "portable x86_64 Ghostty ISA audit passed: evex_avx512=absent sha256=$checksum artifact=$artifact"
+echo "portable x86_64 ISA audit passed: evex_avx512=absent sha256=$checksum artifact=$artifact"

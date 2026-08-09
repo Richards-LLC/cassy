@@ -299,8 +299,12 @@ impl CloudSyncer {
         // a human happens to edit it. Holding the mark makes the next run
         // re-offer the same window — the same conservative choice the generic
         // path makes when it leaves a sub-batch un-synced (push.rs).
-        let skipped = response.skipped_count_for(KNOWLEDGE_ENTITY)
-            + response.skipped_count_for(KNOWLEDGE_TOMBSTONE_ENTITY);
+        let skipped = response
+            .skipped_count_for(KNOWLEDGE_ENTITY)
+            .map_err(CasError::Other)?
+            + response
+                .skipped_count_for(KNOWLEDGE_TOMBSTONE_ENTITY)
+                .map_err(CasError::Other)?;
         if skipped > 0 {
             warn!(
                 skipped,

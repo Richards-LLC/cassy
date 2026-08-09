@@ -44,14 +44,12 @@ fn entry_payload(id: &str) -> String {
 async fn skipped_response_leaves_queue_items_pending() {
     let server = MockServer::start().await;
 
-    // Server reports: we accepted 0 entries, skipped 1. The exact "synced"
-    // shape is intentionally absent — only `skipped` matters for the
-    // client-side defense, and the response struct is permissive by design
-    // (every field `#[serde(default)]`).
+    // Live server shape: counts are nested under the entity key rather than
+    // in the older proposed top-level `skipped` map.
     Mock::given(method("POST"))
         .and(path("/api/sync/push"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "skipped": { "entries": 1 }
+            "entries": { "inserted": 0, "updated": 0, "skipped": 1 }
         })))
         .expect(1..)
         .mount(&server)

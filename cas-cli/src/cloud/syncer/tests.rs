@@ -133,8 +133,8 @@ fn push_response_default_has_no_skipped_field() {
     // `skipped == None` so skipped_count_for(_) returns 0.
     let resp = PushResponse::default();
     assert!(resp.skipped.is_none());
-    assert_eq!(resp.skipped_count_for("entries"), 0);
-    assert_eq!(resp.skipped_count_for("tasks"), 0);
+    assert_eq!(resp.skipped_count_for("entries"), Ok(0));
+    assert_eq!(resp.skipped_count_for("tasks"), Ok(0));
 }
 
 #[test]
@@ -142,12 +142,32 @@ fn push_response_parses_skipped_field() {
     // The forward-looking wire shape: server returns a per-entity-type map.
     let body = r#"{"skipped":{"entries":3,"tasks":0}}"#;
     let resp: PushResponse = serde_json::from_str(body).expect("must parse");
-    assert_eq!(resp.skipped_count_for("entries"), 3);
+    assert_eq!(resp.skipped_count_for("entries"), Ok(3));
     // Explicit 0 in the map is still reported as 0.
-    assert_eq!(resp.skipped_count_for("tasks"), 0);
+    assert_eq!(resp.skipped_count_for("tasks"), Ok(0));
     // Entity types not in the map are also 0 — distinguishes "no skip" from
     // "we never sent any of these" downstream.
-    assert_eq!(resp.skipped_count_for("rules"), 0);
+    assert_eq!(resp.skipped_count_for("rules"), Ok(0));
+}
+
+#[test]
+fn push_response_parses_live_nested_skipped_field() {
+    let body = r#"{"tasks":{"inserted":0,"updated":0,"skipped":1}}"#;
+    let resp: PushResponse = serde_json::from_str(body).expect("must parse live response");
+    assert_eq!(resp.skipped_count_for("tasks"), Ok(1));
+    assert_eq!(resp.skipped_count_for("entries"), Ok(0));
+}
+
+#[test]
+fn push_response_rejects_unrecognized_or_conflicting_skip_signals() {
+    let malformed: PushResponse = serde_json::from_str(r#"{"tasks":{"skipped":"one"}}"#).unwrap();
+    assert!(malformed.skipped_count_for("tasks").is_err());
+
+    let conflicting: PushResponse = serde_json::from_str(
+        r#"{"skipped":{"tasks":1},"tasks":{"inserted":0,"updated":0,"skipped":2}}"#,
+    )
+    .unwrap();
+    assert!(conflicting.skipped_count_for("tasks").is_err());
 }
 
 #[test]
@@ -164,13 +184,13 @@ fn push_response_is_backward_compatible_with_legacy_payload() {
     let resp: PushResponse = serde_json::from_str(legacy_synced_shape)
         .expect("legacy {synced:...} body must still deserialize");
     assert!(resp.skipped.is_none());
-    assert_eq!(resp.skipped_count_for("entries"), 0);
+    assert_eq!(resp.skipped_count_for("entries"), Ok(0));
 
     // Truly empty object — same expectation.
     let resp: PushResponse =
         serde_json::from_str("{}").expect("empty JSON object must deserialize");
     assert!(resp.skipped.is_none());
-    assert_eq!(resp.skipped_count_for("entries"), 0);
+    assert_eq!(resp.skipped_count_for("entries"), Ok(0));
 }
 
 #[test]
@@ -182,10 +202,13 @@ fn push_response_skipped_count_threshold_drives_warn_path() {
     // refactors of `skipped_count_for` can't silently change the gate.
     let body = r#"{"skipped":{"entries":1}}"#;
     let resp: PushResponse = serde_json::from_str(body).unwrap();
-    assert!(resp.skipped_count_for("entries") > 0, "warn-path must fire");
+    assert!(
+        resp.skipped_count_for("entries").unwrap() > 0,
+        "warn-path must fire"
+    );
     assert_eq!(
         resp.skipped_count_for("tasks"),
-        0,
+        Ok(0),
         "non-targeted entity types must not fire the warn-path"
     );
 }

@@ -24,8 +24,8 @@ mod server;
 mod tailscale;
 
 pub use auth::{
-    AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, PairingExchange,
-    PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,
+    AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
+    PairingExchange, PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,
 };
 pub use connector::DaemonConnector;
 pub use discovery::{CloudDeviceSuggestion, load_cloud_device_suggestions};

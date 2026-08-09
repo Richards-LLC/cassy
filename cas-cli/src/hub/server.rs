@@ -65,6 +65,17 @@ impl<R: SessionReadModel> HubState<R> {
 
 pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
     Router::new()
+        .route("/", get(commander_index))
+        .route("/commander", get(commander_index))
+        .route("/commander/", get(commander_index))
+        .route("/commander/app.js", get(commander_javascript))
+        .route("/commander/app.css", get(commander_stylesheet))
+        .route("/commander/ghostty-vt.wasm", get(commander_ghostty_wasm))
+        .route(
+            "/commander/ghostty-write-pty.wasm",
+            get(commander_ghostty_write_wasm),
+        )
+        .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health))
         .route("/v1/auth/pairing/exchange", post(pairing_exchange::<R>))
         .route("/v1/auth/websocket-ticket", post(websocket_ticket::<R>))
@@ -72,11 +83,70 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/v1/sessions", get(sessions::<R>))
         .route("/v1/events", get(events::<R>))
         .route("/v1/sessions/{session}/status", get(status::<R>))
-        .route("/v1/sessions/{session}/lease", post(acquire_lease::<R>))
+        .route(
+            "/v1/sessions/{session}/lease",
+            get(lease_status::<R>)
+                .post(acquire_lease::<R>)
+                .delete(release_lease::<R>),
+        )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
         .layer(middleware::from_fn(security_headers))
+}
+
+fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+async fn commander_index() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/index.html"),
+        "text/html; charset=utf-8",
+    )
+}
+
+async fn commander_javascript() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/app.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
+async fn commander_stylesheet() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/app.css"),
+        "text/css; charset=utf-8",
+    )
+}
+
+async fn commander_ghostty_wasm() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/ghostty-vt.wasm"),
+        "application/wasm",
+    )
+}
+
+async fn commander_ghostty_write_wasm() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/ghostty-write-pty.wasm"),
+        "application/wasm",
+    )
+}
+
+async fn commander_symbols_font() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/symbols.woff2"),
+        "font/woff2",
+    )
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
@@ -117,7 +187,7 @@ async fn preflight<R: SessionReadModel>(
     output.insert("vary", HeaderValue::from_static("Origin"));
     output.insert(
         "access-control-allow-methods",
-        HeaderValue::from_static("GET, HEAD, POST, OPTIONS"),
+        HeaderValue::from_static("GET, HEAD, POST, DELETE, OPTIONS"),
     );
     output.insert(
         "access-control-allow-headers",
@@ -533,14 +603,72 @@ async fn acquire_lease<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path(session): Path<String>,
     headers: HeaderMap,
+    Json(request): Json<LeaseRequest>,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/lease");
+    let required_scope = if request.force {
+        Scope::HubAdmin
+    } else {
+        Scope::PaneInput
+    };
+    let context = match authorize(
+        &state,
+        HubAction::Mutation,
+        required_scope,
+        &headers,
+        "POST",
+        &uri,
+    ) {
+        Ok(Some(context)) => context,
+        _ => return unauthorized(),
+    };
+    match state.auth.as_ref().unwrap().acquire_or_force_lease(
+        &context,
+        &session,
+        chrono::Utc::now(),
+        request.force,
+    ) {
+        Ok(_) => {
+            state.events.controller_changed(&session);
+            match state
+                .auth
+                .as_ref()
+                .unwrap()
+                .lease_status(&context, &session, chrono::Utc::now())
+            {
+                Ok(summary) => with_cors(Json(summary).into_response(), &headers),
+                Err(_) => unauthorized(),
+            }
+        }
+        Err(_) => with_cors(
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error":"lease_unavailable"})),
+            )
+                .into_response(),
+            &headers,
+        ),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LeaseRequest {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn lease_status<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     let uri = format!("/v1/sessions/{session}/lease");
     let context = match authorize(
         &state,
-        HubAction::Mutation,
-        Scope::PaneInput,
+        HubAction::SessionRead,
+        Scope::SessionRead,
         &headers,
-        "POST",
+        "GET",
         &uri,
     ) {
         Ok(Some(context)) => context,
@@ -550,17 +678,41 @@ async fn acquire_lease<R: SessionReadModel>(
         .auth
         .as_ref()
         .unwrap()
-        .acquire_lease(&context, &session, chrono::Utc::now())
+        .lease_status(&context, &session, chrono::Utc::now())
     {
-        Ok(expires_at) => with_cors(
-            Json(serde_json::json!({"expires_at":expires_at})).into_response(),
-            &headers,
-        ),
-        Err(_) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error":"lease_unavailable"})),
-        )
-            .into_response(),
+        Ok(summary) => with_cors(Json(summary).into_response(), &headers),
+        Err(_) => unauthorized(),
+    }
+}
+
+async fn release_lease<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/lease");
+    let context = match authorize(
+        &state,
+        HubAction::Mutation,
+        Scope::PaneInput,
+        &headers,
+        "DELETE",
+        &uri,
+    ) {
+        Ok(Some(context)) => context,
+        _ => return unauthorized(),
+    };
+    match state
+        .auth
+        .as_ref()
+        .unwrap()
+        .release_lease(&context, &session, chrono::Utc::now())
+    {
+        Ok(()) => {
+            state.events.controller_changed(&session);
+            with_cors(StatusCode::NO_CONTENT.into_response(), &headers)
+        }
+        Err(_) => unauthorized(),
     }
 }
 

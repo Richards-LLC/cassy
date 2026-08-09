@@ -17,6 +17,7 @@ pub enum MachineEventKind {
     PaneExited,
     PaneRemoved,
     DaemonDisconnected,
+    ControllerChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +95,15 @@ impl MachineEventBus {
             Some(session.to_owned()),
             None,
             Some(diagnose_daemon_death(None, false)),
+        );
+    }
+
+    pub(crate) fn controller_changed(&self, session: &str) {
+        self.emit(
+            MachineEventKind::ControllerChanged,
+            Some(session.to_owned()),
+            None,
+            None,
         );
     }
 

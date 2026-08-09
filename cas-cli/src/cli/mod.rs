@@ -9,6 +9,7 @@ mod claude;
 mod claude_md;
 mod codemap_cmd;
 mod history_cmd;
+mod hub;
 mod index_cmd;
 mod knowledge_cmd;
 mod memory_migrate;
@@ -67,6 +68,7 @@ pub use config::ConfigCommands;
 pub use doctor::DoctorArgs;
 pub use factory::{AttachArgs, FactoryArgs, KillAllArgs, KillArgs};
 pub use hook::HookArgs;
+pub use hub::HubArgs;
 pub use init::InitArgs;
 pub use list::ListArgs;
 pub use mcp_cmd::McpCommands;
@@ -171,6 +173,9 @@ pub enum Commands {
 
     /// Local helper server for external orchestration tools
     Bridge(BridgeArgs),
+
+    /// Stable machine-local Commander hub
+    Hub(HubArgs),
 
     /// Run MCP server for Claude Code integration
     Serve,
@@ -321,6 +326,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Kill(_)
         | Commands::KillAll(_)
         | Commands::Bridge(_)
+        | Commands::Hub(_)
         | Commands::Config(_)
         | Commands::Status(_)
         | Commands::StatusLine(_)
@@ -493,6 +499,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Grok(_) => "grok".to_string(),
         Commands::Default(_) => "default".to_string(),
         Commands::Bridge(_) => "bridge".to_string(),
+        Commands::Hub(_) => "hub".to_string(),
         Commands::Serve => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
         Commands::Config(_) => "config".to_string(),
@@ -568,6 +575,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         }
         Commands::Default(args) => provider_default::execute(args),
         Commands::Bridge(args) => bridge::execute(args, cli),
+        Commands::Hub(args) => hub::execute(args, cli),
         Commands::Serve => serve_execute(),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Config(cmd) => config::execute_subcommand(cmd, cli, require_cas_root(cas_root)?),

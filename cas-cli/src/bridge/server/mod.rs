@@ -6,9 +6,9 @@
 mod factory;
 mod http;
 mod routes;
-mod session;
+pub(crate) mod session;
 mod sse;
-mod types;
+pub(crate) mod types;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

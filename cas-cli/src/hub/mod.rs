@@ -14,6 +14,19 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::ui::factory::{DaemonMessage, SessionManager};
 
+mod connector;
+mod events;
+mod identity;
+mod runtime;
+mod server;
+
+pub use connector::DaemonConnector;
+pub use events::{MachineEvent, MachineEventBus, MachineEventKind};
+pub(crate) use identity::ensure_private_dir;
+pub use identity::{MachineIdentity, MachineIdentityStore};
+pub use runtime::{HubInstanceLock, HubProcessRecord, HubRuntimePaths};
+pub use server::{HubState, router};
+
 pub const HUB_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_HUB_PORT: u16 = 4173;
 pub const DEFAULT_VIEWER_QUEUE_CAPACITY: usize = 256;
@@ -110,7 +123,7 @@ pub fn validate_control_bind(addr: SocketAddr, transport: TransportSecurity) -> 
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub schema_version: u32,
     pub ready: bool,
@@ -154,6 +167,7 @@ struct Viewer {
 #[derive(Default)]
 struct SessionFanout {
     upstream_starts: usize,
+    snapshot: Option<ProxyFrame>,
     viewers: HashMap<usize, Viewer>,
 }
 
@@ -192,8 +206,10 @@ impl SessionMultiplexer {
             .entry(session.to_owned())
             .or_insert_with(|| SessionFanout {
                 upstream_starts: 1,
+                snapshot: None,
                 viewers: HashMap::new(),
             });
+        let snapshot = fanout.snapshot.clone();
         fanout.viewers.insert(
             viewer_id,
             Viewer {
@@ -202,6 +218,14 @@ impl SessionMultiplexer {
                 lagged: lagged.clone(),
             },
         );
+        if let Some(snapshot) = snapshot {
+            let _ = fanout
+                .viewers
+                .get(&viewer_id)
+                .expect("viewer was just inserted")
+                .tx
+                .try_send(snapshot);
+        }
         ViewerReceiver {
             rx,
             lagged,
@@ -233,6 +257,17 @@ impl SessionMultiplexer {
             }
         }
         Ok(())
+    }
+
+    pub async fn publish_snapshot(&self, session: &str, frame: ProxyFrame) -> Result<()> {
+        {
+            let mut state = self.state.lock().await;
+            let Some(fanout) = state.sessions.get_mut(session) else {
+                anyhow::bail!("session '{session}' has no upstream fan-out")
+            };
+            fanout.snapshot = Some(frame.clone());
+        }
+        self.publish(session, frame).await
     }
 
     pub async fn upstream_start_count(&self, session: &str) -> usize {
@@ -296,7 +331,7 @@ pub enum ProcessExit {
     Signal(i32),
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonDeathCause {
     CleanExit {
@@ -314,7 +349,7 @@ pub enum DaemonDeathCause {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonDeathDiagnostic {
     pub cause: DaemonDeathCause,
     pub next_action: String,

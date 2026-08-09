@@ -736,6 +736,64 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
 }
 
 #[tokio::test]
+async fn h0_tls_hsts_policy_is_bound_to_server_transport_not_client_headers() {
+    let state = || {
+        let events = MachineEventBus::new(4);
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity {
+                id: "machine-test".into(),
+            },
+            DaemonConnector::new(SessionMultiplexer::new(4), events.clone()),
+            events,
+        )
+    };
+    let spoofed_plaintext = router(state())
+        .oneshot(
+            Request::get("/")
+                .header("host", "machine.tail.example")
+                .header("forwarded", "proto=https;host=machine.tail.example")
+                .header("x-forwarded-proto", "https")
+                .header("x-forwarded-host", "machine.tail.example")
+                .header("tailscale-user-login", "spoof@example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spoofed_plaintext.status(), StatusCode::OK);
+    assert!(
+        !spoofed_plaintext
+            .headers()
+            .contains_key("strict-transport-security"),
+        "client-controlled proxy and identity headers cannot opt plaintext into HSTS"
+    );
+
+    let tls_response =
+        router(state().with_response_transport(TransportSecurity::TrustedLoopbackTlsProxy))
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+    assert_eq!(tls_response.status(), StatusCode::OK);
+    let headers = tls_response.headers();
+    assert_eq!(
+        headers.get_all("strict-transport-security").iter().count(),
+        1
+    );
+    assert_eq!(headers["strict-transport-security"], "max-age=31536000");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["x-frame-options"], "DENY");
+    assert!(
+        headers["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'")
+    );
+}
+
+#[tokio::test]
 async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

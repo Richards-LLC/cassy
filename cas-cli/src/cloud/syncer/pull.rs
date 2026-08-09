@@ -231,6 +231,7 @@ impl CloudSyncer {
 
         // Get last pull timestamp
         let since = self.queue.get_metadata("last_pull_at")?;
+        let had_prior_watermark = since.is_some();
 
         let mut params = Vec::new();
         if let Some(since) = &since {
@@ -509,8 +510,15 @@ impl CloudSyncer {
             }
         }
 
-        // Update last pull timestamp
-        if let Some(pulled_at) = body.pulled_at {
+        // An empty first pull can mean this new machine resolved the wrong
+        // canonical project id. Stamping that response's watermark would make
+        // a later corrected-id pull incremental and permanently skip the
+        // historical backfill (GH #192). Once a project has established a
+        // watermark, retain the existing behavior: healthy empty incremental
+        // pulls advance to the server clock.
+        if (had_prior_watermark || result.total_pulled() > 0)
+            && let Some(pulled_at) = body.pulled_at
+        {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);
         }
 

@@ -411,7 +411,6 @@ fn run_recorded_adapter_scenarios(
                     target: "worker-a".to_string(),
                 })
             }),
-            thresholds,
         ));
     }
     if matches!(adapter, ProbeAdapterKind::Codex | ProbeAdapterKind::All) {
@@ -426,7 +425,6 @@ fn run_recorded_adapter_scenarios(
                     target: "worker-a".to_string(),
                 })
             }),
-            thresholds,
         ));
     }
     if matches!(adapter, ProbeAdapterKind::Grok | ProbeAdapterKind::All) {
@@ -442,7 +440,6 @@ fn run_recorded_adapter_scenarios(
                     target: "worker-a".to_string(),
                 })
             }),
-            thresholds,
         ));
     }
     if matches!(adapter, ProbeAdapterKind::All) {
@@ -458,10 +455,9 @@ fn adapter_scenario_from_result(
     message_id: &str,
     target: &str,
     result: Option<Result<MessageStageEvidence>>,
-    thresholds: &ProbeThresholds,
 ) -> ScenarioReport {
     match result {
-        Some(Ok(stage)) => adapter_scenario(name, stage, thresholds),
+        Some(Ok(stage)) => adapter_scenario(name, stage),
         Some(Err(error)) => {
             let detail = format!("{error:?}");
             adapter_failure_scenario(
@@ -482,50 +478,11 @@ fn adapter_scenario_from_result(
     }
 }
 
-fn adapter_scenario(
-    name: &'static str,
-    mut stage: MessageStageEvidence,
-    thresholds: &ProbeThresholds,
-) -> ScenarioReport {
-    let mut failed_stage = None;
-    if stage.terminal == "delivered" {
-        if let (Some(delivered), Some(wake)) = (stage.delivered_at_ms, stage.wake_at_ms)
-            && wake.saturating_sub(delivered) > thresholds.wake_p95_ms
-        {
-            stage.terminal = "wake_slo_failed";
-            failed_stage = Some("wake_slo");
-            stage.wake_status = "FAILED";
-            stage.stage_statuses.push(StageStatusEvidence {
-                stage: "wake".to_string(),
-                status: "FAILED".to_string(),
-                provenance: format!(
-                    "wake observed {}ms after delivery; wake_p95_slo_ms={}",
-                    wake.saturating_sub(delivered),
-                    thresholds.wake_p95_ms
-                ),
-            });
-        }
-        if failed_stage.is_none()
-            && let (Some(delivered), Some(reaction)) =
-                (stage.delivered_at_ms, stage.first_reaction_at_ms)
-            && reaction.saturating_sub(delivered) > thresholds.reaction_p95_ms
-        {
-            stage.terminal = "reaction_slo_failed";
-            failed_stage = Some("reaction_slo");
-            stage.reaction_status = Some("FAILED".to_string());
-            stage.stage_statuses.push(StageStatusEvidence {
-                stage: "reaction".to_string(),
-                status: "FAILED".to_string(),
-                provenance: format!(
-                    "reaction observed {}ms after delivery; reaction_p95_slo_ms={}",
-                    reaction.saturating_sub(delivered),
-                    thresholds.reaction_p95_ms
-                ),
-            });
-        }
-    } else {
-        failed_stage = Some(stage.terminal);
-    }
+fn adapter_scenario(name: &'static str, stage: MessageStageEvidence) -> ScenarioReport {
+    // A recorded adapter supplies one wake/reaction observation, not a latency
+    // distribution. Keep it as provenance and reserve p95 evaluation for the
+    // aggregate receipt, which enforces the minimum sample count below.
+    let failed_stage = (stage.terminal != "delivered").then_some(stage.terminal);
 
     let passed =
         stage.terminal == "delivered" && stage.reaction_status.as_deref() != Some("UNKNOWN");

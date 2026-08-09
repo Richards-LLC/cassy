@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::ensure_private_dir;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MachineIdentity {
     pub id: String,
@@ -55,36 +57,6 @@ impl MachineIdentityStore {
                 .with_context(|| format!("create hub machine identity at {}", path.display())),
         }
     }
-}
-
-pub(crate) fn ensure_private_dir(path: &Path) -> Result<()> {
-    if path.exists() {
-        let metadata = fs::symlink_metadata(path)?;
-        anyhow::ensure!(
-            metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
-            "hub state path is not a real directory"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            anyhow::ensure!(
-                metadata.mode() & 0o777 == 0o700,
-                "hub state directory must have mode 0700"
-            );
-            anyhow::ensure!(
-                metadata.uid() == unsafe { libc::geteuid() },
-                "hub state directory has the wrong owner"
-            );
-        }
-        return Ok(());
-    }
-    fs::create_dir(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 fn ensure_private_file(path: &Path) -> Result<()> {

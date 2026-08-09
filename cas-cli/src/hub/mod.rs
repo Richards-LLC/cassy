@@ -21,6 +21,7 @@ mod events;
 mod identity;
 mod runtime;
 mod server;
+mod state;
 mod tailscale;
 
 pub use auth::{
@@ -30,10 +31,10 @@ pub use auth::{
 pub use connector::DaemonConnector;
 pub use discovery::{CloudDeviceSuggestion, load_cloud_device_suggestions};
 pub use events::{MachineEvent, MachineEventBus, MachineEventKind};
-pub(crate) use identity::ensure_private_dir;
 pub use identity::{MachineIdentity, MachineIdentityStore};
 pub use runtime::{HubInstanceLock, HubProcessRecord, HubRuntimePaths};
 pub use server::{HubState, router};
+pub(crate) use state::ensure_private_dir;
 pub use tailscale::{TailscaleServeManager, TailscaleServeReceipt};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

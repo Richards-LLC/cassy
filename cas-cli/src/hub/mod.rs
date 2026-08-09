@@ -16,6 +16,7 @@ use crate::ui::factory::{DaemonMessage, SessionManager};
 
 mod auth;
 mod connector;
+mod death;
 mod discovery;
 mod events;
 mod identity;
@@ -28,6 +29,9 @@ pub use auth::{
     PairingExchange, PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,
 };
 pub use connector::DaemonConnector;
+pub use death::{DaemonExitEvidenceStore, DaemonExitReceipt, DaemonIdentity};
+#[cfg(unix)]
+pub(crate) use death::{supervise_forked_daemon, supervise_spawned_daemon};
 pub use discovery::{CloudDeviceSuggestion, load_cloud_device_suggestions};
 pub use events::{MachineEvent, MachineEventBus, MachineEventKind};
 pub(crate) use identity::ensure_private_dir;
@@ -355,7 +359,7 @@ impl Drop for ViewerReceiver {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProcessExit {
     Code(i32),
     Signal(i32),
@@ -387,7 +391,7 @@ pub struct DaemonDeathDiagnostic {
 
 pub fn diagnose_daemon_death(
     exit: Option<ProcessExit>,
-    core_dumped: bool,
+    core_dumped: Option<bool>,
 ) -> DaemonDeathDiagnostic {
     let cause = match exit {
         Some(ProcessExit::Code(0)) => DaemonDeathCause::CleanExit { code: 0 },
@@ -395,13 +399,23 @@ pub fn diagnose_daemon_death(
         Some(ProcessExit::Signal(signal)) => DaemonDeathCause::Signal {
             signal,
             name: signal_name(signal).map(str::to_owned),
-            core_dumped: Some(core_dumped),
+            core_dumped,
         },
         None => DaemonDeathCause::Unknown,
     };
+    let next_action = match &cause {
+        DaemonDeathCause::Signal { signal: 4, .. } => {
+            "Replace this CAS binary with the portable release artifact for this machine, then \
+             restart the factory session; preserve the daemon log and core dump for diagnosis."
+        }
+        _ => {
+            "Inspect the factory daemon log and session metadata; do not infer a cause from a \
+             closed socket alone."
+        }
+    };
     DaemonDeathDiagnostic {
         cause,
-        next_action: "Inspect the factory daemon log and session metadata; do not infer a cause from a closed socket alone.".into(),
+        next_action: next_action.into(),
     }
 }
 
@@ -433,6 +447,8 @@ pub struct HubSession {
     pub epic_id: Option<String>,
     pub ws_port: Option<u16>,
     pub liveness: DaemonLiveness,
+    #[serde(skip)]
+    pub daemon_identity: Option<DaemonIdentity>,
 }
 
 pub trait SessionReadModel: Clone + Send + Sync + 'static {
@@ -447,25 +463,36 @@ impl SessionReadModel for LocalSessionReadModel {
         Ok(SessionManager::new()
             .list_sessions()?
             .into_iter()
-            .map(|session| HubSession {
-                name: session.name,
-                project_dir: session.metadata.project_dir,
-                supervisor: session.metadata.supervisor.name,
-                workers: session
+            .map(|session| {
+                let daemon_identity = session
                     .metadata
-                    .workers
-                    .into_iter()
-                    .map(|worker| worker.name)
-                    .collect(),
-                epic_id: session.metadata.epic_id,
-                ws_port: session.metadata.ws_port,
-                liveness: if !session.is_running {
-                    DaemonLiveness::StaleMetadata
-                } else if session.metadata.ws_port.is_none() {
-                    DaemonLiveness::MissingEndpoint
-                } else {
-                    DaemonLiveness::Live
-                },
+                    .daemon_pid_starttime
+                    .map(|pid_starttime| DaemonIdentity {
+                        session: session.name.clone(),
+                        pid: session.metadata.daemon_pid,
+                        pid_starttime,
+                    });
+                HubSession {
+                    name: session.name,
+                    project_dir: session.metadata.project_dir,
+                    supervisor: session.metadata.supervisor.name,
+                    workers: session
+                        .metadata
+                        .workers
+                        .into_iter()
+                        .map(|worker| worker.name)
+                        .collect(),
+                    epic_id: session.metadata.epic_id,
+                    ws_port: session.metadata.ws_port,
+                    liveness: if !session.is_running {
+                        DaemonLiveness::StaleMetadata
+                    } else if session.metadata.ws_port.is_none() {
+                        DaemonLiveness::MissingEndpoint
+                    } else {
+                        DaemonLiveness::Live
+                    },
+                    daemon_identity,
+                }
             })
             .collect())
     }
@@ -537,6 +564,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         epic_id: None,
         ws_port: Some(12345),
         liveness: DaemonLiveness::Live,
+        daemon_identity: None,
     }
 }
 

@@ -7,7 +7,11 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{MachineEventBus, ProxyFrame, SessionMultiplexer, ViewerReceiver};
+use super::death::diagnose_disconnect;
+use super::{
+    DaemonExitEvidenceStore, DaemonIdentity, MachineEventBus, ProxyFrame, SessionMultiplexer,
+    ViewerReceiver,
+};
 use crate::ui::factory::{ClientMessage, DaemonMessage};
 
 struct UpstreamSlot {
@@ -21,6 +25,7 @@ pub struct DaemonConnector {
     mux: SessionMultiplexer,
     events: MachineEventBus,
     slots: Arc<Mutex<HashMap<String, Arc<UpstreamSlot>>>>,
+    exit_evidence: Option<DaemonExitEvidenceStore>,
 }
 
 impl DaemonConnector {
@@ -29,10 +34,23 @@ impl DaemonConnector {
             mux,
             events,
             slots: Arc::new(Mutex::new(HashMap::new())),
+            exit_evidence: DaemonExitEvidenceStore::default_for_user(),
         }
     }
 
-    pub async fn attach<I, S>(&self, session: &str, port: u16, panes: I) -> Result<ViewerReceiver>
+    #[cfg(test)]
+    pub(crate) fn with_exit_evidence_store(mut self, store: DaemonExitEvidenceStore) -> Self {
+        self.exit_evidence = Some(store);
+        self
+    }
+
+    pub async fn attach<I, S>(
+        &self,
+        session: &str,
+        port: u16,
+        panes: I,
+        identity: Option<DaemonIdentity>,
+    ) -> Result<ViewerReceiver>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -62,12 +80,15 @@ impl DaemonConnector {
             let session = session.to_owned();
             let mux = self.mux.clone();
             let events = self.events.clone();
+            let exit_evidence = self.exit_evidence.clone();
             tokio::spawn(async move {
                 if let Err(error) = run_upstream(&session, port, &mux, &events, receiver).await {
                     tracing::warn!(session, %error, "Commander hub daemon upstream closed");
                 }
                 slot.running.store(false, Ordering::Release);
-                events.daemon_disconnected(&session);
+                let diagnostic =
+                    diagnose_disconnect(identity.as_ref(), exit_evidence.as_ref()).await;
+                events.daemon_disconnected(&session, diagnostic);
             });
         }
         Ok(receiver)

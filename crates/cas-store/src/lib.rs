@@ -274,6 +274,18 @@ pub trait Store: Send + Sync {
     /// Update an existing entry
     fn update(&self, entry: &Entry) -> Result<()>;
 
+    /// Update an entry only if its current lifecycle timestamp still equals
+    /// `expected_updated_at`. SQLite overrides this with a single conditional
+    /// write; the legacy fallback preserves the precondition for backends
+    /// without update metadata.
+    fn update_if_unmodified(&self, entry: &Entry, expected_updated_at: DateTime<Utc>) -> Result<bool> {
+        if self.recent_timestamp(entry)? != expected_updated_at {
+            return Ok(false);
+        }
+        self.update(entry)?;
+        Ok(true)
+    }
+
     /// Delete an entry
     fn delete(&self, id: &str) -> Result<()>;
 

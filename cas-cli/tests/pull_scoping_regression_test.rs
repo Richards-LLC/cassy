@@ -75,29 +75,166 @@ fn strip_comments(src: &str) -> String {
     out
 }
 
+/// Blank inline `#[cfg(test)] mod ... { ... }` spans while preserving line
+/// breaks. The guard scans files under `src/`, where an inline test module is
+/// still present on disk but is not shipped production code.
+fn strip_cfg_test_modules(src: &str) -> String {
+    let mut out = src.as_bytes().to_vec();
+    let mut search_from = 0;
+
+    while let Some(offset) = src[search_from..].find("#[cfg(test)]") {
+        let attribute_start = search_from + offset;
+        let after_attribute = attribute_start + "#[cfg(test)]".len();
+
+        let Some(open_brace) = cfg_test_module_open_brace(src, after_attribute) else {
+            search_from = after_attribute;
+            continue;
+        };
+        let Some(close_brace) = matching_brace(src, open_brace) else {
+            // Leave malformed source unchanged; rustc will report the actual
+            // syntax error, while this guard should remain conservative.
+            search_from = open_brace + 1;
+            continue;
+        };
+
+        for byte in &mut out[attribute_start..=close_brace] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        search_from = close_brace + 1;
+    }
+
+    String::from_utf8(out).expect("source bytes remain valid UTF-8")
+}
+
+/// Return the opening brace for the module immediately gated by `#[cfg(test)]`.
+fn cfg_test_module_open_brace(src: &str, after_attribute: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let mut i = after_attribute;
+
+    // `pub(crate) mod tests { ... }` is valid too, so seek the `mod` keyword
+    // before either the item's body or terminator.
+    while i < bytes.len() {
+        if bytes[i] == b'{' || bytes[i] == b';' {
+            return None;
+        }
+        if bytes[i..].starts_with(b"mod")
+            && (i == 0 || !is_identifier_byte(bytes[i - 1]))
+            && !is_identifier_byte(*bytes.get(i + 3).unwrap_or(&b' '))
+        {
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j] != b'{' && bytes[j] != b';' {
+                j += 1;
+            }
+            return (bytes.get(j) == Some(&b'{')).then_some(j);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Find the closing brace for an inline module, ignoring braces in ordinary
+/// quoted literals. Comments are already stripped before this helper runs.
+fn matching_brace(src: &str, open_brace: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open_brace;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                    } else if bytes[i] == quote {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn pull_url_reference_lines(src: &str) -> Vec<usize> {
+    let without_comments = strip_comments(src);
+    let production_only = strip_cfg_test_modules(&without_comments);
+    production_only
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| line.contains("/api/sync/pull").then_some(i + 1))
+        .collect()
+}
+
+/// Scan one source root for pull URL references, after removing non-production
+/// inline test modules.
+fn pull_url_hits(root: &Path) -> Vec<(PathBuf, Vec<usize>)> {
+    let mut files = Vec::new();
+    collect_rust_files(root, &mut files);
+
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let src = fs::read_to_string(&path).ok()?;
+            let line_numbers = pull_url_reference_lines(&src);
+            (!line_numbers.is_empty()).then_some((path, line_numbers))
+        })
+        .collect()
+}
+
+#[test]
+fn pull_url_scan_ignores_cfg_test_module_fixture() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("pull_scoping")
+        .join("cfg_test_module_only.rs");
+    let src = fs::read_to_string(&fixture).expect("read cfg(test) pull URL fixture");
+
+    assert!(
+        pull_url_reference_lines(&src).is_empty(),
+        "references inside #[cfg(test)] modules must not be reported as production: {}",
+        fixture.display(),
+    );
+}
+
+#[test]
+fn pull_url_scan_still_detects_production_reference() {
+    let src = "const PULL_PATH: &str = \"/api/sync/pull\";\n\
+               #[cfg(test)]\n\
+               mod tests { const MATCHER: &str = \"/api/sync/pull\"; }\n";
+
+    assert_eq!(pull_url_reference_lines(src), vec![1]);
+}
+
 #[test]
 fn only_one_production_pull_url_builder_exists() {
     let root = production_source_root();
-    let mut files = Vec::new();
-    collect_rust_files(&root, &mut files);
 
     // Files that legitimately contain `/api/sync/pull` as code (not comments).
-    let mut hits: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-    for path in &files {
-        let Ok(src) = fs::read_to_string(path) else {
-            continue;
-        };
-        let stripped = strip_comments(&src);
-        let mut line_numbers = Vec::new();
-        for (i, line) in stripped.lines().enumerate() {
-            if line.contains("/api/sync/pull") {
-                line_numbers.push(i + 1);
-            }
-        }
-        if !line_numbers.is_empty() {
-            hits.push((path.clone(), line_numbers));
-        }
-    }
+    let hits = pull_url_hits(&root);
 
     // The single allowed builder lives in the scoped syncer.
     let expected = root.join("cloud").join("syncer").join("pull.rs");

@@ -29,6 +29,14 @@ impl Store for SqliteStore {
         self.store_update(entry)
     }
 
+    fn update_if_unmodified(
+        &self,
+        entry: &Entry,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.store_update_if_unmodified(entry, expected_updated_at)
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.store_delete(id)
     }

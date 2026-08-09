@@ -80,13 +80,22 @@ pub struct MemoryRequest {
     #[serde(default)]
     pub bypass_overlap: Option<bool>,
 
-    /// Overlap handling mode for `remember` (Phase 1: 'interactive' default;
-    /// 'autofix' reserved for Phase 2).
+    /// Overlap handling mode for `remember`. `interactive` is the default;
+    /// `autofix` explicitly opts in to atomically merging a high-overlap save.
     #[schemars(
-        description = "Overlap handling mode: 'interactive' (default) | 'autofix' (reserved, Phase 2)"
+        description = "Overlap handling mode: 'interactive' (default) | 'autofix' (atomic high-overlap merge)"
     )]
     #[serde(default)]
     pub mode: Option<String>,
+
+    /// Optimistic-concurrency timestamp for an `autofix` merge. When set,
+    /// the existing overlapping memory must still have this RFC3339 update
+    /// timestamp or the merge returns a conflict without changing it.
+    #[schemars(
+        description = "For remember mode=autofix: RFC3339 updated timestamp expected on the existing memory; stale values return a conflict"
+    )]
+    #[serde(default)]
+    pub expected_updated_at: Option<String>,
 
     /// Sort field (for list)
     #[schemars(description = "Sort by: 'created', 'updated', 'importance', 'title'")]

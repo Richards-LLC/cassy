@@ -18,6 +18,7 @@ fn remember_request(content: &str, title: &str) -> RememberRequest {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     }
 }

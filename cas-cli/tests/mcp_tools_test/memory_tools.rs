@@ -18,6 +18,7 @@ async fn test_remember_basic() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -48,6 +49,7 @@ async fn test_remember_with_defaults() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -78,6 +80,7 @@ async fn test_get_entry() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -131,6 +134,7 @@ async fn test_update_entry() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -188,6 +192,7 @@ async fn test_archive_and_unarchive() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -238,6 +243,7 @@ async fn test_helpful_and_harmful() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -289,6 +295,7 @@ async fn test_list_entries() {
             team_id: None,
             bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
         };
         service
@@ -333,6 +340,7 @@ async fn test_recent_entries() {
             team_id: None,
             bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
         };
         service
@@ -369,6 +377,7 @@ async fn test_delete_entry() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -414,6 +423,7 @@ async fn test_set_tier() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -469,6 +479,7 @@ async fn test_overlap_blocks_duplicate_insert() {
         team_id: None,
         bypass_overlap: Some(true),
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
     service
@@ -489,6 +500,7 @@ async fn test_overlap_blocks_duplicate_insert() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
     let result = service
@@ -536,6 +548,7 @@ async fn test_bypass_overlap_allows_duplicate() {
             team_id: None,
             bypass_overlap: Some(true),
         mode: None,
+        expected_updated_at: None,
         personal: None,
         };
         service
@@ -565,6 +578,7 @@ async fn test_unrelated_memory_inserts_normally() {
         team_id: None,
         bypass_overlap: Some(true),
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
     service
@@ -588,6 +602,7 @@ async fn test_unrelated_memory_inserts_normally() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
     let result = service
@@ -629,6 +644,7 @@ async fn test_moderate_overlap_creates_with_crossref() {
         team_id: None,
         bypass_overlap: Some(true),
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
     let first_result = service
@@ -664,6 +680,7 @@ async fn test_moderate_overlap_creates_with_crossref() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
     let second_result = service
@@ -733,6 +750,7 @@ async fn test_remember_team_linked_project_auto_promotes_to_team() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -788,6 +806,7 @@ async fn test_remember_personal_flag_opts_out_of_team_auto_promote() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: Some(true),
     };
 
@@ -840,6 +859,7 @@ async fn test_remember_explicit_team_id_wins_over_auto_promote() {
         team_id: Some(EXPLICIT_TEAM.to_string()),
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 

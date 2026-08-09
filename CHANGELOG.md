@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.55.0] - 2026-08-09
+
+### Added
+- **Commander provides one phone-friendly view across paired CAS machines.** Each machine can run a durable local hub, expose it through an explicitly managed Tailscale Serve route, and contribute its live sessions and terminal panes to a controller-origin catalog without creating another runtime session or model request.
+- **Live terminal viewing and control now have an explicit concurrency model.** Multiple observers share one bounded upstream connection per daemon session, one identified controller holds input at a time, slow viewers are isolated, and the embedded offline client supports pane selection, resize, targeted interrupt, and attributed messages through additive protocol negotiation.
+- **Browser control is bound to the paired device, origin, operation, and short-lived proof.** Non-extractable device keys, DPoP request binding, exact Origin/CORS handling, one-use pairing and WebSocket credentials, scoped authorization, revocation, controller leases, and attributed audit all fail closed; non-loopback plaintext service is refused.
+
 ## [2.54.1] - 2026-08-09
 
 ### Fixed

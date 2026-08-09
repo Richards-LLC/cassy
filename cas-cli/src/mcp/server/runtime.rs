@@ -161,6 +161,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     let (daemon, activity, _handle) = if enable_daemon {
         let cas_config = crate::config::Config::load(&cas_root).unwrap_or_default();
         let code_config = cas_config.code();
+        let cloud_config = cas_config.cloud.clone().unwrap_or_default();
         let project_dir = cas_root.parent().unwrap_or(&cas_root);
         let code_watch_paths: Vec<std::path::PathBuf> = code_config
             .watch_paths
@@ -170,6 +171,8 @@ async fn run_server_impl() -> anyhow::Result<()> {
 
         let config = EmbeddedDaemonConfig {
             cas_root: cas_root.clone(),
+            cloud_sync_enabled: cloud_config.auto_sync,
+            cloud_sync_interval_secs: cloud_config.interval_secs.max(1),
             index_code: code_config.enabled,
             code_watch_paths,
             code_extensions: code_config.extensions.clone(),

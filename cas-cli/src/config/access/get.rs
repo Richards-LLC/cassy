@@ -19,6 +19,8 @@ impl Config {
             "cloud.interval_secs" => Some(cloud.interval_secs.to_string()),
             "cloud.pull_on_start" => Some(cloud.pull_on_start.to_string()),
             "cloud.max_retries" => Some(cloud.max_retries.to_string()),
+            "cloud.queue_pending_warning" => Some(cloud.queue_pending_warning.to_string()),
+            "cloud.queue_oldest_warning_secs" => Some(cloud.queue_oldest_warning_secs.to_string()),
             // Hooks section
             "hooks.capture_enabled" => Some(hooks.capture_enabled.to_string()),
             "hooks.capture_tools" => Some(hooks.capture_tools.join(",")),

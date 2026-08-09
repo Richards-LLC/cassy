@@ -6,7 +6,7 @@
 //! # Integration Status
 //! Queue infrastructure ready for cloud sync feature.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -21,7 +21,7 @@ mod stats;
 mod tests;
 mod types;
 
-pub use types::{EntityType, PendingByType, QueueStats, QueuedSync, SyncOperation};
+pub use types::{EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncOperation};
 
 /// Persistent sync queue backed by SQLite
 pub struct SyncQueue {
@@ -37,6 +37,18 @@ impl SyncQueue {
         // Enable WAL mode for better concurrency
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Open an existing queue without creating or mutating its SQLite file.
+    ///
+    /// Factory preflight uses this path: readiness checks must not turn a
+    /// missing database into a newly-created one just by looking at it.
+    pub fn open_read_only(cas_dir: &Path) -> Result<Self, CasError> {
+        let db_path = cas_dir.join("cas.db");
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

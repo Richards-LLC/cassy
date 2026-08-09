@@ -561,9 +561,13 @@ impl EmbeddedDaemon {
                     }
                 }
 
-                // Cloud sync - runs after short idle (lighter threshold than maintenance)
+                // Cloud sync is a bounded background push/pull. Unlike full
+                // maintenance, it must not require an idle window: a busy
+                // factory keeps receiving MCP requests often enough to reset
+                // ActivityTracker forever, which used to leave its local
+                // queue wedged despite the configured 60-second cadence.
                 _ = cloud_sync_interval.tick() => {
-                    if self.cloud_syncer.is_some() && self.activity.idle_seconds() >= self.config.cloud_sync_idle_secs {
+                    if self.cloud_syncer.is_some() {
                         match self.run_cloud_sync().await {
                             Ok(result) => {
                                 let mut status = self.status.write().await;

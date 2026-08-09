@@ -53,7 +53,7 @@ pub use embeddings::{
     VectorNamespace, drain_units, embed_pending_pages, history_commit_key, history_doc_key,
 };
 pub use device::DeviceConfig;
-pub use sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue};
+pub use sync_queue::{EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue};
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
     KnowledgePageRecord, KnowledgePullReport, PushPlan, PushScope, SyncConflict, SyncResult,

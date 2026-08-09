@@ -54,6 +54,10 @@ fn test_validate_int_range() {
     assert!(reg.validate("cloud.interval_secs", "3600").is_ok());
     assert!(reg.validate("cloud.interval_secs", "9").is_err()); // Below min
     assert!(reg.validate("cloud.interval_secs", "10000").is_err()); // Above max
+    assert!(reg.validate("cloud.queue_pending_warning", "200").is_ok());
+    assert!(reg.validate("cloud.queue_pending_warning", "0").is_err());
+    assert!(reg.validate("cloud.queue_oldest_warning_secs", "21600").is_ok());
+    assert!(reg.validate("cloud.queue_oldest_warning_secs", "59").is_err());
 }
 
 #[test]

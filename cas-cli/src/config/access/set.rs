@@ -77,6 +77,18 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            "cloud.queue_pending_warning" => {
+                let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);
+                cloud.queue_pending_warning = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
+            "cloud.queue_oldest_warning_secs" => {
+                let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);
+                cloud.queue_oldest_warning_secs = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
             // Hooks section
             "hooks.capture_enabled" => {
                 let hooks = self.hooks.get_or_insert_with(HookConfig::default);

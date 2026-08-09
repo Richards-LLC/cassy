@@ -1,7 +1,11 @@
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 
-use crate::cloud::sync_queue::{EntityType, PendingByType, QueueStats, QueuedSync, SyncQueue};
+use chrono::{DateTime, Utc};
+
+use crate::cloud::sync_queue::{
+    EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncQueue,
+};
 use crate::error::CasError;
 
 impl SyncQueue {
@@ -86,6 +90,41 @@ impl SyncQueue {
             failed: failed as usize,
             by_type,
             oldest_item,
+        })
+    }
+
+    /// Capture the queue facts needed to detect a stalled cloud push path.
+    pub fn health(&self, max_retries: i32, now: DateTime<Utc>) -> Result<QueueHealth, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE retry_count < ?1",
+            params![max_retries],
+            |row| row.get(0),
+        )?;
+        let oldest_item_text: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM sync_queue WHERE retry_count < ?1 ORDER BY created_at ASC LIMIT 1",
+                params![max_retries],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let oldest_item = oldest_item_text
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc));
+        let last_error: Option<String> = conn
+            .query_row(
+                "SELECT last_error FROM sync_queue WHERE last_error IS NOT NULL ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        Ok(QueueHealth {
+            pending: pending as usize,
+            oldest_age_secs: oldest_item.map(|created_at| (now - created_at).num_seconds().max(0)),
+            oldest_item,
+            last_error,
         })
     }
 

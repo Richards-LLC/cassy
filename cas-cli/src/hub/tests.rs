@@ -9,7 +9,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tower::ServiceExt;
 
 use super::*;
-use crate::ui::factory::{DaemonMessage, PaneInfo, PaneKind, SessionState};
+use crate::ui::factory::{
+    DaemonMessage, PROTOCOL_VERSION, PaneInfo, PaneKind, SessionState, daemon_capabilities,
+};
 
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
@@ -258,6 +260,8 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
             "worker-1".into(),
             vec![b"scrollback\n".to_vec()],
         )])),
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: daemon_capabilities(),
     };
     let output = DaemonMessage::Output {
         pane_id: "worker-1".into(),

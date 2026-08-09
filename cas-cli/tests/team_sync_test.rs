@@ -26,7 +26,9 @@ mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
 use cas::cli::cloud::execute_team_push;
-use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue};
+use cas::cloud::{
+    CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue,
+};
 use cas::store::open_task_store_local;
 use cas::types::Task;
 use flate2::read::GzDecoder;
@@ -76,17 +78,15 @@ async fn team_push_drains_queue_when_team_configured() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "synced": {
-                    "entries": 1,
-                    "tasks": 0, "rules": 0, "skills": 0,
-                    "sessions": 0, "verifications": 0, "events": 0,
-                    "prompts": 0, "file_changes": 0, "commit_links": 0,
-                    "agents": 0, "worktrees": 0,
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "entries": 1,
+                "tasks": 0, "rules": 0, "skills": 0,
+                "sessions": 0, "verifications": 0, "events": 0,
+                "prompts": 0, "file_changes": 0, "commit_links": 0,
+                "agents": 0, "worktrees": 0,
+            }
+        })))
         .expect(1)
         .mount(&server)
         .await;
@@ -98,10 +98,9 @@ async fn team_push_drains_queue_when_team_configured() {
 
     // `execute_team_push` is sync and uses `ureq`; run on the blocking
     // pool so the wiremock tokio runtime can serve the request.
-    let result =
-        tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
-            .await
-            .unwrap();
+    let result = tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
+        .await
+        .unwrap();
 
     assert!(result.is_ok(), "execute_team_push returned Err: {result:?}");
 
@@ -150,6 +149,14 @@ async fn team_push_nested_skip_response_leaves_queue_pending() {
         1,
         "server-skipped team rows must remain pending"
     );
+    let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+    assert!(
+        pending[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("cloud skipped 1 of 1 team entries")),
+        "queue output must expose why this retryable team row is retained: {pending:?}"
+    );
 }
 
 /// No team configured → early return, zero HTTP traffic, `Ok(())`.
@@ -171,10 +178,9 @@ async fn team_push_no_op_when_no_team_configured() {
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
-    let result =
-        tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
-            .await
-            .unwrap();
+    let result = tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
+        .await
+        .unwrap();
     assert!(result.is_ok());
 }
 
@@ -196,10 +202,9 @@ async fn team_push_suppressed_by_auto_promote_kill_switch() {
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
-    let result =
-        tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
-            .await
-            .unwrap();
+    let result = tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
+        .await
+        .unwrap();
     assert!(result.is_ok());
 }
 
@@ -222,10 +227,9 @@ async fn team_push_silent_when_queue_empty() {
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
-    let result =
-        tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
-            .await
-            .unwrap();
+    let result = tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
+        .await
+        .unwrap();
     assert!(result.is_ok());
 }
 
@@ -331,10 +335,9 @@ async fn team_push_http_failure_is_isolated() {
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
-    let result =
-        tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
-            .await
-            .unwrap();
+    let result = tokio::task::spawn_blocking(move || execute_team_push(&cfg, &cas_root, &cli))
+        .await
+        .unwrap();
     assert!(
         result.is_ok(),
         "helper must return Ok even when team push fails (partial-failure isolation): {result:?}"
@@ -366,17 +369,15 @@ async fn team_push_chunks_upserts_by_payload_budget() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "synced": {
-                    "entries": 1,
-                    "tasks": 0, "rules": 0, "skills": 0,
-                    "sessions": 0, "verifications": 0, "events": 0,
-                    "prompts": 0, "file_changes": 0, "commit_links": 0,
-                    "agents": 0, "worktrees": 0,
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "entries": 1,
+                "tasks": 0, "rules": 0, "skills": 0,
+                "sessions": 0, "verifications": 0, "events": 0,
+                "prompts": 0, "file_changes": 0, "commit_links": 0,
+                "agents": 0, "worktrees": 0,
+            }
+        })))
         .expect(3)
         .mount(&server)
         .await;
@@ -395,7 +396,13 @@ async fn team_push_chunks_upserts_by_payload_budget() {
         })
         .to_string();
         queue
-            .enqueue_for_team(EntityType::Entry, &id, SyncOperation::Upsert, Some(&payload), TEST_TEAM)
+            .enqueue_for_team(
+                EntityType::Entry,
+                &id,
+                SyncOperation::Upsert,
+                Some(&payload),
+                TEST_TEAM,
+            )
             .unwrap();
     }
 

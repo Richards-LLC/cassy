@@ -117,6 +117,14 @@ async fn skipped_response_leaves_queue_items_pending() {
         1,
         "queue items the server skipped must remain pending — cas-f645 contract",
     );
+    let pending = queue_after.pending(10, 5).unwrap();
+    assert!(
+        pending[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("cloud skipped 1 of 1 entries")),
+        "queue output must expose why this retryable row is retained: {pending:?}"
+    );
 }
 
 /// Backward-compatibility guard: an older cloud build that does not yet

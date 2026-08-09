@@ -20,7 +20,9 @@ impl CloudSyncer {
         // re-enqueue them via enqueue_for_team on failure, which resets
         // retry_count to 0 (ON CONFLICT DO UPDATE) — preventing items from
         // ever reaching the `failed` bucket (defect B / cas-8dd8).
-        let queued = self.queue.pending_for_team(team_id, usize::MAX, self.config.max_retries)?;
+        let queued = self
+            .queue
+            .pending_for_team(team_id, usize::MAX, self.config.max_retries)?;
 
         if queued.is_empty() {
             result.duration_ms = start.elapsed().as_millis() as u64;
@@ -78,8 +80,9 @@ impl CloudSyncer {
         let grouped = self.group_queued_items(&queued);
 
         // Include project_canonical_id (required for project scoping)
-        let project_id = get_project_canonical_id()
-            .ok_or_else(|| CasError::Other("Cannot sync: not inside a CAS project directory".to_string()))?;
+        let project_id = get_project_canonical_id().ok_or_else(|| {
+            CasError::Other("Cannot sync: not inside a CAS project directory".to_string())
+        })?;
 
         // cas-8ca5 / contract §5: include the normalized git remote so the
         // server's project resolver can map an unpinned machine onto the team's
@@ -174,10 +177,9 @@ impl CloudSyncer {
     ) -> (usize, Vec<String>) {
         let mut upserts = Vec::new();
 
-        for item in queued
-            .iter()
-            .filter(|item| item.operation == SyncOperation::Upsert && item.entity_type == entity_type)
-        {
+        for item in queued.iter().filter(|item| {
+            item.operation == SyncOperation::Upsert && item.entity_type == entity_type
+        }) {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(value) => upserts.push((item, value)),
@@ -203,14 +205,9 @@ impl CloudSyncer {
                 sub_batch.into_iter().unzip();
             let sent_count = values.len();
 
-            match self.push_team_sub_batch(
-                team_id,
-                entity_key,
-                values,
-                token,
-                project_id,
-                git_remote,
-            ) {
+            match self
+                .push_team_sub_batch(team_id, entity_key, values, token, project_id, git_remote)
+            {
                 Ok(response) => {
                     if let Some(body) = response.as_ref() {
                         self.maybe_adopt_team_canonical_id(body);
@@ -232,10 +229,14 @@ impl CloudSyncer {
                     synced += accepted;
 
                     if skipped > 0 {
-                        errors.push(format!(
+                        let diagnostic = format!(
                             "cloud skipped {skipped} of {} team {entity_key} row(s); leaving sub-batch un-synced for retry",
                             batch_items.len()
-                        ));
+                        );
+                        for item in &batch_items {
+                            let _ = self.queue.record_diagnostic(item.id, &diagnostic);
+                        }
+                        errors.push(diagnostic);
                         continue;
                     }
 

@@ -60,4 +60,18 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("{ InterruptPane: { pane_id: pane } }");
     expect(source).not.toContain("[...surfaces.keys()].find");
   });
+
+  it("never caches an asynchronously-created terminal against a detached render", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("existingSurface.element !== mount || !existingSurface.element.isConnected");
+    expect(source).toContain("!mount.isConnected || currentMount !== mount");
+    expect(source).toContain("surface.dispose();");
+  });
+
+  it("preserves the active pane grid across lease and status renders", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
+    expect(source).toContain("replaceWith(preservedGrid)");
+    expect(source).toContain("data-session-key");
+  });
 });

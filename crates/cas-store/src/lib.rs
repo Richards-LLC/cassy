@@ -96,9 +96,9 @@ pub use code_vector_store::{
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
-    get_latest_worker_delivery,
-    get_worker_delivery_by_receipt, list_worker_delivery_events, transition_worker_delivery,
-    transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
+    get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
+    transition_worker_delivery, transition_worker_delivery_verification_with_conn,
+    worker_delivery_transaction_id,
 };
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
@@ -131,8 +131,8 @@ pub use history_provenance::{
 // Knowledge store for LLM-distilled repo prose (EPIC cas-7d31 / cas-cbf1):
 // markdown bodies on disk, index + content-hash source ledger in cas.db.
 pub use knowledge_store::{
-    DiskSource, IngestBatch, IngestReason, IngestReport, KNOWLEDGE_DIR_NAME, KNOWLEDGE_SCHEMA,
-    KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS, KNOWLEDGE_PAGE_TOMBSTONE_STATEMENTS,
+    DiskSource, IngestBatch, IngestReason, IngestReport, KNOWLEDGE_DIR_NAME,
+    KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS, KNOWLEDGE_PAGE_TOMBSTONE_STATEMENTS, KNOWLEDGE_SCHEMA,
     KNOWLEDGE_SCHEMA_STATEMENTS, KnowledgeHit, KnowledgePage, KnowledgePageOrigin,
     KnowledgePageTombstone, KnowledgeSource, KnowledgeStore, PageWrite, PendingSource,
     SourceClassification, SourceOutcome, SourceStatus, SqliteKnowledgeStore, TombstoneApplyOutcome,
@@ -144,14 +144,15 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
-    IssuedVerifierCapability, SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore,
+    IssuedVerifierCapability, ParentDependencyUpdate, RequestChangesBoundary,
+    RequestChangesOutcome, SqliteVerificationStore, TaskReopenLifecycleOutbox,
+    VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_SCHEMA, VerificationStore,
     add_system_verification, add_verification_with_conn, bind_server_verifier_handoff,
     bind_server_verifier_handoff_and_register_child, bind_verifier_capability,
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
     consume_verifier_capability_with_conn, create_verification_dispatch,
     create_verification_dispatch_bound, create_verification_dispatch_bound_with_conn,
-    pend_task_for_supervisor_review_with_dispatch,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
     inspect_bound_server_verifier_handoff, inspect_verifier_capability,
@@ -159,11 +160,9 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_new_cycle,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
-    resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    reopen_closed_task_atomic, request_changes_for_parked_delivery,
-    timeout_verification_dispatch, update_system_verification,
-    ParentDependencyUpdate, RequestChangesBoundary, RequestChangesOutcome,
-    TaskReopenLifecycleOutbox,
+    pend_task_for_supervisor_review_with_dispatch, reopen_closed_task_atomic,
+    request_changes_for_parked_delivery, resolve_verification_dispatch_with_conn,
+    save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
 };
 
 // Worktree store for git worktree tracking
@@ -191,11 +190,10 @@ pub use supervisor_queue_store::{
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
     ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
-    MessageDeliveryReport, MessageStatus,
-    ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS, PROMPT_RETRY_MAX_AGE_SECS, PendingReason,
-    PromptQueueStore, PromptRetryDisposition, QueuedPrompt, RetriedPrompt,
-    SqlitePromptQueueStore, SurfacingSource, UndeliveredLifecycleRelay, WakeAttempt,
-    reply_confirms_delivered_message,
+    MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
+    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore, PromptRetryDisposition,
+    QueuedPrompt, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
+    UndeliveredLifecycleRelay, WakeAttempt, reply_confirms_delivered_message,
 };
 
 // Reminder store for supervisor "Remind Me" feature
@@ -231,8 +229,8 @@ pub use file_change_store::{
 
 // Commit link store for associating git commits with AI sessions (code attribution)
 pub use commit_link_store::{
-    COMMIT_LINK_LINK_METHOD_STATEMENTS, COMMIT_LINK_SCHEMA, CommitLinkStore,
-    SqliteCommitLinkStore, add_commit_link_with_conn,
+    COMMIT_LINK_LINK_METHOD_STATEMENTS, COMMIT_LINK_SCHEMA, CommitLinkStore, SqliteCommitLinkStore,
+    add_commit_link_with_conn,
 };
 
 // Recording text store for full-text search in factory recordings
@@ -278,7 +276,11 @@ pub trait Store: Send + Sync {
     /// `expected_updated_at`. SQLite overrides this with a single conditional
     /// write; the legacy fallback preserves the precondition for backends
     /// without update metadata.
-    fn update_if_unmodified(&self, entry: &Entry, expected_updated_at: DateTime<Utc>) -> Result<bool> {
+    fn update_if_unmodified(
+        &self,
+        entry: &Entry,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool> {
         if self.recent_timestamp(entry)? != expected_updated_at {
             return Ok(false);
         }

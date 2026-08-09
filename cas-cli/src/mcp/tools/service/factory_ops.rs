@@ -48,34 +48,31 @@ fn short_session(session_id: &str) -> &str {
 }
 
 /// Collapse accidental duplicate registrations for one logical factory
-/// identity. The first harness registration is authoritative while it is
-/// alive; a later live registration wins only when the original process is
-/// gone (legitimate same-name respawn).
+/// identity.
+///
+/// The registry can contain an old row and a fresh registration for the same
+/// worker after a harness restart. `worker_status` is a roster, so its stable
+/// identity is the visible role + worker name, not the registration's factory
+/// session. Prefer the freshest heartbeat: it is the strongest evidence of
+/// which same-name process is currently answering. This keeps a live respawn
+/// from being hidden behind its older ghost row.
 fn dedupe_authoritative_agents(
     agents: Vec<cas_types::Agent>,
 ) -> (Vec<cas_types::Agent>, usize) {
     let original_len = agents.len();
-    let mut by_identity = std::collections::BTreeMap::<
-        (Option<String>, String, String),
-        cas_types::Agent,
-    >::new();
+    let mut by_identity =
+        std::collections::BTreeMap::<(String, String), cas_types::Agent>::new();
 
     for candidate in agents {
-        let key = (
-            candidate.factory_session.clone(),
-            candidate.role.to_string(),
-            candidate.name.clone(),
-        );
+        let key = (candidate.role.to_string(), candidate.name.clone());
         match by_identity.get_mut(&key) {
             None => {
                 by_identity.insert(key, candidate);
             }
             Some(current) => {
-                let candidate_alive = agent_process_is_alive(&candidate);
-                let current_alive = agent_process_is_alive(current);
-                let candidate_wins = (candidate_alive && !current_alive)
-                    || (candidate_alive == current_alive
-                        && candidate.registered_at < current.registered_at);
+                let candidate_wins = candidate.last_heartbeat > current.last_heartbeat
+                    || (candidate.last_heartbeat == current.last_heartbeat
+                        && candidate.registered_at > current.registered_at);
                 if candidate_wins {
                     *current = candidate;
                 }
@@ -1474,11 +1471,17 @@ impl CasService {
 
         // cas-2e81: always surface recently-died-while-leased even when the
         // Active roster is empty — "None active" must not hide a mid-P0 crash.
+        let live_worker_names: std::collections::HashSet<String> = agents
+            .iter()
+            .filter(|agent| agent.role == AgentRole::Worker)
+            .map(|agent| agent.name.clone())
+            .collect();
         let died_section = super::orphan_recovery::format_recently_died_while_leased(
             &self.inner.cas_root,
             store.as_ref(),
             factory_session.as_deref(),
             3600, // 1h window
+            &live_worker_names,
         );
 
         // GH #60: recent spawn lifecycle, resolved once for both render paths.
@@ -1787,16 +1790,16 @@ impl CasService {
                 // same lookup feeds context/activity/in-flight evidence and
                 // hard-dead salvage diagnostics. Claude retains its single
                 // stat fast path.
-                let transcript_resolution_for_worker = match worker_cli {
-                    cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok => {
-                        Some(worker_status_cached_transcript_resolution(
-                            clone_path.as_deref(),
-                            session_uuid,
-                            worker_cli,
-                        ))
-                    }
-                    cas_mux::SupervisorCli::Claude => None,
-                };
+                let transcript_resolution_for_worker = worker_status_uses_scanned_transcript(
+                    worker_cli,
+                )
+                .then(|| {
+                    worker_status_cached_transcript_resolution(
+                        clone_path.as_deref(),
+                        session_uuid,
+                        worker_cli,
+                    )
+                });
                 let transcript_path_for_worker = transcript_resolution_for_worker
                     .as_ref()
                     .and_then(|cached| {
@@ -5806,6 +5809,14 @@ fn worker_status_transcript_path(
     }
 }
 
+/// Only harnesses with a scan-based transcript resolver may use the shared
+/// worker-status cache. In particular, a legacy Claude row must never be
+/// treated as a Codex/Grok rollout merely because a same-name stale row used
+/// a different harness.
+fn worker_status_uses_scanned_transcript(cli: cas_mux::SupervisorCli) -> bool {
+    matches!(cli, cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok)
+}
+
 #[derive(Debug, Clone)]
 struct WorkerStatusTranscriptResolution {
     resolution: TranscriptResolution,
@@ -6759,16 +6770,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_status_identity_dedupe_keeps_one_authoritative_factory_row() {
+    fn worker_status_dedupe_prefers_freshest_heartbeat_across_factory_sessions() {
         let mut parent = cas_types::Agent::new("parent-session".into(), "worker-one".into());
         parent.role = cas_types::AgentRole::Worker;
         parent.factory_session = Some("factory-a".into());
         parent.registered_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        parent.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(1);
+        parent
+            .metadata
+            .insert("worker_cli".into(), "codex".into());
 
         let mut nested = parent.clone();
         nested.id = "nested-knowledge-session".into();
         nested.cc_session_id = Some("nested-transcript".into());
+        nested.factory_session = None;
         nested.registered_at = chrono::Utc::now();
+        nested.last_heartbeat = chrono::Utc::now();
+        nested.metadata.insert("worker_cli".into(), "claude".into());
 
         let mut other = cas_types::Agent::new("other-session".into(), "worker-two".into());
         other.role = cas_types::AgentRole::Worker;
@@ -6778,7 +6796,25 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(rows.len(), 2);
         let worker_one = rows.iter().find(|row| row.name == "worker-one").unwrap();
-        assert_eq!(worker_one.id, "parent-session");
+        assert_eq!(worker_one.id, "nested-knowledge-session");
+        assert_eq!(
+            worker_cli_from_agent(worker_one),
+            cas_mux::SupervisorCli::Claude,
+            "the fresh Claude registration must not inherit the stale Codex row's resolver"
+        );
+    }
+
+    #[test]
+    fn worker_status_transcript_scan_is_guarded_by_registered_harness() {
+        assert!(!worker_status_uses_scanned_transcript(
+            cas_mux::SupervisorCli::Claude
+        ));
+        assert!(worker_status_uses_scanned_transcript(
+            cas_mux::SupervisorCli::Codex
+        ));
+        assert!(worker_status_uses_scanned_transcript(
+            cas_mux::SupervisorCli::Grok
+        ));
     }
 
     #[cfg(target_os = "linux")]

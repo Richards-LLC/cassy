@@ -10,7 +10,7 @@ cas doctor
 [OK] schema: v229 (up to date)
 [OK] supervisor relay: no undelivered lifecycle relays
 [OK] delivery retries: no pending message has spent 3+ attempts
-[OK] tables: [N] tables, 700 columns, 192 rows total
+[OK] tables: [N] tables, 706 columns, 192 rows total
 [OK] entry store: [N] entries accessible
 [WARN] search index: Index not found. Will be created on first search.
 [WARN] symbol index: nothing indexed for this project (0 symbol(s) in the store across all repositories); the code search index is missing. The daemon only indexes while idle — run `cas index code` to catch up now.

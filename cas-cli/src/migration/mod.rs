@@ -267,6 +267,18 @@ CREATE TABLE IF NOT EXISTS cas_migrations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_migrations_subsystem ON cas_migrations(subsystem);
+
+CREATE TABLE IF NOT EXISTS cas_migration_reconciliations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    migration_id INTEGER NOT NULL,
+    migration_name TEXT NOT NULL,
+    previous_applied_at TEXT NOT NULL,
+    reconciled_at TEXT NOT NULL,
+    reason TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_reconciliations_migration
+    ON cas_migration_reconciliations(migration_id, id);
 "#;
 
 /// Ensure the migrations table exists
@@ -346,8 +358,10 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     ensure_migrations_table(&conn)?;
 
     let initially_applied = get_applied_migrations(&conn)?;
-    let mut applied_ids: std::collections::HashSet<u32> =
-        initially_applied.iter().map(|migration| migration.id).collect();
+    let mut applied_ids: std::collections::HashSet<u32> = initially_applied
+        .iter()
+        .map(|migration| migration.id)
+        .collect();
 
     // Schema detection may fill an unrecorded prefix left by databases that
     // predate the ledger, but it must never jump over a real lower gap. A
@@ -359,6 +373,14 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     let mut detection_blocked = false;
     for migration in MIGRATIONS {
         if applied_ids.contains(&migration.id) {
+            // A ledger row is evidence about what an earlier runner believed;
+            // the registered predicate is the source of truth about the
+            // current schema. Surface recorded rows whose predicate is now
+            // false so the runner can reconcile them safely in registry order.
+            if !migration_is_detected(&conn, migration) {
+                detection_blocked = true;
+                pending.push(migration);
+            }
             continue;
         }
 
@@ -377,8 +399,16 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     // this check. The reported cursor is the applied registry prefix, not the
     // maximum arbitrary row: stranded higher rows must not hide a lower gap.
     let applied = get_applied_migrations(&conn)?;
-    let applied_ids: std::collections::HashSet<u32> =
-        applied.iter().map(|migration| migration.id).collect();
+    let applied_ids: std::collections::HashSet<u32> = applied
+        .iter()
+        .filter_map(|applied| {
+            MIGRATIONS
+                .iter()
+                .find(|migration| migration.id == applied.id)
+                .filter(|migration| migration_is_detected(&conn, migration))
+                .map(|migration| migration.id)
+        })
+        .collect();
     let current_version = MIGRATIONS
         .iter()
         .take_while(|migration| applied_ids.contains(&migration.id))
@@ -481,6 +511,94 @@ fn apply_migration_statement(conn: &Connection, sql: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether a migration's statements are safe to replay after its ledger row
+/// has already been recorded.
+///
+/// Recorded-but-undetected repair is deliberately more conservative than a
+/// normal forward migration. CAS can prove additive columns are idempotent by
+/// inspecting the target column, and SQLite's `IF NOT EXISTS` grammar proves
+/// create statements are non-destructive. Everything else (DROP, rename,
+/// UPDATE/backfill, or an unfamiliar future statement) is surfaced as an
+/// error instead of being replayed on user data.
+fn migration_is_safely_reconcilable(migration: &Migration) -> bool {
+    migration.up.iter().all(|sql| {
+        if add_column_target(sql).is_some() {
+            return true;
+        }
+
+        let normalized = sql
+            .split_whitespace()
+            .map(|token| token.to_ascii_uppercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        [
+            "CREATE TABLE IF NOT EXISTS ",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS ",
+            "CREATE INDEX IF NOT EXISTS ",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ",
+        ]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    })
+}
+
+/// Repair a migration that is present in `cas_migrations` but whose detection
+/// predicate is false, preserving the original ledger marker in an append-only
+/// reconciliation receipt.
+fn reconcile_recorded_migration(conn: &Connection, migration: &Migration) -> Result<()> {
+    let recorded: (String, String, String) = conn.query_row(
+        "SELECT name, subsystem, applied_at FROM cas_migrations WHERE id = ?1",
+        [migration.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let (recorded_name, recorded_subsystem, previous_applied_at) = recorded;
+
+    if recorded_name != migration.name || recorded_subsystem != migration.subsystem.as_str() {
+        return Err(CasError::MigrationFailed {
+            name: migration.name.to_string(),
+            reason: format!(
+                "recorded migration identity mismatch: ledger has {recorded_name}/{recorded_subsystem}"
+            ),
+        });
+    }
+
+    if !migration_is_safely_reconcilable(migration) {
+        return Err(CasError::MigrationFailed {
+            name: migration.name.to_string(),
+            reason: "recorded migration predicate is false, but its SQL is not provably safe to replay; manual repair is required".to_string(),
+        });
+    }
+
+    for sql in migration.up {
+        apply_migration_statement(conn, sql)?;
+    }
+
+    if !migration_is_detected(conn, migration) {
+        return Err(CasError::MigrationFailed {
+            name: migration.name.to_string(),
+            reason: "recorded migration predicate remained false after safe replay".to_string(),
+        });
+    }
+
+    let reconciled_at = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO cas_migration_reconciliations
+             (migration_id, migration_name, previous_applied_at, reconciled_at, reason)
+         VALUES (?1, ?2, ?3, ?4, 'recorded predicate was false')",
+        params![
+            migration.id,
+            migration.name,
+            previous_applied_at,
+            reconciled_at
+        ],
+    )?;
+    conn.execute(
+        "UPDATE cas_migrations SET applied_at = ?1 WHERE id = ?2",
+        params![reconciled_at, migration.id],
+    )?;
+    Ok(())
+}
+
 /// Apply a single migration
 fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
     // Execute all SQL statements in the migration. Each ADD COLUMN statement
@@ -578,6 +696,34 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
         // Run each migration in a transaction
         conn.execute("BEGIN IMMEDIATE", [])?;
 
+        let already_recorded = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cas_migrations WHERE id = ?1)",
+            [migration.id],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+
+        if already_recorded {
+            match reconcile_recorded_migration(&conn, migration) {
+                Ok(()) => {
+                    conn.execute("COMMIT", [])?;
+                    result.applied_count += 1;
+                    result.applied_names.push(migration.name.to_string());
+                    continue;
+                }
+                Err(error) => {
+                    conn.execute("ROLLBACK", [])?;
+                    let reason = error.to_string();
+                    result
+                        .errors
+                        .push((migration.name.to_string(), reason.clone()));
+                    return Err(CasError::MigrationFailed {
+                        name: migration.name.to_string(),
+                        reason,
+                    });
+                }
+            }
+        }
+
         // `check_migrations` deliberately stops schema detection at the first
         // real gap. Once every lower migration has committed, preserve the
         // existing detection behavior for a later schema that was already
@@ -647,7 +793,7 @@ pub fn has_pending_migrations(cas_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::migration::*;
-    use cas_store::KnowledgeStore;
+    use cas_store::{CommitLinkStore, KnowledgeStore};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -662,12 +808,35 @@ mod tests {
         let cas_dir = project.join(".cas");
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
 
-        // Recreate the exact knowledge_pages shape shipped at schema v225.
+        // Recreate the exact commit_links + knowledge_pages shapes shipped at
+        // schema v225. The released ledger marked m225 BOOTSTRAP while
+        // commit_links was absent; m143 then created this legacy table later
+        // in the same run, leaving m225 recorded but its predicate false.
         // The current store initializer deliberately cannot add columns to an
         // existing table, while the later m227-m229 tables remain present and
         // therefore satisfy their detection predicates.
         conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_knowledge_pages_rel_path;
+            "DROP TABLE commit_links;
+             CREATE TABLE commit_links (
+                 commit_hash TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 agent_id TEXT NOT NULL,
+                 branch TEXT NOT NULL,
+                 message TEXT NOT NULL,
+                 files_changed TEXT NOT NULL,
+                 prompt_ids TEXT NOT NULL,
+                 committed_at TEXT NOT NULL,
+                 author TEXT NOT NULL,
+                 scope TEXT NOT NULL DEFAULT 'project'
+             );
+             INSERT INTO commit_links
+                 (commit_hash, session_id, agent_id, branch, message,
+                  files_changed, prompt_ids, committed_at, author, scope)
+             VALUES ('legacy-v225', 'session-v225', 'agent-v225', 'main',
+                     'legacy observed commit', '[]', '[]',
+                     '2026-01-01T00:00:00Z', 'CAS', 'project');
+             UPDATE cas_migrations SET applied_at = 'BOOTSTRAP' WHERE id = 225;
+             DROP INDEX IF EXISTS idx_knowledge_pages_rel_path;
              DROP INDEX IF EXISTS idx_knowledge_pages_type;
              DROP INDEX IF EXISTS idx_knowledge_pages_pending_embedding;
              DROP TABLE knowledge_pages;
@@ -712,6 +881,20 @@ mod tests {
                 .unwrap(),
             225
         );
+        assert!(!cas_store::shared_db::column_exists(
+            &conn,
+            "commit_links",
+            "link_method"
+        ));
+        assert_eq!(
+            conn.query_row(
+                "SELECT applied_at FROM cas_migrations WHERE id = 225",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "BOOTSTRAP"
+        );
 
         if stranded_later_ledger {
             for id in [227, 228, 229] {
@@ -744,7 +927,7 @@ mod tests {
 
     fn assert_repaired_v225_knowledge_gap(cas_dir: &Path) {
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [226, 227, 228, 229] {
+        for id in [225, 226, 227, 228, 229] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
@@ -766,7 +949,41 @@ mod tests {
             "DETECTED",
             "the missing lower migration must actually apply"
         );
+        assert!(cas_store::shared_db::column_exists(
+            &conn,
+            "commit_links",
+            "link_method"
+        ));
+        assert_eq!(
+            conn.query_row(
+                "SELECT previous_applied_at FROM cas_migration_reconciliations
+                 WHERE migration_id = 225",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "BOOTSTRAP",
+            "the false released ledger marker must remain auditable"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM commit_links WHERE commit_hash = 'legacy-v225'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "additive reconciliation must preserve legacy provenance rows"
+        );
         drop(conn);
+
+        let links = cas_store::SqliteCommitLinkStore::open(cas_dir).unwrap();
+        let legacy = links
+            .get("legacy-v225")
+            .expect("production provenance read must succeed")
+            .expect("legacy provenance row must survive");
+        assert_eq!(legacy.session_id, "session-v225");
+        assert_eq!(legacy.link_method, None);
 
         let store = cas_store::SqliteKnowledgeStore::open(cas_dir).unwrap();
         let pages = store
@@ -790,8 +1007,8 @@ mod tests {
 
             let status = check_migrations(&cas_dir).unwrap();
             assert_eq!(
-                status.current_version, 225,
-                "a detected later schema must not advance the contiguous cursor"
+                status.current_version, 224,
+                "a false recorded m225 must stop the truthful contiguous cursor"
             );
             assert_eq!(
                 status
@@ -799,8 +1016,8 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![226, 227, 228, 229],
-                "once m226 is missing, later unrecorded migrations must wait behind it"
+                vec![225, 226, 227, 228, 229],
+                "recorded m225 and missing m226 must order all later work behind them"
             );
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
@@ -817,8 +1034,14 @@ mod tests {
             drop(conn);
 
             let first = run_migrations(&cas_dir, false).unwrap();
-            assert_eq!(first.applied_count, 1);
-            assert_eq!(first.applied_names, ["knowledge_pages_add_attribution"]);
+            assert_eq!(first.applied_count, 2);
+            assert_eq!(
+                first.applied_names,
+                [
+                    "commit_links_link_method",
+                    "knowledge_pages_add_attribution"
+                ]
+            );
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
             for id in [227, 228, 229] {
@@ -847,13 +1070,13 @@ mod tests {
             conn.execute("DELETE FROM cas_migrations", []).unwrap();
             drop(conn);
 
-            assert_eq!(bootstrap_migrations(&cas_dir).unwrap(), 173);
+            assert_eq!(bootstrap_migrations(&cas_dir).unwrap(), 172);
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
             assert_eq!(
                 conn.query_row("SELECT MAX(id) FROM cas_migrations", [], |row| row
                     .get::<_, i64>(0))
                     .unwrap(),
-                225
+                224
             );
             assert_eq!(
                 conn.query_row(
@@ -874,8 +1097,8 @@ mod tests {
 
             let status = check_migrations(&cas_dir).unwrap();
             assert_eq!(
-                status.current_version, 225,
-                "max ledger id 229 must not hide the missing m226 prefix entry"
+                status.current_version, 224,
+                "max ledger id 229 must not hide the false recorded m225 entry"
             );
             assert_eq!(
                 status
@@ -883,14 +1106,168 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![226]
+                vec![225, 226]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
-            assert_eq!(first.applied_count, 1);
-            assert_eq!(first.applied_names, ["knowledge_pages_add_attribution"]);
+            assert_eq!(first.applied_count, 2);
+            assert_eq!(
+                first.applied_names,
+                [
+                    "commit_links_link_method",
+                    "knowledge_pages_add_attribution"
+                ]
+            );
             assert_repaired_v225_knowledge_gap(&cas_dir);
         });
+    }
+
+    #[test]
+    fn all_absent_parent_bootstrap_shortcuts_are_reconciled() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let cas_dir = prepare_v225_knowledge_gap(home, false);
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute("DROP TABLE knowledge_page_tombstones", [])
+                .unwrap();
+            for id in [226, 227] {
+                let migration = MIGRATIONS
+                    .iter()
+                    .find(|migration| migration.id == id)
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+                     VALUES (?1, ?2, ?3, 'BOOTSTRAP')",
+                    params![id, migration.name, migration.subsystem.as_str()],
+                )
+                .unwrap();
+            }
+            drop(conn);
+
+            let status = check_migrations(&cas_dir).unwrap();
+            assert_eq!(status.current_version, 224);
+            assert_eq!(
+                status
+                    .pending
+                    .iter()
+                    .map(|migration| migration.id)
+                    .collect::<Vec<_>>(),
+                vec![225, 226, 227, 228, 229]
+            );
+
+            let first = run_migrations(&cas_dir, false).unwrap();
+            assert_eq!(first.applied_count, 3);
+            assert_eq!(
+                first.applied_names,
+                [
+                    "commit_links_link_method",
+                    "knowledge_pages_add_attribution",
+                    "knowledge_page_tombstones"
+                ]
+            );
+
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM cas_migration_reconciliations
+                     WHERE migration_id IN (225, 226, 227)",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                3,
+                "every historical absent-parent shortcut must leave an audit receipt"
+            );
+            drop(conn);
+
+            assert_repaired_v225_knowledge_gap(&cas_dir);
+        });
+    }
+
+    #[test]
+    fn recorded_additive_migration_reconciles_with_an_audit_receipt() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_migrations_table(&conn).unwrap();
+        conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        let migration = Migration {
+            id: 999_998,
+            name: "sample_add_value",
+            subsystem: Subsystem::Tasks,
+            description: "synthetic recorded-but-undetected additive migration",
+            up: &["ALTER TABLE sample ADD COLUMN value TEXT"],
+            detect: Some("SELECT COUNT(*) FROM pragma_table_info('sample') WHERE name = 'value'"),
+        };
+        conn.execute(
+            "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+             VALUES (?1, ?2, ?3, 'BOOTSTRAP')",
+            params![migration.id, migration.name, migration.subsystem.as_str()],
+        )
+        .unwrap();
+
+        conn.execute("BEGIN IMMEDIATE", []).unwrap();
+        reconcile_recorded_migration(&conn, &migration).unwrap();
+        conn.execute("COMMIT", []).unwrap();
+
+        assert!(migration_is_detected(&conn, &migration));
+        assert_eq!(
+            conn.query_row(
+                "SELECT previous_applied_at FROM cas_migration_reconciliations
+                 WHERE migration_id = ?1",
+                [migration.id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "BOOTSTRAP"
+        );
+    }
+
+    #[test]
+    fn recorded_destructive_migration_is_never_replayed() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_migrations_table(&conn).unwrap();
+        conn.execute("CREATE TABLE irreplaceable (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        let migration = Migration {
+            id: 999_999,
+            name: "destructive_repair",
+            subsystem: Subsystem::Tasks,
+            description: "synthetic destructive migration",
+            up: &["DROP TABLE irreplaceable"],
+            detect: Some("SELECT 0"),
+        };
+        conn.execute(
+            "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+             VALUES (?1, ?2, ?3, 'BOOTSTRAP')",
+            params![migration.id, migration.name, migration.subsystem.as_str()],
+        )
+        .unwrap();
+
+        conn.execute("BEGIN IMMEDIATE", []).unwrap();
+        let error = reconcile_recorded_migration(&conn, &migration)
+            .expect_err("destructive replay must be refused");
+        conn.execute("ROLLBACK", []).unwrap();
+
+        assert!(error.to_string().contains("not provably safe to replay"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'irreplaceable'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migration_reconciliations
+                 WHERE migration_id = ?1",
+                [migration.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

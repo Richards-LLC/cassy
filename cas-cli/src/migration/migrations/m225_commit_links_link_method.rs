@@ -25,18 +25,10 @@ pub const MIGRATION: Migration = Migration {
     description:
         "Add commit_links.link_method so a reconstructed provenance link is never mistaken for an observed one (cas-519f)",
     up: cas_store::COMMIT_LINK_LINK_METHOD_STATEMENTS,
-    // Also satisfied when `commit_links` does not exist at all: m143 creates it
-    // earlier in the same run, and a database that somehow lacks it must not be
-    // handed an `ALTER TABLE` against a missing table.
     detect: Some(
-        "SELECT CASE WHEN
-             NOT EXISTS (
-                 SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'commit_links'
-             )
-             OR EXISTS (
-                 SELECT 1 FROM pragma_table_info('commit_links') WHERE name = 'link_method'
-             )
-         THEN 1 ELSE 0 END",
+        "SELECT EXISTS (
+             SELECT 1 FROM pragma_table_info('commit_links') WHERE name = 'link_method'
+         )",
     ),
 };
 
@@ -116,16 +108,16 @@ mod tests {
         );
     }
 
-    /// A database with no `commit_links` at all must be reported as "nothing to
-    /// do" rather than sent into an ALTER against a missing table.
+    /// An absent parent table is not evidence that this migration is applied.
+    /// The ordered runner creates it through m143 before attempting m225.
     #[test]
-    fn detect_is_satisfied_when_the_table_is_absent() {
+    fn detect_is_false_when_the_table_is_absent() {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(
             conn.query_row(super::MIGRATION.detect.unwrap(), [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-            1
+            0
         );
     }
 

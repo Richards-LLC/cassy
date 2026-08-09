@@ -15,15 +15,10 @@ pub const MIGRATION: Migration = Migration {
     up: cas_store::KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS,
     detect: Some(
         "SELECT CASE WHEN
-             NOT EXISTS (
-                 SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'knowledge_pages'
-             )
-             OR (
-                 EXISTS (SELECT 1 FROM pragma_table_info('knowledge_pages') WHERE name = 'origin')
-                 AND EXISTS (
-                     SELECT 1 FROM pragma_table_info('knowledge_pages')
-                     WHERE name = 'origin_project_id'
-                 )
+             EXISTS (SELECT 1 FROM pragma_table_info('knowledge_pages') WHERE name = 'origin')
+             AND EXISTS (
+                 SELECT 1 FROM pragma_table_info('knowledge_pages')
+                 WHERE name = 'origin_project_id'
              )
          THEN 1 ELSE 0 END",
     ),
@@ -83,13 +78,13 @@ mod tests {
     }
 
     #[test]
-    fn detect_skips_absent_table_and_finds_legacy_shape() {
+    fn detect_rejects_absent_table_and_legacy_shape() {
         let conn = Connection::open_in_memory().unwrap();
         let detect = super::MIGRATION.detect.unwrap();
         assert_eq!(
             conn.query_row(detect, [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            1
+            0
         );
         legacy_table(&conn);
         assert_eq!(

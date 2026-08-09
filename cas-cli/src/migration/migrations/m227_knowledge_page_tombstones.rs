@@ -14,16 +14,10 @@ pub const MIGRATION: Migration = Migration {
     description: "Add durable knowledge-page tombstones for cloud delete propagation (cas-e6aa)",
     up: cas_store::KNOWLEDGE_PAGE_TOMBSTONE_STATEMENTS,
     detect: Some(
-        "SELECT CASE WHEN
-             NOT EXISTS (
-                 SELECT 1 FROM sqlite_master
-                 WHERE type = 'table' AND name = 'knowledge_pages'
-             )
-             OR EXISTS (
-                 SELECT 1 FROM sqlite_master
-                 WHERE type = 'table' AND name = 'knowledge_page_tombstones'
-             )
-         THEN 1 ELSE 0 END",
+        "SELECT EXISTS (
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'knowledge_page_tombstones'
+         )",
     ),
 };
 

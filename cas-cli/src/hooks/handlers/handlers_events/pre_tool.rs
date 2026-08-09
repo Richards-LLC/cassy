@@ -244,6 +244,25 @@ pub fn handle_pre_tool_use(
     // instead of calling open_*() directly, reducing ~11 SQLite connections to ~3-4.
     let mut stores = ToolHookStores::new(cas_root);
 
+    // Durable workspace contract (GH #196).  Factory file creation is
+    // intentionally narrow: the checked-out worktree, a configured durable
+    // artifacts root, and the harness-provided scratchpad are sanctioned.
+    // A scratchpad may itself be under /tmp, but it is explicitly ephemeral
+    // and is rejected later if cited as close evidence.
+    if is_factory_agent {
+        let factory = stores.config().factory();
+        if let Some(path) = factory_unsanctioned_write_path(input, &factory.artifacts_root) {
+            let artifacts = resolved_factory_artifacts_root(factory.artifacts_root.as_deref());
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                &format!(
+                    "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the worktree, durable artifacts root, or harness scratchpad is blocked: {}. Use your worktree, `{}/<task-id>/` for durable proof, or the harness scratchpad only for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
+                    path.display(), artifacts.display()
+                ),
+            ));
+        }
+    }
+
     // Compute current agent's task IDs (via leases) once for all jail checks.
     // This prevents cross-agent jail contamination where Agent A's pending tasks
     // block Agent B in a different session.
@@ -1058,6 +1077,76 @@ pub(crate) const FACTORY_AUTO_APPROVE_TOOLS: &[&str] = &[
     "Bash",
     "NotebookEdit",
 ];
+
+/// Resolve the durable artifact parent used by the factory workspace contract.
+/// `~/.cas/artifacts` is deliberately a real-disk fallback, not `/tmp`.
+fn resolved_factory_artifacts_root(configured: Option<&str>) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("~") => home.unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
+        Some(value) if value.starts_with("~/") => home
+            .map(|base| base.join(&value[2..]))
+            .unwrap_or_else(|| std::path::PathBuf::from(value)),
+        Some(value) => std::path::PathBuf::from(value),
+        None => home
+            .map(|base| base.join(".cas/artifacts"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
+    }
+}
+
+fn factory_unsanctioned_write_path(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+) -> Option<std::path::PathBuf> {
+    let tool = input.tool_name.as_deref()?;
+    let tool_input = input.tool_input.as_ref()?;
+    let raw_path = match tool {
+        "Write" | "Edit" | "NotebookEdit" => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("path"))
+            .and_then(|value| value.as_str()),
+        "Bash" => {
+            let command = tool_input.get("command").and_then(|value| value.as_str())?;
+            if !(command.contains('>')
+                || command.contains(" tee ")
+                || command.contains("touch ")
+                || command.contains("mkdir ")
+                || command.contains("cp ")
+                || command.contains("mv "))
+            {
+                return None;
+            }
+            command
+                .split_whitespace()
+                .map(|token| token.trim_matches(|c| matches!(c, '\'' | '\"' | '(' | ')' | ';')))
+                .find(|token| token.starts_with('/') || token.starts_with("~/") || token.starts_with("$HOME/"))
+        }
+        _ => return None,
+    }?;
+
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
+        home.as_ref()?.join(suffix)
+    } else if let Some(suffix) = raw_path.strip_prefix("$HOME/") {
+        home.as_ref()?.join(suffix)
+    } else {
+        std::path::PathBuf::from(raw_path)
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut sanctioned = vec![std::path::PathBuf::from(&input.cwd)];
+    sanctioned.push(resolved_factory_artifacts_root(
+        configured_artifacts_root.as_deref(),
+    ));
+    for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+        if let Some(value) = std::env::var_os(key) {
+            sanctioned.push(std::path::PathBuf::from(value));
+        }
+    }
+    (!sanctioned.iter().any(|root| path.starts_with(root))).then_some(path)
+}
 
 /// Whether `tool_name`/`action` is one of the CODEMAP-freshness-gated calls
 /// (task creation, worker spawn) — keyed on the CALLER's own `tool_prefix`

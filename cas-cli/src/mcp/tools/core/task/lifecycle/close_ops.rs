@@ -98,6 +98,23 @@ fn delivery_audit_text_is_portable(value: &str) -> bool {
     })
 }
 
+/// Return a durable-proof path under tmpfs cited in a task-close reason.
+///
+/// This deliberately inspects only the close reason, which workers use to
+/// claim their proof. It must not scan task notes: tasks can legitimately
+/// discuss `/tmp` (including the incident that introduced this guard), and
+/// treating that prose as a close failure would make the gate unusable. A
+/// structured artifact-path field is the follow-up durable solution; until
+/// then this catches the primary evidence-loss vector without changing the
+/// receipt schema.
+fn tmpfs_receipt_path_in_close_reason(reason: &str) -> Option<String> {
+    reason.split_whitespace().find_map(|token| {
+        let path = token.trim_matches(|ch: char| "(),[]{}<>\"'`".contains(ch));
+        (path.starts_with("/tmp/") || path.starts_with("/private/tmp/"))
+            .then(|| path.to_string())
+    })
+}
+
 fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
@@ -110,7 +127,10 @@ fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), S
 
 #[cfg(test)]
 mod delivery_audit_text_tests {
-    use super::{delivery_audit_text_is_portable, request_changes_role_gate};
+    use super::{
+        delivery_audit_text_is_portable, request_changes_role_gate,
+        tmpfs_receipt_path_in_close_reason,
+    };
 
     #[test]
     fn receipt_audit_text_rejects_paths_secrets_and_payload_controls() {
@@ -138,6 +158,22 @@ mod delivery_audit_text_tests {
         assert!(worker_error.contains("only supervisors"));
         assert!(worker_error.contains("cas-7484"));
         request_changes_role_gate(true, "cas-7484").unwrap();
+    }
+
+    #[test]
+    fn close_reason_names_tmpfs_proof_path_without_scanning_discussion() {
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason("Proof: /tmp/cas-4060-test.exit passed"),
+            Some("/tmp/cas-4060-test.exit".to_string())
+        );
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason("See (/private/tmp/cas-proof.json) for output"),
+            Some("/private/tmp/cas-proof.json".to_string())
+        );
+        assert_eq!(
+            tmpfs_receipt_path_in_close_reason("This task discusses /tmp storage policy"),
+            None
+        );
     }
 }
 
@@ -1161,6 +1197,15 @@ impl CasCore {
                 "Already closed: {} - {} (closed at {}). This call did not re-close \
                  the task; closed_at and notes were left unchanged.",
                 req.id, task.title, closed_at_msg
+            )));
+        }
+
+        if !(req.bypass_code_review.unwrap_or(false) && is_supervisor_from_env())
+            && let Some(reason) = req.reason.as_deref()
+            && let Some(path) = tmpfs_receipt_path_in_close_reason(reason)
+        {
+            return Ok(Self::tool_error(format!(
+                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}`. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. A supervisor may use bypass_code_review=true only for a legitimate historical reference."
             )));
         }
 

@@ -397,7 +397,7 @@ pub struct AuthStore(Arc<AuthInner>);
 impl AuthStore {
     pub fn open(root: impl AsRef<Path>, machine_id: impl Into<String>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        secure_directory(&root)?;
+        super::ensure_private_dir(&root)?;
         let lock_path = root.join("auth.lock");
         if lock_path.exists() {
             secure_regular_file(&lock_path)?;
@@ -986,36 +986,6 @@ fn validate_origin(origin: &str) -> Result<()> {
             && parsed.fragment().is_none(),
         "invalid controller origin"
     );
-    Ok(())
-}
-
-fn secure_directory(path: &Path) -> Result<()> {
-    if path.exists() {
-        let metadata = fs::symlink_metadata(path)?;
-        anyhow::ensure!(
-            metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
-            "hub state directory is not a real directory"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            anyhow::ensure!(
-                metadata.mode() & 0o777 == 0o700,
-                "hub state directory must have mode 0700"
-            );
-            anyhow::ensure!(
-                metadata.uid() == unsafe { libc::geteuid() },
-                "hub state directory has the wrong owner"
-            );
-        }
-    } else {
-        fs::create_dir(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        }
-    }
     Ok(())
 }
 

@@ -15,6 +15,12 @@ pub struct HubProcessRecord {
     pub port: u16,
     pub version: String,
     pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_serve_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]

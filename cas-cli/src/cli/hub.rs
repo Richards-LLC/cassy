@@ -11,12 +11,19 @@ use crate::cli::Cli;
 use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus, MachineIdentityStore,
-    PreAuthAuthorizer, Scope, SessionCatalog, SessionMultiplexer, TransportSecurity, router,
-    validate_control_bind,
+    MachineMetadata, MachineTransport, PreAuthAuthorizer, Scope, SessionCatalog,
+    SessionMultiplexer, TailscaleServeManager, TransportSecurity, load_cloud_device_suggestions,
+    router, validate_control_bind,
 };
 
 #[derive(Args, Debug, Clone)]
 pub struct HubArgs {
+    /// Publish the loopback hub through tailnet-only Tailscale Serve HTTPS
+    #[arg(long, global = true)]
+    pub tailscale_serve: bool,
+    /// Tailscale Serve HTTPS port (443 is the stable no-port URL)
+    #[arg(long, global = true, default_value_t = 443)]
+    pub tailscale_serve_port: u16,
     #[command(subcommand)]
     pub command: Option<HubCommands>,
 }
@@ -93,27 +100,34 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         .clone()
         .unwrap_or(HubCommands::Start(HubServeArgs::default()))
     {
-        HubCommands::Start(serve) => start(&serve, cli),
-        HubCommands::Serve(serve) => serve_foreground(&serve),
+        HubCommands::Start(serve) => {
+            start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
+        }
+        HubCommands::Serve(serve) => {
+            serve_foreground(&serve, args.tailscale_serve, args.tailscale_serve_port)
+        }
         HubCommands::Status => status(cli),
         HubCommands::Stop => stop(cli),
         HubCommands::Restart(serve) => {
             let _ = stop(cli);
-            start(&serve, cli)
+            start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
         }
         HubCommands::Pair(pair) => pair_device(&pair, cli),
         HubCommands::Auth(auth) => manage_auth(&auth, cli),
     }
 }
 
-fn start(args: &HubServeArgs, cli: &Cli) -> Result<()> {
+fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     if let Ok(record) = paths.read_process_record() {
         if record_is_live(&record) {
+            let endpoint = record
+                .public_url
+                .clone()
+                .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
             anyhow::bail!(
-                "cas hub is already running at http://{}:{} (pid {}, version {})",
-                record.bind,
-                record.port,
+                "cas hub is already running at {} (pid {}, version {})",
+                endpoint,
                 record.pid,
                 record.version
             );
@@ -142,6 +156,12 @@ fn start(args: &HubServeArgs, cli: &Cli) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log));
+    if tailscale_serve {
+        command
+            .arg("--tailscale-serve")
+            .arg("--tailscale-serve-port")
+            .arg(tailscale_port.to_string());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -164,10 +184,17 @@ fn start(args: &HubServeArgs, cli: &Cli) -> Result<()> {
                 if cli.json {
                     println!("{}", serde_json::to_string(&record)?);
                 } else {
-                    println!(
-                        "CAS hub started at http://{}:{} (pid {})",
-                        record.bind, record.port, record.pid
-                    );
+                    let endpoint = record
+                        .public_url
+                        .as_deref()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
+                    println!("CAS hub started at {endpoint} (pid {})", record.pid);
+                    if let Some(warning) = &record.transport_warning {
+                        eprintln!(
+                            "Tailscale Serve unavailable: {warning}; local hub remains healthy"
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -180,7 +207,7 @@ fn start(args: &HubServeArgs, cli: &Cli) -> Result<()> {
     )
 }
 
-fn serve_foreground(args: &HubServeArgs) -> Result<()> {
+fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
     let addr = SocketAddr::new(args.bind, args.port);
     validate_control_bind(addr, TransportSecurity::Plaintext)?;
     let paths = HubRuntimePaths::default_for_user()?;
@@ -194,12 +221,27 @@ fn serve_foreground(args: &HubServeArgs) -> Result<()> {
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
+        let (tailscale, transport_warning) = if tailscale_serve {
+            match TailscaleServeManager::new(paths.root()).ensure(actual.port(), tailscale_port) {
+                Ok(receipt) => (Some(receipt), None),
+                Err(error) => {
+                    let warning = error.to_string();
+                    tracing::warn!(%warning, "Tailscale Serve refused; keeping Commander loopback-only");
+                    (None, Some(warning))
+                }
+            }
+        } else {
+            (None, None)
+        };
         let record = HubProcessRecord {
             pid: std::process::id(),
             bind: actual.ip().to_string(),
             port: actual.port(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             started_at: chrono::Utc::now().to_rfc3339(),
+            public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),
+            tailscale_serve_port: tailscale.as_ref().map(|receipt| receipt.https_port),
+            transport_warning,
         };
         paths.write_process_record(&record)?;
 
@@ -209,6 +251,17 @@ fn serve_foreground(args: &HubServeArgs) -> Result<()> {
             SessionMultiplexer::new(DEFAULT_VIEWER_QUEUE_CAPACITY),
             events.clone(),
         );
+        let metadata = MachineMetadata {
+            transport: MachineTransport {
+                kind: if tailscale.is_some() {
+                    "tailscale_serve".to_owned()
+                } else {
+                    "loopback".to_owned()
+                },
+                public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),
+            },
+            cloud_devices: load_cloud_device_suggestions(),
+        };
         let state = HubState::new(
             catalog.clone(),
             Arc::new(PreAuthAuthorizer),
@@ -216,7 +269,8 @@ fn serve_foreground(args: &HubServeArgs) -> Result<()> {
             connector,
             events.clone(),
         )
-        .with_auth(auth);
+        .with_auth(auth)
+        .with_machine_metadata(metadata);
         let event_catalog = catalog.clone();
         let event_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -340,9 +394,14 @@ fn status(cli: &Cli) -> Result<()> {
     if cli.json {
         println!("{}", serde_json::json!({"running":live,"record":record}));
     } else if live {
+        let endpoint = record
+            .public_url
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
         println!(
-            "CAS hub is running at http://{}:{} (pid {}, version {})",
-            record.bind, record.port, record.pid, record.version
+            "CAS hub is running at {} (pid {}, version {})",
+            endpoint, record.pid, record.version
         );
     } else {
         println!(
@@ -356,8 +415,9 @@ fn status(cli: &Cli) -> Result<()> {
 
 fn stop(cli: &Cli) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
-    let record = paths.read_process_record()?;
-    if record_is_live(&record) {
+    let record = paths.read_process_record().ok();
+    if record.as_ref().is_some_and(record_is_live) {
+        let record = record.as_ref().expect("live record exists");
         #[cfg(unix)]
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(record.pid as i32),
@@ -376,11 +436,32 @@ fn stop(cli: &Cli) -> Result<()> {
             "cas hub did not stop cleanly"
         );
     }
+    let tailscale_result = TailscaleServeManager::new(paths.root()).disable_owned();
     paths.remove_process_record()?;
     if cli.json {
-        println!("{}", serde_json::json!({"stopped":true,"pid":record.pid}));
+        println!(
+            "{}",
+            serde_json::json!({
+                "stopped":true,
+                "pid":record.as_ref().map(|record| record.pid),
+                "tailscale_serve_removed":matches!(&tailscale_result, Ok(Some(_))),
+                "tailscale_warning":tailscale_result.as_ref().err().map(ToString::to_string),
+            })
+        );
     } else {
-        println!("CAS hub stopped (pid {})", record.pid);
+        if let Some(record) = &record {
+            println!("CAS hub stopped (pid {})", record.pid);
+        } else {
+            println!("CAS hub was not running");
+        }
+        match tailscale_result {
+            Ok(Some(receipt)) => println!(
+                "Removed CAS Tailscale Serve mapping at {}",
+                receipt.public_url
+            ),
+            Ok(None) => {}
+            Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),
+        }
     }
     Ok(())
 }

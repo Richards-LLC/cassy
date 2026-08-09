@@ -237,6 +237,58 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
 }
 
 #[tokio::test]
+async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestions() {
+    let events = MachineEventBus::new(16);
+    let state = HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+        events,
+    )
+    .with_machine_metadata(MachineMetadata {
+        transport: MachineTransport {
+            kind: "tailscale_serve".into(),
+            public_url: Some("https://target.tail.ts.net/".into()),
+        },
+        cloud_devices: vec![CloudDeviceSuggestion {
+            id: "device-hint".into(),
+            name: "Laptop".into(),
+            status: Some("online".into()),
+            hub_url: Some("https://laptop.tail.ts.net/".into()),
+            ssh_host: None,
+        }],
+    });
+    let response = router(state)
+        .oneshot(
+            Request::get("/v1/machine")
+                .header("origin", "https://controller.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["transport"]["kind"], "tailscale_serve");
+    assert_eq!(
+        body["transport"]["public_url"],
+        "https://target.tail.ts.net/"
+    );
+    assert_eq!(body["cloud_devices"][0]["id"], "device-hint");
+    assert!(
+        body["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "cloud_device_suggestions")
+    );
+}
+
+#[tokio::test]
 async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -366,6 +418,9 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
         port: 4173,
         version: env!("CARGO_PKG_VERSION").into(),
         started_at: "2026-08-09T00:00:00Z".into(),
+        public_url: None,
+        tailscale_serve_port: None,
+        transport_warning: None,
     };
     paths.write_process_record(&record).unwrap();
     assert_eq!(paths.read_process_record().unwrap(), record);

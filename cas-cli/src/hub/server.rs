@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AuthContext, AuthStore, DaemonConnector, HealthResponse, HubAction, HubAuthorizer, HubRequest,
-    HubSession, MachineEventBus, MachineIdentity, PairingExchange, Scope, SessionCatalog,
-    SessionReadModel, ViewerRecvError, required_scope,
+    HubSession, MachineEventBus, MachineIdentity, MachineMetadata, PairingExchange, Scope,
+    SessionCatalog, SessionReadModel, ViewerRecvError, required_scope,
 };
 use crate::ui::factory::{ClientMessage, MessageAttribution};
 
@@ -30,6 +30,7 @@ pub struct HubState<R: SessionReadModel> {
     connector: DaemonConnector,
     events: MachineEventBus,
     auth: Option<AuthStore>,
+    metadata: MachineMetadata,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -47,11 +48,17 @@ impl<R: SessionReadModel> HubState<R> {
             connector,
             events,
             auth: None,
+            metadata: MachineMetadata::default(),
         }
     }
 
     pub fn with_auth(mut self, auth: AuthStore) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    pub fn with_machine_metadata(mut self, metadata: MachineMetadata) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -129,6 +136,8 @@ struct MachineResponse {
     machine_id: String,
     version: &'static str,
     capabilities: &'static [&'static str],
+    transport: super::MachineTransport,
+    cloud_devices: Vec<super::CloudDeviceSuggestion>,
 }
 
 async fn machine<R: SessionReadModel>(
@@ -152,7 +161,15 @@ async fn machine<R: SessionReadModel>(
             schema_version: super::HUB_SCHEMA_VERSION,
             machine_id: state.machine.id,
             version: env!("CARGO_PKG_VERSION"),
-            capabilities: &["session_index", "daemon_attach", "machine_events"],
+            capabilities: &[
+                "session_index",
+                "daemon_attach",
+                "machine_events",
+                "tailscale_serve",
+                "cloud_device_suggestions",
+            ],
+            transport: state.metadata.transport,
+            cloud_devices: state.metadata.cloud_devices,
         })
         .into_response(),
         &headers,

@@ -16,21 +16,46 @@ use crate::ui::factory::{DaemonMessage, SessionManager};
 
 mod auth;
 mod connector;
+mod discovery;
 mod events;
 mod identity;
 mod runtime;
 mod server;
+mod tailscale;
 
 pub use auth::{
     AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, PairingExchange,
     PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,
 };
 pub use connector::DaemonConnector;
+pub use discovery::{CloudDeviceSuggestion, load_cloud_device_suggestions};
 pub use events::{MachineEvent, MachineEventBus, MachineEventKind};
 pub(crate) use identity::ensure_private_dir;
 pub use identity::{MachineIdentity, MachineIdentityStore};
 pub use runtime::{HubInstanceLock, HubProcessRecord, HubRuntimePaths};
 pub use server::{HubState, router};
+pub use tailscale::{TailscaleServeManager, TailscaleServeReceipt};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MachineTransport {
+    pub kind: String,
+    pub public_url: Option<String>,
+}
+
+impl Default for MachineTransport {
+    fn default() -> Self {
+        Self {
+            kind: "loopback".to_owned(),
+            public_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MachineMetadata {
+    pub transport: MachineTransport,
+    pub cloud_devices: Vec<CloudDeviceSuggestion>,
+}
 
 pub const HUB_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_HUB_PORT: u16 = 4173;

@@ -237,6 +237,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
     WHERE state IN ('pending', 'claimed');
 "#;
 
+/// Additive m230 upgrade for dispatches written before repository proofs were
+/// durable. Kept here so the store-open repair and numbered migration execute
+/// the exact same DDL.
+pub const VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT: &str =
+    "ALTER TABLE verification_dispatches ADD COLUMN repository_proof TEXT";
+
 const VERIFIER_CAPABILITY_TTL_MINUTES: i64 = 30;
 const SERVER_HANDOFF_ID_PREFIX: &str = "vhnd-";
 
@@ -2585,36 +2591,53 @@ pub fn consume_verifier_capability_with_conn(
 
 impl VerificationStore for SqliteVerificationStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
-        conn.execute_batch(VERIFICATION_SCHEMA)?;
-        // Serve-first startup can open current store code against a legacy
-        // primary/side table before m213 runs. SQLite cannot conditionally
-        // create an index on a missing column, so add these bootstrap indexes
-        // only when both additive columns already exist. The migration creates
-        // them after upgrading legacy tables.
-        let has_exact_boundary_columns = conn.query_row(
-            "SELECT CASE WHEN
-                EXISTS (
-                    SELECT 1 FROM pragma_table_info('verification_capabilities')
-                    WHERE name = 'dispatch_id'
-                )
-                AND EXISTS (
-                    SELECT 1 FROM pragma_table_info('verifications')
-                    WHERE name = 'dispatch_id'
-                )
-             THEN 1 ELSE 0 END",
-            [],
-            |row| row.get::<_, i64>(0),
-        )? == 1;
-        if has_exact_boundary_columns {
-            conn.execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_verification_capabilities_dispatch
-                    ON verification_capabilities(dispatch_id);
-                 CREATE INDEX IF NOT EXISTS idx_verifications_dispatch
-                    ON verifications(dispatch_id, created_at DESC);",
+        // `VERIFICATION_SCHEMA` is a modern baseline. On a database whose
+        // `verification_dispatches` table predates m230, its CREATE TABLE IF
+        // NOT EXISTS is a no-op and cannot add `repository_proof`, although
+        // every dispatch read selects it. Repair the shape before returning
+        // from any store open (CLI, MCP, or direct caller), without claiming
+        // the numbered migration's ledger row. The normal runner sees m230's
+        // detection query succeed and records it. `ensure_column` makes
+        // concurrent openers idempotent and race-safe.
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().map_err(lock_err)?;
+            conn.execute_batch(VERIFICATION_SCHEMA)?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "verification_dispatches",
+                "repository_proof",
+                VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
             )?;
-        }
-        Ok(())
+
+            // Serve-first startup can open current store code against a legacy
+            // primary/side table before m213 runs. SQLite cannot conditionally
+            // create an index on a missing column, so add these bootstrap indexes
+            // only when both additive columns already exist. The migration creates
+            // them after upgrading legacy tables.
+            let has_exact_boundary_columns = conn.query_row(
+                "SELECT CASE WHEN
+                    EXISTS (
+                        SELECT 1 FROM pragma_table_info('verification_capabilities')
+                        WHERE name = 'dispatch_id'
+                    )
+                    AND EXISTS (
+                        SELECT 1 FROM pragma_table_info('verifications')
+                        WHERE name = 'dispatch_id'
+                    )
+                 THEN 1 ELSE 0 END",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? == 1;
+            if has_exact_boundary_columns {
+                conn.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS idx_verification_capabilities_dispatch
+                        ON verification_capabilities(dispatch_id);
+                     CREATE INDEX IF NOT EXISTS idx_verifications_dispatch
+                        ON verifications(dispatch_id, created_at DESC);",
+                )?;
+            }
+            Ok(())
+        })
     }
 
     fn generate_id(&self) -> Result<String> {
@@ -2898,6 +2921,62 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = SqliteVerificationStore::open(dir.path()).unwrap();
         (store, dir)
+    }
+
+    /// The exact m213 dispatch table shape before m230 made repository proofs
+    /// durable. This is intentionally created outside the store so its modern
+    /// baseline DDL cannot mask the missing-column upgrade.
+    fn create_pre_m230_dispatch_store(cas_dir: &std::path::Path) {
+        let conn = Connection::open(cas_dir.join("cas.db")).expect("legacy fixture db");
+        conn.execute_batch(
+            "CREATE TABLE verification_dispatches (
+                 id TEXT PRIMARY KEY,
+                 task_id TEXT NOT NULL,
+                 receipt_id TEXT,
+                 delivery_transaction_id TEXT,
+                 requester_agent_id TEXT NOT NULL,
+                 owner_agent_id TEXT NOT NULL,
+                 verifier_agent_id TEXT,
+                 capability_id TEXT,
+                 state TEXT NOT NULL DEFAULT 'pending',
+                 requested_at TEXT NOT NULL,
+                 deadline_at TEXT NOT NULL,
+                 resolved_at TEXT,
+                 recovery_action TEXT NOT NULL DEFAULT 'supervisor_redispatch_or_direct'
+             );
+             INSERT INTO verification_dispatches
+                 (id, task_id, requester_agent_id, owner_agent_id, requested_at, deadline_at)
+             VALUES
+                 ('vdispatch-pre-m230', 'cas-pre-m230', 'worker', 'supervisor',
+                  '2026-08-09T22:00:00+00:00', '2026-08-09T23:00:00+00:00');",
+        )
+        .expect("create pre-m230 dispatch fixture");
+    }
+
+    #[test]
+    fn open_self_heals_pre_m230_dispatches_before_the_first_dispatch_query() {
+        let dir = TempDir::new().unwrap();
+        create_pre_m230_dispatch_store(dir.path());
+
+        // This reproduces the close/verification failure shape: the first
+        // typed dispatch read selects repository_proof from a pre-m230 table.
+        let dispatch = get_latest_verification_dispatch(dir.path(), "cas-pre-m230")
+            .expect("store open must repair the m230 column before querying")
+            .expect("legacy dispatch remains readable");
+        assert_eq!(dispatch.id, "vdispatch-pre-m230");
+        assert_eq!(dispatch.repository, None);
+
+        // A second open is the idempotency check; m230's normal migration
+        // runner remains responsible for recording its ledger row later.
+        let reopened = SqliteVerificationStore::open(dir.path())
+            .expect("reopening an already repaired store must be a no-op");
+        drop(reopened);
+        let conn = Connection::open(dir.path().join("cas.db")).expect("upgraded fixture db");
+        assert!(crate::shared_db::column_exists(
+            &conn,
+            "verification_dispatches",
+            "repository_proof"
+        ));
     }
 
     #[test]

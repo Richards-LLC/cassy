@@ -49,7 +49,7 @@ use cas::store::{
     open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
     open_rule_store, open_skill_store, open_spec_store, open_store, open_task_store,
 };
-use cas::types::{Entry, EntryType, Scope};
+use cas::types::{Entry, EntryType, Scope, Skill};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -226,6 +226,88 @@ async fn team_pull_hits_endpoint_and_lands_rows_when_team_configured() {
         .expect("team-pulled entry must land in local store");
     assert_eq!(pulled.content, "alice's shared learning");
     assert_eq!(pulled.entry_type, EntryType::Context);
+}
+
+/// GH #194: SqliteSkillStore reports an unknown skill as generic `NotFound`,
+/// while the original team-pull upsert caught only `SkillNotFound`. That made
+/// every sync print the same error and never populated the local row. Pull the
+/// exact same response twice: first must insert; second must be quiet.
+#[tokio::test]
+async fn team_pull_inserts_missing_skill_then_second_pull_is_quiet() {
+    let server = MockServer::start().await;
+    let project_id = "team-skill-project";
+    let mut skill = Skill::new("cas-ska3".to_string(), "Shared skill".to_string());
+    skill.description = "shared by the team".to_string();
+    let mut shared_skill = serde_json::to_value(&skill).unwrap();
+    shared_skill["project_id"] = serde_json::json!(project_id);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [],
+            "tasks": [],
+            "rules": [],
+            "skills": [shared_skill],
+            "pulled_at": chrono::Utc::now().to_rfc3339(),
+            "team_id": TEST_TEAM,
+            "status": "ok",
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let tmp = make_cas_root();
+    let cas_root = tmp.path().to_path_buf();
+    let config = make_cloud_config(server.uri());
+    let first_and_second = tokio::task::spawn_blocking(move || {
+        let queue = cas::cloud::SyncQueue::open(&cas_root).unwrap();
+        queue.init().unwrap();
+        let syncer = cas::cloud::CloudSyncer::new(
+            std::sync::Arc::new(queue),
+            config,
+            cas::cloud::CloudSyncerConfig::default(),
+        );
+        let entries = open_store(&cas_root).unwrap();
+        let tasks = open_task_store(&cas_root).unwrap();
+        let rules = open_rule_store(&cas_root).unwrap();
+        let skills = open_skill_store(&cas_root).unwrap();
+
+        let first = syncer
+            .pull_team(
+                TEST_TEAM,
+                project_id,
+                entries.as_ref(),
+                tasks.as_ref(),
+                rules.as_ref(),
+                skills.as_ref(),
+            )
+            .unwrap();
+        let second = syncer
+            .pull_team(
+                TEST_TEAM,
+                project_id,
+                entries.as_ref(),
+                tasks.as_ref(),
+                rules.as_ref(),
+                skills.as_ref(),
+            )
+            .unwrap();
+        (first, second)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(first_and_second.0.pulled_skills, 1);
+    assert!(
+        first_and_second.0.errors.is_empty(),
+        "first pull must insert the locally-missing skill: {:?}",
+        first_and_second.0.errors
+    );
+    assert!(
+        first_and_second.1.errors.is_empty(),
+        "second pull must not repeat a missing-skill warning: {:?}",
+        first_and_second.1.errors
+    );
 }
 
 /// AC negative: `execute_team_pull` MUST NOT hit the team endpoint when no

@@ -131,11 +131,12 @@ libc = "0.2"
 notify-rust = "4.11"
 
 # Async runtime (for AI extraction and MCP server)
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "signal", "sync", "time"] }
 
 # WebSocket support (for factory server)
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
+axum = { version = "0.8", features = ["ws"] }
 
 # rustls: needed so we can explicitly install a process-level CryptoProvider
 # at startup. rustls 0.23 refuses to auto-select a provider from feature flags
@@ -221,6 +222,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Parametrized tests and fixtures
 rstest = "0.24"
+tower = { version = "0.5", features = ["util"] }
 
 # Property-based testing
 proptest = "1.5"

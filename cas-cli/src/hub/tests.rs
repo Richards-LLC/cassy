@@ -1,7 +1,15 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use futures_util::SinkExt;
+use tokio::sync::Notify;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tower::ServiceExt;
 
 use super::*;
-use crate::ui::factory::DaemonMessage;
+use crate::ui::factory::{DaemonMessage, PaneInfo, PaneKind, SessionState};
 
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
@@ -133,4 +141,228 @@ async fn h1_zero_06_read_paths_never_write_pty_or_create_logical_sessions() {
     assert_eq!(source.pty_write_count(), 0);
     assert_eq!(source.model_call_count(), 0);
     assert_eq!(source.logical_session_create_count(), 0);
+}
+
+#[test]
+fn machine_identity_is_stable_on_disk() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = MachineIdentityStore::new(temp.path());
+
+    let first = store.load_or_create().unwrap();
+    let second = store.load_or_create().unwrap();
+
+    assert_eq!(first, second);
+    assert!(!first.id.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("machine-id")).unwrap(),
+        first.id
+    );
+}
+
+#[derive(Clone)]
+struct ExactOriginReadAuthorizer(&'static str);
+
+impl HubAuthorizer for ExactOriginReadAuthorizer {
+    fn authorize(&self, request: &HubRequest) -> AuthorizationDecision {
+        if request.action == HubAction::Health
+            || (request.action != HubAction::Mutation && request.origin.as_deref() == Some(self.0))
+        {
+            AuthorizationDecision::Allow
+        } else {
+            AuthorizationDecision::Deny
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_surface_is_real_and_origin_authorized() {
+    let source = RecordingReadModel::with_sessions(vec![fixture_session("factory-a")]);
+    let events = MachineEventBus::new(16);
+    let state = HubState::new(
+        SessionCatalog::new(source.clone()),
+        Arc::new(ExactOriginReadAuthorizer("http://127.0.0.1:4173")),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+        events,
+    );
+    let app = router(state);
+
+    let health = app
+        .clone()
+        .oneshot(Request::get("/v1/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    let health: serde_json::Value =
+        serde_json::from_slice(&to_bytes(health.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        health,
+        serde_json::json!({"schema_version": 1, "ready": true})
+    );
+
+    let denied = app
+        .clone()
+        .oneshot(Request::get("/v1/sessions").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        source.read_count(),
+        0,
+        "denied reads never touch session state"
+    );
+
+    let allowed = app
+        .oneshot(
+            Request::get("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(allowed.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["sessions"][0]["name"], "factory-a");
+    assert_eq!(body["sessions"][0]["liveness"], "live");
+    assert_eq!(source.read_count(), 1);
+}
+
+#[tokio::test]
+async fn real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let release_output = Arc::new(Notify::new());
+
+    let welcome = DaemonMessage::Welcome {
+        session_name: "factory-a".into(),
+        state: SessionState {
+            focused_pane: Some("worker-1".into()),
+            panes: vec![PaneInfo {
+                id: "worker-1".into(),
+                kind: PaneKind::Worker,
+                focused: true,
+                title: "Worker 1".into(),
+                exited: false,
+            }],
+            epic_id: Some("cas-epic".into()),
+            epic_title: Some("Commander".into()),
+            cols: 120,
+            rows: 40,
+        },
+        scrollback: Some(HashMap::from([(
+            "worker-1".into(),
+            vec![b"scrollback\n".to_vec()],
+        )])),
+    };
+    let output = DaemonMessage::Output {
+        pane_id: "worker-1".into(),
+        data: b"\x1b[32mlive bytes\x1b[0m".to_vec(),
+    };
+    let welcome_bytes = serde_json::to_vec(&welcome).unwrap();
+    let output_bytes = serde_json::to_vec(&output).unwrap();
+
+    let daemon_connections = connections.clone();
+    let daemon_release = release_output.clone();
+    let daemon_welcome = welcome_bytes.clone();
+    let daemon_output = output_bytes.clone();
+    let daemon = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            daemon_connections.fetch_add(1, Ordering::SeqCst);
+            let release = daemon_release.clone();
+            let welcome = daemon_welcome.clone();
+            let output = daemon_output.clone();
+            tokio::spawn(async move {
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                ws.send(WsMessage::Binary(welcome)).await.unwrap();
+                release.notified().await;
+                ws.send(WsMessage::Binary(output)).await.unwrap();
+                futures_util::future::pending::<()>().await;
+            });
+        }
+    });
+
+    let events = MachineEventBus::new(16);
+    let connector = DaemonConnector::new(SessionMultiplexer::new(8), events);
+    let mut first = connector
+        .attach("factory-a", port, ["worker-1"])
+        .await
+        .unwrap();
+    assert_eq!(first.recv().await.unwrap().bytes, welcome_bytes);
+
+    let mut second = connector
+        .attach("factory-a", port, ["worker-1"])
+        .await
+        .unwrap();
+    assert_eq!(
+        second.recv().await.unwrap().bytes,
+        welcome_bytes,
+        "late viewers rehydrate from the byte-identical canonical Welcome"
+    );
+
+    release_output.notify_waiters();
+    assert_eq!(first.recv().await.unwrap().bytes, output_bytes);
+    assert_eq!(second.recv().await.unwrap().bytes, output_bytes);
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+    assert_eq!(connector.upstream_connection_count("factory-a").await, 1);
+    daemon.abort();
+}
+
+#[tokio::test]
+async fn aggregate_events_cover_session_and_pane_lifecycle() {
+    let events = MachineEventBus::new(16);
+    let mut receiver = events.subscribe();
+
+    events.reconcile_sessions(["factory-a"]).await;
+    let added = receiver.recv().await.unwrap();
+    assert_eq!(added.kind, MachineEventKind::SessionAdded);
+    assert_eq!(added.session.as_deref(), Some("factory-a"));
+
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::PaneAdded {
+            pane: PaneInfo {
+                id: "worker-1".into(),
+                kind: PaneKind::Worker,
+                focused: false,
+                title: "Worker 1".into(),
+                exited: false,
+            },
+        },
+    );
+    let pane = receiver.recv().await.unwrap();
+    assert_eq!(pane.kind, MachineEventKind::PaneAdded);
+    assert_eq!(pane.pane_id.as_deref(), Some("worker-1"));
+
+    events.reconcile_sessions(std::iter::empty::<&str>()).await;
+    let removed = receiver.recv().await.unwrap();
+    assert_eq!(removed.kind, MachineEventKind::SessionRemoved);
+    assert_eq!(removed.session.as_deref(), Some("factory-a"));
+}
+
+#[test]
+fn runtime_state_is_single_instance_and_round_trips() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = HubRuntimePaths::new(temp.path());
+    let first_lock = paths.acquire_instance_lock().unwrap();
+    assert!(paths.acquire_instance_lock().is_err());
+
+    let record = HubProcessRecord {
+        pid: std::process::id(),
+        bind: "127.0.0.1".into(),
+        port: 4173,
+        version: env!("CARGO_PKG_VERSION").into(),
+        started_at: "2026-08-09T00:00:00Z".into(),
+    };
+    paths.write_process_record(&record).unwrap();
+    assert_eq!(paths.read_process_record().unwrap(), record);
+
+    drop(first_lock);
+    assert!(paths.acquire_instance_lock().is_ok());
 }

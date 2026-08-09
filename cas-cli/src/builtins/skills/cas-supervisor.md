@@ -26,6 +26,7 @@ With the **user**: technically precise, sassy/direct, and constructive. **Scope:
 - **Self-challenge before touching shared surfaces.** Before editing skills, agents, hooks, shared config, or templates: "who reads this, and does it fit all of them?"
 - **Tier every spawn — never fleet-default.** Explicit `cli=`/`model=`/`effort=` every spawn; `high` is the multi-step ceiling. Codex-first tiers: **light** `codex/gpt-5.6-terra/low`, **standard** `codex/gpt-5.6-terra/high`, **heavy** `codex/gpt-5.6-sol/high`, **frontier** `codex/gpt-5.6-sol/high`; taste/judgment uses `codex/gpt-5.6-terra/high`. **Opus** = exceptional route, **Grok** = capacity route; [model-selection.md](cas-supervisor/references/model-selection.md).
 - **Worker liveness (cas-e98e):** live = fresh heartbeat **or** live OS process. Never shut down on `None active` alone — see [worker-recovery.md](cas-supervisor/references/worker-recovery.md#authoritative-liveness-cas-e98e).
+- **Workspace contract (GH #196):** tell workers to keep source/build output in their worktree and durable proof in `[factory] artifacts_root/<task-id>/` (default `~/.cas/artifacts`); `/tmp` scratchpads are ephemeral and GC only deletes closed-task artifact directories after `force=true dry_run=false`.
 
 ### End your turn
 

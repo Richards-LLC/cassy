@@ -52,8 +52,13 @@ fn allow_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
 fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
     let specific = out.hook_specific_output.as_ref()?;
     let value = serde_json::to_value(specific).ok()?;
-    (value.get("permissionDecision")?.as_str()? == "deny")
-        .then(|| value.get("permissionDecisionReason")?.as_str()?.to_string())
+    if value.get("permissionDecision")?.as_str()? != "deny" {
+        return None;
+    }
+    value
+        .get("permissionDecisionReason")
+        .and_then(|reason| reason.as_str())
+        .map(str::to_string)
 }
 
 // ============================================================================

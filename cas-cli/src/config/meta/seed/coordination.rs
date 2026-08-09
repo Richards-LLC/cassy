@@ -2,6 +2,25 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
+    // FACTORY SECTION
+    // ============================================================
+    registry.register(ConfigMeta {
+        key: "factory.artifacts_root",
+        section: "factory",
+        name: "Durable Task Artifacts Root",
+        description: "Real-disk root for per-task durable proof. Workers may write only in their worktree, this root/<task-id>, or a harness scratchpad; bare /tmp and stray home files are blocked.",
+        value_type: ConfigType::String,
+        default: "~/.cas/artifacts",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "artifacts", "proof", "durable", "workspace", "tmpfs"],
+        use_cases: &[
+            "Set to a durable volume such as /mnt/datacube/agent-scratch",
+            "Leave unset to use ~/.cas/artifacts",
+        ],
+    });
+
     // COORDINATION SECTION
     // ============================================================
     registry.register(ConfigMeta {

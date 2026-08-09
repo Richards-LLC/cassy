@@ -425,8 +425,7 @@ fn integration_test_process_path_mutation_is_isolated() {
                         || line.contains("remove_var(\"PATH\"")
                         || line.contains(".set(\"PATH\"")
                         || line.contains(".remove(\"PATH\"")
-                        || (line.contains("(\"PATH\",")
-                            && !line.contains(".env(\"PATH\","));
+                        || (line.contains("(\"PATH\",") && !line.contains(".env(\"PATH\","));
                     if mutates_process_path {
                         hits.push(format!("{}:{}", path.display(), line_index + 1));
                     }
@@ -1135,8 +1134,16 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
             "not work a newly spawned worker",
         ),
         (TaskStatus::Blocked, None, "not work a newly spawned worker"),
-        (TaskStatus::Open, Some("alpha"), "already assigned to 'alpha'"),
-        (TaskStatus::InProgress, Some("alpha"), "already assigned to 'alpha'"),
+        (
+            TaskStatus::Open,
+            Some("alpha"),
+            "already assigned to 'alpha'",
+        ),
+        (
+            TaskStatus::InProgress,
+            Some("alpha"),
+            "already assigned to 'alpha'",
+        ),
     ];
 
     for (status, assignee, expected) in undispatchable {
@@ -3415,7 +3422,10 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
 
     let store = env.agent_store();
     store
-        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .register(&Agent::new(
+            "test-sup".to_string(),
+            "supervisor".to_string(),
+        ))
         .expect("register supervisor");
     store.register(&fixture.worker).expect("register worker");
 
@@ -3462,7 +3472,10 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 
     let store = env.agent_store();
     store
-        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .register(&Agent::new(
+            "test-sup".to_string(),
+            "supervisor".to_string(),
+        ))
         .expect("register supervisor");
     store.register(&fixture.worker).expect("register worker");
 
@@ -3513,7 +3526,10 @@ async fn test_clear_context_refuses_harness_without_verified_reset() {
 
     let store = env.agent_store();
     store
-        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .register(&Agent::new(
+            "test-sup".to_string(),
+            "supervisor".to_string(),
+        ))
         .expect("register supervisor");
     store.register(&fixture.worker).expect("register worker");
 
@@ -3668,7 +3684,10 @@ async fn test_clear_context_all_workers_fans_out_to_live_workers() {
 
     let store = env.agent_store();
     store
-        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .register(&Agent::new(
+            "test-sup".to_string(),
+            "supervisor".to_string(),
+        ))
         .expect("register supervisor");
     store.register(&fixture.worker).expect("register worker");
 
@@ -3763,6 +3782,82 @@ async fn test_gc_report_shows_pending_prompts() {
     );
 }
 
+#[tokio::test]
+async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
+    let env = FactoryTestEnv::new();
+    let root = env.cas_root.join("durable-artifacts");
+    let task_store = env.task_store();
+    let closed_id = task_store.generate_id().expect("generate closed task id");
+    let mut closed = Task::new(closed_id.clone(), "closed artifact owner".to_string());
+    closed.status = TaskStatus::Closed;
+    task_store.add(&closed).expect("add closed task");
+    let open_id = task_store.generate_id().expect("generate open task id");
+    task_store
+        .add(&Task::new(
+            open_id.clone(),
+            "open artifact owner".to_string(),
+        ))
+        .expect("add open task");
+    std::fs::create_dir_all(root.join(&closed_id)).unwrap();
+    std::fs::create_dir_all(root.join(&open_id)).unwrap();
+    std::fs::create_dir_all(root.join("operator-review-stray")).unwrap();
+    std::fs::write(root.join(&closed_id).join("proof.txt"), "durable proof").unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n",
+            root.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let report = env
+        .service
+        .factory(Parameters(factory_req("gc_report")))
+        .await
+        .unwrap();
+    let report_text = get_text(&report);
+    assert!(
+        report_text.contains("closed-task candidates=1"),
+        "{report_text}"
+    );
+    assert!(
+        report_text.contains("review-only stray artifact"),
+        "{report_text}"
+    );
+
+    let mut preview = factory_req("gc_cleanup");
+    preview.force = Some(true);
+    let preview = env.service.factory(Parameters(preview)).await.unwrap();
+    assert!(get_text(&preview).contains("mode=review-only"));
+    assert!(
+        root.join(&closed_id).exists(),
+        "force alone must not delete durable proof"
+    );
+
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let cleanup = env.service.factory(Parameters(cleanup)).await.unwrap();
+    let cleanup_text = get_text(&cleanup);
+    assert!(
+        cleanup_text.contains("Closed-task artifact directories removed: 1"),
+        "{cleanup_text}"
+    );
+    assert!(
+        !root.join(&closed_id).exists(),
+        "closed-task artifact should be GC'd"
+    );
+    assert!(
+        root.join(&open_id).exists(),
+        "open task artifact must be preserved"
+    );
+    assert!(
+        root.join("operator-review-stray").exists(),
+        "stray inventory must never delete"
+    );
+}
+
 // Target-cache process liveness is implemented with Linux `/proc`; other
 // platforms intentionally fail closed and cannot select a cache for cleanup.
 #[cfg(target_os = "linux")]
@@ -3786,7 +3881,10 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         .await
         .unwrap();
     let report_text = get_text(&report);
-    assert!(report_text.contains("TARGET_CACHE_STATUS_JSON="), "{report_text}");
+    assert!(
+        report_text.contains("TARGET_CACHE_STATUS_JSON="),
+        "{report_text}"
+    );
     let machine = report_text
         .lines()
         .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
@@ -3805,14 +3903,20 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let preview = env.service.factory(Parameters(preview)).await.unwrap();
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
-    assert!(worker.join("target").exists(), "omitted dry_run must not delete");
+    assert!(
+        worker.join("target").exists(),
+        "omitted dry_run must not delete"
+    );
 
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
     let cleanup = env.service.factory(Parameters(cleanup)).await.unwrap();
     let cleanup_text = get_text(&cleanup);
-    assert!(cleanup_text.contains("reclaimed_bytes=64"), "{cleanup_text}");
+    assert!(
+        cleanup_text.contains("reclaimed_bytes=64"),
+        "{cleanup_text}"
+    );
     assert!(!worker.join("target").exists());
     assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), b"source");
 }
@@ -3856,11 +3960,7 @@ async fn test_gc_cleanup_removes_only_stale_skill_markers_and_invalid_bare_marke
     std::fs::write(&stale, "old").unwrap();
     std::fs::write(&current, "current").unwrap();
     std::fs::write(&bare, "invalid").unwrap();
-    filetime::set_file_mtime(
-        &stale,
-        filetime::FileTime::from_unix_time(1, 0),
-    )
-    .unwrap();
+    filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(1, 0)).unwrap();
 
     let result = env
         .service
@@ -3871,7 +3971,10 @@ async fn test_gc_cleanup_removes_only_stale_skill_markers_and_invalid_bare_marke
 
     assert!(text.contains("Stale skill markers removed: 2"), "{text}");
     assert!(!stale.exists(), "old marker should be removed");
-    assert!(!bare.exists(), "invalid empty-session marker should be removed");
+    assert!(
+        !bare.exists(),
+        "invalid empty-session marker should be removed"
+    );
     assert!(current.exists(), "live session marker must be preserved");
 }
 
@@ -4610,7 +4713,9 @@ async fn test_worker_unresolvable_message_target_fails_without_enqueue() {
         .await
         .expect_err("unresolvable worker target must fail at call time");
     assert!(
-        error.message.contains("Workers can only message their supervisor"),
+        error
+            .message
+            .contains("Workers can only message their supervisor"),
         "unexpected error: {error:?}"
     );
     assert!(
@@ -4726,7 +4831,10 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
 
     let send_req = coord_msg("message", "swift-fox", "status update", None);
     let send_result = env.service.coordination(Parameters(send_req)).await;
-    assert!(send_result.is_ok(), "message should succeed: {send_result:?}");
+    assert!(
+        send_result.is_ok(),
+        "message should succeed: {send_result:?}"
+    );
     let send_text = get_text(&send_result.unwrap());
 
     let notification_id = send_text
@@ -4772,7 +4880,10 @@ async fn test_message_status_exposes_undelivered_after() {
 
     let send_req = coord_msg("message", "swift-fox", "status update", None);
     let send_result = env.service.coordination(Parameters(send_req)).await;
-    assert!(send_result.is_ok(), "message should succeed: {send_result:?}");
+    assert!(
+        send_result.is_ok(),
+        "message should succeed: {send_result:?}"
+    );
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert_eq!(prompts.len(), 1);
@@ -5865,7 +5976,9 @@ async fn test_sync_all_workers_skips_dirty_worktree_without_force_cas_0a6f() {
         "the worktree must not have been rebased onto the epic"
     );
     assert!(
-        git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        git_stdout(&worker_path, &["stash", "list"])
+            .trim()
+            .is_empty(),
         "sync must not have stashed anything"
     );
 }
@@ -5896,7 +6009,9 @@ async fn test_sync_all_workers_force_syncs_dirty_worktree_and_restores_wip_cas_0
         "the worker's WIP must be restored after the rebase"
     );
     assert!(
-        git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        git_stdout(&worker_path, &["stash", "list"])
+            .trim()
+            .is_empty(),
         "a restored stash must not be left behind"
     );
 }
@@ -5935,7 +6050,11 @@ async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_
 
     // Untracked WIP that collides with the file the epic commit introduces:
     // the rebase succeeds, then the stash pop cannot restore it.
-    std::fs::write(worker_path.join("requested.txt"), "local uncommitted version").unwrap();
+    std::fs::write(
+        worker_path.join("requested.txt"),
+        "local uncommitted version",
+    )
+    .unwrap();
 
     let mut req = factory_req("sync_all_workers");
     req.id = Some("cas-3b7c".to_string());
@@ -5962,11 +6081,12 @@ async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_
         // failed: ..."); what matters is the command block the operator is
         // told to run. `git stash pop <sha>` would be rejected by git as
         // "not a stash reference", so the instruction must be `apply`.
-        let instruction = incident
-            .prompt
-            .split("run:")
-            .nth(1)
-            .unwrap_or_else(|| panic!("incident must contain an instruction block: {}", incident.prompt));
+        let instruction = incident.prompt.split("run:").nth(1).unwrap_or_else(|| {
+            panic!(
+                "incident must contain an instruction block: {}",
+                incident.prompt
+            )
+        });
         assert!(
             instruction.contains("git stash apply"),
             "the recovery command must be one git accepts for a SHA: {instruction}"
@@ -5983,7 +6103,9 @@ async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_
 
     // The WIP really is recoverable via the instruction that was sent.
     assert!(
-        !git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        !git_stdout(&worker_path, &["stash", "list"])
+            .trim()
+            .is_empty(),
         "the stash entry must survive for recovery"
     );
 }

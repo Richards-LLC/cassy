@@ -65,4 +65,8 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "staging",
         "Durable staging paths and tmpfs write guardrails",
     );
+    registry.section_descriptions.insert(
+        "factory",
+        "Factory worker lifecycle, durable artifacts, and workspace guardrails",
+    );
 }

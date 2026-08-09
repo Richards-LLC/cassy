@@ -1,13 +1,12 @@
-# Commander v1 runtime release — v2.55.2 candidate, unposted Slack drafts
+# Commander v1 runtime release — v2.55.3 candidate, unposted Slack drafts
 
-> **DO NOT POST.** The immutable public `v2.55.0` Linux artifact fails the final-executable portable
-> x86_64 audit and is superseded before installation; its tag, release, and assets remain unchanged.
-> `v2.55.1` is published and identically installed on two real machines, but its H7 verdict is
-> **NOT RELEASABLE**. Source candidate `v2.55.2` contains reviewed fixes for the clean-host bootstrap
-> and live daemon `SIGILL` evidence failures; it is not tagged, published, installed, or accepted yet.
-> **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after an immutable
-> `v2.55.2` release is independently verified and the complete H7 matrix reruns green from that exact
-> public artifact.
+> **DO NOT POST.** The immutable public `v2.55.2` artifact is published and identically installed on
+> two real machines, but its H7 verdict is **NOT RELEASABLE** because the supported TLS origin omits
+> the binding HSTS policy. Source candidate `v2.55.3` contains the reviewed listener-bound transport
+> fix; it is not tagged, published, installed, or accepted yet. All prior tags, releases, and assets
+> remain unchanged. **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after
+> an immutable `v2.55.3` release is independently verified and the complete H7 matrix reruns green
+> from that exact public artifact.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -15,12 +14,14 @@ replies. Status: **unposted**.
 
 ## User-perspective top-level post
 
-**Live on production · User · v2.55.2**
+**Live on production · User · v2.55.3**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
 
 - Pair a machine once, then see its sessions and terminal output directly over your private network.
+- Once you use Commander's private HTTPS address, your browser remembers to stay on HTTPS for future
+  visits instead of accepting a plaintext downgrade.
 - Start on a newly installed machine without manually creating Commander state directories first.
 - Watch the same session from more than one screen while one clearly identified controller holds input.
 - Reconnect after hub or daemon restarts with an evidence-backed explanation when the operating system
@@ -30,7 +31,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · v2.55.2**
+**Live on production · Dev · v2.55.3**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -40,6 +41,9 @@ daemon session, and bounded downstream fan-out.
   pairing capabilities and WebSocket tickets are short-lived and single-use.
 - Exact Origin/CORS handling, DPoP method/URI/credential binding, replay caches, per-operation scopes,
   revocation, and attributed audit fail closed.
+- The verified Tailscale Serve TLS path uses a separate server-owned loopback backend and emits exactly
+  `Strict-Transport-Security: max-age=31536000` across success, auth-error, catch-all, and preflight
+  responses; the documented plaintext listener ignores spoofed proxy and identity headers.
 - One upstream daemon WebSocket serves multiple pane viewers; controller leases make concurrent input
   explicit, and slow viewers do not create another upstream or stall healthy viewers.
 - Clean-home startup creates the missing hub hierarchy owner-only for ordinary and Tailscale Serve
@@ -63,7 +67,7 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Confirm the immutable published corrective tag is exactly `v2.55.2`; do not reuse or move any tag.
+- [ ] Confirm the immutable published corrective tag is exactly `v2.55.3`; do not reuse or move any tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the

@@ -357,7 +357,25 @@ pub(crate) fn parse_worker_died_envelope(prompt: &str) -> Option<WorkerDiedEnvel
 /// two producers emit a qualifying envelope: the task lifecycle emitter and
 /// orphan recovery's death relay.
 pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
-    parse_lifecycle_envelope(prompt).is_some() || parse_worker_died_envelope(prompt).is_some()
+    parse_lifecycle_envelope(prompt).is_some()
+        || parse_worker_died_envelope(prompt).is_some()
+        || parse_ci_red_run_envelope(prompt)
+}
+
+/// CI failures are emitted only by the daemon's GitHub watcher.  Keeping this
+/// small, strict envelope check beside the existing lifecycle/death checks
+/// preserves the supervisor PTY wake boundary: a caller-settable source alone
+/// can never type arbitrary content into the supervisor pane.
+pub(crate) fn parse_ci_red_run_envelope(prompt: &str) -> bool {
+    let Some(tag_end) = prompt.find('>') else {
+        return false;
+    };
+    let tag = &prompt[..tag_end];
+    tag.starts_with("<ci-red-run ")
+        && xml_attribute(tag, "branch").is_some_and(|value| !value.is_empty())
+        && xml_attribute(tag, "head_sha").is_some_and(|value| !value.is_empty())
+        && xml_attribute(tag, "run_id").is_some_and(|value| value.parse::<u64>().is_ok())
+        && prompt.ends_with("</ci-red-run>")
 }
 
 pub(crate) fn select_unambiguous_merge_task<'a>(

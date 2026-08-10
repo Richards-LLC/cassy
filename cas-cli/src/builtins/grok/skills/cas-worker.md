@@ -88,7 +88,7 @@ Before setting `status=blocked`, re-read with `action=show`. If it already shows
 
 ## Running Tests in a Worker
 
-**Batch the fixes, then verify once.** **Inner loop:** `cargo test --lib <module>` / `cargo test --test <name>` / a name filter. **Final proof:** full scoped suite, at most twice; prefer `cargo nextest run`. Background long runs; never foreground-`sleep`.
+**Batch the fixes, then verify once.** **Inner loop:** `cargo check -p <crate> --lib --tests`. **Final proof:** run the affected `--lib <module>` / `--test <name>` target through `cargo nextest run`, at most twice (post-batch + pre-push). Never run the full suite from a worker. Background long runs; never foreground-`sleep`.
 
 For env-reading code, check the clean-CI shape with `make -C cas-cli test-clean-env`.
 

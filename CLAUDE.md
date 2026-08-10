@@ -24,12 +24,44 @@ Release notes: every PR merged to `staging` or `main` must be announced in Slack
 cargo build                          # Dev build
 cargo build --release                # Release build (LTO, strip)
 cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
-cargo test                           # All tests
-cargo test test_name                 # Single test by name
-cargo test --test cli_test           # Tests in a specific file
+cargo check -p cas --lib --tests     # Worker iteration: compile feedback, no test linking/runs
+scripts/run-scoped-tests.sh -p cas --lib module_name
+scripts/run-scoped-tests.sh -p cas --test cli_test
+cargo nextest run -p cas             # Full suite: supervisor integration/release gates only
+cargo test -p cas --doc              # Doctests (nextest does not support them)
 cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
 ```
+
+Install the standard local runner once with `cargo install cargo-nextest` (or
+`make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
+nextest and rejects a silent zero-test success. Factory workers should iterate
+with `cargo check`, then run only the affected `--lib` or `--test` target; the
+PreToolUse guard rejects an unscoped worker test run. Full suites are owned by
+the supervisor integration merge and release gate.
+
+Factory worker spawns use `sccache` automatically when it is installed, while
+keeping a separate target directory per worktree so concurrent Cargo builds do
+not serialize. An existing `RUSTC_WRAPPER` wins; set
+`CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
+cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
+
+New isolated workers also seed their private `target/` from compiled artifacts
+hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
+small Cargo dep-info files are copied with their target root rebased. Refresh that
+baseline after an epic/main integration merge with
+`scripts/refresh-worker-build-cache.sh`; the script builds a new snapshot to
+completion and only then publishes its pointer, so no worker ever seeds from a
+live Cargo writer. Old snapshots remain valid for in-flight seeders and should
+only be removed during a maintenance window. Set
+`CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
+shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
+
+Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
+checkout paths remain in its cache keys (measured 0/45 hits even with
+`--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when
+[upstream path normalization](https://github.com/mozilla/sccache/pull/2678)
+lands; hardlink seeding is the current cross-worktree mechanism.
 
 The MCP server is always included because factory agents depend on `cas serve`; the optional `mcp-proxy` feature is enabled by default. Binary is `cas` (lib + bin in `cas-cli/`). Build script embeds git hash and build date.
 

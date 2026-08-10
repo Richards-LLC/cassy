@@ -39,6 +39,7 @@ make_stub() {
     local name="$1" status="$2" stub="${tmpdir}/$1"
     {
         echo '#!/usr/bin/env bash'
+        echo 'printf "argv: %s\n" "$*"'
         echo "cat <<'STUB_EOF'"
         cat
         echo 'STUB_EOF'
@@ -206,6 +207,18 @@ EOF
 expect fail "0 tests passed" \
     "nextest: filter matched nothing (0 tests run)" \
     env CARGO="${stub}" CARGO_CMD="nextest run" "${GUARD}" -p cas --lib bogus::filter
+
+# The wrapper itself defaults to nextest; callers should not need to remember
+# CARGO_CMD on every scoped proof run.
+stub="$(make_stub cargo-nextest-default 0 <<'EOF'
+    Starting 7 tests across 1 binary (12 skipped)
+------------
+     Summary [   0.104s] 7 tests run: 7 passed, 12 skipped
+EOF
+)"
+expect pass "argv: nextest run -p cas --lib store::tests" \
+    "nextest is the default runner" \
+    env CARGO="${stub}" "${GUARD}" -p cas --lib store::tests
 
 # ---------------------------------------------------------------------------
 # Preflight — a relative $ZIG must be rejected BEFORE cargo is invoked.

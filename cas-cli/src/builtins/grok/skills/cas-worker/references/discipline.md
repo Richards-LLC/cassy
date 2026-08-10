@@ -99,15 +99,19 @@ background it.
 
 ### Scoped tests
 
-Scope before you run. A full suite in this repo links dozens of test binaries; a targeted
-change rarely needs it:
+Workers do not own full-suite runs. A full suite in this repo links dozens of test binaries;
+multiplied by every worktree, that link tax is the dominant gate cost. Iterate by compiling,
+then prove only the affected target:
 
-- `cargo test --lib` — library unit tests only
-- `cargo test --lib <module>` / `cargo test <name-substring>` — one module or one test
-- `cargo test --test <name>` — one integration-test file
-- `cargo test -p <crate>` — one crate
+- `cargo check -p <crate> --lib --tests` — inner-loop compile feedback, no test execution
+- `scripts/run-scoped-tests.sh -p cas --lib <module>` — one library target/filter via nextest
+- `scripts/run-scoped-tests.sh -p cas --test <name>` — one integration-test file via nextest
+- `CARGO_CMD=test scripts/run-scoped-tests.sh ...` — diagnostic fallback only, not the default
 
-Reserve the full suite for close gates on shared/public surfaces — and background it.
+Package selection alone (`-p cas`) is not a scope here: that one package owns dozens of test
+binaries. Full runs are sanctioned at exactly two points: the supervisor integration merge and
+the release gate. The worker PreToolUse guard refuses an unscoped `cargo test` or
+`cargo nextest run` and points back to the recipes above.
 
 ### The test loop: inner loop vs final proof
 
@@ -118,35 +122,35 @@ checks. 47+ minutes of wall-clock, almost all of it waiting, for maybe 4 minutes
 
 Two loops, and they are not the same loop:
 
-**Inner loop — seconds, run constantly.** Targeted filters only: the module, the test name, the
-one integration binary. This is where you iterate. If your inner loop takes minutes, it is not
-an inner loop — narrow the filter further.
+**Inner loop — seconds, run constantly.** Use `cargo check -p <crate> --lib --tests`. This is
+where you catch type, borrow, feature, and test-compilation errors while editing without linking
+or executing test binaries after every micro-fix.
 
-**Final proof — minutes, run at most twice.** The full scoped suite runs once after you have
-landed the whole batch of fixes, and once more as the pre-close receipt. That is the budget.
-A third full run means you skipped the batching step.
+**Final proof — minutes, run at most twice.** The affected target runs once after you have
+landed the whole batch of fixes, and once more as the pre-push receipt. That is the budget.
+A third real test run means you skipped the batching step unless new edits changed that target.
 
 The rules that follow from that:
 
 1. **Batch before you verify.** When you find three broken call sites, fix all three, then run.
    Do not fix-run-fix-run. Each unnecessary full run costs you ~5 minutes and buys information
    you were about to get anyway.
-2. **Reuse a banked receipt.** If a full sweep already passed at the commit you are closing on
+2. **Reuse a banked receipt.** If a scoped sweep already passed at the commit you are closing on
    and your later edits are provably outside its blast radius, cite it — do not re-run it to
    feel better. Say which commit it was taken at and what it covered.
-3. **`cargo nextest run` when it is installed** (`cargo nextest run --lib <filter>`) — it runs
-   test binaries in parallel and fails fast, which is often several times quicker than
-   `cargo test` on a suite this size. Check once with `cargo nextest --version`; if it is
-   missing, fall back to `cargo test` and do not spend the task installing it.
+3. **Nextest is the standard runner.** The guarded wrapper defaults to
+   `cargo nextest run --lib <filter>` and verifies that a harness reported a nonzero passed
+   count. Install it once with `cargo install cargo-nextest`; do not silently fall back to a
+   slower full `cargo test` shape.
 4. **Never foreground-`sleep` waiting on a run.** Background it (Recipe 1) and spend the
    minutes on other deliverable work: the next fix, the task note, the close-gate checks, the
    PR body. A worker asleep in the foreground cannot even receive a stand-down order.
 5. **Arm the relevant guard in the inner loop**, not just in the final sweep. A guard that only
    runs in the 5-minute sweep teaches you nothing for 5 minutes.
 
-A worked shape, start to close: targeted filters while fixing → one full scoped sweep after the
-batch, backgrounded → other work while it cooks → close on that receipt, or on a banked sweep
-plus a targeted run covering exactly what changed since.
+A worked shape, start to close: `cargo check` while fixing → one affected-target nextest sweep
+after the batch, backgrounded → other work while it cooks → pre-push scoped receipt, or a banked
+receipt plus one target run covering exactly what changed since.
 
 ### A green exit code is not a green test run
 

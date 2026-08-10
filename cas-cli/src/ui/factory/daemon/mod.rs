@@ -422,6 +422,11 @@ mod tests {
     /// handoff and override the daemon's config-derived default at the PTY.
     #[test]
     fn pending_spawn_claude_effort_override_reaches_pty_args() {
+        // This test covers the daemon's routing contract, not live Claude CLI
+        // feature detection. CI intentionally has no `claude` binary, so pin
+        // the capability probe just as cas-pty's PTY argument tests do.
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_EFFORT_SUPPORTED", "1")]);
         let explicit_spec = WorkerSpec {
             name: Some("effort-worker".to_string()),
             cli: SupervisorCli::Claude,

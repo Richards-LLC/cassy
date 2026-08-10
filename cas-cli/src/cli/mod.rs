@@ -10,6 +10,7 @@ mod claude_md;
 mod codemap_cmd;
 mod history_cmd;
 mod hub;
+mod hub_service;
 mod index_cmd;
 mod knowledge_cmd;
 mod memory_migrate;

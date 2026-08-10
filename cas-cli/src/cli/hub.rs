@@ -44,10 +44,28 @@ pub enum HubCommands {
     Stop,
     /// Stop and start the hub while preserving machine identity
     Restart(HubServeArgs),
+    /// Install, inspect, or remove boot-persistent hub supervision
+    Service(HubServiceArgs),
     /// Mint a ten-minute one-time browser pairing invitation
     Pair(HubPairArgs),
     /// List or revoke paired Commander devices
     Auth(HubAuthArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HubServiceArgs {
+    #[command(subcommand)]
+    pub command: HubServiceCommands,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum HubServiceCommands {
+    /// Install and start a user-level service for the loopback hub
+    Install,
+    /// Report service-manager supervision alongside hub health
+    Status,
+    /// Stop and remove service-manager supervision without touching hub identity or auth
+    Uninstall,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -115,6 +133,12 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             stop(cli)?;
             start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
         }
+        HubCommands::Service(service) => super::hub_service::manage_service(
+            &service.command,
+            cli,
+            args.tailscale_serve,
+            args.tailscale_serve_port,
+        ),
         HubCommands::Pair(pair) => pair_device(&pair, cli),
         HubCommands::Auth(auth) => manage_auth(&auth, cli),
     }
@@ -334,9 +358,12 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         paths.remove_process_record()?;
         #[cfg(debug_assertions)]
         hold_instance_lock_after_record_removal_for_test()?;
-        if result.is_err() {
-            let _ = tailscale_manager.disable_owned();
-        }
+        // A service manager stops a foreground hub with SIGTERM instead of
+        // routing through `cas hub stop`. Always tear down only CAS's exact
+        // owned mapping here so an uninstall/reboot cannot leave a stale
+        // Tailscale Serve publication behind. A restart republishes it from
+        // the same private receipt and keeps machine identity/auth untouched.
+        let _ = tailscale_manager.disable_owned();
         result
     })
 }
@@ -633,7 +660,7 @@ fn process_is_running(pid: u32) -> bool {
     }
 }
 
-fn record_is_live(record: &HubProcessRecord) -> bool {
+pub(super) fn record_is_live(record: &HubProcessRecord) -> bool {
     if !process_is_running(record.pid) {
         return false;
     }

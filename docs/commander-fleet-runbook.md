@@ -38,48 +38,42 @@ The corresponding stable URL includes `:8443`.
 
 ## Make startup survive logout and reboot
 
-### Linux systemd user service
-
-Create `~/.config/systemd/user/cas-hub.service` with the installed binary's absolute path:
-
-```ini
-[Unit]
-Description=CAS Commander hub
-After=network-online.target tailscaled.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/ABSOLUTE/PATH/cas hub serve --tailscale-serve
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-```
-
-Then run:
+Install a user-level service from the stable, published `cas` binary:
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now cas-hub.service
-loginctl enable-linger "$USER"
-systemctl --user status cas-hub.service
+cas hub service install --tailscale-serve
+cas hub service status
 ```
 
-After a reboot, repeat `cas hub status`, `tailscale serve status --json`, and the HTTPS health request. The machine ID and URL must match the pre-reboot values.
+On macOS this writes and bootstraps the launchd LaunchAgent at
+`~/Library/LaunchAgents/dev.cas.commander-hub.plist` with `RunAtLoad` and
+`KeepAlive`. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
+enables it, starts it, and enables user lingering so it survives logout and
+reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`;
+they never contain hub identity, auth state, tokens, or credential paths.
 
-### macOS launchd user agent
-
-Create `~/Library/LaunchAgents/dev.cas.commander-hub.plist` with the installed binary's absolute path and arguments `hub`, `serve`, and `--tailscale-serve`. Set `RunAtLoad` and `KeepAlive` to true, then run:
+Use the port flag when the existing Tailscale HTTPS port is deliberately not
+443:
 
 ```sh
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/dev.cas.commander-hub.plist
-launchctl kickstart -k "gui/$(id -u)/dev.cas.commander-hub"
-cas hub status
+cas hub service install --tailscale-serve --tailscale-serve-port 8443
 ```
 
-Do not point either service definition into `.cas/worktrees/`; worktrees are disposable.
+Do not install from `.cas/worktrees/`; worktrees are disposable and CAS refuses
+that path. The service supervises the exact installed binary used for
+`install`. After upgrading that binary, `cas hub restart` or restarting the
+service manager picks up the new version; `cas hub service status` reports the
+supervision state while `cas hub status` reports the running hub and endpoint.
+
+On non-systemd Linux, `cas hub service install` does not pretend it can
+supervise the host. It prints the exact rc-script fallback: run
+`cas hub start --tailscale-serve` after networking and Tailscale, then check
+`cas hub status`. `cas hub service status` remains explicit that reboot
+supervision is manual on these hosts.
+
+After a reboot, repeat `cas hub service status`, `cas hub status`, `tailscale
+serve status --json`, and the HTTPS health request. The machine ID and URL must
+match the pre-reboot values.
 
 ## Pair a target machine from the controller browser
 
@@ -105,17 +99,24 @@ For each paired hub, inspect authenticated `GET /v1/machine`. Compare `version`,
 
 ## Safe stop, upgrade, and teardown
 
-Stop the service manager first so it cannot immediately restart the hub, then let CAS remove only its owned mapping:
+Remove service supervision first so it cannot immediately restart the hub. This
+does not remove `~/.cas/hub/`, machine identity, paired-device auth state, or
+any unrelated Tailscale mapping:
 
 ```sh
-systemctl --user disable --now cas-hub.service  # Linux, when installed
-cas hub stop
+cas hub service uninstall
 tailscale serve status --json
 ```
 
-On macOS, use `launchctl bootout` for the agent before `cas hub stop`. If the live Serve status no longer exactly matches the recorded CAS target, CAS refuses teardown and leaves it untouched for manual review.
+The foreground hub tears down only its recorded CAS-owned Serve mapping during
+the manager stop. If the live Serve status no longer exactly matches the
+recorded CAS target, CAS refuses teardown and leaves it untouched for manual
+review.
 
-For an upgrade, stop as above, replace the binary atomically, compare `cas --version`, re-enable the service, and repeat the full start/health/status sequence. Preserve `~/.cas/hub/`; it contains the stable machine identity and paired-device state. Never delete it as an upgrade step.
+For an upgrade, replace the binary atomically, compare `cas --version`, then
+restart the installed service or run `cas hub restart` and repeat the full
+start/health/status sequence. Preserve `~/.cas/hub/`; it contains the stable
+machine identity and paired-device state. Never delete it as an upgrade step.
 
 ## H5 proof record (2026-08-09)
 

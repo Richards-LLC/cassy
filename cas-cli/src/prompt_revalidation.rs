@@ -204,6 +204,7 @@ pub(crate) fn undelivered_worker_died_notice(worker_name: &str) -> String {
 /// parse here is silently demoted to ordinary chatter — the exact silence this
 /// fixes. Keep the two functions adjacent and change them together.
 const WORKER_DIED_ENVELOPE_OPEN: &str = "<worker-died ";
+const SPAWN_PREASSIGN_FAILED_ENVELOPE_OPEN: &str = "<spawn-preassign-failed ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerDiedEnvelope {
@@ -357,7 +358,22 @@ pub(crate) fn parse_worker_died_envelope(prompt: &str) -> Option<WorkerDiedEnvel
 /// two producers emit a qualifying envelope: the task lifecycle emitter and
 /// orphan recovery's death relay.
 pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
-    parse_lifecycle_envelope(prompt).is_some() || parse_worker_died_envelope(prompt).is_some()
+    parse_lifecycle_envelope(prompt).is_some()
+        || parse_worker_died_envelope(prompt).is_some()
+        || parse_spawn_preassign_failed_envelope(prompt)
+}
+
+/// Spawn pre-assignment failures leave a registered worker idle and need the
+/// same supervisor wake/retry semantics as other factory lifecycle failures.
+pub(crate) fn parse_spawn_preassign_failed_envelope(prompt: &str) -> bool {
+    prompt
+        .strip_prefix(SPAWN_PREASSIGN_FAILED_ENVELOPE_OPEN)
+        .is_some_and(|rest| {
+            rest.contains("task_id=\"")
+                && rest.contains("worker_name=\"")
+                && rest.contains("notification_id=\"")
+                && prompt.contains("</spawn-preassign-failed>")
+        })
 }
 
 pub(crate) fn select_unambiguous_merge_task<'a>(

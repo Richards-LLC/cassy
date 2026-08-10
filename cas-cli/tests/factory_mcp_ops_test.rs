@@ -23,8 +23,7 @@ use cas::store::{
     open_task_store,
 };
 use cas::types::{
-    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType,
-    WorkTarget,
+    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType, WorkTarget,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
@@ -1351,6 +1350,61 @@ async fn test_spawn_workers_task_id_enqueues_for_single_worker() {
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].task_id.as_deref(), Some(task_id.as_str()));
+}
+
+/// GH #170: a task held by a vanished session remains dispatchable. The queue
+/// receipt makes the pending reset explicit; registration performs the reset
+/// before the new worker is bound (covered in queue_and_events).
+#[tokio::test]
+async fn test_spawn_workers_task_id_accepts_stale_assignee_for_reset_preassign() {
+    let env = FactoryTestEnv::new();
+    let task_id = env.task_store().generate_id().expect("generate_id");
+    let mut task = Task::new(task_id.clone(), "Orphaned but pushed work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("dead-session-worker".to_string());
+    task.notes = "Keep this history".to_string();
+    task.branch = Some("factory/dead-session-worker".to_string());
+    env.task_store().add(&task).expect("add stale task");
+
+    let mut req = factory_req("spawn_workers");
+    req.task_id = Some(task_id.clone());
+    let text = get_text(
+        &env.service
+            .factory(Parameters(req))
+            .await
+            .expect("stale holder must not strand a replacement spawn"),
+    );
+
+    assert!(text.contains("dead-session-worker"), "{text}");
+    assert!(text.contains("force-released"), "{text}");
+    assert_eq!(
+        env.spawn_queue().peek(10).unwrap()[0].task_id.as_deref(),
+        Some(task_id.as_str())
+    );
+}
+
+/// A fresh heartbeat is an authoritative live-holder signal even without a
+/// recorded harness PID. It must fail before anything reaches the spawn queue.
+#[tokio::test]
+async fn test_spawn_workers_task_id_refuses_fresh_heartbeat_holder() {
+    let env = FactoryTestEnv::new();
+    let holder = "fresh-heartbeat-worker";
+    env.register_worker(holder);
+    let task_id = env.task_store().generate_id().expect("generate_id");
+    let mut task = Task::new(task_id.clone(), "Live holder".to_string());
+    task.assignee = Some(holder.to_string());
+    env.task_store().add(&task).expect("add held task");
+
+    let mut req = factory_req("spawn_workers");
+    req.task_id = Some(task_id);
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("fresh holder must reject replacement spawn");
+
+    assert!(error.message.contains(holder), "{}", error.message);
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
 
 /// cas-6913 AC3: task_id with a single explicit worker_names entry is also
@@ -6619,7 +6673,12 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     git(&["init", "-q", "-b", "main"]);
     git(&["config", "user.email", "test@cas"]);
     git(&["config", "user.name", "CAS Test"]);
-    git(&["remote", "add", "origin", "https://github.com/example/main-only.git"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/main-only.git",
+    ]);
     std::fs::write(project.join("seed.rs"), "// seed\n").unwrap();
     git(&["add", "seed.rs"]);
     git(&["commit", "-q", "-m", "seed"]);
@@ -6644,7 +6703,10 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     .to_string();
 
     let store = env.task_store();
-    let mut epic = Task::new("cas-50fe-main-only".to_string(), "main-only epic".to_string());
+    let mut epic = Task::new(
+        "cas-50fe-main-only".to_string(),
+        "main-only epic".to_string(),
+    );
     epic.task_type = TaskType::Epic;
     epic.status = TaskStatus::InProgress;
     epic.branch = Some("epic/main-only".to_string());
@@ -6662,14 +6724,14 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     let mut status_req = factory_req("epic_status");
     status_req.id = Some(epic.id.clone());
     let status = get_text(
-        &env
-            .service
+        &env.service
             .factory(Parameters(status_req))
             .await
             .expect("epic_status"),
     );
     assert!(
-        status.contains("Parent branch: main") && status.contains("✓ All child factory branches are merged"),
+        status.contains("Parent branch: main")
+            && status.contains("✓ All child factory branches are merged"),
         "status must evaluate the configured integration target, not the cosmetic epic branch: {status}"
     );
 
@@ -6686,8 +6748,7 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     }))
     .expect("close request");
     let close = get_text(
-        &env
-            .service
+        &env.service
             .task(Parameters(close_req))
             .await
             .expect("epic close against declared target"),

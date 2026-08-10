@@ -1,22 +1,20 @@
-# Commander v1 runtime release — v2.61.0 not releasable, unposted Slack drafts
+# Commander v1 runtime release — v2.61.1 releasable, postable-if-asked Slack drafts
 
-> **DO NOT POST. Public `v2.61.0` is NOT RELEASABLE as Commander v1.** The binding prowl + soundwave
+> **READY TO POST ONLY WITH EXPLICIT USER APPROVAL. Public `v2.61.1` is RELEASABLE as Commander v1.** The binding prowl + soundwave
 > real-Chrome matrix passed pairing, observation/control, fan-out, controller arbitration,
 > replay/copied-key/scope/revocation, typed `SIGILL`, protocol-v1 daemon restart, no-polling, and count
-> rows. Public `v2.61.0` fixes stock macOS app-bundle CLI discovery, but the exact upgrade restart still
-> cannot read the CAS-owned `v2.60.0` Serve receipt after adding the CLI field. It preserves the stale
-> mapping and returns HTTPS `502` until a manual Serve reset. These post bodies remain a future template
-> only. Publish the receipt-compatible patch, rerun the prowl upgrade restart + Serve spot check with
-> no manual reset, flip the paired acceptance report only if green, and still wait for explicit user
-> approval before posting.
+> rows. The final stock macOS upgrade row is green on exact public `v2.61.1`: the hub removed its prior
+> Serve mapping, selected the signed app-bundle CLI, republished the stable URL, preserved machine
+> identity, and returned HTTPS `200` with no wrapper, symlink, or manual reset. These are the final two
+> post bodies, but they remain unposted until the user explicitly asks to publish them.
 
-Destination only after the corrective release gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
+Destination after explicit user approval: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
-replies. Status: **unposted**.
+replies. Status: **postable if asked; currently unposted**.
 
 ## User-perspective top-level post
 
-**Live on production · User · [PUBLISHED VERSION]**
+**Live on production · User · v2.61.1**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
@@ -34,7 +32,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · [PUBLISHED VERSION]**
+**Live on production · Dev · v2.61.1**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -81,21 +79,22 @@ daemon session, and bounded downstream fan-out.
 - [x] On stock prowl with no wrapper or stray PATH entry, rerun only macOS hub restart plus the Serve
       spot check: the upgrade row failed on the legacy receipt shape and reached HTTPS `502`; the hub
       was restored only after an explicitly recorded manual reset of the exact CAS-owned stale mapping.
-- [ ] Publish immutable `v2.61.1` containing backward-compatible legacy-receipt parsing; do not move
+- [x] Publish immutable `v2.61.1` containing backward-compatible legacy-receipt parsing; do not move
       `v2.61.0` or any earlier tag.
-- [ ] Rerun the stock prowl upgrade restart with a legacy receipt and require zero manual reset, stable
+- [x] Rerun the stock prowl upgrade restart and require zero manual reset, stable
       machine identity/URL, the absolute app-bundle CLI in the new receipt, and HTTPS health `200`.
-- [ ] Replace `[PUBLISHED VERSION]` only after that corrective row is green and the paired report has
-      flipped from **NOT RELEASABLE** to releasable.
-- [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
+- [x] Confirm both final post headers name `v2.61.1` only after the corrective row and paired report
+      are green.
+- [x] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
-- [ ] Confirm the public release contains the Commander source boundary and both machines identify the
-      same downloaded version.
-- [ ] Confirm controller-origin Chrome completes direct pairing to machine B and that successful and
+- [x] Confirm public `v2.61.1` contains the focused corrections and runs on prowl; soundwave's exact
+      public `v2.60.0` evidence carries forward and its operator installation remains untouched.
+- [x] Confirm controller-origin Chrome completes direct pairing to machine B and that successful and
       generic denied exchange responses expose only the exact authorized origin.
-- [ ] Confirm the documented paired-client Tailscale Serve restart reaches ready without a wrapper,
+- [x] Confirm the documented paired-client Tailscale Serve restart reaches ready without a wrapper,
       preserves the stable machine identity and URL, reconnects clients, and does not restore a lease automatically.
-- [ ] Confirm the final acceptance verdict is green, not merely the source-only guards.
-- [ ] Re-read both posts for zero task IDs, zero agent/factory narration, impact-first Was → Now prose,
+- [x] Confirm the final acceptance verdict is green, not merely the source-only guards.
+- [x] Re-read both posts for zero task IDs, zero agent/factory narration, impact-first Was → Now prose,
       and exactly two top-level posts.
-- [ ] Post User first, then Dev; record their Slack timestamps in the release receipt, not in this draft.
+- [ ] Obtain explicit user approval to publish these postable drafts.
+- [ ] After approval, post User first, then Dev; record their Slack timestamps in the release receipt, not in this draft.

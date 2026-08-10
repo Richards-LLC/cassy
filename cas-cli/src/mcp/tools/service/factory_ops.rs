@@ -1895,6 +1895,7 @@ impl CasService {
                         None => String::new(),
                     }
                 };
+                let compaction_info = format_context_checkpoint_status(&agent.metadata);
                 // cas-86c5: surface per-worker "last activity" age so the
                 // supervisor can distinguish an actively-investigating worker
                 // (no edits yet, but recent checkpoint events) from one that
@@ -2094,7 +2095,7 @@ impl CasService {
                         .map(|t| (t.id.as_str(), t.title.as_str(), t.status)),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -2104,6 +2105,7 @@ impl CasService {
                     transcript_info,
                     model_info,
                     context_info,
+                    compaction_info,
                     activity_info,
                     harness_turn_info,
                     task_info,
@@ -6205,6 +6207,38 @@ pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
     }
 }
 
+/// Render the short-lived state left by Claude's PreCompact hook.  This is
+/// deliberately metadata-backed: a normal worker heartbeat continues during
+/// compaction, so timestamp age is the only portable indication that the
+/// worker is still heads-down rather than merely having an old checkpoint.
+///
+/// No equivalent automatic state is claimed for Codex/Grok because those
+/// harnesses do not publish a PreCompact event to CAS.
+pub(crate) fn format_context_checkpoint_status(
+    metadata: &std::collections::HashMap<String, String>,
+) -> String {
+    if metadata.get("context_checkpoint_state").map(String::as_str) != Some("compacting") {
+        return String::new();
+    }
+    let fresh = metadata
+        .get("context_checkpoint_at")
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|at| (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds() < 300)
+        .unwrap_or(false);
+    if !fresh {
+        return String::new();
+    }
+    let task = metadata
+        .get("context_checkpoint_task_id")
+        .map(String::as_str)
+        .unwrap_or("unknown task");
+    let branch = metadata
+        .get("context_checkpoint_branch")
+        .map(String::as_str)
+        .unwrap_or("unknown branch");
+    format!("\n    state: compacting / heads-down — will resume {task} on {branch}")
+}
+
 /// Historical live-worker path lookup used by Claude reporting.
 ///
 /// Reconstructs the Claude-layout path from `clone_path` + `session_id` and
@@ -10189,6 +10223,32 @@ effort = "high"
     // Process-alive unit tests live in agent_liveness::tests (cas-e98e).
 
     // ---- cas-573c: context-usage band + tail reader -----------------------
+
+    #[test]
+    fn worker_status_names_a_fresh_compacting_checkpoint_as_heads_down() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "context_checkpoint_state".to_string(),
+            "compacting".to_string(),
+        );
+        metadata.insert(
+            "context_checkpoint_task_id".to_string(),
+            "cas-41c28".to_string(),
+        );
+        metadata.insert(
+            "context_checkpoint_branch".to_string(),
+            "factory/worker".to_string(),
+        );
+        metadata.insert(
+            "context_checkpoint_at".to_string(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+
+        let rendered = format_context_checkpoint_status(&metadata);
+        assert!(rendered.contains("compacting / heads-down"));
+        assert!(rendered.contains("cas-41c28"));
+        assert!(rendered.contains("factory/worker"));
+    }
 
     #[test]
     fn context_band_ok_below_50_pct() {

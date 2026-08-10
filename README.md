@@ -41,6 +41,7 @@ cas -w 3              # launch with 3 workers, each in its own worktree
 cas codex             # Codex as the supervisor
 cas grok              # Grok as the supervisor
 cas claude alt        # Claude supervisor signed in as the ~/.claude-alt account
+cas claude login alt  # sign in only the alt profile without changing main
 ```
 
 A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges the branches. Workers claim one task at a time, work in an isolated checkout under `.cas/worktrees/`, and report back through the shared database. The TUI shows every agent side by side (or `--tabbed`), plus a sidecar with the active epic, the task list, the live diff and an activity feed.
@@ -49,7 +50,7 @@ A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges 
 |---|---|
 | **Worktree isolation** | Each worker gets its own worktree + branch. `--no-worktrees` shares one directory, `--worktree-root` relocates them |
 | **Mixed harnesses** | `--supervisor-cli` / `--worker-cli`, or per-slot `--worker-spec '{"name":"alice","cli":"codex","effort":"high"}'` |
-| **Account selection** | `cas claude <profile>` picks the Claude account directory; spawned workers inherit it. `cas claude --list-profiles` shows what's detected |
+| **Account selection** | `cas claude login <profile>` signs in one isolated Claude profile; `cas claude <profile>` launches it and spawned workers inherit the same config and credential store. `cas claude --list-profiles` asks Claude Code for each profile's real auth state |
 | **No silent downgrades** | `--strict-cli` refuses to quietly reroute a Codex worker to Claude when Codex is unavailable |
 | **Task coordination** | Tasks carry dependencies, priorities, leases and close gates — a close is refused when the branch is unmerged or the tree is unverifiable |
 | **Session control** | `cas list`, `cas attach`, `cas kill`, `cas kill-all`; `--notify` for desktop alerts, `--record` for replayable sessions |
@@ -185,6 +186,7 @@ cas changelog           # release notes
 cas                   # launch the factory TUI
 cas -w 3              # ...with 3 workers
 cas claude|codex|grok # choose the supervisor harness (all factory flags pass through)
+cas claude login alt  # isolate login to ~/.claude-alt (main stays untouched)
 cas open              # interactive project picker
 cas init              # initialize CAS in the current project
 cas serve             # run the MCP server

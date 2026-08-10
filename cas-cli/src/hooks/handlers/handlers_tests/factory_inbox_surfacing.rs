@@ -85,6 +85,21 @@ fn store_at(dir: &TempDir) -> SqlitePromptQueueStore {
     store
 }
 
+/// The receipt ledger is the authoritative answer to whether a particular
+/// recipient alias has seen a row.  Check it without draining: a drain would
+/// create the very receipt this wiring test needs to prove already exists.
+fn assert_receipted_for_every_alias(store: &SqlitePromptQueueStore, aliases: &[String]) {
+    for alias in aliases {
+        assert_eq!(
+            store
+                .count_unseen_for_recipient(alias, Some(SESSION))
+                .unwrap(),
+            0,
+            "the hook must write a receipt for supervisor alias {alias}"
+        );
+    }
+}
+
 fn context_of(output: &cas_core::hooks::types::HookOutput) -> String {
     match &output.hook_specific_output {
         Some(HookSpecificOutput::UserPromptSubmit { additional_context }) => {
@@ -224,6 +239,45 @@ fn the_supervisor_reminder_appends_instead_of_suppressing_mail() {
         context.contains("MERGE REQUIRED for cas-7a01"),
         "supervisor-bound mail must surface alongside the reminder: {context}"
     );
+}
+
+/// cas-53a7: receipt mirroring is a production-path obligation, not merely a
+/// helper contract.  The hook surfaces this broadcast through the pane-name
+/// alias first; it must then retire the same row for the logical `supervisor`
+/// alias too, so the other inbox reader cannot re-inject it on a later turn.
+#[test]
+fn supervisor_turn_writes_receipts_for_every_inbox_alias() {
+    let _lock = super::env_lock();
+    let _env = supervisor_env();
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let aliases = crate::harness_policy::inbox_aliases("loyal-bear-96", true);
+    assert!(
+        aliases.len() > 1,
+        "precondition: this must exercise the supervisor's full alias set"
+    );
+
+    // Fill the first alias's surface limit. This is the live shape in which a
+    // broadcast never reaches the second alias reader in this turn, so only
+    // the hook's explicit mirroring can write that alias's receipts.
+    for index in 0..10 {
+        store
+            .enqueue_with_session(
+                "director",
+                "all_workers",
+                &format!("receipt must mirror through the turn-start hook #{index}"),
+                SESSION,
+            )
+            .unwrap();
+    }
+
+    let context =
+        context_of(&handle_user_prompt_submit(&input("supervisor"), Some(temp.path())).unwrap());
+    assert!(
+        context.contains("receipt must mirror through the turn-start hook #0"),
+        "precondition: the real hook must surface the broadcast: {context}"
+    );
+    assert_receipted_for_every_alias(&store, &aliases);
 }
 
 /// A supervisor with no mail must still get exactly the reminder it always got.

@@ -4319,6 +4319,65 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     );
 }
 
+/// cas-53a7: the MCP reader must mirror its real receipt across every alias a
+/// supervisor answers to.  A broadcast reaches the pane-name alias first; if
+/// this reader drops `mirror_receipts_across_aliases`, the logical
+/// `supervisor` alias remains unread and this assertion fails without any
+/// unit mock of the helper.
+#[tokio::test]
+async fn inbox_poll_writes_receipts_for_every_supervisor_alias() {
+    const SUPERVISOR: &str = "receipt-supervisor";
+
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some(SUPERVISOR)),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("receipt-supervisor-id");
+    let store = env.agent_store();
+    let mut supervisor = Agent::new("receipt-supervisor-id".to_string(), SUPERVISOR.to_string());
+    supervisor.role = AgentRole::Supervisor;
+    store
+        .register(&supervisor)
+        .expect("register calling supervisor");
+
+    let aliases = cas::harness_policy::inbox_aliases(SUPERVISOR, true);
+    assert!(
+        aliases.len() > 1,
+        "precondition: this must exercise the supervisor's full alias set"
+    );
+    let queue = env.prompt_queue();
+    // Fill the first alias's poll limit. The remaining alias is not polled in
+    // this response, so only the production mirror call can receipt it.
+    for index in 0..10 {
+        queue
+            .enqueue(
+                "director",
+                "all_workers",
+                &format!("receipt must mirror through MCP inbox_poll #{index}"),
+            )
+            .expect("enqueue broadcast");
+    }
+
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("inbox_poll"),
+    );
+    assert!(
+        text.contains("receipt must mirror through MCP inbox_poll #0"),
+        "precondition: the real MCP handler must return the broadcast: {text}"
+    );
+    for alias in aliases {
+        assert_eq!(
+            queue.count_unseen_for_recipient(&alias, None).unwrap(),
+            0,
+            "inbox_poll must write a receipt for supervisor alias {alias}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn inbox_poll_sessionless_registered_agent_only_reads_legacy_rows() {
     let _guard = EnvGuard::set_optional(&[

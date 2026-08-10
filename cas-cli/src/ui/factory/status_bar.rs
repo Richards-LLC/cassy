@@ -16,7 +16,7 @@ use crate::ui::factory::app::FactoryApp;
 use crate::ui::factory::app::truncate_branch_middle;
 use crate::ui::factory::input::InputMode;
 use crate::ui::theme::Styles;
-use cas_mux::PaneKind;
+use cas_mux::{PaneKind, SupervisorCli};
 
 /// Status bar widget
 pub struct StatusBar;
@@ -80,6 +80,26 @@ impl StatusBar {
         };
         left_spans.push(mode);
         left_spans.push(Span::raw(" "));
+
+        // Show the actual account used by the focused Claude pane. Worker panes may
+        // deliberately run with a different config directory than the factory
+        // supervisor, so read their resolved WorkerSpec rather than the parent env.
+        if let Some(profile) = Self::focused_claude_profile(app) {
+            let is_alt = profile != "main";
+            let profile_style = if is_alt {
+                Style::default()
+                    .fg(palette.chip_fg)
+                    .bg(palette.status_warning)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                styles.text_muted
+            };
+            left_spans.push(Span::styled(
+                format!(" CLAUDE {profile} "),
+                profile_style,
+            ));
+            left_spans.push(Span::raw(" "));
+        }
 
         // SELECT MODE indicator (mouse capture disabled for native drag-select)
         if app.select_mode {
@@ -586,6 +606,52 @@ impl StatusBar {
         ))
     }
 
+    /// Return the account profile represented by a Claude config directory.
+    ///
+    /// The default config directory is always the main account. Alternate
+    /// profiles follow Claude Code's conventional `~/.claude-<profile>` name.
+    fn claude_profile_from_config_dir(config_dir: Option<&str>) -> String {
+        let config_dir = config_dir.map(str::trim).filter(|dir| !dir.is_empty());
+        let Some(config_dir) = config_dir else {
+            return "main".to_string();
+        };
+
+        let directory_name = config_dir.trim_end_matches('/').rsplit('/').next();
+        match directory_name {
+            Some(".claude") | None => "main".to_string(),
+            Some(name) => name
+                .strip_prefix(".claude-")
+                .filter(|profile| !profile.is_empty())
+                .unwrap_or("main")
+                .to_string(),
+        }
+    }
+
+    /// Return the profile for the focused Claude harness, if one is focused.
+    ///
+    /// A worker without an explicit config-dir override inherits the factory
+    /// process environment, just like its PTY does. Codex, Grok, shell, and
+    /// director panes intentionally have no Claude account badge.
+    fn focused_claude_profile(app: &FactoryApp) -> Option<String> {
+        let pane = app.mux.focused()?;
+        if pane.harness() != SupervisorCli::Claude {
+            return None;
+        }
+
+        let config_dir = match pane.kind() {
+            PaneKind::Worker => {
+                let spec = app.mux.effective_worker_spec(pane.id(), None);
+                spec.config_dir
+                    .or(spec.requester_config_dir)
+                    .or_else(|| std::env::var("CLAUDE_CONFIG_DIR").ok())
+            }
+            PaneKind::Supervisor => std::env::var("CLAUDE_CONFIG_DIR").ok(),
+            PaneKind::Director | PaneKind::Shell => return None,
+        };
+
+        Some(Self::claude_profile_from_config_dir(config_dir.as_deref()))
+    }
+
     /// Trim leading spans until the rendered width fits.
     /// We drop from the front so the most critical tail hints (e.g., quit key)
     /// remain visible on narrow terminals.
@@ -813,6 +879,26 @@ impl StatusBar {
 #[cfg(test)]
 mod tests {
     use super::StatusBar;
+    use cas_mux::{Pane, PaneKind, Pty, PtyConfig, SupervisorCli, WorkerSpec};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
+
+    fn spawn_claude_worker(name: &str) -> Option<Pane> {
+        let pty = Pty::spawn(
+            name,
+            PtyConfig {
+                command: "cat".to_string(),
+                args: vec![],
+                cwd: None,
+                env: vec![],
+                rows: 24,
+                cols: 80,
+            },
+        )
+        .ok()?;
+        Pane::with_pty(name, PaneKind::Worker, pty, 24, 80, SupervisorCli::Claude).ok()
+    }
 
     #[test]
     fn branch_label_drops_before_shortcut_hints_on_narrow_width() {
@@ -830,5 +916,67 @@ mod tests {
     fn branch_label_degrades_on_cache_miss() {
         assert_eq!(StatusBar::branch_label_for_width(None, 120), None);
         assert_eq!(StatusBar::branch_label_for_width(Some(""), 120), None);
+    }
+
+    #[test]
+    fn claude_profile_uses_main_for_default_and_alt_suffix_for_profile_dir() {
+        assert_eq!(StatusBar::claude_profile_from_config_dir(None), "main");
+        assert_eq!(
+            StatusBar::claude_profile_from_config_dir(Some("~/.claude")),
+            "main"
+        );
+        assert_eq!(
+            StatusBar::claude_profile_from_config_dir(Some("/home/test/.claude-alt/")),
+            "alt"
+        );
+    }
+
+    #[test]
+    fn render_status_bar_shows_and_emphasizes_focused_worker_alt_profile() {
+        let Some(worker_pane) = spawn_claude_worker("alt-worker") else {
+            eprintln!("skipping: `cat`/PTY-backed pane unavailable in this environment");
+            return;
+        };
+
+        let mut app = crate::ui::factory::app::FactoryApp::for_test();
+        app.mux.set_worker_spec(
+            "alt-worker",
+            WorkerSpec {
+                name: Some("alt-worker".to_string()),
+                cli: SupervisorCli::Claude,
+                model: None,
+                effort: None,
+                config_dir: Some("~/.claude-alt".to_string()),
+                requester_config_dir: None,
+            },
+        );
+        app.mux.add_pane(worker_pane);
+        assert!(app.mux.focus("alt-worker"), "fixture pane must be focusable");
+
+        let mut terminal = Terminal::new(TestBackend::new(68, 1)).unwrap();
+        terminal
+            .draw(|frame| StatusBar::render(frame, frame.area(), &app))
+            .unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        let account_offset = rendered
+            .find("CLAUDE alt")
+            .expect("focused Claude worker's alt account must be visible: {rendered}");
+        let account_cell = &terminal.backend().buffer()[(account_offset as u16, 0)];
+        assert!(
+            account_cell.modifier.contains(Modifier::BOLD),
+            "alternate account badge must be bold/emphasized"
+        );
+        assert_ne!(
+            account_cell.bg,
+            app.theme().palette.bg_elevated,
+            "alternate account badge must have a distinct background"
+        );
     }
 }

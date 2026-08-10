@@ -9,7 +9,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `contrib/shell-helpers/` — installable `cas-update` wrapper plus its shell-test harness.
 - `docs/` — plans, specs, reports, release notes, research, guides, and operational records.
 - `fixtures/retrieval-parity/` — checked-in retrieval benchmark baseline and query set.
-- `scripts/` — install, release, migration, scoped-test, build-regression, worktree, and portable-ISA checks.
+- `scripts/` — install, release, migration, scoped-test, build-regression, worktree, portable-ISA, and release-preflight checks.
 - `migration/` — historical cloud-move logs and systemd material; not the active database migration tree.
 - `homebrew/` — Homebrew formula and formula update helper.
 - `slack-bridge/` — standalone Node/TypeScript service routing Slack traffic to CAS daemons.
@@ -48,6 +48,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cli/{codemap_cmd,project_overview_cmd,knowledge_cmd}.rs` — documentation freshness gates and knowledge commands.
 - `cli/history_cmd.rs` — history index/search/status/repair command surface.
 - `cli/{hook,update,integrate,config,config_tui,init}.rs` — hook dispatch, managed-file sync, integrations, configuration, and setup.
+- `cli/{claude,claude_md}.rs` — Claude profile launch/login commands and managed `CLAUDE.md` material.
 - `cli/{doctor,status,index_cmd}.rs` — diagnostics, status, and index operations.
 - `mcp/{daemon,socket,server}/` — always-available MCP daemon, Unix socket, and request routing.
 - `mcp/tools/core/` — task, memory, knowledge, search, rules, skills, and coordination MCP handlers.
@@ -55,14 +56,14 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `ui/factory/` — bare-`cas` TUI, factory daemon runtime, director events/prompts, app state, and rendering.
 - `bridge/server/` — HTTP bridge server used by `cas bridge serve`.
 - `hooks/handlers/` — SessionStart, PreToolUse, PostToolUse, and session-stop hook behavior.
-- `builtins/` — embedded Claude/Codex/Grok skills, agents, and workflows synced into harness directories.
+- `builtins/` — embedded Claude/Codex/Grok skills, agents, and workflows synced into harness directories; `skills/cli-routing/` routes CLI work and `skills/cas-code-review/` carries review personas/workflows.
 - `store/` — layered project/global stores, syncing/notifying wrappers, sharing policy, and test mocks.
 - `cloud/` — cloud sync, embeddings, code-vector support, embedding drain, and sync queue.
 - `knowledge/` — source selection, chunking, prompt construction, merge policy, and distillation pipeline.
 - `history/` — incremental Git history index, FTS search, provenance, symbol links, and epoch tracking.
 - `ambient_recall.rs` — bounded, scope-gated hook recall contracts and ranking.
 - `hybrid_search/` — lexical/semantic/code/knowledge search composition and capability-aware weighting.
-- `migration/migrations/` — numbered SQLite migrations; current additions include history epochs and code-vector state.
+- `migration/migrations/` — numbered SQLite migrations; current additions include history epochs, code-vector state, and `m231_sync_conflicts_create_table.rs`.
 - `daemon/` — background maintenance, filesystem watching, and indexing scheduling.
 - `sync/` — managed artifact rendering from builtins into `.claude/` and harness mirrors.
 - `worktree/` — create, manage, salvage, sweep, and clean worktrees.
@@ -97,7 +98,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## Cross-cutting
 - **Tests:** colocated Rust unit tests plus integration suites in `cas-cli/tests/` and crate-specific `crates/*/tests/`.
 - **Test isolation:** use `TestEnvGuard` from `cas-cli/src/lib.rs`; do not introduce a second HOME/environment helper.
-- **Release tooling:** `scripts/release.sh`, migration-snapshot and portable-ISA check/test scripts, `CHANGELOG.md`, and `docs/release-notes/`.
+- **Release tooling:** `scripts/release.sh`, `scripts/check-release-preflight.sh`, migration-snapshot and portable-ISA check/test scripts, `CHANGELOG.md`, and dated `docs/release-notes/` announcements.
 - **Research/reports:** `docs/analysis/`, `docs/spikes/`, and `docs/reports/`; ambient-recall benchmarks and the Codex factory startup SIGILL report live there.
 - **Docs:** `docs/specs/`, `docs/requests/`, `docs/guides/`, `docs/onboarding/`, `docs/reviews/`, `docs/brainstorms/`, and `docs/ideation/` organize durable planning material.
 - **Config:** `.claude/settings.json`, `.codex/config.toml`, `.mcp.json`, root `Cargo.toml`, and `.env.worktree.template`.

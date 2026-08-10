@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.61.1] - 2026-08-10
+
+### Fixed
+- **Hub upgrades now recover Tailscale Serve mappings created by v2.60.0.** Legacy ownership receipts load without the newer diagnostic executable field, so CAS can tear down its exact stale mapping and republish the upgraded hub instead of leaving HTTPS unavailable.
+
 ## [2.61.0] - 2026-08-10
 
 ### Added

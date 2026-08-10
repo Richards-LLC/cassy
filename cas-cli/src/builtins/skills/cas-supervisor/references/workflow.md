@@ -137,6 +137,21 @@ mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
 **display filter and never merge authority**, and CAS never silently defaults to
 `main`/`master`/`staging`.
 
+### Required merge-review discipline
+
+Before accepting a scoped worker receipt and landing its lane, do these two checks:
+
+1. **Contract changes first.** If the diff changes a public contract (API shape,
+   persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
+   tests that still pin the old contract before accepting the scoped receipt. For example:
+   `git grep -n '<old contract token>' -- '*test*'` (narrow the path/spec as needed).
+   Update or reject the receipt when those tests prove an unreviewed caller contract.
+2. **Read the lane CI signal.** Inspect `gh run list --branch factory/<worker>` at
+   review time. `worktree_merge` also reports its best-effort CI workflow verdict, but
+   this explicit review check catches a new run or a result that arrived after the
+   merge command's lookup. A red or unknown result is a review signal, not a v1 merge
+   refusal: investigate and record the decision rather than silently ignoring it.
+
 Three flags that are routinely confused — they are independent (cas-0b32 / cas-369f):
 
 | Flag | What it authorizes | What it does NOT do |

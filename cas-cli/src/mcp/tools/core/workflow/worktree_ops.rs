@@ -2,6 +2,135 @@ use crate::mcp::tools::core::imports::*;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+/// A best-effort verdict for the CI workflow associated with a factory lane.
+///
+/// This is deliberately not a merge gate. The lookup gives supervisors the
+/// signal that GitHub has, but a missing token, an offline checkout, or a run
+/// that has not completed must never change the merge's Git semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BranchCiState {
+    Green { url: String },
+    Red { url: String },
+    Unknown { reason: String },
+}
+
+const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Query the CI workflow's latest *completed* run for one source branch.
+///
+/// `gh api` expands `{owner}` and `{repo}` from the repository at `cwd`, so
+/// this avoids guessing an origin URL and continues to work for task-declared
+/// repositories. GitHub receives the branch as a separate `-f` value rather
+/// than as interpolated endpoint syntax.
+fn lookup_latest_completed_branch_ci(branch: &str, cwd: &Path) -> BranchCiState {
+    lookup_branch_ci_with(branch, |branch| {
+        let branch_field = format!("branch={branch}");
+        let mut command = Command::new("gh");
+        command.current_dir(cwd).args([
+            "api",
+            "--method",
+            "GET",
+            "repos/{owner}/{repo}/actions/workflows/ci.yml/runs",
+            "-f",
+            &branch_field,
+            "-f",
+            "status=completed",
+            "-F",
+            "per_page=1",
+        ]);
+        match crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
+            BRANCH_CI_LOOKUP_TIMEOUT,
+        ) {
+            Ok(output) if output.status.success() => Ok(output.stdout),
+            Ok(output) => Err(format!(
+                "gh api exited with {status}",
+                status = output.status
+            )),
+            Err(crate::bounded_process::BoundedCommandError::TimedOut) => {
+                Err("gh api timed out".to_string())
+            }
+            Err(crate::bounded_process::BoundedCommandError::Io) => {
+                Err("gh api is unavailable".to_string())
+            }
+        }
+    })
+}
+
+/// Isolate response classification from process execution so its three output
+/// shapes can be tested with a mocked lookup rather than requiring GitHub.
+fn lookup_branch_ci_with<F>(branch: &str, fetch: F) -> BranchCiState
+where
+    F: FnOnce(&str) -> Result<Vec<u8>, String>,
+{
+    match fetch(branch) {
+        Ok(body) => classify_completed_branch_ci_response(&body),
+        Err(reason) => BranchCiState::Unknown { reason },
+    }
+}
+
+fn classify_completed_branch_ci_response(body: &[u8]) -> BranchCiState {
+    let parsed: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(error) => {
+            return BranchCiState::Unknown {
+                reason: format!("gh api returned invalid JSON: {error}"),
+            };
+        }
+    };
+    let Some(runs) = parsed
+        .get("workflow_runs")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return BranchCiState::Unknown {
+            reason: "gh api response omitted workflow_runs".to_string(),
+        };
+    };
+    let Some(run) = runs.first() else {
+        return BranchCiState::Unknown {
+            reason: "no completed CI run found".to_string(),
+        };
+    };
+    let Some(conclusion) = run.get("conclusion").and_then(serde_json::Value::as_str) else {
+        return BranchCiState::Unknown {
+            reason: "latest completed CI run has no conclusion".to_string(),
+        };
+    };
+    let Some(url) = run.get("html_url").and_then(serde_json::Value::as_str) else {
+        return BranchCiState::Unknown {
+            reason: "latest completed CI run has no URL".to_string(),
+        };
+    };
+    match conclusion {
+        "success" => BranchCiState::Green {
+            url: url.to_string(),
+        },
+        "failure" => BranchCiState::Red {
+            url: url.to_string(),
+        },
+        other => BranchCiState::Unknown {
+            reason: format!("latest completed CI conclusion is {other}"),
+        },
+    }
+}
+
+fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
+    match state {
+        BranchCiState::Green { url } => {
+            format!("CI state: green — latest completed CI run for {branch} succeeded: {url}\n\n")
+        }
+        BranchCiState::Red { url } => {
+            format!("⚠️ CI RED — latest completed CI run for {branch} failed: {url}\n\n")
+        }
+        BranchCiState::Unknown { reason } => {
+            format!("CI state unknown: {reason} (branch {branch}).\n\n")
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct DeliverySupervisorAuthority {
@@ -2043,6 +2172,12 @@ impl CasCore {
         let do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
 
+        // GH #209 / cas-bc13: inspect the lane before Git changes the target.
+        // This is advisory only: all lookup failures are rendered as an
+        // explicit unknown verdict below, never as a refusal to merge.
+        let branch_ci_state = lookup_latest_completed_branch_ci(&worktree.branch, &cwd);
+        let ci_prefix = describe_branch_ci_state(&worktree.branch, &branch_ci_state);
+
         let merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
@@ -2437,6 +2572,9 @@ impl CasCore {
             // likely *why* the close gate fired — append the diagnosis rather
             // than letting the caller re-derive it. Appended as an extra
             // content block so the gate's own text stays verbatim.
+            close_result
+                .content
+                .insert(0, Content::text(ci_prefix.clone()));
             if !push_outcome.is_published() {
                 close_result.content.push(Content::text(push_note));
             }
@@ -2448,7 +2586,7 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "Merged worktree {} to {}.{} Commit: {}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}Merged worktree {} to {}.{} Commit: {}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
@@ -2462,7 +2600,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Merged worktree {} to {}.{} Commit: {}{}{}",
+            "{ci_prefix}Merged worktree {} to {}.{} Commit: {}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
@@ -2585,15 +2723,64 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeliveryMergePreflight, authorize_explicit_task_for_system_b_worker,
+        BranchCiState, DeliveryMergePreflight, authorize_explicit_task_for_system_b_worker,
         classify_delivery_merge_preflight, derive_delivery_supervisor_authority,
-        describe_target_push_state, is_cas_pattern_worktree, is_factory_style_worktree,
-        is_git_worktree, path_is_under, resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
+        describe_branch_ci_state, describe_target_push_state, is_cas_pattern_worktree,
+        is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with, path_is_under,
+        resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
     };
     use crate::worktree::git::TargetPushOutcome;
     use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn mocked_branch_ci_lookup_renders_a_red_lane_with_its_run_url() {
+        let state = lookup_branch_ci_with("factory/fox", |_| {
+            Ok(br#"{"workflow_runs":[{"conclusion":"failure","html_url":"https://github.com/acme/cas/actions/runs/42"}]}"#.to_vec())
+        });
+
+        assert_eq!(
+            state,
+            BranchCiState::Red {
+                url: "https://github.com/acme/cas/actions/runs/42".to_string(),
+            }
+        );
+        let receipt = describe_branch_ci_state("factory/fox", &state);
+        assert!(receipt.contains("CI RED"), "{receipt}");
+        assert!(receipt.contains("actions/runs/42"), "{receipt}");
+    }
+
+    #[test]
+    fn mocked_branch_ci_lookup_renders_a_green_lane() {
+        let state = lookup_branch_ci_with("factory/fox", |_| {
+            Ok(br#"{"workflow_runs":[{"conclusion":"success","html_url":"https://github.com/acme/cas/actions/runs/43"}]}"#.to_vec())
+        });
+
+        assert_eq!(
+            state,
+            BranchCiState::Green {
+                url: "https://github.com/acme/cas/actions/runs/43".to_string(),
+            }
+        );
+        let receipt = describe_branch_ci_state("factory/fox", &state);
+        assert!(receipt.contains("CI state: green"), "{receipt}");
+    }
+
+    #[test]
+    fn mocked_branch_ci_lookup_renders_an_explicit_unknown_on_api_failure() {
+        let state = lookup_branch_ci_with("factory/fox", |_| Err("gh api timed out".to_string()));
+
+        assert_eq!(
+            state,
+            BranchCiState::Unknown {
+                reason: "gh api timed out".to_string(),
+            }
+        );
+        let receipt = describe_branch_ci_state("factory/fox", &state);
+        assert!(receipt.contains("CI state unknown"), "{receipt}");
+        assert!(receipt.contains("gh api timed out"), "{receipt}");
+    }
 
     // -----------------------------------------------------------------
     // cas-5ee0 (GH #137): the merge receipt must state push state.

@@ -171,6 +171,70 @@ fn push_response_rejects_unrecognized_or_conflicting_skip_signals() {
 }
 
 #[test]
+fn itemized_rejections_allow_a_subset_of_skipped_rows() {
+    let entity = serde_json::json!({
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 20,
+        "rejected": (0..6)
+            .map(|index| serde_json::json!({
+                "id": format!("cas-rejected-{index}"),
+                "reason": "scope_mismatch",
+                "existing_canonical_id": "cas-src",
+            }))
+            .collect::<Vec<_>>()
+    });
+    let queued_ids = (0..20).map(|index| format!("cas-rejected-{index}"));
+
+    let itemized = itemized_rejections_for(&entity, "tasks", 20, queued_ids)
+        .expect("a well-formed rejection subset must be accepted")
+        .expect("the rejection list is present");
+
+    assert_eq!(itemized.len(), 6);
+}
+
+#[test]
+fn itemized_rejections_fail_closed_when_malformed() {
+    let rejection = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "reason": "scope_mismatch",
+            "existing_canonical_id": "cas-src",
+        })
+    };
+
+    let over_count = serde_json::json!({
+        "rejected": [rejection("cas-a"), rejection("cas-b")]
+    });
+    assert!(
+        itemized_rejections_for(
+            &over_count,
+            "tasks",
+            1,
+            ["cas-a".to_string(), "cas-b".to_string()].into_iter(),
+        )
+        .unwrap_err()
+        .contains("exceeds skipped count")
+    );
+
+    let unknown = serde_json::json!({"rejected": [rejection("cas-unknown")]});
+    assert!(
+        itemized_rejections_for(&unknown, "tasks", 1, ["cas-known".to_string()].into_iter())
+            .unwrap_err()
+            .contains("was not in this sub-batch")
+    );
+
+    let duplicate = serde_json::json!({
+        "rejected": [rejection("cas-a"), rejection("cas-a")]
+    });
+    assert!(
+        itemized_rejections_for(&duplicate, "tasks", 2, ["cas-a".to_string()].into_iter())
+            .unwrap_err()
+            .contains("duplicate id")
+    );
+}
+
+#[test]
 fn push_response_is_backward_compatible_with_legacy_payload() {
     // Older cloud builds may return shapes like {"synced": {...}} or just
     // an empty body. Either must deserialize into a PushResponse whose

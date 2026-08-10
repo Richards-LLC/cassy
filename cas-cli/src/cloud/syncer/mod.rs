@@ -537,9 +537,10 @@ impl PushRejectionReason {
 
 /// Parse and validate the server's optional per-row rejection list.
 ///
-/// `None` preserves the aggregate-only server contract.  `Some` requires an
-/// exact one-to-one mapping to the rows that the server counted as skipped;
-/// callers can safely mark only those rows failed and sync the remainder.
+/// `None` preserves the aggregate-only server contract. `Some` may itemize a
+/// subset of skipped rows: the server also counts benign same-scope stale/no-op
+/// writes as skipped, but only identity collisions have actionable rejection
+/// details. Callers can safely fail the named rows and settle the remainder.
 pub(crate) fn itemized_rejections_for(
     entity: &serde_json::Value,
     location: &str,
@@ -555,9 +556,9 @@ pub(crate) fn itemized_rejections_for(
     let rejected: Vec<PushRejection> = serde_json::from_value(value.clone())
         .map_err(|error| format!("unrecognized {location}.rejected: {error}"))?;
 
-    if rejected.len() != skipped {
+    if rejected.len() > skipped {
         return Err(format!(
-            "{location}.rejected count {} does not match skipped count {skipped}",
+            "{location}.rejected count {} exceeds skipped count {skipped}",
             rejected.len()
         ));
     }

@@ -1671,7 +1671,13 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
     });
     task_store.add(&task).expect("add task");
 
+    // A real worker reaches close with a registered SessionStart identity.
+    // Seed that identity explicitly so a clean CI process with no ambient
+    // CAS_SESSION_ID exercises close/lint behavior instead of failing during
+    // agent lookup (the same rebuilt-CasCore fixture rule as cas-48e6).
+    let agent_id = register_worker_agent(&cas_root_a, "frontend", None);
     let core = CasCore::with_daemon(cas_root_a, None, None);
+    core.set_agent_id_for_testing(agent_id);
     let result = core
         .cas_task_close(Parameters(TaskCloseRequest {
             id: task.id.clone(),
@@ -1788,6 +1794,7 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
     let id = Agent::generate_fallback_id();
     let mut agent = Agent::new(id.clone(), name.to_string());
     agent.agent_type = AgentType::Worker;
+    agent.role = AgentRole::Worker;
     agent.factory_session = factory_session.map(|s| s.to_string());
     agent_store.register(&agent).expect("register worker agent");
     id

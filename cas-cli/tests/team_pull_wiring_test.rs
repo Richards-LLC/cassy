@@ -704,9 +704,16 @@ async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
         .expect("full sync must succeed");
 
     let requests = server.received_requests().await.unwrap();
+    // A clean runner may also issue the independent lazy `/api/me` refresh;
+    // it is not a data pull and must not make this watermark test depend on
+    // whether the host happens to have a fresh user-level teams cache.
+    let team_pull_path = format!("/api/teams/{TEST_TEAM}/sync/pull");
     let pull_requests: Vec<_> = requests
         .iter()
-        .filter(|request| request.method.as_str() == "GET")
+        .filter(|request| {
+            request.method.as_str() == "GET"
+                && (request.url.path() == "/api/sync/pull" || request.url.path() == team_pull_path)
+        })
         .collect();
     assert_eq!(pull_requests.len(), 3, "personal, team, and knowledge pull");
     for request in pull_requests {

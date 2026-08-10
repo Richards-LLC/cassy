@@ -33,8 +33,8 @@
 #   scripts/check-real-store-untouched.sh                    # full suite
 #   scripts/check-real-store-untouched.sh --test cli_test    # scoped run
 #
-# Any arguments are passed through to `cargo test`. Scoping is strongly
-# encouraged for routine use — a full `cargo test` in this repo links ~64 test
+# Any arguments are passed through to `cargo nextest run`. Scoping is strongly
+# encouraged for routine use — a full suite in this repo links ~64 test
 # binaries and is expensive (see CLAUDE.md).
 #
 # Exit codes: 0 = clean, 1 = drift detected or the test run failed.
@@ -43,6 +43,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
+CARGO_CMD="${CARGO_CMD:-nextest run}"
 
 # The real stores this run must not touch. CAS_REAL_DBS overrides for
 # environments whose stores live elsewhere (colon-separated).
@@ -105,10 +106,10 @@ protected="$(
 export CAS_TEST_PROTECTED_DBS="${protected}"
 
 echo
-echo "Running: ${CARGO} test $*"
+echo "Running: ${CARGO} ${CARGO_CMD} $*"
 echo "CAS_TEST_PROTECTED_DBS=${CAS_TEST_PROTECTED_DBS}"
 echo
-(cd "${REPO_ROOT}" && "${CARGO}" test "$@")
+(cd "${REPO_ROOT}" && "${CARGO}" ${CARGO_CMD} "$@")
 test_status=$?
 
 echo

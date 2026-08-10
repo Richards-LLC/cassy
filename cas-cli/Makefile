@@ -31,15 +31,17 @@ CARGO ?= cargo
 
 # Run all tests
 test:
-	$(CARGO) test -p cas
+	$(CARGO) nextest run -p cas --no-fail-fast
+	$(CARGO) test -p cas --doc
 
 # Run full test matrix
 test-full:
-	$(CARGO) test -p cas --all-features
+	$(CARGO) nextest run -p cas --all-features --no-fail-fast
+	$(CARGO) test -p cas --all-features --doc
 
 # Run tests with output
 test-verbose:
-	$(CARGO) test -p cas -- --nocapture
+	$(CARGO) nextest run -p cas --no-capture
 
 # Reproduce the clean-CI environment shape locally (cas-43ce / GH #136).
 #
@@ -70,11 +72,11 @@ test-clean-env:
 		echo "No CAS_* variables set — already in the clean-CI shape."; \
 	fi; \
 	unset_args=$$(echo "$$stripped" | sed 's/^/-u /'); \
-	env $$unset_args $(CARGO) test -p cas $(CLEAN_ENV_ARGS)
+	env $$unset_args $(CARGO) nextest run -p cas $(CLEAN_ENV_ARGS)
 
 # Run specific test module
 test-%:
-	$(CARGO) test -p cas $* -- --nocapture
+	$(CARGO) nextest run -p cas $* --no-capture
 
 # Generate coverage report (requires cargo-tarpaulin)
 # Install: cargo install cargo-tarpaulin
@@ -155,12 +157,12 @@ release-fast:
 test-release-panic: test-release-panic-release test-release-panic-release-fast
 
 test-release-panic-release:
-	$(CARGO) test -p cas --release --lib panic_regression
-	$(CARGO) test -p cas --release --test search_utf8_regression_test
+	$(CARGO) nextest run -p cas --release --lib panic_regression
+	$(CARGO) nextest run -p cas --release --test search_utf8_regression_test
 
 test-release-panic-release-fast:
-	$(CARGO) test -p cas --profile release-fast --lib panic_regression
-	$(CARGO) test -p cas --profile release-fast --test search_utf8_regression_test
+	$(CARGO) nextest run -p cas --profile release-fast --lib panic_regression
+	$(CARGO) nextest run -p cas --profile release-fast --test search_utf8_regression_test
 
 # Prove a test run writes nothing into a real CAS store (cas-78c8 / GH #156).
 #
@@ -230,7 +232,7 @@ test-nextest:
 
 # Watch for changes and run tests
 watch:
-	$(CARGO) watch -x "test -p cas"
+	$(CARGO) watch -x "nextest run -p cas"
 
 # Integration tests only
 integration:
@@ -238,11 +240,11 @@ integration:
 
 # Unit tests only (lib tests)
 unit:
-	$(CARGO) test -p cas --lib
+	$(CARGO) nextest run -p cas --lib
 
 # Run library tests without the optional MCP proxy
 dev-test:
-	$(CARGO) test -p cas --lib --no-default-features
+	$(CARGO) nextest run -p cas --lib --no-default-features
 
 # Generate cargo timing report
 timings:

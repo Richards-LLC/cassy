@@ -116,7 +116,10 @@ async fn skipped_response_becomes_visible_failed_queue_item() {
     );
 
     assert!(
-        push_result.errors.iter().any(|error| error.contains("cloud skipped 1 of 1 entries")),
+        push_result
+            .errors
+            .iter()
+            .any(|error| error.contains("cloud skipped 1 of 1 entries")),
         "server skips must make the overall push incomplete: {push_result:?}"
     );
 
@@ -144,6 +147,70 @@ async fn skipped_response_becomes_visible_failed_queue_item() {
             .is_some_and(|diagnostic| diagnostic.contains("server response: {\"entries\"")),
         "queue output must preserve the raw server response: {items:?}"
     );
+}
+
+/// A current cloud response itemizes genuine identity collisions. The client
+/// must dequeue the owned neighbor in the same batch and retain only the named
+/// rejection with its actionable reason for `cas cloud queue --verbose`.
+#[tokio::test]
+async fn itemized_rejection_syncs_owned_row_and_names_project_mismatch() {
+    let server = MockServer::start().await;
+    let body: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/cloud_push/personal-itemized-project-mismatch.json"
+    ))
+    .expect("personal itemized rejection fixture must be valid JSON");
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(5)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = SyncQueue::open(tmp.path()).unwrap();
+    queue.init().unwrap();
+    for id in ["owned-project-entry-001", "rejected-project-entry-002"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&entry_payload(id)),
+            )
+            .unwrap();
+    }
+
+    let mut cfg = make_cloud_config(server.uri());
+    cfg.team_id = None;
+    let syncer = CloudSyncer::new(
+        Arc::new(queue),
+        cfg,
+        CloudSyncerConfig {
+            timeout: Duration::from_secs(5),
+            max_retries: 5,
+            ..Default::default()
+        },
+    );
+    let (results, syncer) = tokio::task::spawn_blocking(move || {
+        let results = (0..5).map(|_| syncer.push()).collect::<Vec<_>>();
+        (results, syncer)
+    })
+    .await
+    .expect("spawn_blocking join");
+
+    assert!(
+        results
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|result| !result.errors.is_empty())),
+        "each refusal is surfaced"
+    );
+    assert_eq!(syncer.queue().stats(5).unwrap().failed, 1);
+    assert_eq!(syncer.queue().list_all(10).unwrap().len(), 1);
+    let failed = &syncer.queue().list_all(10).unwrap()[0];
+    assert_eq!(failed.entity_id, "rejected-project-entry-002");
+    assert!(failed.last_error.as_deref().is_some_and(|error| {
+        error.contains("project_mismatch") && error.contains("foreign-project")
+    }));
 }
 
 /// Backward-compatibility guard: an older cloud build that does not yet

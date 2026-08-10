@@ -1,6 +1,19 @@
 use crate::types::*;
 
 #[test]
+fn coordination_request_rejects_unknown_fields() {
+    let error = serde_json::from_str::<CoordinationRequest>(
+        r#"{"action":"shutdown_workers","worker_namse":"alice"}"#,
+    )
+    .expect_err("unknown fields on destructive requests must not be discarded");
+    let message = error.to_string();
+    assert!(
+        message.contains("worker_namse") || message.contains("unknown field"),
+        "unexpected serde error: {message}"
+    );
+}
+
+#[test]
 fn test_team_request_default() {
     let req: TeamRequest = serde_json::from_str(r#"{"action": "list"}"#).unwrap();
     assert_eq!(req.action, "list");

@@ -201,6 +201,11 @@ test-scoped:
 test-scoped-selftest:
 	../scripts/test-run-scoped-tests.sh
 
+# Prove factory pushes stay scoped while epic/main/tag gates retain the full
+# matrix, including macOS, and reject the retired sccache cache protocol.
+test-ci-tiers:
+	../scripts/test-ci-test-tiers.sh
+
 # Type check
 check:
 	$(CARGO) check -p cas

@@ -118,9 +118,12 @@ fi
 if [[ -n "${SCOPED_TEST_LOG:-}" ]]; then
     log="${SCOPED_TEST_LOG}"
     : >"${log}"
+    clean_log="$(mktemp)"
+    trap 'rm -f "${clean_log}"' EXIT
 else
     log="$(mktemp)"
-    trap 'rm -f "${log}"' EXIT
+    clean_log="$(mktemp)"
+    trap 'rm -f "${log}" "${clean_log}"' EXIT
 fi
 
 echo "Running: ${CARGO} ${CARGO_CMD} $*"
@@ -131,21 +134,26 @@ echo
 (cd "${REPO_ROOT}" && "${CARGO}" ${CARGO_CMD} "$@" 2>&1) | tee "${log}"
 cargo_status="${PIPESTATUS[0]}"
 
+# Cargo and nextest color their summary text in CI. Keep the requested raw log
+# intact, but make every verdict parse against one ANSI-free view so a green
+# colorized run is judged the same way as a green plain-text run.
+sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "${log}" >"${clean_log}"
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
 
 # `cargo test`: "test result: ok. 524 passed; 0 failed; ..."
-cargo_test_summaries="$(grep -c '^test result:' "${log}" 2>/dev/null || true)"
+cargo_test_summaries="$(grep -c '^test result:' "${clean_log}" 2>/dev/null || true)"
 cargo_test_passed="$(
-    sed -n 's/^test result: [a-zA-Z]*\. \([0-9]\{1,\}\) passed.*/\1/p' "${log}" 2>/dev/null |
+    sed -n 's/^test result: [a-zA-Z]*\. \([0-9]\{1,\}\) passed.*/\1/p' "${clean_log}" 2>/dev/null |
         awk '{ total += $1 } END { print total + 0 }'
 )"
 
 # `cargo nextest run`: "Summary [ 1.234s] 524 tests run: 524 passed, 0 skipped"
-nextest_summaries="$(grep -cE '^ *Summary \[.*\] +[0-9]+ tests? run:' "${log}" 2>/dev/null || true)"
+nextest_summaries="$(grep -cE '^ *Summary +\[.*\] +[0-9]+ tests? run:' "${clean_log}" 2>/dev/null || true)"
 nextest_passed="$(
-    sed -n 's/^ *Summary \[.*\] *[0-9]\{1,\} tests\{0,1\} run: \([0-9]\{1,\}\) passed.*/\1/p' "${log}" 2>/dev/null |
+    sed -n 's/^ *Summary \{1,\}\[.*\] *[0-9]\{1,\} tests\{0,1\} run: \([0-9]\{1,\}\) passed.*/\1/p' "${clean_log}" 2>/dev/null |
         awk '{ total += $1 } END { print total + 0 }'
 )"
 
@@ -153,7 +161,7 @@ summaries=$((cargo_test_summaries + nextest_summaries))
 passed=$((cargo_test_passed + nextest_passed))
 
 filtered="$(
-    sed -n 's/^test result:.* \([0-9]\{1,\}\) filtered out.*/\1/p' "${log}" 2>/dev/null |
+    sed -n 's/^test result:.* \([0-9]\{1,\}\) filtered out.*/\1/p' "${clean_log}" 2>/dev/null |
         awk '{ total += $1 } END { print total + 0 }'
 )"
 
@@ -173,11 +181,11 @@ fail() {
 #     real error is buried far above the tail a reader usually sees.
 if [[ "${cargo_status}" -ne 0 ]]; then
     detail=()
-    if grep -q 'did not match any packages\|package ID specification' "${log}" 2>/dev/null; then
+    if grep -q 'did not match any packages\|package ID specification' "${clean_log}" 2>/dev/null; then
         detail+=("The package name did not resolve. In this workspace the binary crate")
         detail+=("is \`cas\` (directory cas-cli/) — \`-p cas-cli\` matches nothing. GH #173 shape 1.")
     fi
-    if grep -q 'failed to run custom build command' "${log}" 2>/dev/null; then
+    if grep -q 'failed to run custom build command' "${clean_log}" 2>/dev/null; then
         detail+=("A build script failed — no test binary was ever produced, so nothing ran.")
         detail+=("If it is ghostty_vt_sys, check \$ZIG is an absolute path. GH #173 shape 2.")
     fi

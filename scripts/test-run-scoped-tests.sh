@@ -198,6 +198,38 @@ expect pass "PASS: 524 test(s) passed" \
     "nextest: genuine green (524 passed)" \
     env CARGO="${stub}" CARGO_CMD="nextest run" "${GUARD}" -p cas --lib store::tests
 
+# CI enables color even when its output is captured. These strings deliberately
+# contain literal ESC bytes, mirroring the nextest and cargo summaries that
+# originally made a 4378/4378 green run look like it had no harness result.
+ansi_nextest_summary=$'\033[32;1m     Summary \033[0m [   1.234s] 524 tests run: \033[32m524 passed\033[0m, 3405 skipped'
+stub="$(make_stub cargo-nextest-ansi-green 0 <<EOF
+    Starting 524 tests across 1 binary (3405 skipped)
+${ansi_nextest_summary}
+EOF
+)"
+expect pass "PASS: 524 test(s) passed" \
+    "nextest: ANSI-colored green summary (524 passed)" \
+    env CARGO="${stub}" CARGO_CMD="nextest run" "${GUARD}" -p cas --lib store::tests
+
+ansi_cargo_summary=$'\033[32;1mtest result:\033[0m ok. \033[32m7 passed\033[0m; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.01s'
+stub="$(make_stub cargo-test-ansi-green 0 <<EOF
+running 7 tests
+${ansi_cargo_summary}
+EOF
+)"
+expect pass "PASS: 7 test(s) passed" \
+    "cargo test: ANSI-colored green summary (7 passed)" \
+    env CARGO="${stub}" CARGO_CMD="test" "${GUARD}" -p cas --lib store::tests
+
+stub="$(make_stub cargo-ansi-no-summary 0 <<'EOF'
+[32mFinished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+[31merror:[0m link failed before any test binary ran
+EOF
+)"
+expect fail "no test harness ever reported" \
+    "ANSI-colored output without a harness summary still fails" \
+    env CARGO="${stub}" CARGO_CMD="test" "${GUARD}" -p cas --lib store::tests
+
 stub="$(make_stub cargo-nextest-empty 0 <<'EOF'
     Starting 0 tests across 1 binary (3929 skipped)
 ------------

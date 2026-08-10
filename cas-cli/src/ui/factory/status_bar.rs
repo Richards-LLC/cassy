@@ -54,6 +54,18 @@ impl StatusBar {
         let styles = &app.theme().styles;
         let mut left_spans = Vec::new();
         let mut right_spans = Vec::new();
+        let claude_account = Self::focused_claude_profile(app).map(|profile| {
+            let is_alt = profile != "main";
+            let profile_style = if is_alt {
+                Style::default()
+                    .fg(palette.chip_fg)
+                    .bg(palette.status_warning)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                styles.text_muted
+            };
+            Span::styled(format!("CLAUDE {profile}"), profile_style)
+        });
 
         // Left side: Mode indicator
         let mode = match &app.input_mode {
@@ -90,26 +102,6 @@ impl StatusBar {
         };
         left_spans.push(mode);
         left_spans.push(Span::raw(" "));
-
-        // Show the actual account used by the focused Claude pane. Worker panes may
-        // deliberately run with a different config directory than the factory
-        // supervisor, so read their resolved WorkerSpec rather than the parent env.
-        if let Some(profile) = Self::focused_claude_profile(app) {
-            let is_alt = profile != "main";
-            let profile_style = if is_alt {
-                Style::default()
-                    .fg(palette.chip_fg)
-                    .bg(palette.status_warning)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                styles.text_muted
-            };
-            left_spans.push(Span::styled(
-                format!(" CLAUDE {profile} "),
-                profile_style,
-            ));
-            left_spans.push(Span::raw(" "));
-        }
 
         // SELECT MODE indicator (mouse capture disabled for native drag-select)
         if app.select_mode {
@@ -560,10 +552,15 @@ impl StatusBar {
         }
 
         // Responsive priority, lowest to highest: shortcut hints, the
-        // network-derived latest-release badge, then the compiled/running CAS
-        // identity. `trim_spans_from_front` sheds that list in the same order.
-        // Mode and error indicators stay on the untrimmed left and therefore
-        // win when a terminal is too narrow to render every meaningful status.
+        // network-derived latest-release badge, focused Claude account, then
+        // the compiled/running CAS identity. `trim_spans_from_front` sheds
+        // that list in the same order. Mode and error indicators stay on the
+        // untrimmed left and therefore win when a terminal is too narrow to
+        // render every meaningful status.
+        if let Some(account) = claude_account {
+            right_spans.push(Span::raw(" │ "));
+            right_spans.push(account);
+        }
         if let Some(update_label) = update_badge {
             right_spans.push(Span::raw(" │ "));
             right_spans.push(Span::styled(

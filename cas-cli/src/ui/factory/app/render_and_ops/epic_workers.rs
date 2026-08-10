@@ -39,9 +39,8 @@ fn worker_registry_rows_for_shutdown<'a>(
         .filter(|agent| {
             agent.name == name
                 && agent.role == cas_types::AgentRole::Worker
-                && factory_session.is_none_or(|session| {
-                    agent.factory_session.as_deref() == Some(session)
-                })
+                && factory_session
+                    .is_none_or(|session| agent.factory_session.as_deref() == Some(session))
         })
         .collect();
     matching.sort_by_key(|agent| agent.registered_at);
@@ -422,7 +421,12 @@ fn commits_behind(repo_root: &std::path::Path, base: &str, newer: &str) -> Optio
 /// `true` when `reference` resolves to a commit in `repo_root`.
 fn ref_exists(repo_root: &std::path::Path, reference: &str) -> bool {
     std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ])
         .current_dir(repo_root)
         .output()
         .is_ok_and(|output| output.status.success())
@@ -703,13 +707,34 @@ pub(crate) fn assign_task_to_new_worker(
             // Early-assign already pinned this worker (cas-7a94 isolate path).
             return true;
         }
-        tracing::warn!(
-            task_id, worker_name, existing_assignee = %existing,
-            "cas-6913: task already has an assignee — not overwriting at spawn-time pre-assignment"
-        );
-        return false;
+        if let Err(reason) = reset_stale_preassign_holder(cas_dir, &task, existing) {
+            tracing::warn!(
+                task_id, worker_name, existing_assignee = %existing, reason,
+                "cas-2327: refused spawn-time pre-assignment holder"
+            );
+            return false;
+        }
+        // Reset persisted successfully; reload before assigning so the normal
+        // write below never carries stale status/assignee data forward.
+        let task = match store.get(task_id) {
+            Ok(task) => task,
+            Err(e) => {
+                tracing::error!(task_id, worker_name, error = %e, "cas-2327: stale-holder reset succeeded but task reload failed");
+                return false;
+            }
+        };
+        return assign_unassigned_task(&*store, task, task_id, worker_name);
     }
 
+    assign_unassigned_task(&*store, task, task_id, worker_name)
+}
+
+fn assign_unassigned_task(
+    store: &dyn cas_store::TaskStore,
+    task: cas_types::Task,
+    task_id: &str,
+    worker_name: &str,
+) -> bool {
     let mut updated = task;
     updated.assignee = Some(worker_name.to_string());
     updated.updated_at = chrono::Utc::now();
@@ -732,6 +757,62 @@ pub(crate) fn assign_task_to_new_worker(
     }
 }
 
+/// Reset exactly one dead assignee before a replacement worker is bound.
+///
+/// Unlike a destructive task wipe, this preserves the task's notes, branch,
+/// deliverables, and prior-status evidence. The explicit audit note is vital:
+/// an orphan may have pushed real work before its session died.
+fn reset_stale_preassign_holder(
+    cas_dir: &std::path::Path,
+    task: &cas_types::Task,
+    holder: &str,
+) -> Result<(), String> {
+    let agents = open_agent_store(cas_dir)
+        .map_err(|e| format!("could not inspect current assignee '{holder}': {e}"))?;
+    if agents
+        .get(holder)
+        .map(|agent| {
+            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(&agent)
+                .is_live()
+        })
+        .unwrap_or(false)
+    {
+        return Err(format!("task is still held by live worker '{holder}'"));
+    }
+
+    agents
+        .release_lease_for_task(&task.id, "Stale pre-assignment force-release")
+        .map_err(|e| format!("could not release stale holder '{holder}' lease: {e}"))?;
+
+    let store = open_task_store(cas_dir)
+        .map_err(|e| format!("could not open task store for stale-holder reset: {e}"))?;
+    let mut reset = store
+        .get(&task.id)
+        .map_err(|e| format!("could not reload task after lease release: {e}"))?;
+    if reset.assignee.as_deref() != Some(holder) {
+        return Err(format!(
+            "task assignee changed from stale holder '{holder}' while preparing reset"
+        ));
+    }
+    let prior_status = reset.status;
+    reset.status = cas_types::TaskStatus::Open;
+    reset.assignee = None;
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    let audit = format!(
+        "[{timestamp}] ✅ DECISION cas-2327: force-released stale assignee '{holder}' with reset semantics; {prior_status:?}→Open. Notes, branch, and prior work were preserved before pre-assigning a replacement worker."
+    );
+    reset.notes = if reset.notes.is_empty() {
+        audit
+    } else {
+        format!("{}\n\n{audit}", reset.notes)
+    };
+    reset.updated_at = chrono::Utc::now();
+    store
+        .update(&reset)
+        .map(|_| ())
+        .map_err(|e| format!("could not persist stale-holder reset: {e}"))
+}
+
 /// cas-7a94: release tasks bound to a dead/shutting-down worker so they are
 /// claimable again without a manual `task action=reset`.
 ///
@@ -743,10 +824,7 @@ pub(crate) fn assign_task_to_new_worker(
 /// merge parking must not be clobbered by worker teardown).
 ///
 /// Best-effort: store failures are logged; returns the number of tasks cleared.
-pub(crate) fn release_worker_task_bindings(
-    cas_dir: &std::path::Path,
-    worker_name: &str,
-) -> usize {
+pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_name: &str) -> usize {
     let task_store = match open_task_store(cas_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -855,8 +933,10 @@ pub(crate) fn release_preassign_if_bound(
     if task.assignee.as_deref() != Some(worker_name) {
         return;
     }
-    if matches!(task.status, cas_types::TaskStatus::Closed | cas_types::TaskStatus::AwaitingMerge)
-    {
+    if matches!(
+        task.status,
+        cas_types::TaskStatus::Closed | cas_types::TaskStatus::AwaitingMerge
+    ) {
         return;
     }
     if let Ok(agents) = open_agent_store(cas_dir) {
@@ -1378,11 +1458,8 @@ impl FactoryApp {
         // instead of silently leaving stale idle agents in director panels.
         let agent_store = open_agent_store(self.cas_dir())?;
         let agents = agent_store.list(None)?;
-        let matching_agents = worker_registry_rows_for_shutdown(
-            &agents,
-            name,
-            self.factory_session.as_deref(),
-        );
+        let matching_agents =
+            worker_registry_rows_for_shutdown(&agents, name, self.factory_session.as_deref());
         let agent = matching_agents.first().copied().ok_or_else(|| {
             let known_workers: Vec<String> = agents
                 .iter()
@@ -1404,8 +1481,8 @@ impl FactoryApp {
         // Open/InProgress/Blocked bindings. Remaining non-Closed work (e.g.
         // AwaitingMerge) still blocks worktree reclaim.
         let agent_id = agent.id.clone();
-        let has_open_tasks = worker_has_open_tasks(&cas_dir, name)
-            || worker_has_open_tasks(&cas_dir, &agent_id);
+        let has_open_tasks =
+            worker_has_open_tasks(&cas_dir, name) || worker_has_open_tasks(&cas_dir, &agent_id);
 
         // Retire every same-name row in this factory session. Older builds
         // allowed nested headless Claude calls to register child session IDs
@@ -1871,12 +1948,7 @@ mod spawn_base_tests {
             .unwrap();
     }
 
-    fn seed_epic(
-        cas_dir: &std::path::Path,
-        epic_id: &str,
-        title: &str,
-        branch: Option<&str>,
-    ) {
+    fn seed_epic(cas_dir: &std::path::Path, epic_id: &str, title: &str, branch: Option<&str>) {
         let store = crate::store::open_task_store(cas_dir).unwrap();
         let mut epic = cas_types::Task::new(epic_id.to_string(), title.to_string());
         epic.task_type = cas_types::TaskType::Epic;
@@ -2025,7 +2097,12 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "epic/alpha", "main");
 
-        seed_epic(&cas_dir, "cas-ghost", "Ghost epic", Some("epic/never-created"));
+        seed_epic(
+            &cas_dir,
+            "cas-ghost",
+            "Ghost epic",
+            Some("epic/never-created"),
+        );
         seed_child(&cas_dir, "cas-orphan", "cas-ghost");
 
         let task_base = task_epic_base(&cas_dir, &repo, "cas-orphan");
@@ -2642,7 +2719,8 @@ mod spawn_base_tests {
         };
 
         assert!(
-            !cleanup_cancelled_spawn_worktree_with_manager(Some(&mut manager), &mut result).unwrap()
+            !cleanup_cancelled_spawn_worktree_with_manager(Some(&mut manager), &mut result)
+                .unwrap()
         );
         assert!(
             result.worktree.is_some(),
@@ -2829,7 +2907,11 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["update-ref", "refs/remotes/origin/main", &head_sha(&repo, "main")])
+            .args([
+                "update-ref",
+                "refs/remotes/origin/main",
+                &head_sha(&repo, "main"),
+            ])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -3040,7 +3122,11 @@ mod tests {
         let (_temp, cas_dir) = seeded_cas_dir();
         let store = crate::store::open_task_store(&cas_dir).unwrap();
         store
-            .add(&task_with("cas-abc1", Some("other-worker"), TaskStatus::Open))
+            .add(&task_with(
+                "cas-abc1",
+                Some("other-worker"),
+                TaskStatus::Open,
+            ))
             .unwrap();
 
         assert!(
@@ -3114,11 +3200,7 @@ mod tests {
 
         let updated = store.get("cas-7f61").unwrap();
         assert_eq!(updated.assignee, None, "assignee cleared");
-        assert_eq!(
-            updated.status,
-            TaskStatus::Open,
-            "Open stays Open"
-        );
+        assert_eq!(updated.status, TaskStatus::Open, "Open stays Open");
     }
 
     /// Inverse bug (observed): InProgress ghost with no live agent / no lease

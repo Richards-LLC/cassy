@@ -507,6 +507,46 @@ fn enqueue_spawn_outcome_notice(
     )?)
 }
 
+/// cas-2327 (GH #170): a booted worker whose promised task did not bind is a
+/// factory lifecycle failure, not ordinary spawn chatter. Mark this prompt as
+/// a corroborated wake envelope so cas-7787 retry/undelivered reporting applies.
+fn enqueue_preassign_failure_lifecycle_relay(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    task_id: &str,
+    detail: &str,
+) -> anyhow::Result<i64> {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
+
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let request = request_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "direct".to_string());
+    let source =
+        format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}spawn-preassign-failed:{request}:{worker_name}");
+    let body = format!(
+        "<spawn-preassign-failed task_id=\"{task_id}\" worker_name=\"{worker_name}\" notification_id=\"{request}\">\n\
+         Factory spawn pre-assignment failed: {detail}\n\
+         </spawn-preassign-failed>"
+    );
+    let result = queue.enqueue_idempotent(
+        &source,
+        supervisor_name,
+        &body,
+        Some(factory_session),
+        Some(&format!("Worker spawn preassign failed: {worker_name}")),
+        Some(crate::store::NotificationPriority::High),
+        &format!("spawn-preassign-failed:{request}:{worker_name}:{task_id}"),
+    )?;
+    Ok(match result {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    })
+}
+
 fn take_unverified_spawn_on_exit(
     verifications: &mut HashMap<String, SpawnVerification>,
     worker_name: &str,
@@ -1559,14 +1599,13 @@ impl FactoryDaemon {
                     &detail,
                 );
                 self.app.set_error(detail.clone());
-                let _ = enqueue_spawn_outcome_notice(
+                let _ = enqueue_preassign_failure_lifecycle_relay(
                     self.app.cas_dir(),
                     self.app.supervisor_name(),
                     &self.session_name,
                     request_id,
                     worker,
-                    "preassign",
-                    false,
+                    task_id,
                     &detail,
                 );
             }
@@ -5058,7 +5097,8 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 mod tests {
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
-        cancel_targeted_in_flight_spawn, deliver_worker_task_brief, enqueue_spawn_cancelled_notice,
+        cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
+        enqueue_preassign_failure_lifecycle_relay, enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, ensure_worker_preassignment, is_exact_agent_name_match,
         matches_event_filter, preassign_failure_reason, prompt_poison_sweep_due,
         prompt_poison_sweep_targets, registered_prompt_sweep_agents, registration_timeout_detail,
@@ -7740,6 +7780,69 @@ mod tests {
             ensure_worker_preassignment(&cas_dir, "cas-missing", "young-jay-62").is_err(),
             "a vanished task must surface as a failure, not silence"
         );
+    }
+
+    /// GH #170: a dead display-name assignee is not live ownership. Reset it
+    /// in-place so its pushed-work provenance and notes survive, then bind the
+    /// newly registered worker exactly as the spawn receipt promised.
+    #[test]
+    fn registration_preassignment_resets_stale_holder_and_preserves_audit_history() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-stale".to_string(), "orphaned delivery".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("dead-session-worker".to_string());
+        task.notes = "original pushed-work note".to_string();
+        task.branch = Some("factory/dead-session-worker".to_string());
+        store.add(&task).unwrap();
+
+        ensure_worker_preassignment(&cas_dir, "cas-stale", "replacement-worker")
+            .expect("dead holder must be reset before replacement assignment");
+
+        let updated = store.get("cas-stale").unwrap();
+        assert_eq!(updated.assignee.as_deref(), Some("replacement-worker"));
+        assert_eq!(updated.status, TaskStatus::Open);
+        assert_eq!(
+            updated.branch.as_deref(),
+            Some("factory/dead-session-worker")
+        );
+        assert!(updated.notes.contains("original pushed-work note"));
+        assert!(updated.notes.contains("dead-session-worker"));
+        assert!(updated.notes.contains("reset semantics"));
+    }
+
+    #[test]
+    fn residual_preassign_failure_uses_wake_eligible_lifecycle_relay() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+
+        enqueue_preassign_failure_lifecycle_relay(
+            &cas_dir,
+            "supervisor",
+            "factory-session",
+            Some(823),
+            "replacement-worker",
+            "cas-stale",
+            "task store became unreadable",
+        )
+        .expect("failure must reach lifecycle relay path");
+
+        let row = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .pop()
+            .expect("relay row");
+        assert!(
+            row.source.starts_with("lifecycle-wake:"),
+            "{:?}",
+            row.source
+        );
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+            &row.prompt
+        ));
+        assert!(row.prompt.contains("cas-stale"));
     }
 
     /// GH #84's other half: workers "booted with zero context". A confirmed

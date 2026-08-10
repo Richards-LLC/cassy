@@ -845,7 +845,7 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::{open_spawn_queue_store, open_task_store};
+        use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_types::{TaskStatus, TaskType};
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
@@ -882,6 +882,7 @@ impl CasService {
         // string says why, and is only surfaced when there is also no epic, so
         // epic-present behaviour is unchanged.
         let mut task_id_authorization: Option<Result<(), String>> = None;
+        let mut stale_assignee_notice = String::new();
         if let Some(ref task_id) = req.task_id {
             let requested_worker_count = if worker_names.is_empty() {
                 count
@@ -921,6 +922,46 @@ impl CasService {
                 ));
             }
 
+            // cas-2327 (GH #170): a display-name assignee can outlive its
+            // worker session. Apply the same dual liveness rule that the
+            // factory roster uses: a fresh heartbeat OR a live harness process
+            // owns the task; a missing/dead row is stale and will be reset at
+            // pre-assignment time. Never boot a worker just to discover this.
+            let stale_holder = match task.assignee.as_deref() {
+                Some(assignee) => {
+                    let agents = open_agent_store(&self.inner.cas_root).map_err(|e| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Failed to inspect assignee {assignee} for task {task_id}: {e}"
+                            ),
+                        )
+                    })?;
+                    let alive = agents
+                        .get(assignee)
+                        .map(|agent| {
+                            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(&agent)
+                                .is_live()
+                        })
+                        .unwrap_or(false);
+                    if alive {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            format!(
+                                "task {task_id} is already assigned to live worker '{assignee}'; \\
+                                 refusing to spawn another worker for it"
+                            ),
+                        ));
+                    }
+                    stale_assignee_notice = format!(
+                        "\nStale assignee '{assignee}' was detected; its task binding will be \\
+                         force-released with reset semantics before pre-assignment."
+                    );
+                    true
+                }
+                None => false,
+            };
+
             // Standing in for an epic is a stronger claim than being a legal
             // pre-assignment target, so it is held to a stricter bar: the task
             // must be work a NEW worker can actually pick up. A task parked in
@@ -934,11 +975,10 @@ impl CasService {
             // an open epic behaves exactly as before.
             task_id_authorization = Some(match (&task.status, &task.assignee) {
                 (TaskStatus::Open | TaskStatus::InProgress, None) => Ok(()),
+                (TaskStatus::Open | TaskStatus::InProgress, Some(_)) if stale_holder => Ok(()),
                 (TaskStatus::Open | TaskStatus::InProgress, Some(assignee)) => Err(format!(
                     "task {task_id} is already assigned to '{assignee}', so it cannot stand in \
-                     for an EPIC — that worker owns it and the pre-assignment would be refused. \
-                     Clear it first (mcp__cas__task action=update id={task_id} assignee=) or \
-                     reset it (action=reset) if that worker is gone."
+                     for an EPIC — that worker owns it and the pre-assignment would be refused."
                 )),
                 (status, _) => Err(format!(
                     "task {task_id} is {status:?}, which is not work a newly spawned worker can \
@@ -1114,7 +1154,11 @@ impl CasService {
         let task_id_note = req
             .task_id
             .as_ref()
-            .map(|id| format!("\nTask: {id} will be pre-assigned once the worker boots"))
+            .map(|id| {
+                format!(
+                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}"
+                )
+            })
             .unwrap_or_default();
         let request_id_text = request_id.to_string();
         let count_text = count.to_string();
@@ -3526,9 +3570,7 @@ impl CasService {
                     .ok()
                 })
                 .map(|context| context.target_branch)
-                .or_else(|| {
-                    crate::config::Config::configured_epic_base_branch(&close_project_root)
-                })
+                .or_else(|| crate::config::Config::configured_epic_base_branch(&close_project_root))
                 .unwrap_or_else(|| {
                     GitOperations::new(close_project_root.to_path_buf()).detect_default_branch()
                 });

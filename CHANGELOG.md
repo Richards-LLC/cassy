@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.61.0] - 2026-08-10
+
+### Added
+- **Commander hubs can now persist as managed services.** `cas hub service install`, `status`, and `uninstall` provide launchd and systemd integration for durable fleet control.
+- **The hosted static Commander origin is explicitly supported.** `https://hub.petrastella.io` is documented as an opt-in trust boundary, and the controller visibly identifies incompatible hub capabilities.
+
+### Changed
+- **Hub restart recovers the public Tailscale Serve endpoint on macOS.** CAS discovers the signed Tailscale app-bundle CLI when it is not on `PATH`, preserving the normal start/restart recovery path.
+
+### Fixed
+- **Hub stop receipts now report the final Tailscale Serve outcome truthfully.** A mapping removed by the foreground hub during shutdown is recognized as removed rather than reported as untouched.
+- **Scoped CI validation now reads ANSI-coloured test summaries correctly.** Matching test failures continue to be reported instead of being obscured by terminal formatting.
+
 ## [2.60.0] - 2026-08-10
 
 ### Added

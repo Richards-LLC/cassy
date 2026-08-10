@@ -74,10 +74,12 @@
       "fc82f138ab0e22de22db3429134f1ac32a094829795ed5a17728fb1ec4bb0186"
     ],
     "skills/cas-html-reports/references/report-types.md": [
-      "862b7dea5b648ec2185d90d1903120de7e4d9ad90ee97e716e420a56e153e0ce"
+      "862b7dea5b648ec2185d90d1903120de7e4d9ad90ee97e716e420a56e153e0ce",
+      "f51e1e11829bf361483971145f8e6428cd73304405b5212d32e2148c988a57c2"
     ],
     "skills/cas-html-reports/references/review-checklist.md": [
-      "e16f440a723f3b43be28f1eb9aaf0ed3fb14f18343ab0c755a7d14fab01efd21"
+      "e16f440a723f3b43be28f1eb9aaf0ed3fb14f18343ab0c755a7d14fab01efd21",
+      "eace9385d9e5d8967a4c3d4cdf2d5cd680bbe1d6bbf0673a1ec679d0fbfd467c"
     ],
     "skills/cas-html-reports/references/sources.md": [
       "2da6116697f892707a9542ce2219f79130af2fc018be4421aac58dd27a405303"
@@ -95,6 +97,9 @@
     ],
     "skills/cas-memory-management/references/body-templates.md": [
       "e3d58410bad40b38d0d0521ceb9107576cadde5bc44f75b27c2cb6d86b45a4ac"
+    ],
+    "skills/cas-memory-management/references/lifecycle-and-storage.md": [
+      "dbc172f804c52f98f0dd88443590f4afbcf321e06ed84a64e1fa60496aa800bb"
     ],
     "skills/cas-memory-management/references/overlap-detection.md": [
       "1c9a2bd0f35fe6d318670e89d41a7baf3e1bf8987c87cb4378bdb814f66406f2",
@@ -229,6 +234,11 @@
       "e7fa41d7b3e8a6b4782e67f10eb768b59ea7ac589cb6f2d0fbb77f39c2b4c795",
       "ee79a48739d5a145b32dc9ee647b1a0b70ba525a26a8e58523640d774be6df3f",
       "f98fa68adfd403425062351d1f2901d071300e6b5c90ff709ae46166dc430379"
+    ],
+    "skills/cas-supervisor/references/reminders.md": [
+      "2a68b6b63af597702bae3682d0127260263c48306f9353e94f16b46076807dd9",
+      "cb5b8c9b8472acd2ee8383b508828fe6cd466be5936baeb9b0e89066801db898",
+      "f847fd0dc15bc47004edb86b16e5e7697bb44a4a2db93f42612270a687fa8df1"
     ],
     "skills/cas-supervisor/references/worker-recovery.md": [
       "186194057b9818062d7cf5e6a7eae9bcea8914505b95f984d55818044b11cd8d",
@@ -396,6 +406,9 @@
       "e14bb689f014b1b7c54dfda725389a1ca756715271d51b420906b8da8b3ab33c",
       "e62d81bf3eefad52e5bdaffeff87efb375e8170123518906333d9f86e5cf4107",
       "faa0a5269b0522cd70f4cf6ab963cfadf00906b5868d7cc90177c4b66bbece8d"
+    ],
+    "skills/cli-routing/references/routing.md": [
+      "f28b0d10a4281789f76d697a7bdbecf6635b2ee0f425cbccc5f126cde6fd31ae"
     ],
     "skills/fallow/references/cli-reference.md": [
       "7a4944f1a5ced9b9f6599da03c8ef6ebd6268c7bbdc32a27adfa6d77db0b037d"

@@ -525,6 +525,9 @@ impl PtyConfig {
         // (cas-4513 Claude Code JS crash-screen symptom). Emitted only
         // for role="worker"; supervisor stays uncapped.
         push_worker_cargo_env(&mut env, role);
+        // cas-eb39: share dependency compilation across isolated worktrees
+        // without serializing their Cargo target directories.
+        push_worker_build_cache_env(&mut env, role);
         // cas-7d8e: silence non-essential traffic and pin the binary for
         // workers only. The supervisor keeps feature-flag evaluation (Remote
         // Control) and the auto-updater (security patches).
@@ -698,6 +701,8 @@ impl PtyConfig {
 
         // cas-0bf4: see equivalent comment in `claude()`.
         push_worker_cargo_env(&mut env, role);
+        // cas-eb39: see equivalent comment in `claude()`.
+        push_worker_build_cache_env(&mut env, role);
         // cas-3522 follow-on: see equivalent comment in `claude()`.
         push_worker_zig_env(&mut env, role, cas_root);
 
@@ -883,6 +888,8 @@ impl PtyConfig {
 
         // cas-0bf4: see equivalent comment in `claude()`.
         push_worker_cargo_env(&mut env, role);
+        // cas-eb39: see equivalent comment in `claude()`.
+        push_worker_build_cache_env(&mut env, role);
         // cas-3522 follow-on: see equivalent comment in `claude()`.
         push_worker_zig_env(&mut env, role, cas_root);
 
@@ -1162,6 +1169,62 @@ fn push_worker_cargo_env(env: &mut Vec<(String, String)>, role: &str) {
     if let Some(cargo_jobs) = cargo_build_jobs_for_worker(None) {
         env.push(("CARGO_BUILD_JOBS".to_string(), cargo_jobs));
     }
+}
+
+/// Share Rust compilation across factory worktrees through `sccache`.
+///
+/// A shared `CARGO_TARGET_DIR` is safe from corruption because Cargo locks it,
+/// but that lock serializes independent workers and branch switches churn the
+/// shared workspace artifacts. Keeping each worktree's target directory while
+/// using sccache gives concurrent workers a content-addressed dependency cache
+/// instead. Workspace crates keep their normal incremental artifacts; the
+/// fresh-worktree win is the dependency graph that no longer recompiles N
+/// times across N workers.
+///
+/// The wiring is deliberately worker-only and best-effort:
+/// - preserve an operator-provided `RUSTC_WRAPPER` exactly as-is;
+/// - `CAS_FACTORY_DISABLE_SCCACHE=1` is the emergency kill switch;
+/// - do nothing when `sccache` is absent, because exporting a missing wrapper
+///   makes every Cargo invocation fail;
+/// - raise sccache's small 10 GiB default to 50 GiB unless the operator already
+///   chose a size. This repo's duplicated dependency artifacts were measured at
+///   roughly 170 GiB across the main checkout and six worker worktrees.
+fn push_worker_build_cache_env(env: &mut Vec<(String, String)>, role: &str) {
+    let entries = worker_build_cache_env(
+        role,
+        std::env::var("CAS_FACTORY_DISABLE_SCCACHE").as_deref() == Ok("1"),
+        std::env::var("RUSTC_WRAPPER").ok().as_deref(),
+        std::env::var("SCCACHE_CACHE_SIZE").ok().as_deref(),
+        executable_on_path("sccache"),
+    );
+    env.extend(entries);
+}
+
+/// Env-free decision core for [`push_worker_build_cache_env`]. Keeping the
+/// policy pure makes every branch testable without process-wide env races.
+fn worker_build_cache_env(
+    role: &str,
+    disabled: bool,
+    rustc_wrapper: Option<&str>,
+    cache_size: Option<&str>,
+    sccache_available: bool,
+) -> Vec<(String, String)> {
+    if role != "worker" || disabled || rustc_wrapper.is_some() || !sccache_available {
+        return Vec::new();
+    }
+
+    let mut entries = vec![("RUSTC_WRAPPER".to_string(), "sccache".to_string())];
+    if cache_size.is_none() {
+        entries.push(("SCCACHE_CACHE_SIZE".to_string(), "50G".to_string()));
+    }
+    entries
+}
+
+fn executable_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
 /// Quiet a factory *worker's* outbound traffic and pin its binary (cas-7d8e).
@@ -2322,6 +2385,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_worker_build_cache_env_decision_table() {
+        let none = Vec::<(String, String)>::new();
+        assert_eq!(
+            worker_build_cache_env("supervisor", false, None, None, true),
+            none,
+            "supervisors must not receive worker build-cache policy"
+        );
+        assert_eq!(
+            worker_build_cache_env("worker", true, None, None, true),
+            none,
+            "the factory kill switch must disable sccache"
+        );
+        assert_eq!(
+            worker_build_cache_env("worker", false, Some("rustc-wrapper"), None, true),
+            none,
+            "an operator-provided RUSTC_WRAPPER must win"
+        );
+        assert_eq!(
+            worker_build_cache_env("worker", false, Some(""), None, true),
+            none,
+            "even an explicitly empty RUSTC_WRAPPER is an operator choice"
+        );
+        assert_eq!(
+            worker_build_cache_env("worker", false, None, None, false),
+            none,
+            "a missing sccache binary must not poison every Cargo invocation"
+        );
+        assert_eq!(
+            worker_build_cache_env("worker", false, None, None, true),
+            vec![
+                ("RUSTC_WRAPPER".to_string(), "sccache".to_string()),
+                ("SCCACHE_CACHE_SIZE".to_string(), "50G".to_string()),
+            ],
+            "the worker default should enable sccache and raise its cache size"
+        );
+        assert_eq!(
+            worker_build_cache_env("worker", false, None, Some("80G"), true),
+            vec![("RUSTC_WRAPPER".to_string(), "sccache".to_string())],
+            "an operator-provided SCCACHE_CACHE_SIZE must be inherited unchanged"
+        );
     }
 
     /// cas-bbc2: `cas_binary_on_path()` returns true when an executable named

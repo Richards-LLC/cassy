@@ -1672,6 +1672,133 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_
 // =============================================================================
 
 #[tokio::test]
+async fn test_shutdown_workers_rejects_unsupported_known_param_without_queueing() {
+    let env = FactoryTestEnv::new();
+    env.register_worker("alice");
+
+    let mut req = coord_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    // task_id is a valid field in the unified request, but not for this
+    // destructive action. It must not disappear during domain conversion.
+    req.task_id = Some("cas-wrong-field".to_string());
+
+    let result = env.service.coordination(Parameters(req)).await;
+    let err = result.expect_err("unsupported shutdown field must hard-error");
+    assert!(err.message.contains("task_id"), "unexpected error: {err:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek").is_empty(),
+        "a rejected destructive request must queue nothing"
+    );
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_id_targets_exact_worker() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("alice");
+    env.register_worker("bob");
+
+    let mut req = coord_req("shutdown_workers");
+    // GH #197's incident shape: id carried the display name. Before the fix
+    // this field was ignored and the empty selector expanded to ALL.
+    req.id = Some("alice".to_string());
+
+    let result = env
+        .service
+        .coordination(Parameters(req))
+        .await
+        .expect("id target should be accepted");
+    let text = get_text(&result);
+    assert!(text.contains("alice"), "receipt must name target: {text}");
+    assert!(
+        text.contains("tasks=[none]"),
+        "receipt must show task state: {text}"
+    );
+
+    let entries = env.spawn_queue().peek(10).expect("peek");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].worker_names, vec!["alice"]);
+    assert!(!entries[0].worker_names.contains(&"bob".to_string()));
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_mid_task_requires_force_and_receipt_enumerates_state() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("alice");
+    let mut task = Task::new("cas-active".to_string(), "active work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("alice".to_string());
+    env.task_store().add(&task).expect("add task");
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req.clone()))
+        .await
+        .expect_err("mid-task shutdown must require force");
+    assert!(
+        err.message.contains("force=true"),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.message.contains("cas-active"),
+        "task state missing: {err:?}"
+    );
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+
+    req.force = Some(true);
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("force should authorize exact target");
+    let text = get_text(&result);
+    assert!(
+        text.contains("alice"),
+        "worker missing from receipt: {text}"
+    );
+    assert!(
+        text.contains("cas-active [in_progress]"),
+        "task missing: {text}"
+    );
+    assert!(text.contains("worktree="), "worktree state missing: {text}");
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+    std::fs::write(worker_path.join("uncommitted.txt"), "live WIP\n").unwrap();
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("dirty/unpushed shutdown must require force");
+    assert!(
+        err.message.contains("force=true"),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.message.contains("dirty_files=1"),
+        "dirty state missing: {err:?}"
+    );
+    assert!(
+        err.message.contains("unpushed_commits="),
+        "unpushed state missing: {err:?}"
+    );
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
 async fn test_shutdown_workers_validates_existence() {
     let env = FactoryTestEnv::new();
     env.register_worker("alice");

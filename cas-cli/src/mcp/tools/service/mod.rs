@@ -464,6 +464,41 @@ impl CasService {
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
 
+            // Destructive operations fail closed on fields that belong to
+            // another action in this unified request. Serde catches unknown
+            // JSON keys; this catches known union fields that the selected
+            // action would otherwise silently discard (the GH #197 incident
+            // was exactly `shutdown_workers id=...` falling through to ALL).
+            let allowed: Option<&[&str]> = match action.as_str() {
+                "shutdown_workers" => {
+                    Some(&["action", "id", "count", "worker_names", "force"])
+                }
+                "sync_all_workers" => {
+                    Some(&["action", "id", "branch", "worker_names", "force"])
+                }
+                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run"]),
+                "server_stop" => Some(&["action", "id"]),
+                "worktree_cleanup" => {
+                    Some(&["action", "id", "all", "orphans", "dry_run", "force"])
+                }
+                "worktree_merge" => {
+                    Some(&["action", "id", "force", "allow_trunk", "cleanup"])
+                }
+                _ => None,
+            };
+            if let Some(allowed) = allowed {
+                let unsupported = coordination_params_not_in(&req, allowed);
+                if !unsupported.is_empty() {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Unsupported parameter(s) for destructive action `{action}`: {}. Nothing was queued or changed.",
+                            unsupported.join(", ")
+                        ),
+                    ));
+                }
+            }
+
             let result = match action.as_str() {
                 // ---- Agent domain ----
                 "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
@@ -1142,6 +1177,24 @@ impl CasService {
             "MCP proxy requires mcp-proxy feature. Build with: cargo build --features mcp-proxy",
         ))
     }
+}
+
+/// Return explicitly supplied fields outside an action's allow-list.
+///
+/// Serialization keeps this fail-closed when a new union field is added: a
+/// destructive action must opt into that field deliberately before accepting
+/// it. `None` fields serialize as null and therefore do not count as supplied.
+fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Vec<String> {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(req) else {
+        return vec!["<request serialization failed>".to_string()];
+    };
+    let mut unsupported: Vec<String> = fields
+        .into_iter()
+        .filter(|(name, value)| !value.is_null() && !allowed.contains(&name.as_str()))
+        .map(|(name, _)| name)
+        .collect();
+    unsupported.sort();
+    unsupported
 }
 
 // ============================================================================

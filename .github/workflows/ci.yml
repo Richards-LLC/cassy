@@ -16,6 +16,10 @@ on:
   push:
     branches:
       - main
+      - "epic/**"
+      - "factory/**"
+    tags:
+      - "v*"
   schedule:
     - cron: "0 8 * * 1"
   # Manual trigger. Without this a run cannot be forced from the CLI or API,
@@ -26,10 +30,52 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
+  # The action supplies GitHub cache-v2 credentials. Keep one explicit CAS
+  # namespace so every CI job can reuse identical compiler objects.
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_VERSION: "cas-v2"
 
 jobs:
+  # Factory pushes and pull requests get one cheap target-scoped lane. The
+  # integration/full tier below starts only after a merge reaches epic/*,
+  # main, a release tag, or an explicit/scheduled gate.
+  scoped-validation:
+    name: Scoped Validation (factory/PR)
+    if: >-
+      github.event_name == 'pull_request'
+      || (github.event_name == 'push'
+      && startsWith(github.ref, 'refs/heads/factory/'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: scoped-validation
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Check library and test targets
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo check -p cas --lib --tests
+
+      - name: Test library target (one binary)
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
+
   fast-validation:
     name: Fast Validation
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +136,12 @@ jobs:
   # It compiles its own --all-targets artifacts; it executes no tests.
   clippy:
     name: Clippy (advisory, compiles only — no test suite)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,6 +162,12 @@ jobs:
   # Linux test suite on a more expensive runner.
   macos-check:
     name: macOS Check
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
     # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
     # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.
@@ -141,7 +199,7 @@ jobs:
           ./.context/zig/zig env
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -173,7 +231,10 @@ jobs:
     name: Test Compile Guard (compile-only, executes nothing)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.ref == 'refs/heads/main'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -208,7 +269,10 @@ jobs:
     name: Panic Isolation — release profile (named subset, not the suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.ref == 'refs/heads/main'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -228,7 +292,10 @@ jobs:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.ref == 'refs/heads/main'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -256,8 +323,17 @@ jobs:
     name: Build Benchmark & Timings (measurement only, no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.ref == 'refs/heads/main'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
+    # This job measures a genuinely cold compiler. Letting the repaired remote
+    # sccache serve objects after `cargo clean` would turn the benchmark into a
+    # cache benchmark and make its historical regression threshold meaningless.
+    env:
+      RUSTC_WRAPPER: ""
+      SCCACHE_GHA_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
         with:

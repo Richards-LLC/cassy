@@ -507,6 +507,7 @@ pub struct TeamRequest {
 
 /// Unified factory operations request for dynamic worker management
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
@@ -514,12 +515,11 @@ pub struct FactoryRequest {
     )]
     pub action: String,
 
-    /// Generic id field — used by `epic_status` and `sync_all_workers` to
-    /// identify the target epic, and forwarded from the unified
-    /// `CoordinationRequest.id` so callers can write
-    /// `mcp__cas__coordination action=epic_status id=cas-754b`.
+    /// Generic id field used by entity-targeted actions. For
+    /// `shutdown_workers`, this accepts either the worker's registered id or
+    /// exact display name.
     #[schemars(
-        description = "ID for actions that target a specific entity (e.g., epic_id for epic_status or sync_all_workers)"
+        description = "ID for actions that target a specific entity (e.g., worker id/name for shutdown_workers, epic id for epic_status or sync_all_workers)"
     )]
     #[serde(default)]
     pub id: Option<String>,
@@ -557,9 +557,9 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub message: Option<String>,
 
-    /// Supervisor policy hint for shutdown safety checks
+    /// Explicit consent for shutdown/sync safety overrides.
     #[schemars(
-        description = "sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task; a worktree already mid-rebase is refused regardless. shutdown_workers: supervisor should verify worktree state first. Default false."
+        description = "sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task; a worktree already mid-rebase is refused regardless. shutdown_workers: required when any selected worker is mid-task or has dirty/unpushed work. Default false."
     )]
     #[serde(default)]
     pub force: Option<bool>,
@@ -702,10 +702,11 @@ pub struct FactoryRequest {
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
 ///   worktree_merge, worktree_status.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
+        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers requires force=true for mid-task or dirty/unpushed workers. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
     )]
     pub action: String,
 

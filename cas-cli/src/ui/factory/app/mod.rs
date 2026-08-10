@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use cas_mux::{Mux, PaneKind};
@@ -144,6 +144,124 @@ pub struct WorkerSpawnResult {
     pub worktree_created: bool,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TargetSeedStats {
+    files: u64,
+    bytes: u64,
+}
+
+/// Seed a new worker's private Cargo target from the immutable baseline named
+/// by `.cas/build-cache/current`.
+///
+/// The refresh script builds the named snapshot to completion before
+/// atomically publishing the pointer, so this never clones another worker's
+/// live target. A temporary sibling also keeps failed seeds from leaving a
+/// partial `target/` that Cargo could mistake as valid.
+fn seed_worker_target_from_baseline(
+    cas_dir: &Path,
+    worktree_path: &Path,
+) -> anyhow::Result<Option<TargetSeedStats>> {
+    let pointer = cas_dir.join("build-cache").join("current");
+    let Ok(snapshot_name) = std::fs::read_to_string(&pointer) else {
+        return Ok(None);
+    };
+    let snapshot_name = snapshot_name.trim();
+    let mut components = Path::new(snapshot_name).components();
+    let safe_name = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if snapshot_name.is_empty() || !safe_name {
+        anyhow::bail!(
+            "invalid worker build-cache pointer {}: expected one snapshot directory name",
+            pointer.display()
+        );
+    }
+
+    let source = cas_dir
+        .join("build-cache")
+        .join("snapshots")
+        .join(snapshot_name);
+    if !source.is_dir() {
+        anyhow::bail!(
+            "worker build-cache snapshot '{}' does not exist at {}",
+            snapshot_name,
+            source.display()
+        );
+    }
+
+    let target = worktree_path.join("target");
+    if target.exists() {
+        return Ok(None);
+    }
+    let staging = worktree_path.join(".target-seed-in-progress");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+
+    let mut stats = TargetSeedStats::default();
+    if let Err(error) = hardlink_seed_tree(&source, &staging, &target, &mut stats) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    std::fs::rename(&staging, &target)?;
+    Ok(Some(stats))
+}
+
+fn hardlink_seed_tree(
+    source: &Path,
+    destination: &Path,
+    published_destination: &Path,
+    stats: &mut TargetSeedStats,
+) -> anyhow::Result<()> {
+    hardlink_seed_tree_inner(source, destination, source, published_destination, stats)
+}
+
+fn hardlink_seed_tree_inner(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+    stats: &mut TargetSeedStats,
+) -> anyhow::Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let destination_entry = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            hardlink_seed_tree_inner(
+                &entry.path(),
+                &destination_entry,
+                source_root,
+                destination_root,
+                stats,
+            )?;
+        } else if file_type.is_file() {
+            let metadata = entry.metadata()?;
+            if entry.path().extension().is_some_and(|extension| extension == "d") {
+                let dep_info = std::fs::read_to_string(entry.path())?;
+                let rebased = dep_info.replace(
+                    &source_root.to_string_lossy().to_string(),
+                    &destination_root.to_string_lossy(),
+                );
+                std::fs::write(&destination_entry, rebased)?;
+            } else {
+                std::fs::hard_link(entry.path(), &destination_entry)?;
+            }
+            stats.files += 1;
+            stats.bytes += metadata.len();
+        } else if file_type.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, destination_entry)?;
+            #[cfg(not(unix))]
+            anyhow::bail!(
+                "worker target cache contains a symlink unsupported on this platform: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
 impl WorkerSpawnPrep {
     /// Phase 2: Run the slow git operations (designed for spawn_blocking).
     pub fn run(self) -> anyhow::Result<WorkerSpawnResult> {
@@ -239,6 +357,26 @@ impl WorkerSpawnPrep {
                 .clone()
                 .unwrap_or_else(|| wt.parent_branch.clone());
             git.create_worktree(&wt.worktree_path, &wt.branch_name, Some(&checkout_from))?;
+
+            if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() != Ok("1") {
+                match seed_worker_target_from_baseline(&wt.cas_dir, &wt.worktree_path) {
+                    Ok(Some(stats)) => tracing::info!(
+                        worker = %self.worker_name,
+                        files = stats.files,
+                        bytes = stats.bytes,
+                        "spawn prep: seeded private Cargo target from quiescent baseline"
+                    ),
+                    Ok(None) => tracing::debug!(
+                        worker = %self.worker_name,
+                        "spawn prep: no worker Cargo target baseline available"
+                    ),
+                    Err(error) => tracing::warn!(
+                        worker = %self.worker_name,
+                        error = %error,
+                        "spawn prep: worker Cargo target seed skipped"
+                    ),
+                }
+            }
 
             // STEP 1 (cas-5232): Log the resolved cwd immediately after worktree creation
             // so the daemon trace contains a clear record of which path each worker got.
@@ -4941,6 +5079,83 @@ mod spawn_isolation_tests {
     // -----------------------------------------------------------------
     // WorkerSpawnPrep::run() tests
     // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn new_worker_target_is_hardlinked_from_published_baseline() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let cas_dir = repo.join(".cas");
+        let snapshot = cas_dir
+            .join("build-cache")
+            .join("snapshots")
+            .join("target-main-test");
+        let cached_artifact = snapshot.join("debug").join("deps").join("libwarm.rlib");
+        std::fs::create_dir_all(cached_artifact.parent().unwrap()).unwrap();
+        std::fs::write(&cached_artifact, b"warm dependency artifact").unwrap();
+        let cached_dep_info = snapshot.join("debug").join("deps").join("warm.d");
+        std::fs::write(
+            &cached_dep_info,
+            format!("{}: registry-source.rs\n", cached_artifact.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            cas_dir.join("build-cache").join("current"),
+            "target-main-test\n",
+        )
+        .unwrap();
+
+        let worktree_path = cas_dir.join("worktrees").join("cache-worker");
+        let prep = WorkerSpawnPrep {
+            worker_name: "cache-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/cache-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+
+        let result = prep.run().expect("create and seed worker worktree");
+        let seeded_artifact = result
+            .cwd
+            .join("target")
+            .join("debug")
+            .join("deps")
+            .join("libwarm.rlib");
+        assert_eq!(
+            std::fs::read(&seeded_artifact).unwrap(),
+            b"warm dependency artifact"
+        );
+
+        let source_metadata = std::fs::metadata(cached_artifact).unwrap();
+        let seeded_metadata = std::fs::metadata(seeded_artifact).unwrap();
+        assert_eq!(source_metadata.dev(), seeded_metadata.dev());
+        assert_eq!(
+            source_metadata.ino(),
+            seeded_metadata.ino(),
+            "seeded artifact must share its inode with the immutable baseline"
+        );
+
+        let seeded_dep_info = result.cwd.join("target").join("debug/deps/warm.d");
+        let seeded_dep_text = std::fs::read_to_string(&seeded_dep_info).unwrap();
+        assert!(seeded_dep_text.contains(&result.cwd.join("target").display().to_string()));
+        assert!(!seeded_dep_text.contains(&snapshot.display().to_string()));
+        assert_ne!(
+            std::fs::metadata(cached_dep_info).unwrap().ino(),
+            std::fs::metadata(seeded_dep_info).unwrap().ino(),
+            "rebased dep-info must not mutate the immutable baseline hardlink"
+        );
+    }
 
     /// WorkerSpawnPrep::run() must return the worktree path as cwd for N=4
     /// isolated workers — never the process's current directory.

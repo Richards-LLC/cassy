@@ -1116,10 +1116,12 @@ async fn test_spawn_workers_with_task_id_succeeds_with_no_epic_at_all() {
 
 /// cas-549c review follow-up: standing in for an EPIC is a stronger claim
 /// than being a legal pre-assignment target. A task that a newly spawned
-/// worker cannot actually pick up — already owned by another worker, or
+/// worker cannot actually pick up — owned by a *live* worker, or
 /// parked awaiting the supervisor — must NOT authorize an epic-free spawn,
 /// or the factory boots a pane and worktree for a worker that then sits
-/// permanently idle (assign_task_to_new_worker refuses to steal an assignee).
+/// permanently idle (assign_task_to_new_worker refuses to steal a live
+/// assignee). A missing/dead holder is intentionally dispatchable under
+/// cas-2327's stale-holder reset contract.
 #[tokio::test]
 async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
     let undispatchable = [
@@ -1137,17 +1139,24 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
         (
             TaskStatus::Open,
             Some("alpha"),
-            "already assigned to 'alpha'",
+            "already assigned to live worker 'alpha'",
         ),
         (
             TaskStatus::InProgress,
             Some("alpha"),
-            "already assigned to 'alpha'",
+            "already assigned to live worker 'alpha'",
         ),
     ];
 
     for (status, assignee, expected) in undispatchable {
         let env = FactoryTestEnv::new();
+        if let Some(holder) = assignee {
+            // cas-2327 makes an unregistered holder stale and resettable, so
+            // register this fixture holder to retain its live-owner contract.
+            let mut agent = Agent::new("alpha-agent-id".to_string(), holder.to_string());
+            agent.role = AgentRole::Worker;
+            env.agent_store().register(&agent).expect("register live holder");
+        }
         let task_store = env.task_store();
         let id = task_store.generate_id().expect("generate_id");
         let mut task = Task::new(id.clone(), format!("{status:?} task"));

@@ -332,6 +332,18 @@ fn redact_dynamic_values(s: &str) -> String {
     let ver_re = regex::Regex::new(r"\d+\.\d+\.\d+").unwrap();
     result = ver_re.replace_all(&result, "[VERSION]").to_string();
 
+    // Git versions vary the no-repository diagnostic: newer releases add a
+    // mount-boundary explanation on a second line. Doctor only needs to show
+    // that this check could not inspect a non-repository temp fixture, so keep
+    // the snapshot independent of the installed Git wording (cas-58be).
+    let git_not_repo_re = regex::Regex::new(
+        r"fatal: not a git repository \(or any of the parent directories\): \.git|fatal: not a git repository \(or any parent up to mount point /\)\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.",
+    )
+    .unwrap();
+    result = git_not_repo_re
+        .replace_all(&result, "[GIT_NOT_REPOSITORY]")
+        .to_string();
+
     // Redact the cloud canonical-id bucket name. When a project has no git
     // remote, `cas doctor` derives the bucket from the folder name — under test
     // that is the randomly-generated TempDir basename, so it must be redacted or
@@ -346,4 +358,20 @@ fn redact_dynamic_values(s: &str) -> String {
     result = count_re.replace_all(&result, ": [N]").to_string();
 
     result
+}
+
+#[test]
+fn doctor_snapshot_redaction_normalizes_git_not_repository_diagnostics() {
+    let prefix = "[WARN] code history index: cannot check code history index: not a git repository: [TEMP_PATH] (";
+    let expected = format!("{prefix}[GIT_NOT_REPOSITORY])");
+    for diagnostic in [
+        "fatal: not a git repository (or any of the parent directories): .git",
+        "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+    ] {
+        assert_eq!(
+            redact_dynamic_values(&format!("{prefix}{diagnostic})")),
+            expected,
+            "diagnostic must not make the doctor snapshot depend on Git version"
+        );
+    }
 }

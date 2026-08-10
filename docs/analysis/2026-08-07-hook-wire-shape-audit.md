@@ -83,8 +83,9 @@ makes this class of bug invisible.
 | `agent_type` | SubagentStart/Stop | WIRE | `agent_type` (+alias `agentType`) | OK — observed `"general-purpose"` |
 | *(no key)* | SubagentStart/Stop | WIRE | `subagent_type` (+alias `subagentType`) | **DEAD FIELD — Finding 3 resolved.** No such key is sent; the real one is `agent_type`. |
 | *(no key)* | SubagentStart | WIRE | `subagent_prompt` | DEAD FIELD. SubagentStart sends no prompt at all — independent proof that cas-78d3's alias move cost nothing. |
-| `message` | Notification | DOC | `message` | OK by docs; **not observed** (Notification did not fire in either headless run) |
-| `notification_type`, `title` | Notification | DOC | — none — | undeclared, unconsumed — no impact |
+| `message` | Notification | WIRE | `message` | **verified in interactive capture** — text is `"Claude is waiting for your input"`; no current handler reads it. |
+| `notification_type` | Notification | WIRE | — none — | verified value `"idle_prompt"`; undeclared, unconsumed — no impact. |
+| `title` | Notification | DOC | — none — | documented, but absent from the captured idle-notification envelope; undeclared, unconsumed — no impact. |
 | `trigger` | PreCompact | DOC | — none — | undeclared (latent — Finding 2) |
 | `custom_instructions` | PreCompact | DOC | — none — | undeclared (latent — Finding 2) |
 
@@ -207,9 +208,11 @@ which is an entirely different thing from a top-level `HookInput` field.
 These events did not fire during the headless captures and remain documentation-only. They are
 listed as `DOC` in the table and are **not** claimed as verified:
 
-- `Notification` — including whether its text really is `message`. This is the one open item with
-  a live consumer (`handle_notification` reads `input.message`), so it is the highest-value next
-  capture. It needs an interactive session (permission prompt / idle notification).
+- `Notification` is now captured (see the table). The exact interactive `idle_prompt` envelope was
+  `{session_id, transcript_path, cwd, prompt_id, hook_event_name:"Notification",
+  message:"Claude is waiting for your input", notification_type:"idle_prompt"}`. The earlier
+  task wording was stale: current `handle_notification` switches on `hook_event_name` and does
+  **not** read `input.message`; the verified `message` field is therefore not a live consumer key.
 - `PreCompact` — `trigger`, `custom_instructions` (Finding 2). Needs a real compaction.
 - `PermissionRequest` / `PermissionDenied` — a headless run with a disallowed tool did not emit
   them; they appear to require interactive permission flow.

@@ -781,6 +781,33 @@ mod cas_3dcb_death_relay_tests {
         assert!(relay.prompt.contains("cas-held1"));
     }
 
+    /// GH #197: requested shutdown is still a worker termination. It must use
+    /// the same durable supervisor relay as a crash rather than disappearing
+    /// merely because the exit was intentional.
+    #[test]
+    fn intentional_shutdown_emits_supervisor_lifecycle_relay() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("retired-worker", 0);
+        let summary = OrphanRecoverySummary {
+            held_task_ids: vec!["cas-active".to_string()],
+            recovered_task_ids: vec!["cas-active".to_string()],
+        };
+        emit_worker_died_signals(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &worker,
+            &summary,
+            "worker terminated by shutdown request",
+        );
+
+        let relays = fixture.prompt_relays();
+        assert_eq!(relays.len(), 1, "one termination, one relay: {relays:?}");
+        assert!(relays[0].prompt.contains("retired-worker"));
+        assert!(relays[0].prompt.contains("cas-active"));
+        assert!(relays[0].prompt.contains("shutdown request"));
+        assert_eq!(fixture.durable_notices(), 1);
+    }
+
     /// The 1,452-notices-for-one-agent class, proven at the emitter: however
     /// many times the same corpse is re-detected, one incident yields one
     /// notice on each channel.

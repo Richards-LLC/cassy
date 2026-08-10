@@ -123,6 +123,117 @@ fn default_worker_effort_for_cli(_cli: cas_mux::SupervisorCli) -> cas_mux::Effor
         .unwrap_or(cas_mux::Effort::Medium)
 }
 
+/// Request-time shutdown state carried into the supervisor receipt.
+///
+/// The queue remains intentionally small and transport-only, so the safety
+/// decision and its human-readable evidence stay together here at the MCP
+/// boundary. The daemon receives exact names rather than a selector it could
+/// accidentally broaden.
+#[derive(Debug)]
+struct ShutdownWorkerSnapshot {
+    worker_name: String,
+    worker_id: String,
+    task_states: Vec<String>,
+    has_in_progress_task: bool,
+    worktree_state: String,
+    unsafe_worktree: bool,
+}
+
+impl ShutdownWorkerSnapshot {
+    fn requires_force(&self) -> bool {
+        self.has_in_progress_task || self.unsafe_worktree
+    }
+
+    fn render(&self) -> String {
+        let tasks = if self.task_states.is_empty() {
+            "none".to_string()
+        } else {
+            self.task_states.join(", ")
+        };
+        format!(
+            "{} (id={}): tasks=[{}]; {}",
+            self.worker_name, self.worker_id, tasks, self.worktree_state
+        )
+    }
+}
+
+fn shutdown_worker_snapshot(
+    cas_root: &std::path::Path,
+    worker: &cas_types::Agent,
+    tasks: &[cas_types::Task],
+) -> ShutdownWorkerSnapshot {
+    let assigned: Vec<&cas_types::Task> = tasks
+        .iter()
+        .filter(|task| {
+            task.assignee
+                .as_deref()
+                .is_some_and(|assignee| assignee == worker.name || assignee == worker.id)
+                && task.status != cas_types::TaskStatus::Closed
+        })
+        .collect();
+    let has_in_progress_task = assigned
+        .iter()
+        .any(|task| task.status == cas_types::TaskStatus::InProgress);
+    let task_states = assigned
+        .iter()
+        .map(|task| format!("{} [{}]", task.id, task.status))
+        .collect();
+
+    let (worktree_state, unsafe_worktree) = match resolve_worker_clone_path(cas_root, worker) {
+        WorkerClonePathResolve::Ready(path) => {
+            let dirty = dirty_file_count(&path);
+            let unpushed = run_git(
+                &path,
+                &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+            )
+            .and_then(|count| {
+                count
+                    .parse::<usize>()
+                    .map_err(|error| format!("invalid unpushed count {count:?}: {error}"))
+            });
+            match (dirty, unpushed) {
+                (Ok(dirty), Ok(unpushed)) => (
+                    format!(
+                        "worktree={} (dirty_files={dirty}, unpushed_commits={unpushed})",
+                        path.display()
+                    ),
+                    dirty > 0 || unpushed > 0,
+                ),
+                (dirty, unpushed) => {
+                    let mut errors = Vec::new();
+                    if let Err(error) = dirty {
+                        errors.push(format!("dirty-state probe failed: {error}"));
+                    }
+                    if let Err(error) = unpushed {
+                        errors.push(format!("unpushed-state probe failed: {error}"));
+                    }
+                    (
+                        format!(
+                            "worktree={} (STATE UNKNOWN: {})",
+                            path.display(),
+                            errors.join("; ")
+                        ),
+                        true,
+                    )
+                }
+            }
+        }
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
+            format!("worktree={} (not present)", candidate.display()),
+            false,
+        ),
+    };
+
+    ShutdownWorkerSnapshot {
+        worker_name: worker.name.clone(),
+        worker_id: worker.id.clone(),
+        task_states,
+        has_in_progress_task,
+        worktree_state,
+        unsafe_worktree,
+    }
+}
+
 /// cas-28a4 (GH #71): which worker CLI a model slug belongs to.
 ///
 /// Deliberately conservative — an unrecognized slug returns `None` and is
@@ -1050,11 +1161,12 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::{open_agent_store, open_spawn_queue_store};
+        use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_types::{AgentRole, AgentStatus};
 
-        let mut worker_names: Vec<String> = req
+        let requested_names: Vec<String> = req
             .worker_names
+            .as_deref()
             .map(|names| {
                 names
                     .split(',')
@@ -1063,74 +1175,162 @@ impl CasService {
                     .collect()
             })
             .unwrap_or_default();
-
-        // When supervisor has no specific worker names requested, scope to owned workers
-        // so a supervisor cannot shut down another supervisor's workers.
-        if worker_names.is_empty() {
-            if let Some(owned) = supervisor_owned_workers() {
-                worker_names = owned.into_iter().collect();
-            }
+        let requested_id = req.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+        if requested_id.is_some() && (!requested_names.is_empty() || req.count.is_some()) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "shutdown_workers accepts exactly one target form: id=, worker_names=, or count=. Nothing was queued.",
+            ));
+        }
+        if req.count.is_some_and(|count| count < 0) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "shutdown_workers count must be >= 0. Nothing was queued.",
+            ));
         }
 
-        // Validate workers exist before queuing (synchronous validation)
-        if !worker_names.is_empty() {
-            let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to open agent store: {e}"),
-                )
-            })?;
-
-            // Include both active and stale workers — stale workers are often
-            // exactly what supervisors want to shut down.
-            let mut known_agents = agent_store.list(Some(AgentStatus::Active)).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to list agents: {e}"),
-                )
-            })?;
-            if let Ok(stale) = agent_store.list(Some(AgentStatus::Stale)) {
-                known_agents.extend(stale);
-            }
-
-            // Get worker names, scoped to this supervisor's workers when applicable
-            let owned = supervisor_owned_workers();
-            let factory_session = current_factory_session();
-            let known_workers: std::collections::HashSet<String> = known_agents
-                .iter()
-                .filter(|a| {
-                    a.role == AgentRole::Worker
-                        && a.visible_to_factory_session(factory_session.as_deref())
-                        && owned.as_ref().is_none_or(|set| set.contains(&a.name))
+        let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open agent store: {e}"),
+            )
+        })?;
+        let owned = supervisor_owned_workers();
+        let factory_session = current_factory_session();
+        let all_agents = agent_store.list(None).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list agents: {e}"),
+            )
+        })?;
+        let (known_workers, _) = dedupe_authoritative_agents(
+            all_agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.role == AgentRole::Worker
+                        && matches!(
+                            agent.status,
+                            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Stale
+                        )
+                        && agent.visible_to_factory_session(factory_session.as_deref())
+                        && owned
+                            .as_ref()
+                            .is_none_or(|names| names.contains(&agent.name))
                 })
-                .map(|a| a.name.clone())
-                .collect();
+                .collect(),
+        );
 
-            // Check each requested worker exists
-            let mut not_found = Vec::new();
-            for name in &worker_names {
-                if !known_workers.contains(name) {
-                    not_found.push(name.clone());
-                }
-            }
+        // Resolve every target now and queue exact names. An omitted/ignored
+        // selector can therefore never broaden later inside the daemon.
+        let selected: Vec<cas_types::Agent> = if let Some(id) = requested_id {
+            known_workers
+                .iter()
+                .find(|worker| worker.id == id || worker.name == id)
+                .cloned()
+                .into_iter()
+                .collect()
+        } else if !requested_names.is_empty() {
+            requested_names
+                .iter()
+                .filter_map(|name| {
+                    known_workers
+                        .iter()
+                        .find(|worker| worker.name == *name)
+                        .cloned()
+                })
+                .collect()
+        } else {
+            let limit = req.count.unwrap_or(0) as usize;
+            known_workers
+                .iter()
+                .take(if limit == 0 {
+                    known_workers.len()
+                } else {
+                    limit
+                })
+                .cloned()
+                .collect()
+        };
 
-            if !not_found.is_empty() {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Worker(s) not found: {}. Known workers: {}",
-                        not_found.join(", "),
-                        if known_workers.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            known_workers.into_iter().collect::<Vec<_>>().join(", ")
-                        }
-                    ),
-                ));
+        let missing: Vec<String> = if let Some(id) = requested_id {
+            if selected.is_empty() {
+                vec![id.to_string()]
+            } else {
+                Vec::new()
             }
+        } else {
+            requested_names
+                .iter()
+                .filter(|name| {
+                    !selected
+                        .iter()
+                        .any(|worker| worker.name.as_str() == name.as_str())
+                })
+                .cloned()
+                .collect()
+        };
+        if !missing.is_empty() || selected.is_empty() {
+            let known = known_workers
+                .iter()
+                .map(|worker| format!("{} ({})", worker.name, worker.id))
+                .collect::<Vec<_>>();
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Worker target(s) not found: {}. Known workers: {}. Nothing was queued.",
+                    if missing.is_empty() {
+                        "(none selected)".to_string()
+                    } else {
+                        missing.join(", ")
+                    },
+                    if known.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                ),
+            ));
         }
 
-        // Validation passed, queue the shutdown
+        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open task store for shutdown safety check: {e}"),
+            )
+        })?;
+        let tasks = task_store.list(None).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list tasks for shutdown safety check: {e}"),
+            )
+        })?;
+        let snapshots: Vec<ShutdownWorkerSnapshot> = selected
+            .iter()
+            .map(|worker| shutdown_worker_snapshot(&self.inner.cas_root, worker, &tasks))
+            .collect();
+        let force = req.force.unwrap_or(false);
+        let unsafe_snapshots: Vec<&ShutdownWorkerSnapshot> = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.requires_force())
+            .collect();
+        if !force && !unsafe_snapshots.is_empty() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "shutdown_workers refused: selected worker state requires force=true. Nothing was queued.\n{}",
+                    unsafe_snapshots
+                        .iter()
+                        .map(|snapshot| format!("- {}", snapshot.render()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            ));
+        }
+
+        let worker_names: Vec<String> = selected.iter().map(|worker| worker.name.clone()).collect();
+
+        // Validation passed: queue only the exact resolved names. `count=None`
+        // is intentional — the daemon must not re-expand this decision.
         let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1138,11 +1338,8 @@ impl CasService {
             )
         })?;
 
-        let count = req.count;
-        let force = req.force.unwrap_or(false);
-        let factory_session = current_factory_session();
         let request_id = queue
-            .enqueue_shutdown(count, &worker_names, force, factory_session.as_deref())
+            .enqueue_shutdown(None, &worker_names, force, factory_session.as_deref())
             .map_err(|e| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
@@ -1150,7 +1347,7 @@ impl CasService {
                 )
             })?;
         let request_id_text = request_id.to_string();
-        let count_text = count.map(|value| value.to_string()).unwrap_or_default();
+        let count_text = req.count.map(|value| value.to_string()).unwrap_or_default();
         let worker_names_text = worker_names.join(",");
         let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
             &self.inner.cas_root,
@@ -1163,21 +1360,22 @@ impl CasService {
             ],
         );
 
-        let msg = if !worker_names.is_empty() {
-            format!(
-                "Queued shutdown request for worker(s): {} (request ID: {})",
-                worker_names.join(", "),
-                request_id
-            )
-        } else if let Some(c) = count {
-            if c == 0 {
-                format!("Queued shutdown request for ALL workers (request ID: {request_id})")
-            } else {
-                format!("Queued shutdown request for {c} worker(s) (request ID: {request_id})")
-            }
+        let request_scope = if requested_id.is_none()
+            && requested_names.is_empty()
+            && req.count.unwrap_or(0) == 0
+        {
+            "ALL workers".to_string()
         } else {
-            format!("Queued shutdown request for ALL workers (request ID: {request_id})")
+            format!("worker(s): {}", worker_names.join(", "))
         };
+        let msg = format!(
+            "Queued shutdown request for {request_scope} (request ID: {request_id})\nExact affected workers and request-time state:\n{}",
+            snapshots
+                .iter()
+                .map(|snapshot| format!("- {}", snapshot.render()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
 
         Ok(Self::success(msg))
     }

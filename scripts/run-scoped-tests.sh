@@ -49,7 +49,7 @@
 #
 # Environment:
 #   CARGO         cargo binary to invoke (default: cargo)
-#   CARGO_CMD     subcommand: "test" (default) or "nextest run"
+#   CARGO_CMD     subcommand: "nextest run" (default) or "test"
 #   SCOPED_TEST_LOG
 #                 path to keep the captured run log (default: a temp file)
 #
@@ -60,7 +60,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
-CARGO_CMD="${CARGO_CMD:-test}"
+CARGO_CMD="${CARGO_CMD:-nextest run}"
 
 if [[ $# -eq 0 ]]; then
     echo "error: refusing to run unscoped." >&2

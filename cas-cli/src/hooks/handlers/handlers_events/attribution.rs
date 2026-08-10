@@ -451,7 +451,7 @@ fn git_repo_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
 
 /// Split shell words into simple statements while preserving quoted contents
 /// and subshell scope markers. Other control operators terminate statements.
-fn split_shell_statements(command: &str) -> Vec<Vec<String>> {
+pub(super) fn split_shell_statements(command: &str) -> Vec<Vec<String>> {
     let mut statements = Vec::new();
     let mut words = Vec::new();
     let mut word = String::new();

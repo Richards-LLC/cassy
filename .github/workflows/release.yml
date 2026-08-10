@@ -8,6 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_VERSION: "cas-v2"
 
 jobs:
   verify:
@@ -30,7 +32,7 @@ jobs:
           sudo apt-get install -y gcc mold
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       # Keep Cargo's registry and dependency artifacts warm across releases.
       # The explicit lockfile key prevents a dependency update from restoring
@@ -71,7 +73,7 @@ jobs:
           mold --version
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
@@ -137,7 +139,7 @@ jobs:
         run: ./scripts/bootstrap-zig.sh
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2

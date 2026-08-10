@@ -15,6 +15,7 @@ mod ripple_path_scope;
 mod send_message_autoroute;
 mod supervisor_reminder;
 mod tmpfs_guardrail;
+mod unscoped_test_guard;
 
 /// Process-wide mutex for tests that mutate `CAS_AGENT_ROLE` (or any other
 /// env var read by the PreToolUse / PermissionRequest handlers).

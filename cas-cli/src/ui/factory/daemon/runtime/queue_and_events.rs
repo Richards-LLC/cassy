@@ -1306,18 +1306,29 @@ impl FactoryDaemon {
     ) -> anyhow::Result<()> {
         let unverified = take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
 
-        // Look up agent by name
+        // Look up the authoritative registration id before director state is
+        // refreshed/removed, then load the full store row needed by the
+        // durable supervisor lifecycle relay.
         let agent_id = self
             .app
             .director_data()
             .agents
             .iter()
             .find(|a| is_exact_agent_name_match(a, worker_name))
-            .map(|a| a.id.clone());
+            .map(|agent| agent.id.clone());
 
-        if let Some(id) = agent_id {
+        if let Some(agent_id) = agent_id {
             if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
-                let _ = agent_store.mark_stale(&id);
+                if let Ok(agent) = agent_store.get(&agent_id) {
+                    let _ = agent_store.mark_stale(&agent.id);
+                    crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+                        self.app.cas_dir(),
+                        agent_store.as_ref(),
+                        &agent,
+                        &[],
+                        "worker PTY exited",
+                    );
+                }
             }
         }
 

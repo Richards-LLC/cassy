@@ -1,0 +1,17 @@
+{
+  "synced": {
+    "entries": {
+      "inserted": 1,
+      "updated": 0,
+      "skipped": 1,
+      "rejected": [
+        {
+          "id": "rejected-team-entry-002",
+          "reason": "scope_mismatch",
+          "existing_canonical_id": "cas-src"
+        }
+      ]
+    }
+  },
+  "canonical_id": "cas-src"
+}

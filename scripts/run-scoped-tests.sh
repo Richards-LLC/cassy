@@ -69,6 +69,27 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
+# nextest's positional filter is a literal substring match, not a regex. A
+# regex-looking final argument therefore costs a full build only to hit the
+# zero-test guard below. Do not warn for `-E`: that is nextest's explicit
+# expression syntax and is the suggested escape hatch for real regexes.
+scope_filter="${!#}"
+regex_filter=0
+if [[ " $* " != *" -E "* && " $* " != *" --filter-expr "* ]]; then
+    for metachar in '(' ')' '|' '[' ']' '+' '*' '?' '^' '$' '\\'; do
+        if [[ "${scope_filter}" == *"${metachar}"* ]]; then
+            regex_filter=1
+            break
+        fi
+    done
+fi
+
+if [[ "${regex_filter}" -eq 1 ]]; then
+    echo "WARNING: nextest filters are substring matches, not regexes — your pattern contains regex syntax: ${scope_filter}" >&2
+    echo "         Use a shared literal substring, or nextest's -E expression syntax for regex matching." >&2
+    echo >&2
+fi
+
 # ---------------------------------------------------------------------------
 # Preflight: shape 2, caught before the build rather than after it.
 #
@@ -160,6 +181,10 @@ if [[ "${cargo_status}" -ne 0 ]]; then
         detail+=("A build script failed — no test binary was ever produced, so nothing ran.")
         detail+=("If it is ghostty_vt_sys, check \$ZIG is an absolute path. GH #173 shape 2.")
     fi
+    if [[ "${cargo_status}" -eq 4 && "${summaries}" -gt 0 && "${passed}" -eq 0 && "${regex_filter}" -eq 1 ]]; then
+        detail+=("nextest filters are substring matches, not regexes — your pattern contains regex syntax: \`${scope_filter}\`.")
+        detail+=("Use a shared literal substring, or nextest's -E expression syntax for regex matching.")
+    fi
     fail "the test run exited ${cargo_status}." "${detail[@]}"
 fi
 
@@ -175,12 +200,20 @@ fi
 
 # (c) Did anything actually execute?
 if [[ "${passed}" -eq 0 ]]; then
-    fail "0 tests passed across ${summaries} harness summary line(s)." \
+    detail=(
         "${filtered} test(s) were filtered out — the filter matched nothing, so this run" \
         "verified nothing. \"test result: ok\" with a passed count of 0 is a" \
         "failure to run, not a pass. Check the module path: a stale filter like" \
         "\`mod::tests::\` silently matches zero tests when the module was renamed" \
         "(e.g. to \`mod::additive_only_tests::\`). GH #173 shape 3."
+    )
+    if [[ "${regex_filter}" -eq 1 ]]; then
+        detail+=(
+            "nextest filters are substring matches, not regexes — your pattern contains regex syntax: \`${scope_filter}\`." \
+            "Use a shared literal substring, or nextest's -E expression syntax for regex matching."
+        )
+    fi
+    fail "0 tests passed across ${summaries} harness summary line(s)." "${detail[@]}"
 fi
 
 echo "PASS: ${passed} test(s) passed across ${summaries} harness summary line(s)."

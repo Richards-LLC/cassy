@@ -144,6 +144,83 @@ fn factory_write_to_bare_tmp_is_denied_with_durable_remediation() {
     assert!(reason.contains(".cas/artifacts"), "{reason}");
 }
 
+#[test]
+fn factory_write_under_worktree_is_allowed() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let input = input_for("Write", Some("/test/under-worktree.txt"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(
+        allow_reason(&out).is_some(),
+        "a write under the worktree must be allowed"
+    );
+}
+
+#[test]
+fn factory_write_under_configured_artifacts_root_is_allowed() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let artifacts_root = tmp.path().join("durable-artifacts");
+    std::fs::create_dir_all(&artifacts_root).expect("artifacts root");
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n",
+            artifacts_root.display().to_string()
+        ),
+    )
+    .expect("factory config");
+
+    let artifact_path = artifacts_root.join("cas-4060").join("proof.txt");
+    let input = input_for("Write", artifact_path.to_str());
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(
+        allow_reason(&out).is_some(),
+        "a write under the configured durable artifacts root must be allowed"
+    );
+}
+
+#[test]
+fn factory_write_under_declared_scratchpad_is_allowed() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scratchpad = tmp.path().join("harness-scratchpad");
+    let _scratchpad = set_env_var("CAS_SCRATCHPAD", scratchpad.as_os_str());
+
+    let scratchpad_path = scratchpad.join("ephemeral-note.txt");
+    let input = input_for("Write", scratchpad_path.to_str());
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(
+        allow_reason(&out).is_some(),
+        "a write under the declared harness scratchpad must be allowed"
+    );
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+fn set_env_var(key: &'static str, value: &std::ffi::OsStr) -> EnvVarGuard {
+    let previous = std::env::var_os(key);
+    unsafe { std::env::set_var(key, value) };
+    EnvVarGuard { key, previous }
+}
+
 // ============================================================================
 // cas_root=None path — the case the deadlock reporter was hitting.
 //

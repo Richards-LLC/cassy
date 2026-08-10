@@ -745,7 +745,22 @@ impl DirectorEventDetector {
         else {
             return true;
         };
-        transcript_confirms_stall_for_path(resolved.transcript_path.as_deref(), resolved.cli)
+        let background_processes = crate::cli::factory::wedged::find_worker_pid(
+            &crate::cli::factory::wedged::RealProcessTable,
+            &resolved.name,
+        )
+        .or(resolved.pid)
+        .map(crate::cli::factory::wedged::background_processes_for)
+        .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+        if background_processes.is_active() {
+            transcript_confirms_stall_for_path_with_background(
+                resolved.transcript_path.as_deref(),
+                resolved.cli,
+                &background_processes,
+            )
+        } else {
+            transcript_confirms_stall_for_path(resolved.transcript_path.as_deref(), resolved.cli)
+        }
     }
 
     /// Add a worker to the tracked list (call when spawning workers dynamically)
@@ -1611,15 +1626,28 @@ fn transcript_confirms_stall_for_path(
     transcript_path: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
 ) -> bool {
+    transcript_confirms_stall_for_path_with_background(
+        transcript_path,
+        cli,
+        &crate::cli::factory::wedged::BackgroundProcessState::Unavailable,
+    )
+}
+
+fn transcript_confirms_stall_for_path_with_background(
+    transcript_path: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+    background_processes: &crate::cli::factory::wedged::BackgroundProcessState,
+) -> bool {
     let Some(path) = transcript_path else {
         return false;
     };
     let window = crate::cli::factory::wedged::activity_fresh_window(cli);
     let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, cli);
-    transcript_confirms_stall_for_age(
+    transcript_confirms_stall_for_age_with_background(
         crate::cli::factory::wedged::transcript_mtime_age(path),
         window,
         in_flight,
+        background_processes.is_active(),
     )
 }
 
@@ -1641,7 +1669,16 @@ fn transcript_confirms_stall_for_age(
     fresh_window: Duration,
     in_flight_tool_call: bool,
 ) -> bool {
-    if in_flight_tool_call {
+    transcript_confirms_stall_for_age_with_background(age, fresh_window, in_flight_tool_call, false)
+}
+
+fn transcript_confirms_stall_for_age_with_background(
+    age: Option<Duration>,
+    fresh_window: Duration,
+    in_flight_tool_call: bool,
+    background_process_active: bool,
+) -> bool {
+    if in_flight_tool_call || background_process_active {
         return false;
     }
     match age {

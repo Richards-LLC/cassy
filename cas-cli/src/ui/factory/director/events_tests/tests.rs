@@ -319,7 +319,11 @@ fn test_finished_worker_still_emits_once_after_spawn_grace() {
         now + chrono::Duration::seconds(4),
     );
 
-    assert!(!first.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })));
+    assert!(
+        !first
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerIdle { .. }))
+    );
     assert_eq!(
         second
             .iter()
@@ -329,7 +333,9 @@ fn test_finished_worker_still_emits_once_after_spawn_grace() {
         "a worker that finished real work must remain actionable after the spawn grace"
     );
     assert!(
-        !third.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })),
+        !third
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })),
         "the actionable idle signal must still emit exactly once per idle streak"
     );
 }
@@ -1443,10 +1449,8 @@ fn long_backoff_supervisor_message_does_not_permanently_suppress_worker_idle() {
     // present in director data" — nothing to do with idle suppression, which
     // is what made the failure so misleading. The guard also owns the shared
     // env lock for the duration, so no other test can mutate it mid-body.
-    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
-        "CAS_FACTORY_SESSION",
-        None,
-    )]);
+    let _env =
+        crate::test_support::TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
 
     let temp_dir = tempfile::tempdir().unwrap();
     let stores = DirectorStores::open(temp_dir.path()).unwrap();
@@ -1547,8 +1551,7 @@ fn delivered_supervisor_message_keeps_current_idle_streak_suppressed() {
     let mut contacted = idle.clone();
     contacted.agents[0].pending_messages = 1;
     contacted.agents[0].pending_supervisor_messages = 1;
-    contacted.agents[0].latest_supervisor_message_at =
-        Some(utc + chrono::Duration::seconds(1));
+    contacted.agents[0].latest_supervisor_message_at = Some(utc + chrono::Duration::seconds(1));
     detector.detect_changes_at(
         &contacted,
         None,
@@ -1591,9 +1594,11 @@ fn delivered_supervisor_message_keeps_current_idle_streak_suppressed() {
         clock + Duration::from_secs(21),
         utc + chrono::Duration::seconds(21),
     );
-    assert!(!later_idle_tick_1
-        .iter()
-        .any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })));
+    assert!(
+        !later_idle_tick_1
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerIdle { .. }))
+    );
     assert!(later_idle_tick_2.iter().any(|event| matches!(
         event,
         DirectorEvent::WorkerIdle { worker, .. } if worker == "swift-fox"
@@ -2723,10 +2728,7 @@ fn test_7e85_in_flight_tool_call_suppresses_stall_alert() {
         "lively-crow".to_string(),
         Some(std::time::Duration::from_secs(280)), // cold the whole `sleep 280` duration
     )]));
-    detector.set_transcript_in_flight_override(HashMap::from([(
-        "lively-crow".to_string(),
-        true,
-    )]));
+    detector.set_transcript_in_flight_override(HashMap::from([("lively-crow".to_string(), true)]));
 
     let data = stalled_data_for(make_agent_working_stalled(
         "agent-1",
@@ -2768,10 +2770,7 @@ fn test_7e85_no_in_flight_call_does_not_suppress_genuine_stall() {
         "lively-crow".to_string(),
         Some(std::time::Duration::from_secs(600)), // cold, no outstanding call
     )]));
-    detector.set_transcript_in_flight_override(HashMap::from([(
-        "lively-crow".to_string(),
-        false,
-    )]));
+    detector.set_transcript_in_flight_override(HashMap::from([("lively-crow".to_string(), false)]));
 
     let data = stalled_data_for(make_agent_working_stalled(
         "agent-1",
@@ -2834,6 +2833,22 @@ fn test_09d0_transcript_confirms_stall_for_age_pure_cases() {
             true,
         ),
         "an in-flight tool call must suppress the stall verdict regardless of age"
+    );
+}
+
+/// cas-058e: a live descendant is the same positive-work signal even when
+/// transcript parsing has already recorded `in-flight tool call: false`.
+#[test]
+fn test_058e_background_process_suppresses_director_stall_alarm() {
+    use crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW;
+    assert!(
+        !transcript_confirms_stall_for_age_with_background(
+            Some(std::time::Duration::from_secs(10 * 60)),
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+            true,
+        ),
+        "a live background process must suppress the director stall alarm"
     );
 }
 

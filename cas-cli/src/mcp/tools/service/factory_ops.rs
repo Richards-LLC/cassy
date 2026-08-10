@@ -2232,6 +2232,22 @@ impl CasService {
                 let in_flight_tool_call = transcript_path_for_worker.as_deref().is_some_and(|p| {
                     crate::cli::factory::wedged::transcript_has_in_flight_tool_call(p, worker_cli)
                 });
+                // cas-058e: a completed tool call may have left a real cargo
+                // build running under the worker pane. Resolve the harness PID
+                // exactly as `is-wedged` does; an unreadable process tree is
+                // deliberately not positive evidence and therefore cannot
+                // suppress a real stall.
+                let background_processes = crate::cli::factory::wedged::find_worker_pid(
+                    &crate::cli::factory::wedged::RealProcessTable,
+                    &agent.name,
+                )
+                .or(agent.pid)
+                .map(crate::cli::factory::wedged::background_processes_for)
+                .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+                let has_active_work = crate::cli::factory::wedged::has_active_work(
+                    in_flight_tool_call,
+                    &background_processes,
+                );
                 let assigned_open_task = assigned_open_tasks.iter().find(|task| {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
@@ -2253,7 +2269,7 @@ impl CasService {
                     has_in_progress_task,
                     last_activity.map(|(secs, _)| secs),
                     stall_threshold_secs,
-                    in_flight_tool_call,
+                    has_active_work,
                 );
                 // cas-e728 (GH #105): inbox depth is rendered on EVERY row, not
                 // only on a row that already tripped the stall path. The most
@@ -2302,7 +2318,7 @@ impl CasService {
                                 .to_string()
                         }
                     }
-                } else if in_flight_tool_call {
+                } else if has_active_work {
                     // Has an assignment, would otherwise read as stalled
                     // (old/absent checkpoint), but an in-flight tool call
                     // is direct evidence of real work in progress — never
@@ -2310,9 +2326,9 @@ impl CasService {
                     // hedge for a worker holding an assignment (AC3).
                     match last_activity {
                         Some((secs, phase)) => format!(
-                            "\n    last activity: {secs}s ago ({phase}) — in-flight tool call (busy, not stalled)"
+                            "\n    last activity: {secs}s ago ({phase}) — live background work (busy, not stalled)"
                         ),
-                        None => "\n    in-flight tool call in progress (busy, not stalled — no checkpoint-class activity yet)"
+                        None => "\n    live background work in progress (busy, not stalled — no checkpoint-class activity yet)"
                             .to_string(),
                     }
                 } else {
@@ -2322,7 +2338,7 @@ impl CasService {
                         }
                         None => {
                             // Unreachable in practice: has_in_progress_task
-                            // && !in_flight_tool_call && last_activity==None
+                            // && !has_active_work && last_activity==None
                             // always makes is_worker_stalled return true
                             // above (the None arm there stalls
                             // unconditionally absent in-flight evidence).
@@ -5499,15 +5515,15 @@ fn format_priority_worker_status_alert(
 /// True when the worker has an in-progress task (a lease and/or a real
 /// task assignment — see the `has_in_progress_task` computation in
 /// `factory_worker_status`, cas-d165 Finding 2) AND there is no in-flight
-/// tool call (cas-d165 Finding 1) AND either:
+/// tool call or live background process (cas-d165/cas-058e) AND either:
 /// - its last observable activity is at/past `stall_threshold_secs`, or
 /// - no activity was observed at all within the query window (`None`).
 ///
 /// A worker with no in-progress task is never "stalled" in this sense —
 /// idle-with-no-task is a distinct, already-signaled state (`WorkerIdle`).
 ///
-/// `in_flight_tool_call` is the SAME evidence cas-7e85 / `cas factory
-/// is-wedged` consume (`wedged::transcript_has_in_flight_tool_call`) —
+/// `has_active_work` is the shared evidence cas-7e85 / cas-058e / `cas factory
+/// is-wedged` consume —
 /// checked first and short-circuits to "not stalled" unconditionally,
 /// mirroring `transcript_confirms_stall_for_age`'s AC1 in
 /// `director/events.rs`. Before this parameter existed, this
@@ -5519,9 +5535,9 @@ fn is_worker_stalled(
     has_in_progress_task: bool,
     last_activity_secs_ago: Option<i64>,
     stall_threshold_secs: i64,
-    in_flight_tool_call: bool,
+    has_active_work: bool,
 ) -> bool {
-    if !has_in_progress_task || in_flight_tool_call {
+    if !has_in_progress_task || has_active_work {
         return false;
     }
     match last_activity_secs_ago {

@@ -12,7 +12,9 @@ use crate::cloud::{CloudConfig, EntityType, SyncQueue};
 use crate::types::{Entry, Rule, Skill};
 
 mod knowledge;
-pub use knowledge::{KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope};
+pub use knowledge::{
+    KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
+};
 mod pull;
 pub(crate) use pull::entity_matches_project;
 mod push;
@@ -184,6 +186,16 @@ pub enum ConflictResolution {
     LocalWins,
     /// Keep more recent version based on timestamps
     KeepRecent,
+}
+
+impl ConflictResolution {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteWins => "remote_wins",
+            Self::LocalWins => "local_wins",
+            Self::KeepRecent => "timestamp_lww",
+        }
+    }
 }
 
 /// Action to take after conflict resolution

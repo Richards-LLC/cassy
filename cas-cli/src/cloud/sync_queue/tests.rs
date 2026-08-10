@@ -132,6 +132,35 @@ fn diagnostic_keeps_a_server_skipped_row_retryable() {
 }
 
 #[test]
+fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
+    let (_temp, queue) = create_test_queue();
+
+    queue
+        .record_conflict(
+            "task",
+            "cas-conflict",
+            r#"{\"id\":\"cas-conflict\",\"notes\":\"local note\"}"#,
+            "remote",
+            "timestamp_lww",
+        )
+        .unwrap();
+
+    let conflicts = queue.list_conflicts(10).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].entity_type, "task");
+    assert_eq!(conflicts[0].entity_id, "cas-conflict");
+    assert_eq!(
+        conflicts[0].discarded_row_json,
+        r#"{\"id\":\"cas-conflict\",\"notes\":\"local note\"}"#
+    );
+    assert_eq!(conflicts[0].winner_side, "remote");
+    assert_eq!(conflicts[0].strategy, "timestamp_lww");
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 1);
+    assert_eq!(queue.prune_conflicts(0).unwrap(), 1);
+    assert!(queue.list_conflicts(10).unwrap().is_empty());
+}
+
+#[test]
 fn health_reports_pending_age_and_last_push_error() {
     let (_temp, queue) = create_test_queue();
     queue

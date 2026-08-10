@@ -6,7 +6,7 @@ use crate::cloud::syncer::{
     CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult, TeamPullResponse,
     UpsertResult,
 };
-use crate::cloud::get_project_canonical_id;
+use crate::cloud::{EntityType, get_project_canonical_id};
 use crate::error::CasError;
 use crate::store::{
     CommitLinkStore, EventStore, FileChangeStore, PromptStore, RuleStore, SkillStore, SpecStore,
@@ -223,7 +223,61 @@ fn reconcile_web_close(store: &dyn TaskStore, task: Task) -> Result<UpsertResult
     }
 }
 
+/// Merge append-only task-note blocks without allowing a whole-row conflict
+/// resolution to discard one machine's timeline.
+fn merge_task_notes(local: &str, remote: &str) -> String {
+    let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
+    for notes in [local, remote] {
+        for block in notes.split("\n\n") {
+            let block = block.trim();
+            if block.is_empty() || blocks.iter().any(|(_, _, existing)| existing == block) {
+                continue;
+            }
+            let timestamp = block
+                .strip_prefix('[')
+                .and_then(|value| value.split_once(']'))
+                .and_then(|(value, _)| {
+                    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M").ok()
+                });
+            let order = blocks.len();
+            blocks.push((timestamp, order, block.to_string()));
+        }
+    }
+    blocks.sort_by_key(|(timestamp, order, _)| (timestamp.is_none(), *timestamp, *order));
+    blocks
+        .into_iter()
+        .map(|(_, _, note)| note)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 impl CloudSyncer {
+    fn journal_local_overwrite<T: serde::Serialize>(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        local: &T,
+        winner_side: &str,
+        strategy: &str,
+    ) -> Result<(), CasError> {
+        if self
+            .queue
+            .has_pending_entity_change(entity_type, entity_id)?
+        {
+            let json = serde_json::to_string(local).map_err(|error| {
+                CasError::Other(format!("Could not serialize sync conflict: {error}"))
+            })?;
+            self.queue.record_conflict(
+                entity_type.as_str(),
+                entity_id,
+                &json,
+                winner_side,
+                strategy,
+            )?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn pull(
         &self,
@@ -495,9 +549,7 @@ impl CloudSyncer {
                     Ok(_) => result.pulled_file_changes += 1,
                     Err(e) => result.errors.push(format!("FileChange error: {e}")),
                 },
-                Err(e) => result
-                    .errors
-                    .push(format!("FileChange lookup error: {e}")),
+                Err(e) => result.errors.push(format!("FileChange lookup error: {e}")),
             }
         }
 
@@ -521,9 +573,7 @@ impl CloudSyncer {
                     Ok(_) => result.pulled_commit_links += 1,
                     Err(e) => result.errors.push(format!("CommitLink error: {e}")),
                 },
-                Err(e) => result
-                    .errors
-                    .push(format!("CommitLink lookup error: {e}")),
+                Err(e) => result.errors.push(format!("CommitLink lookup error: {e}")),
             }
         }
 
@@ -551,6 +601,13 @@ impl CloudSyncer {
                 let remote_time = entry.last_accessed.unwrap_or(entry.created);
 
                 if remote_time > local_time {
+                    self.journal_local_overwrite(
+                        EntityType::Entry,
+                        &entry.id,
+                        &local,
+                        "remote",
+                        "timestamp_lww",
+                    )?;
                     store.update(&entry)?;
                     Ok(UpsertResult::Updated)
                 } else {
@@ -569,7 +626,23 @@ impl CloudSyncer {
         match store.get(&task.id) {
             Ok(local) => {
                 if task.updated_at > local.updated_at {
-                    store.update(&task)?;
+                    let notes_differ = local.notes != task.notes;
+                    self.journal_local_overwrite(
+                        EntityType::Task,
+                        &task.id,
+                        &local,
+                        if notes_differ { "merged" } else { "remote" },
+                        if notes_differ {
+                            "notes_union"
+                        } else {
+                            "timestamp_lww"
+                        },
+                    )?;
+                    let mut merged = task;
+                    if notes_differ {
+                        merged.notes = merge_task_notes(&local.notes, &merged.notes);
+                    }
+                    store.update(&merged)?;
                     Ok(UpsertResult::Updated)
                 } else {
                     Ok(UpsertResult::Skipped)
@@ -591,6 +664,13 @@ impl CloudSyncer {
                 let remote_time = rule.last_accessed.unwrap_or(rule.created);
 
                 if remote_time > local_time {
+                    self.journal_local_overwrite(
+                        EntityType::Rule,
+                        &rule.id,
+                        &local,
+                        "remote",
+                        "timestamp_lww",
+                    )?;
                     store.update(&rule)?;
                     Ok(UpsertResult::Updated)
                 } else {
@@ -609,6 +689,13 @@ impl CloudSyncer {
         match store.get(&skill.id) {
             Ok(local) => {
                 if skill.updated_at > local.updated_at {
+                    self.journal_local_overwrite(
+                        EntityType::Skill,
+                        &skill.id,
+                        &local,
+                        "remote",
+                        "timestamp_lww",
+                    )?;
                     store.update(&skill)?;
                     Ok(UpsertResult::Updated)
                 } else {
@@ -619,9 +706,7 @@ impl CloudSyncer {
             // `NotFound`, while some store implementations use the older
             // skill-specific variant. Both mean a team member has not pulled
             // this shared skill yet and must take the insert path.
-            Err(
-                cas_store::StoreError::SkillNotFound(_) | cas_store::StoreError::NotFound(_),
-            ) => {
+            Err(cas_store::StoreError::SkillNotFound(_) | cas_store::StoreError::NotFound(_)) => {
                 store.add(&skill)?;
                 Ok(UpsertResult::Created)
             }
@@ -666,6 +751,13 @@ impl CloudSyncer {
 
                 match action {
                     ConflictAction::UseRemote => {
+                        self.journal_local_overwrite(
+                            EntityType::Entry,
+                            &entry.id,
+                            &local,
+                            "remote",
+                            strategy.as_str(),
+                        )?;
                         store.update(&entry)?;
                         Ok(UpsertResult::Updated)
                     }
@@ -699,7 +791,23 @@ impl CloudSyncer {
 
                 match action {
                     ConflictAction::UseRemote => {
-                        store.update(&task)?;
+                        let notes_differ = local.notes != task.notes;
+                        self.journal_local_overwrite(
+                            EntityType::Task,
+                            &task.id,
+                            &local,
+                            if notes_differ { "merged" } else { "remote" },
+                            if notes_differ {
+                                "notes_union"
+                            } else {
+                                strategy.as_str()
+                            },
+                        )?;
+                        let mut merged = task;
+                        if notes_differ {
+                            merged.notes = merge_task_notes(&local.notes, &merged.notes);
+                        }
+                        store.update(&merged)?;
                         Ok(UpsertResult::Updated)
                     }
                     ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
@@ -730,6 +838,13 @@ impl CloudSyncer {
 
                 match action {
                     ConflictAction::UseRemote => {
+                        self.journal_local_overwrite(
+                            EntityType::Rule,
+                            &rule.id,
+                            &local,
+                            "remote",
+                            strategy.as_str(),
+                        )?;
                         store.update(&rule)?;
                         Ok(UpsertResult::Updated)
                     }
@@ -763,6 +878,13 @@ impl CloudSyncer {
 
                 match action {
                     ConflictAction::UseRemote => {
+                        self.journal_local_overwrite(
+                            EntityType::Skill,
+                            &skill.id,
+                            &local,
+                            "remote",
+                            strategy.as_str(),
+                        )?;
                         store.update(&skill)?;
                         Ok(UpsertResult::Updated)
                     }
@@ -771,9 +893,7 @@ impl CloudSyncer {
             }
             // Keep team and personal pulls aligned: a fresh local store may
             // represent an absent skill with either missing-row variant.
-            Err(
-                cas_store::StoreError::SkillNotFound(_) | cas_store::StoreError::NotFound(_),
-            ) => {
+            Err(cas_store::StoreError::SkillNotFound(_) | cas_store::StoreError::NotFound(_)) => {
                 store.add(&skill)?;
                 Ok(UpsertResult::Created)
             }
@@ -1172,56 +1292,92 @@ mod tests {
     fn test_entity_matches_project_no_field() {
         // No project field — rejected now that cloud always echoes project_id (cas-6479)
         let entity = json!({ "id": "e-001", "content": "hello" });
-        assert!(!entity_matches_project(&entity, "github.com/owner/repo", "entry"));
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "entry"
+        ));
     }
 
     #[test]
     fn test_entity_matches_project_null_field() {
         // Null project_canonical_id — rejected; cloud must scope all entities (cas-6479)
         let entity = json!({ "id": "e-001", "project_canonical_id": null });
-        assert!(!entity_matches_project(&entity, "github.com/owner/repo", "entry"));
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "entry"
+        ));
     }
 
     #[test]
     fn test_entity_matches_project_matching() {
         // Matching project — accepted
         let entity = json!({ "id": "e-001", "project_canonical_id": "github.com/owner/repo" });
-        assert!(entity_matches_project(&entity, "github.com/owner/repo", "entry"));
+        assert!(entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "entry"
+        ));
     }
 
     #[test]
     fn test_entity_matches_project_foreign() {
         // Different project — rejected (returns false)
         let entity = json!({ "id": "e-001", "project_canonical_id": "github.com/other/repo" });
-        assert!(!entity_matches_project(&entity, "github.com/owner/repo", "entry"));
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "entry"
+        ));
     }
 
     #[test]
     fn test_entity_matches_project_id_field_alias() {
         // Also checks `project_id` field as an alias
         let entity = json!({ "id": "t-abc", "project_id": "github.com/owner/repo" });
-        assert!(entity_matches_project(&entity, "github.com/owner/repo", "task"));
+        assert!(entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "task"
+        ));
     }
 
     #[test]
     fn test_entity_matches_project_id_field_foreign() {
         let entity = json!({ "id": "t-abc", "project_id": "github.com/other/repo" });
-        assert!(!entity_matches_project(&entity, "github.com/owner/repo", "task"));
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "task"
+        ));
     }
 
     #[test]
     fn test_entity_matches_project_null_project_id() {
         // Null project_id — rejected; cloud must scope all entities (cas-6479)
         let entity = json!({ "id": "t-abc", "project_id": null });
-        assert!(!entity_matches_project(&entity, "github.com/owner/repo", "task"));
+        assert!(!entity_matches_project(
+            &entity,
+            "github.com/owner/repo",
+            "task"
+        ));
     }
 
     #[test]
     fn test_entity_matches_local_project() {
         // local: prefix IDs work the same way
         let entity = json!({ "id": "p-001", "project_canonical_id": "local:abcd1234ef567890" });
-        assert!(entity_matches_project(&entity, "local:abcd1234ef567890", "entry"));
-        assert!(!entity_matches_project(&entity, "local:0000000000000000", "entry"));
+        assert!(entity_matches_project(
+            &entity,
+            "local:abcd1234ef567890",
+            "entry"
+        ));
+        assert!(!entity_matches_project(
+            &entity,
+            "local:0000000000000000",
+            "entry"
+        ));
     }
 
     /// PROTOCOL INVARIANT — do not "fix" this test by making the comparison
@@ -1282,11 +1438,13 @@ mod tests {
 // cas-fc52: web-initiated close reconcile (cloud contract §4)
 #[cfg(test)]
 mod web_close_tests {
-    use super::{is_web_close_tombstone, reconcile_web_close};
-    use crate::cloud::syncer::UpsertResult;
+    use super::{CloudSyncer, is_web_close_tombstone, merge_task_notes, reconcile_web_close};
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+    use crate::cloud::syncer::{CloudSyncerConfig, UpsertResult};
     use crate::store::{init_cas_dir, open_task_store};
     use crate::types::{Task, TaskStatus};
     use serde_json::json;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn closed_tombstone(id: &str) -> Task {
@@ -1402,5 +1560,46 @@ mod web_close_tests {
         let outcome = reconcile_web_close(&*store, closed_tombstone("t-new")).unwrap();
         assert!(matches!(outcome, UpsertResult::Created));
         assert_eq!(store.get("t-new").unwrap().status, TaskStatus::Closed);
+    }
+
+    #[test]
+    fn task_note_union_is_timestamp_ordered_and_deduplicated() {
+        let local = "[2026-08-09 10:30] 📝 PROGRESS local follow-up\n\n[2026-08-09 11:30] 📝 PROGRESS shared";
+        let remote =
+            "[2026-08-09 09:30] 📝 PROGRESS remote first\n\n[2026-08-09 11:30] 📝 PROGRESS shared";
+
+        assert_eq!(
+            merge_task_notes(local, remote),
+            "[2026-08-09 09:30] 📝 PROGRESS remote first\n\n[2026-08-09 10:30] 📝 PROGRESS local follow-up\n\n[2026-08-09 11:30] 📝 PROGRESS shared"
+        );
+    }
+
+    #[test]
+    fn local_task_conflict_unions_notes_and_journals_the_losing_row() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new(queue.clone(), CloudConfig::default(), CloudSyncerConfig::default());
+
+        let mut local = Task::new("cas-conflict".to_string(), "local title".to_string());
+        local.notes = "[2026-08-09 10:30] 📝 PROGRESS local note".to_string();
+        store.add(&local).unwrap();
+        queue.enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None).unwrap();
+
+        let mut remote = local.clone();
+        remote.title = "remote title".to_string();
+        remote.notes = "[2026-08-09 09:30] 📝 PROGRESS remote note".to_string();
+        remote.updated_at += chrono::Duration::minutes(1);
+        assert!(matches!(syncer.upsert_task(&*store, remote), Ok(UpsertResult::Updated)));
+
+        let merged = store.get("cas-conflict").unwrap();
+        assert_eq!(merged.title, "remote title");
+        assert_eq!(merged.notes, "[2026-08-09 09:30] 📝 PROGRESS remote note\n\n[2026-08-09 10:30] 📝 PROGRESS local note");
+        let conflicts = queue.list_conflicts(1).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].winner_side, "merged");
+        assert!(conflicts[0].discarded_row_json.contains("local note"));
     }
 }

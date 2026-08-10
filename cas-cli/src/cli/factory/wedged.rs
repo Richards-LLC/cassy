@@ -1157,9 +1157,7 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         let mut visited = HashSet::from([root_pid]);
         let mut processes = Vec::new();
         while let Some(parent) = queue.pop_front() {
-            let Ok(raw_children) =
-                std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))
-            else {
+            let Some(children) = descendant_pids(parent) else {
                 // A vanished descendant is normal; a root we cannot inspect
                 // is not. The latter would turn an unknown tree into a false
                 // "none" claim, so surface unavailable.
@@ -1168,10 +1166,7 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
                 }
                 continue;
             };
-            for child in raw_children
-                .split_whitespace()
-                .filter_map(|pid| pid.parse::<u32>().ok())
-            {
+            for child in children {
                 if !visited.insert(child) {
                     continue;
                 }
@@ -1197,6 +1192,61 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
         let _ = root_pid;
         BackgroundProcessState::Unavailable
     }
+}
+
+/// Discover immediate children spawned from *any* thread of `parent`.
+///
+/// `/proc/<pid>/task/<tid>/children` is per-thread, so checking only the
+/// process leader misses a child spawned from an executor/test thread. The
+/// PPID scan is intentionally retained as a fallback: some procfs mounts do
+/// not expose `children`, while field 4 of `/proc/<pid>/stat` remains the
+/// kernel's authoritative parent relation.
+#[cfg(target_os = "linux")]
+fn descendant_pids(parent: u32) -> Option<Vec<u32>> {
+    let task_dir = std::fs::read_dir(format!("/proc/{parent}/task")).ok()?;
+    let mut children = HashSet::new();
+    for task in task_dir.flatten() {
+        let task_id = task.file_name();
+        let Some(task_id) = task_id.to_str() else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read_to_string(format!("/proc/{parent}/task/{task_id}/children"))
+        else {
+            continue;
+        };
+        children.extend(
+            raw.split_whitespace()
+                .filter_map(|pid| pid.parse::<u32>().ok()),
+        );
+    }
+
+    // Do not depend on CONFIG_PROC_CHILDREN: scan the visible process table as
+    // well, which also catches a child before its spawning thread's children
+    // file is published.
+    let proc_entries = std::fs::read_dir("/proc").ok()?;
+    for entry in proc_entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        if parent_pid_from_stat(&stat) == Some(parent) {
+            children.insert(pid);
+        }
+    }
+    Some(children.into_iter().collect())
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid_from_stat(raw: &str) -> Option<u32> {
+    let tail = raw.get(raw.rfind(')')? + 1..)?.trim_start();
+    // Fields after `comm`: state (3), ppid (4), ...
+    tail.split_whitespace().nth(1)?.parse().ok()
 }
 
 #[cfg(target_os = "linux")]

@@ -418,6 +418,56 @@ mod tests {
         );
     }
 
+    /// A caller-selected spawn effort must survive the queued PendingSpawn
+    /// handoff and override the daemon's config-derived default at the PTY.
+    #[test]
+    fn pending_spawn_claude_effort_override_reaches_pty_args() {
+        let explicit_spec = WorkerSpec {
+            name: Some("effort-worker".to_string()),
+            cli: SupervisorCli::Claude,
+            model: None,
+            effort: Some(Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
+        };
+        let pending = PendingSpawn::Named {
+            request_id: Some(542),
+            name: "effort-worker".to_string(),
+            isolate: false,
+            spec: Some(explicit_spec),
+            task_id: None,
+        };
+        let spec = match pending {
+            PendingSpawn::Named { spec, .. } => spec,
+            _ => unreachable!("test constructs a named pending spawn"),
+        };
+
+        let mut mux = cas_mux::Mux::new(24, 80);
+        mux.set_default_worker_spec(WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Claude,
+            model: None,
+            effort: Some(Effort::Low),
+            config_dir: None,
+            requester_config_dir: None,
+        });
+        let pty = mux.build_add_worker_config(
+            "effort-worker",
+            tempfile::TempDir::new().unwrap().path().to_path_buf(),
+            None,
+            "supervisor",
+            None,
+            spec,
+        );
+        let effort = pty
+            .args
+            .iter()
+            .position(|arg| arg == "--effort")
+            .and_then(|index| pty.args.get(index + 1))
+            .expect("explicit Claude effort must reach PTY args");
+        assert_eq!(effort, "medium");
+    }
+
     /// cas-6913: verify a task_id survives the same PendingSpawn → spawn_task
     /// tuple routing chain as the WorkerSpec above, so `finish_worker_spawn`
     /// (which extracts it from the tuple, see queue_and_events.rs) actually

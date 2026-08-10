@@ -274,6 +274,16 @@ impl FactoryDaemon {
         let mut last_refresh = std::time::Instant::now();
         let mut last_prompt_poll = std::time::Instant::now();
         let mut last_spawn_poll = std::time::Instant::now();
+        // GitHub polling is intentionally decoupled from the two-second UI
+        // refresh. The blocking CLI calls run on Tokio's blocking pool and
+        // results are handed back to this loop for durable prompt enqueue.
+        let mut last_ci_watch = std::time::Instant::now()
+            .checked_sub(super::ci_watch::CI_WATCH_INTERVAL)
+            .unwrap_or_else(std::time::Instant::now);
+        let mut ci_watch_task: Option<
+            JoinHandle<Result<Vec<super::ci_watch::CiFailure>, super::ci_watch::CiWatchError>>,
+        > = None;
+        let mut ci_watch_unavailable_reported = false;
         let refresh_interval = Duration::from_secs(2);
         let poll_interval = Duration::from_millis(100);
 
@@ -372,6 +382,90 @@ impl FactoryDaemon {
             // Periodic CAS data refresh
             let mut refreshed = false;
             if last_refresh.elapsed() >= refresh_interval {
+                // Collect a completed GitHub Actions snapshot in the background.
+                // No supervisor action is required to notice a red run: the
+                // completed result below becomes a lifecycle-wake relay.
+                if ci_watch_task.is_none()
+                    && last_ci_watch.elapsed() >= super::ci_watch::CI_WATCH_INTERVAL
+                {
+                    let project = self.app.project_path().to_path_buf();
+                    let mut watched_branches =
+                        std::collections::BTreeSet::from(["main".to_string()]);
+                    if let Some(manager) = self.app.worktree_manager() {
+                        watched_branches.extend(
+                            self.app
+                                .worker_names()
+                                .iter()
+                                .map(|worker| manager.branch_name_for_worker(worker)),
+                        );
+                    } else if let Ok(output) = Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(&project)
+                        .output()
+                        && output.status.success()
+                    {
+                        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if branch.starts_with("factory/") {
+                            watched_branches.insert(branch);
+                        }
+                    }
+                    ci_watch_task = Some(tokio::task::spawn_blocking(move || {
+                        let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
+                        super::ci_watch::collect_failures(&transport, &watched_branches)
+                    }));
+                    last_ci_watch = std::time::Instant::now();
+                }
+
+                if ci_watch_task.as_ref().is_some_and(JoinHandle::is_finished) {
+                    let task = ci_watch_task.take().expect("checked above");
+                    match task.await {
+                        Ok(Ok(failures)) => {
+                            ci_watch_unavailable_reported = false;
+                            if !failures.is_empty() {
+                                match crate::store::open_prompt_queue_store(self.app.cas_dir()) {
+                                    Ok(queue) => {
+                                        for failure in failures {
+                                            match super::ci_watch::emit_failure(
+                                                queue.as_ref(),
+                                                &self.session_name,
+                                                &failure,
+                                            ) {
+                                                Ok(true) => tracing::warn!(
+                                                    branch = %failure.branch,
+                                                    head_sha = %failure.head_sha,
+                                                    run_url = %failure.run_url,
+                                                    failing_job = %failure.failing_job,
+                                                    "queued CI red-run lifecycle wake for supervisor"
+                                                ),
+                                                Ok(false) => tracing::debug!(
+                                                    branch = %failure.branch,
+                                                    head_sha = %failure.head_sha,
+                                                    "suppressed duplicate CI red-run relay"
+                                                ),
+                                                Err(error) => {
+                                                    tracing::warn!(%error, "failed to queue CI red-run relay")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(%error, "could not open prompt queue for CI red-run relays")
+                                    }
+                                }
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            if !ci_watch_unavailable_reported {
+                                tracing::warn!(%error, "GitHub CI watcher unavailable; retrying silently on its next cadence");
+                                ci_watch_unavailable_reported = true;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "GitHub CI watcher background task failed")
+                        }
+                    }
+                }
+
                 // A successful PTY spawn is not a verified worker. Confirm the
                 // harness reached CAS registration (or surface a bounded
                 // timeout) on the existing two-second lifecycle cadence.

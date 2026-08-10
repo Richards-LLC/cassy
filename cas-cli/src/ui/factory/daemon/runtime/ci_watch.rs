@@ -1,0 +1,422 @@
+//! Low-frequency GitHub Actions failure watcher for live factory lanes.
+//!
+//! The factory refreshes its local state every two seconds, but GitHub is
+//! deliberately queried only once a minute.  That is at most sixty REST calls
+//! per hour for the run list plus the occasional failed-run detail lookup.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use cas_store::{NotificationPriority, PromptQueueStore};
+use serde::Deserialize;
+
+use crate::bounded_process::{Deadline, run_command};
+
+/// The GitHub Actions polling cadence.  A factory uses at most 60 list calls
+/// per hour; failed runs add one jobs call and one optional log lookup.
+pub(crate) const CI_WATCH_INTERVAL: Duration = Duration::from_secs(60);
+const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CiFailure {
+    pub branch: String,
+    pub head_sha: String,
+    pub run_id: u64,
+    pub run_url: String,
+    pub failing_job: String,
+    pub failing_test: Option<String>,
+}
+
+impl CiFailure {
+    pub(crate) fn dedupe_key(&self) -> String {
+        format!("ci-red-run:{}:{}", self.branch, self.head_sha)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CiWatchError {
+    /// `gh` missing, unauthenticated, rate-limited, or otherwise unavailable.
+    /// The daemon logs this only once per process and keeps running.
+    Unavailable(String),
+    Malformed(String),
+}
+
+impl std::fmt::Display for CiWatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(reason) => write!(f, "{reason}"),
+            Self::Malformed(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+pub(crate) trait CiTransport {
+    fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError>;
+    fn failing_job(&self, run_id: u64) -> Result<String, CiWatchError>;
+    fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError>;
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CiRun {
+    pub id: u64,
+    pub head_branch: String,
+    pub head_sha: String,
+    pub html_url: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RunsResponse {
+    workflow_runs: Vec<CiRun>,
+}
+
+#[derive(Deserialize)]
+struct JobsResponse {
+    jobs: Vec<CiJob>,
+}
+
+#[derive(Deserialize)]
+struct CiJob {
+    name: String,
+    conclusion: Option<String>,
+}
+
+/// Real, bounded `gh` transport.  The watcher intentionally uses the CLI so
+/// it inherits the operator's normal `gh auth`/token setup without persisting
+/// credentials in CAS.
+pub(crate) struct GhCiTransport {
+    repo: String,
+    cwd: PathBuf,
+}
+
+impl GhCiTransport {
+    pub(crate) fn from_project(project: &Path) -> Result<Self, CiWatchError> {
+        let output = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(project)
+            .output()
+            .map_err(|e| CiWatchError::Unavailable(format!("cannot read git origin: {e}")))?;
+        if !output.status.success() {
+            return Err(CiWatchError::Unavailable(
+                "cannot read git origin for CI watcher".to_string(),
+            ));
+        }
+        let origin = String::from_utf8_lossy(&output.stdout);
+        let repo = crate::cli::integrate::github::parse_origin_url(&origin)
+            .map(|repo| repo.full_name())
+            .ok_or_else(|| {
+                CiWatchError::Unavailable(
+                    "origin is not a GitHub owner/repo URL; CI watcher disabled".to_string(),
+                )
+            })?;
+        Ok(Self {
+            repo,
+            cwd: project.to_path_buf(),
+        })
+    }
+
+    fn gh_json<T: for<'de> Deserialize<'de>>(&self, args: &[String]) -> Result<T, CiWatchError> {
+        let mut command = Command::new("gh");
+        command.args(args).current_dir(&self.cwd);
+        let output = run_command(
+            &mut command,
+            Deadline::after(GH_CALL_TIMEOUT),
+            GH_CALL_TIMEOUT,
+        )
+        .map_err(|error| {
+            CiWatchError::Unavailable(match error {
+                crate::bounded_process::BoundedCommandError::TimedOut => {
+                    "gh CI watcher request timed out".to_string()
+                }
+                crate::bounded_process::BoundedCommandError::Io => {
+                    "gh is unavailable for the CI watcher".to_string()
+                }
+            })
+        })?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("gh CI watcher request failed")
+                .to_string();
+            return Err(CiWatchError::Unavailable(detail));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|e| CiWatchError::Malformed(format!("invalid GitHub Actions JSON: {e}")))
+    }
+
+    fn gh_text(&self, args: &[String]) -> Result<String, CiWatchError> {
+        let mut command = Command::new("gh");
+        command.args(args).current_dir(&self.cwd);
+        let output = run_command(
+            &mut command,
+            Deadline::after(GH_CALL_TIMEOUT),
+            GH_CALL_TIMEOUT,
+        )
+        .map_err(|_| CiWatchError::Unavailable("gh log lookup unavailable".to_string()))?;
+        if !output.status.success() {
+            return Ok(String::new()); // Test extraction is optional.
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+}
+
+impl CiTransport for GhCiTransport {
+    fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+        let response: RunsResponse = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/actions/runs", self.repo),
+            "-f".to_string(),
+            "status=completed".to_string(),
+            "-f".to_string(),
+            "per_page=100".to_string(),
+        ])?;
+        Ok(response.workflow_runs)
+    }
+
+    fn failing_job(&self, run_id: u64) -> Result<String, CiWatchError> {
+        let response: JobsResponse = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
+        ])?;
+        Ok(response
+            .jobs
+            .into_iter()
+            .find(|job| job.conclusion.as_deref() == Some("failure"))
+            .map(|job| job.name)
+            .unwrap_or_else(|| "unknown failing job".to_string()))
+    }
+
+    fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
+        let log = self.gh_text(&[
+            "run".to_string(),
+            "view".to_string(),
+            run_id.to_string(),
+            "--repo".to_string(),
+            self.repo.clone(),
+            "--log-failed".to_string(),
+        ])?;
+        Ok((!log.is_empty()).then_some(log))
+    }
+}
+
+/// Keep only completed failed runs on the trunk or currently-live factory lanes.
+pub(crate) fn collect_failures(
+    transport: &dyn CiTransport,
+    watched_branches: &BTreeSet<String>,
+) -> Result<Vec<CiFailure>, CiWatchError> {
+    let mut failures = Vec::new();
+    for run in transport.completed_runs()? {
+        if run.status != "completed"
+            || run.conclusion.as_deref() != Some("failure")
+            || !watched_branches.contains(&run.head_branch)
+        {
+            continue;
+        }
+        let failing_job = transport.failing_job(run.id)?;
+        let failing_test = transport
+            .failed_log(run.id)?
+            .as_deref()
+            .and_then(first_failing_test);
+        failures.push(CiFailure {
+            branch: run.head_branch,
+            head_sha: run.head_sha,
+            run_id: run.id,
+            run_url: run.html_url,
+            failing_job,
+            failing_test,
+        });
+    }
+    Ok(failures)
+}
+
+/// Extract the common Rust/nextest failure shape without treating log parsing
+/// as authoritative.  Missing or unfamiliar logs simply omit the test name.
+pub(crate) fn first_failing_test(log: &str) -> Option<String> {
+    log.lines().find_map(|line| {
+        let line = line.trim();
+        let test = line.strip_prefix("test ")?;
+        let (name, outcome) = test.rsplit_once(" ... ")?;
+        (outcome.contains("FAILED")).then(|| name.trim().to_string())
+    })
+}
+
+pub(crate) fn relay_body(failure: &CiFailure) -> String {
+    let test = failure
+        .failing_test
+        .as_deref()
+        .map(|name| format!("\nFirst failing test: {name}"))
+        .unwrap_or_default();
+    format!(
+        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nFailing job: {}{}\nThis red run is deduped by branch + SHA; inspect or fix it before merging further lanes.\n</ci-red-run>",
+        failure.branch,
+        failure.head_sha,
+        failure.run_id,
+        failure.branch,
+        failure.head_sha,
+        failure.run_url,
+        failure.failing_job,
+        test,
+    )
+}
+
+/// Durable prompt handoff.  The stable key makes repeated polls and daemon
+/// restarts silent for the same `(branch, head_sha)` red run.
+pub(crate) fn emit_failure(
+    queue: &dyn PromptQueueStore,
+    factory_session: &str,
+    failure: &CiFailure,
+) -> Result<bool, String> {
+    let key = failure.dedupe_key();
+    let source = format!("lifecycle-wake:{key}");
+    let summary = format!("CI FAILED: {} ({})", failure.branch, failure.head_sha);
+    match queue
+        .enqueue_idempotent(
+            &source,
+            "supervisor",
+            &relay_body(failure),
+            Some(factory_session),
+            Some(&summary),
+            Some(NotificationPriority::High),
+            &key,
+        )
+        .map_err(|e| format!("could not enqueue CI red-run relay: {e}"))?
+    {
+        cas_store::EnqueueIdempotentResult::Created(_) => Ok(true),
+        cas_store::EnqueueIdempotentResult::AlreadyExists(_) => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cas_store::SqlitePromptQueueStore;
+    use std::cell::Cell;
+
+    struct FakeTransport {
+        runs: Vec<CiRun>,
+        job: String,
+        log: Option<String>,
+        calls: Cell<u8>,
+    }
+
+    impl CiTransport for FakeTransport {
+        fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+            Ok(self.runs.clone())
+        }
+        fn failing_job(&self, _: u64) -> Result<String, CiWatchError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.job.clone())
+        }
+        fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {
+            Ok(self.log.clone())
+        }
+    }
+
+    fn run(branch: &str, conclusion: Option<&str>) -> CiRun {
+        CiRun {
+            id: 42,
+            head_branch: branch.to_string(),
+            head_sha: "deadbeef".to_string(),
+            html_url: "https://github.test/org/repo/actions/runs/42".to_string(),
+            status: "completed".to_string(),
+            conclusion: conclusion.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn failed_completed_live_lane_emits_a_relay_with_job_and_test() {
+        let transport = FakeTransport {
+            runs: vec![run("factory/bright-otter", Some("failure"))],
+            job: "Fast Validation".to_string(),
+            log: Some("test contract_conflict_regression ... FAILED".to_string()),
+            calls: Cell::new(0),
+        };
+        let watched = BTreeSet::from(["main".to_string(), "factory/bright-otter".to_string()]);
+        let failures = collect_failures(&transport, &watched).unwrap();
+        assert_eq!(failures.len(), 1);
+        let body = relay_body(&failures[0]);
+        assert!(body.contains("branch=\"factory/bright-otter\""));
+        assert!(body.contains("Failing job: Fast Validation"));
+        assert!(body.contains("First failing test: contract_conflict_regression"));
+        assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(&body));
+        assert_eq!(transport.calls.get(), 1);
+    }
+
+    #[test]
+    fn repeat_failure_has_one_stable_branch_sha_dedupe_key() {
+        let failure = CiFailure {
+            branch: "main".to_string(),
+            head_sha: "abc123".to_string(),
+            run_id: 1,
+            run_url: "url".to_string(),
+            failing_job: "test".to_string(),
+            failing_test: None,
+        };
+        assert_eq!(failure.dedupe_key(), "ci-red-run:main:abc123");
+        assert_eq!(failure.dedupe_key(), failure.clone().dedupe_key());
+    }
+
+    #[test]
+    fn repeated_failure_enqueues_exactly_one_lifecycle_wake_relay() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let failure = CiFailure {
+            branch: "main".to_string(),
+            head_sha: "abc123".to_string(),
+            run_id: 1,
+            run_url: "https://github.test/runs/1".to_string(),
+            failing_job: "Fast Validation".to_string(),
+            failing_test: None,
+        };
+        assert!(emit_failure(&queue, "factory-session", &failure).unwrap());
+        assert!(!emit_failure(&queue, "factory-session", &failure).unwrap());
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "lifecycle-wake:ci-red-run:main:abc123");
+        assert!(rows[0].prompt.contains("Failing job: Fast Validation"));
+    }
+
+    #[test]
+    fn green_runs_are_silent_without_expensive_job_lookup() {
+        let transport = FakeTransport {
+            runs: vec![run("main", Some("success"))],
+            job: "should not run".to_string(),
+            log: None,
+            calls: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+        assert!(failures.is_empty());
+        assert_eq!(transport.calls.get(), 0);
+    }
+
+    #[test]
+    fn unavailable_auth_or_transport_is_a_nonfatal_result() {
+        struct NoAuth;
+        impl CiTransport for NoAuth {
+            fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+                Err(CiWatchError::Unavailable(
+                    "gh auth login required".to_string(),
+                ))
+            }
+            fn failing_job(&self, _: u64) -> Result<String, CiWatchError> {
+                unreachable!()
+            }
+            fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {
+                unreachable!()
+            }
+        }
+        assert!(matches!(
+            collect_failures(&NoAuth, &BTreeSet::new()),
+            Err(CiWatchError::Unavailable(_))
+        ));
+    }
+}

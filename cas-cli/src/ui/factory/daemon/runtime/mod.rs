@@ -1,3 +1,4 @@
+mod ci_watch;
 mod client_input;
 mod cloud;
 mod delivery;

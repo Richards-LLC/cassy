@@ -60,6 +60,15 @@ describe("binding Commander browser invariants", () => {
     expect(joined).toContain("indexedDB.open");
   });
 
+  it("feature-detects hub versions and keeps controls disabled on skew", async () => {
+    const source = await Promise.all(["main.ts", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const joined = source.join("\n");
+    expect(joined).toContain('"/v1/machine"');
+    expect(joined).toContain("Compatibility check unavailable");
+    expect(joined).toContain('hubSupports(machineId, "daemon_attach")');
+    expect(joined).toContain("unsupported controls are disabled");
+  });
+
   it("targets interrupt at the explicitly selected pane rather than render order", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("selectedPanes.get(sessionKey(selected.id, selectedSession))");

@@ -19,6 +19,7 @@ nav { display: grid; gap: 6px; margin-top: 14px; }
 .connection { display: inline-flex; padding: 4px 8px; font: 11px ui-monospace, monospace; border-radius: 999px; background: #21262d; }
 .remove-machine { float: right; min-height: 26px; padding: 2px 7px; color: #ff7b72; font-size: 11px; }
 .connection.connected { color: #56d364; }.connection.auth-blocked { color: #ff7b72; }.connection.reconnecting { color: #d29922; }
+.compatibility-warning { margin: .65rem 0; padding: .65rem .75rem; border: 1px solid #a36c2c; border-radius: .45rem; color: #ffe2a8; background: rgba(163,108,44,.16); font-size: .85rem; }
 main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .toolbar { min-height: 74px; display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-bottom: 1px solid #21262d; background: rgba(13,17,23,.75); }
 .toolbar h1 { margin: 0; font-size: 18px; }.toolbar p { margin: 4px 0 0; color: #8b949e; font-size: 12px; }.actions { display: flex; gap: 8px; }.actions button { padding: 0 12px; }.danger { color: #ffa198; border-color: #da3633; }

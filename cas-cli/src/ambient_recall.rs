@@ -6,7 +6,7 @@
 //! outside the caller's project/team/private boundary before ranking.  Source
 //! bodies stay in their authoritative stores.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -40,6 +40,17 @@ const LEXICAL_INJECTION_CAP: usize = 3;
 /// row that does not overlap that domain needs an unambiguously strong vector
 /// match before it may cross the boundary.
 const FOCUSED_EPIC_SEMANTIC_FLOOR: f64 = 0.80;
+
+/// Live sampling found generic semantic matches through 0.467, while useful
+/// independent matches began at 0.470. This only governs unbound cards whose
+/// lexical evidence was rejected as noise; focused-epic mismatches stay 0.80.
+const SEMANTIC_INJECTION_FLOOR: f64 = 0.47;
+
+/// Terms present in at least 80% of a bounded local result corpus cannot
+/// solely justify lexical relevance. Three rows avoids penalizing tiny result
+/// sets that happen to share their only meaningful term.
+const UBIQUITOUS_TERM_MIN_DOCUMENTS: usize = 3;
+const UBIQUITOUS_TERM_DOCUMENT_FREQUENCY: f64 = 0.80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -430,7 +441,6 @@ impl RecallRetriever for SqliteRecallRetriever {
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
             .map(|row| local_candidate(row, query, &terms))
-            .filter(|candidate| candidate.lexical_eligible)
             .collect();
         candidates.sort_by(|a, b| {
             b.binding
@@ -1103,14 +1113,58 @@ fn is_high_document_frequency_term(term: &str) -> bool {
         "request",
         "this",
         "that",
+        "them",
+        "what",
+        "which",
+        "when",
+        "where",
+        "who",
+        "why",
         "the",
         "and",
+        "are",
+        "was",
+        "were",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "does",
+        "did",
+        "can",
+        "could",
+        "would",
+        "should",
         "for",
         "with",
         "from",
         "into",
+        "about",
+        "after",
+        "before",
+        "between",
+        "over",
+        "under",
+        "again",
         "then",
         "use",
+        "open",
+        "need",
+        "want",
+        "get",
+        "got",
+        "make",
+        "made",
+        "also",
+        "just",
+        "more",
+        "most",
+        "some",
+        "such",
+        "only",
+        "very",
+        "will",
         "queue",
         "new",
         "old",
@@ -1134,6 +1188,66 @@ fn is_content_bearing_term(term: &str) -> bool {
 
 fn lexical_match_is_eligible(matched: &[&str]) -> bool {
     matched.iter().any(|term| is_content_bearing_term(term))
+}
+
+/// Apply a bounded document-frequency pass after all local candidates are
+/// known. This catches project slugs and corpus boilerplate without a
+/// hardcoded project-name list. Rejected rows stay available to the renderer,
+/// so `omitted=` remains an honest count.
+fn exclude_corpus_ubiquitous_lexical_terms(candidates: &mut [EvidenceCandidate], query: &str) {
+    let terms = query_terms(query);
+    let local: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (candidate.provenance.source == "cas.db/read-only").then_some(index)
+        })
+        .collect();
+    if local.len() < UBIQUITOUS_TERM_MIN_DOCUMENTS || terms.is_empty() {
+        return;
+    }
+    let ubiquitous: HashSet<&str> = terms
+        .iter()
+        .filter_map(|term| {
+            let frequency = local
+                .iter()
+                .filter(|&&index| {
+                    candidates[index]
+                        .snippet
+                        .to_ascii_lowercase()
+                        .contains(term.as_str())
+                })
+                .count();
+            (frequency >= UBIQUITOUS_TERM_MIN_DOCUMENTS
+                && (frequency as f64 / local.len() as f64) >= UBIQUITOUS_TERM_DOCUMENT_FREQUENCY)
+                .then_some(term.as_str())
+        })
+        .collect();
+    if ubiquitous.is_empty() {
+        return;
+    }
+    for index in local {
+        let candidate = &mut candidates[index];
+        if candidate.binding {
+            continue;
+        }
+        let haystack = candidate.snippet.to_ascii_lowercase();
+        let matched: Vec<&str> = terms
+            .iter()
+            .map(String::as_str)
+            .filter(|term| haystack.contains(term))
+            .filter(|term| !ubiquitous.contains(term))
+            .collect();
+        candidate.lexical_eligible = lexical_match_is_eligible(&matched);
+        candidate.lexical_weak = matched.len() == 1;
+        if candidate.semantic_score.is_none() {
+            candidate.why_relevant = match matched.len() {
+                0 => "lexical match:".to_string(),
+                1 => format!("lexical(weak) match: {}", matched[0]),
+                _ => format!("lexical match: {}", matched.join(",")),
+            };
+        }
+    }
 }
 
 fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
@@ -1594,6 +1708,12 @@ pub(crate) fn render_packet(
         if injected.len() == cap {
             break;
         }
+        let independently_semantic = candidate
+            .semantic_score
+            .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR);
+        if !candidate.binding && !candidate.lexical_eligible && !independently_semantic {
+            continue;
+        }
         let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
         if lexical_only && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP) {
             continue;
@@ -1747,6 +1867,7 @@ pub(crate) fn retrieve_candidates(
         }
     }
     let mut candidates: Vec<EvidenceCandidate> = fused.into_values().collect();
+    exclude_corpus_ubiquitous_lexical_terms(&mut candidates, &query.canonical);
     candidates.retain(|candidate| {
         !candidate.focus_mismatch
             || candidate
@@ -2333,11 +2454,86 @@ mod tests {
     fn lexical_quality_floor_rejects_all_stopword_match_sets() {
         assert!(!lexical_match_is_eligible(&["the", "old", "context"]));
         assert!(!lexical_match_is_eligible(&["use", "queue"]));
+        assert_eq!(query_terms("what them open release"), vec!["release"]);
         assert!(lexical_match_is_eligible(&["release"]));
         assert_eq!(
             query_terms("the old context use queue for release signing"),
             vec!["release", "signing"]
         );
+    }
+
+    /// cas-8284: fixtures mirror the first live post-floor injection: English
+    /// stopwords (`what`), a project slug present in every local row
+    /// (`cas-src`), and semantic noise below the observed 0.470 cutoff. Every
+    /// exclusion remains in the disclosure denominator.
+    #[test]
+    fn ambient_floor_rejects_live_stopword_slug_and_semantic_noise_shapes() {
+        let identity = identity(RecallRole::Supervisor);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "cas-src parser repair".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stopword = candidate("live-stopword-what", EvidenceScope::Project("project-a".into()));
+        stopword.lexical_eligible = false;
+        stopword.lexical_weak = true;
+        stopword.why_relevant = "lexical(weak) match: what".into();
+
+        let mut slug_rows = (0..3)
+            .map(|index| {
+                let mut row = candidate(
+                    &format!("live-slug-{index}"),
+                    EvidenceScope::Project("project-a".into()),
+                );
+                row.provenance.source = "cas.db/read-only".into();
+                row.snippet = format!("cas-src generic history row {index}");
+                row.why_relevant = "lexical(weak) match: cas-src".into();
+                row
+            })
+            .collect::<Vec<_>>();
+        let mut parser = candidate("live-parser", EvidenceScope::Project("project-a".into()));
+        parser.provenance.source = "cas.db/read-only".into();
+        parser.snippet = "cas-src parser cache repair".into();
+
+        slug_rows.push(parser);
+        exclude_corpus_ubiquitous_lexical_terms(&mut slug_rows, &query.canonical);
+        assert!(slug_rows[..3].iter().all(|row| !row.lexical_eligible));
+        assert!(slug_rows[3].lexical_eligible);
+
+        let mut semantic_noise = candidate("live-semantic-noise", EvidenceScope::Project("project-a".into()));
+        semantic_noise.lexical_eligible = false;
+        semantic_noise.semantic_score = Some(0.467);
+        semantic_noise.why_relevant = "semantic match 0.467".into();
+        let mut semantic_useful = candidate("live-semantic-useful", EvidenceScope::Project("project-a".into()));
+        semantic_useful.lexical_eligible = false;
+        semantic_useful.semantic_score = Some(SEMANTIC_INJECTION_FLOOR);
+        semantic_useful.why_relevant = format!("semantic match {SEMANTIC_INJECTION_FLOOR:.3}");
+
+        let candidates = RecallCandidates {
+            candidates: std::iter::once(stopword)
+                .chain(slug_rows)
+                .chain([semantic_noise, semantic_useful])
+                .collect(),
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
+        assert_eq!(
+            injected.iter().map(|row| row.evidence_id.as_str()).collect::<Vec<_>>(),
+            vec!["live-semantic-useful"],
+            "the supervisor one-card cap may omit eligible lexical evidence, but it must never
+             select a stopword, ubiquitous slug, or sub-floor semantic card"
+        );
+        assert_eq!(packet.omitted, 6, "every excluded live-shape card is omitted");
+        assert!(packet.full.contains("injected=1 omitted=6"));
+        assert!(!packet.full.contains("live-stopword-what"));
+        assert!(!packet.full.contains("live-slug-"));
+        assert!(!packet.full.contains("live-semantic-noise"));
     }
 
     #[test]

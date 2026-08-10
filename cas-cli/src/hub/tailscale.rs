@@ -37,6 +37,9 @@ pub struct TailscaleServeReceipt {
     pub local_target: String,
     pub https_port: u16,
     pub created_by_cas: bool,
+    /// CLI selected when the mapping was created. Empty means a legacy
+    /// receipt did not record this diagnostic-only detail.
+    #[serde(default)]
     pub executable: String,
     pub status_before: Value,
     pub status_after: Value,
@@ -477,6 +480,72 @@ mod tests {
         let calls = fs::read_to_string(calls).unwrap();
         assert_eq!(calls.matches("serve --bg").count(), 1);
         assert_eq!(calls.matches("serve --https=443 off").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v2_60_receipt_is_owned_and_tears_down_with_current_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = private_tempdir();
+        let binary = temp.path().join("tailscale");
+        let calls = temp.path().join("calls");
+        let state = temp.path().join("serve-state");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n'serve status --json') if [ -f '{}' ]; then printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:4173\"}}}}}}}}}}'; else printf '%s' '{{}}'; fi ;;\n'serve --https=443 off') rm -f '{}' ;;\n*) exit 9 ;;\nesac\n",
+            calls.display(),
+            state.display(),
+            state.display(),
+        );
+        fs::write(&binary, script).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&state, "owned").unwrap();
+
+        let hub = temp.path().join("hub");
+        crate::hub::ensure_private_dir(&hub).unwrap();
+        fs::write(
+            hub.join(RECEIPT_FILE),
+            include_str!("fixtures/tailscale-serve-v2.60.0.json"),
+        )
+        .unwrap();
+        let manager = TailscaleServeManager::with_executable(&hub, &binary);
+
+        let legacy = manager.owned_receipt().unwrap().unwrap();
+        assert!(legacy.executable.is_empty(), "legacy CLI is unknown");
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["executable"],
+            "",
+            "current serialization preserves the explicit legacy default"
+        );
+
+        assert_eq!(manager.disable_owned().unwrap(), Some(legacy));
+        assert!(!hub.join(RECEIPT_FILE).exists());
+        assert!(!state.exists());
+        assert!(fs::read_to_string(calls)
+            .unwrap()
+            .contains("serve --https=443 off"));
+
+        let teardown: TailscaleTeardownReceipt =
+            serde_json::from_slice(&fs::read(hub.join(TEARDOWN_RECEIPT_FILE)).unwrap()).unwrap();
+        assert_eq!(teardown.local_target, "http://127.0.0.1:4173");
+        assert_eq!(teardown.https_port, 443);
+        assert!(teardown.status_after.as_object().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(&teardown).unwrap()["executable"],
+            Value::Null,
+            "teardown receipts retain their v2.60.0 shape"
+        );
+    }
+
+    #[test]
+    fn legacy_v2_60_teardown_receipt_shape_still_parses() {
+        let receipt: TailscaleTeardownReceipt = serde_json::from_str(include_str!(
+            "fixtures/tailscale-serve-teardown-v2.60.0.json"
+        ))
+        .unwrap();
+        assert_eq!(receipt.local_target, "http://127.0.0.1:4173");
+        assert_eq!(receipt.https_port, 443);
+        assert!(receipt.status_after.as_object().unwrap().is_empty());
     }
 
     #[cfg(unix)]

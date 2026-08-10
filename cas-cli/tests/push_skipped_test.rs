@@ -4,8 +4,9 @@
 //! cross-project `project_canonical_id` conflict (via Postgres
 //! `ON CONFLICT DO UPDATE ... WHERE false ... RETURNING`), the response
 //! carries a per-entity-type `skipped` count. The client must inspect that
-//! count and leave the corresponding local queue items un-marked-synced so
-//! they remain retryable instead of being silently dropped.
+//! count, surface it as a push error, and advance the corresponding local
+//! queue rows toward the visible failed state instead of retrying them
+//! silently forever.
 //!
 //! This test exercises the full `CloudSyncer::push` path through a
 //! wiremock-backed `/api/sync/push` endpoint to lock that behavior in.
@@ -38,10 +39,11 @@ fn entry_payload(id: &str) -> String {
 }
 
 /// When the server reports `skipped > 0` for an entity type, the affected
-/// queue items must remain in the local sync queue (retryable) instead of
-/// being deleted by `mark_synced`. This is the cas-f645 contract.
+/// queue items must not be marked synced. Each explicit rejection consumes a
+/// retry, so a persistent refusal becomes a visible failed row instead of
+/// remaining pending forever.
 #[tokio::test]
-async fn skipped_response_leaves_queue_items_pending() {
+async fn skipped_response_becomes_visible_failed_queue_item() {
     let server = MockServer::start().await;
 
     // Live server shape: counts are nested under the entity key rather than
@@ -95,10 +97,15 @@ async fn skipped_response_leaves_queue_items_pending() {
 
     // `push` is sync + blocking ureq; the wiremock runtime needs us off
     // the executor thread to serve the POST.
-    let (push_result, syncer) = tokio::task::spawn_blocking(move || (syncer.push(), syncer))
-        .await
-        .expect("spawn_blocking join");
-    let push_result = push_result.expect("push() returned Err");
+    let (push_results, syncer) = tokio::task::spawn_blocking(move || {
+        let results = (0..5)
+            .map(|_| syncer.push().expect("push() returned Err"))
+            .collect::<Vec<_>>();
+        (results, syncer)
+    })
+    .await
+    .expect("spawn_blocking join");
+    let push_result = &push_results[0];
 
     // Server reported 1 skipped → the client must NOT count this as
     // pushed. The legacy "trust the 200" path would have set pushed_entries
@@ -108,22 +115,34 @@ async fn skipped_response_leaves_queue_items_pending() {
         "client must not count server-skipped rows as pushed",
     );
 
-    // Critical AC: the queue item is still present (retryable). If
-    // `mark_synced` had been called, `pending_count` would be 0 and the
-    // row would have been deleted from the sync_queue table.
+    assert!(
+        push_result.errors.iter().any(|error| error.contains("cloud skipped 1 of 1 entries")),
+        "server skips must make the overall push incomplete: {push_result:?}"
+    );
+
+    // Critical AC: the queue item is neither silently discarded nor retried
+    // indefinitely. It becomes a failed row with an operator-visible reason.
     let queue_after = syncer.queue();
     assert_eq!(
         queue_after.pending_count(5).unwrap(),
-        1,
-        "queue items the server skipped must remain pending — cas-f645 contract",
+        0,
+        "persistent server skips must leave the pending queue after max retries",
     );
-    let pending = queue_after.pending(10, 5).unwrap();
+    assert_eq!(queue_after.stats(5).unwrap().failed, 1);
+    let items = queue_after.list_all(10).unwrap();
     assert!(
-        pending[0]
+        items[0]
             .last_error
             .as_deref()
             .is_some_and(|diagnostic| diagnostic.contains("cloud skipped 1 of 1 entries")),
-        "queue output must expose why this retryable row is retained: {pending:?}"
+        "queue output must expose why this row failed: {items:?}"
+    );
+    assert!(
+        items[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("server response: {\"entries\"")),
+        "queue output must preserve the raw server response: {items:?}"
     );
 }
 

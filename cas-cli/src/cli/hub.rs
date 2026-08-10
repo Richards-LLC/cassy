@@ -579,6 +579,11 @@ fn status(cli: &Cli) -> Result<()> {
 fn stop(cli: &Cli) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
+    let tailscale_manager = TailscaleServeManager::new(paths.root());
+    // Capture the exact mapping we own before asking the hub to exit. The
+    // foreground process now always tears it down on SIGTERM, so stop must
+    // judge the final outcome instead of which process issued `serve off`.
+    let owned_tailscale_receipt = tailscale_manager.owned_receipt();
     if record.as_ref().is_some_and(record_is_live) {
         let record = record.as_ref().expect("live record exists");
         #[cfg(unix)]
@@ -596,7 +601,18 @@ fn stop(cli: &Cli) -> Result<()> {
         // may already have removed it while still holding the machine lock.
         drop(paths.wait_for_instance_lock(HUB_LIFECYCLE_TIMEOUT)?);
     }
-    let tailscale_result = TailscaleServeManager::new(paths.root()).disable_owned();
+    let tailscale_result = tailscale_manager.disable_owned();
+    let tailscale_outcome = match tailscale_result {
+        Ok(Some(receipt)) => Ok((true, Some(receipt))),
+        Ok(None) => match owned_tailscale_receipt {
+            Ok(Some(receipt)) => tailscale_manager
+                .mapping_is_absent(&receipt)
+                .map(|absent| (absent, None)),
+            Ok(None) => Ok((false, None)),
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
     paths.remove_process_record()?;
     if cli.json {
         println!(
@@ -604,8 +620,8 @@ fn stop(cli: &Cli) -> Result<()> {
             serde_json::json!({
                 "stopped":true,
                 "pid":record.as_ref().map(|record| record.pid),
-                "tailscale_serve_removed":matches!(&tailscale_result, Ok(Some(_))),
-                "tailscale_warning":tailscale_result.as_ref().err().map(ToString::to_string),
+                "tailscale_serve_removed":matches!(&tailscale_outcome, Ok((true, _))),
+                "tailscale_warning":tailscale_outcome.as_ref().err().map(ToString::to_string),
             })
         );
     } else {
@@ -614,12 +630,15 @@ fn stop(cli: &Cli) -> Result<()> {
         } else {
             println!("CAS hub was not running");
         }
-        match tailscale_result {
-            Ok(Some(receipt)) => println!(
+        match tailscale_outcome {
+            Ok((true, Some(receipt))) => println!(
                 "Removed CAS Tailscale Serve mapping at {}",
                 receipt.public_url
             ),
-            Ok(None) => {}
+            Ok((true, None)) => {
+                println!("CAS Tailscale Serve mapping was removed as the hub exited")
+            }
+            Ok((false, _)) => {}
             Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),
         }
     }

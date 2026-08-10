@@ -163,7 +163,7 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
 
 #[cfg(unix)]
 #[test]
-fn clean_home_tailscale_path_bootstraps_receipts_and_cleans_up() {
+fn clean_home_tailscale_stop_reports_removal_after_serve_exit_teardown() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = private_home();
@@ -304,6 +304,9 @@ esac
         "killed trusted backend listener survived recovery"
     );
 
+    // `hub stop` waits for the foreground process to exit. That process now
+    // performs the owned teardown itself, so the receipt must report the
+    // mapping's final absence rather than require stop to be its remover.
     let stop = assert_health_status_and_stop(home.path(), bin.as_os_str(), &recovered);
     assert_eq!(stop["tailscale_serve_removed"], true);
     assert!(!home.path().join(".cas/hub/tailscale-serve.json").exists());

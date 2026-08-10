@@ -173,15 +173,9 @@ impl TailscaleServeManager {
     /// Disable only a mapping CAS created and only while it is still unchanged.
     pub fn disable_owned(&self) -> Result<Option<TailscaleServeReceipt>> {
         let path = self.state_dir.join(RECEIPT_FILE);
-        let receipt: TailscaleServeReceipt = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid CAS Tailscale receipt")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(receipt) = self.owned_receipt()? else {
+            return Ok(None);
         };
-        anyhow::ensure!(
-            receipt.created_by_cas,
-            "CAS does not own this Tailscale mapping"
-        );
         let before = self.serve_status()?;
         anyhow::ensure!(
             handlers_on_port(&before, receipt.https_port)
@@ -210,6 +204,26 @@ impl TailscaleServeManager {
         write_private_json(&self.state_dir.join(TEARDOWN_RECEIPT_FILE), &teardown)?;
         fs::remove_file(path)?;
         Ok(Some(receipt))
+    }
+
+    /// Load CAS's current ownership receipt, if there is one.
+    pub fn owned_receipt(&self) -> Result<Option<TailscaleServeReceipt>> {
+        let path = self.state_dir.join(RECEIPT_FILE);
+        let receipt: TailscaleServeReceipt = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid CAS Tailscale receipt")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(
+            receipt.created_by_cas,
+            "CAS does not own this Tailscale mapping"
+        );
+        Ok(Some(receipt))
+    }
+
+    /// Check whether the exact mapping recorded in an ownership receipt is gone.
+    pub fn mapping_is_absent(&self, receipt: &TailscaleServeReceipt) -> Result<bool> {
+        Ok(handlers_on_port(&self.serve_status()?, receipt.https_port).is_empty())
     }
 
     fn status(&self) -> Result<Value> {

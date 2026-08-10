@@ -24,6 +24,7 @@ use cas::store::{
 };
 use cas::types::{
     Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType,
+    WorkTarget,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
@@ -6270,6 +6271,122 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
     assert!(
         !text.contains("Stacked on"),
         "an epic cut straight from trunk must not claim a stack: {text}"
+    );
+}
+
+/// cas-50fe: projects that land child work directly on their configured
+/// integration branch must not be forced to fast-forward the cosmetic epic
+/// branch merely to satisfy `epic_status` or the close gate.  The child below
+/// is intentionally reachable from `main` but not from `epic/main-only`.
+///
+/// This is end-to-end because the diagnostic and close path must select the
+/// same repository/branch authority; a unit test of the collector alone would
+/// miss handler wiring back to `epic.branch`.
+#[tokio::test]
+async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    git(&["remote", "add", "origin", "https://github.com/example/main-only.git"]);
+    std::fs::write(project.join("seed.rs"), "// seed\n").unwrap();
+    git(&["add", "seed.rs"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["checkout", "-q", "-b", "epic/main-only"]);
+    git(&["checkout", "-q", "main"]);
+    git(&["checkout", "-q", "-b", "factory/alpha"]);
+    std::fs::write(project.join("delivered.rs"), "// delivered\n").unwrap();
+    git(&["add", "delivered.rs"]);
+    git(&["commit", "-q", "-m", "deliver directly to main"]);
+    git(&["checkout", "-q", "main"]);
+    git(&["merge", "-q", "--ff-only", "factory/alpha"]);
+    let delivered_sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "main"])
+            .current_dir(&project)
+            .output()
+            .expect("resolve delivered tip")
+            .stdout,
+    )
+    .expect("sha utf-8")
+    .trim()
+    .to_string();
+
+    let store = env.task_store();
+    let mut epic = Task::new("cas-50fe-main-only".to_string(), "main-only epic".to_string());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::InProgress;
+    epic.branch = Some("epic/main-only".to_string());
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/example/main-only".to_string(),
+        target_branch: "main".to_string(),
+    });
+    store.add(&epic).expect("add epic");
+    let child_id = child_task_of_epic(&env, &epic.id, "direct-main child");
+    let mut child = store.get(&child_id).expect("child");
+    child.status = TaskStatus::Closed;
+    child.assignee = Some("alpha".to_string());
+    store.update(&child).expect("set child branch evidence");
+
+    let mut status_req = factory_req("epic_status");
+    status_req.id = Some(epic.id.clone());
+    let status = get_text(
+        &env
+            .service
+            .factory(Parameters(status_req))
+            .await
+            .expect("epic_status"),
+    );
+    assert!(
+        status.contains("Parent branch: main") && status.contains("✓ All child factory branches are merged"),
+        "status must evaluate the configured integration target, not the cosmetic epic branch: {status}"
+    );
+
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .expect("disable verification for close-path fixture");
+    let close_req: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "close",
+        "id": epic.id,
+        "reason": "all children landed directly on main",
+        "commit_receipt": delivered_sha,
+    }))
+    .expect("close request");
+    let close = get_text(
+        &env
+            .service
+            .task(Parameters(close_req))
+            .await
+            .expect("epic close against declared target"),
+    );
+    assert!(
+        close.contains("Closed task:"),
+        "epic close must share epic_status's target authority: {close}"
     );
 }
 

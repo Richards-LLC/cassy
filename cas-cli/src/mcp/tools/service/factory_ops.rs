@@ -3242,10 +3242,40 @@ impl CasService {
             ));
         }
 
-        // The parent branch the gate compares against: the epic's
-        // own `branch` field (set by epic creation), falling back to
-        // "master" to match the epic-close path's existing default.
-        let parent_branch = epic.branch.as_deref().unwrap_or("master");
+        // Use the exact explicit repository/branch authority the epic close
+        // path uses. An epic branch can be a useful coordination branch while
+        // the project intentionally lands every child directly on the task's
+        // declared target (typically `main`). Reporting against the former
+        // while close evaluates the latter creates a false hard-block and
+        // trains operators to fast-forward cosmetic epic branches merely to
+        // silence this diagnostic (cas-50fe).
+        let declared_repo_context = epic
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| {
+                crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                    &self.inner.cas_root,
+                    target,
+                )
+            })
+            .transpose()
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        let close_project_root = declared_repo_context
+            .as_ref()
+            .map(|context| context.repo_root.clone())
+            .unwrap_or_else(|| {
+                self.inner
+                    .cas_root
+                    .parent()
+                    .unwrap_or(&self.inner.cas_root)
+                    .to_path_buf()
+            });
+        let parent_branch = declared_repo_context
+            .as_ref()
+            .map(|context| context.target_branch.as_str())
+            .or(epic.branch.as_deref())
+            .unwrap_or("master");
 
         let subtasks = task_store.get_subtasks(epic_id).map_err(|e| {
             Self::error(
@@ -3254,8 +3284,7 @@ impl CasService {
             )
         })?;
 
-        let close_project_root = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root);
-        let statuses = collect_epic_branch_statuses(&subtasks, parent_branch, close_project_root);
+        let statuses = collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
 
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides
@@ -3283,12 +3312,12 @@ impl CasService {
                 })
                 .map(|context| context.target_branch)
                 .or_else(|| {
-                    crate::config::Config::configured_epic_base_branch(close_project_root)
+                    crate::config::Config::configured_epic_base_branch(&close_project_root)
                 })
                 .unwrap_or_else(|| {
                     GitOperations::new(close_project_root.to_path_buf()).detect_default_branch()
                 });
-            GitOperations::new(close_project_root.to_path_buf())
+            GitOperations::new(close_project_root.clone())
                 .unlanded_epic_ancestry(parent_branch, &trunk)
         };
         let report = render_epic_status_report_with_stack(

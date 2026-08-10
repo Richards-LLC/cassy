@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use super::{Cli, hub::HubServiceCommands};
-use crate::hub::HubRuntimePaths;
+use crate::hub::{DEFAULT_HUB_PORT, HubRuntimePaths};
 
 const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
@@ -425,7 +425,7 @@ fn service_args(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> Ve
         "--bind".into(),
         "127.0.0.1".into(),
         "--port".into(),
-        "4173".into(),
+        DEFAULT_HUB_PORT.to_string(),
     ];
     if tailscale_serve {
         args.extend([

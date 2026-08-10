@@ -296,6 +296,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             started_at: chrono::Utc::now().to_rfc3339(),
             public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),
             tailscale_serve_port: tailscale.as_ref().map(|receipt| receipt.https_port),
+            tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
             transport_warning,
         };
         if let Err(error) = paths.write_process_record(&record) {

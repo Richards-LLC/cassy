@@ -813,6 +813,81 @@ impl StatusBar {
 #[cfg(test)]
 mod tests {
     use super::StatusBar;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render_status_bar(width: u16, update_badge: Option<&str>, error: Option<&str>) -> String {
+        let mut app = crate::ui::factory::app::FactoryApp::for_test();
+        app.error_message = error.map(str::to_string);
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                StatusBar::render_with_update_badge(
+                    frame,
+                    frame.area(),
+                    &app,
+                    update_badge.map(str::to_string),
+                )
+            })
+            .unwrap();
+
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn running_version_label() -> String {
+        format!("CAS v{}", env!("CARGO_PKG_VERSION"))
+    }
+
+    #[test]
+    fn wide_status_bar_always_shows_running_version() {
+        let text = render_status_bar(120, None, None);
+        assert!(text.contains(&running_version_label()), "{text}");
+    }
+
+    #[test]
+    fn narrow_status_bar_keeps_running_version_after_critical_mode() {
+        let text = render_status_bar(30, None, None);
+        assert!(text.contains("NORMAL"), "{text}");
+        assert!(text.contains(&running_version_label()), "{text}");
+    }
+
+    #[test]
+    fn update_available_keeps_current_and_latest_versions_unambiguous() {
+        let text = render_status_bar(120, Some("⬆ v99.0.0 available"), None);
+        assert!(text.contains(&running_version_label()), "{text}");
+        assert!(text.contains("⬆ v99.0.0 available"), "{text}");
+    }
+
+    #[test]
+    fn narrow_update_available_keeps_both_versions_when_space_allows() {
+        let text = render_status_bar(50, Some("⬆ v99.0.0 available"), None);
+        assert!(text.contains(&running_version_label()), "{text}");
+        assert!(text.contains("⬆ v99.0.0 available"), "{text}");
+    }
+
+    #[test]
+    fn disabled_or_unavailable_update_check_does_not_hide_running_version() {
+        let text = render_status_bar(80, None, None);
+        assert!(text.contains(&running_version_label()), "{text}");
+        assert!(!text.contains("available"), "{text}");
+    }
+
+    #[test]
+    fn failed_update_check_preserves_critical_error_and_running_version() {
+        let text = render_status_bar(50, None, Some("update check failed"));
+        assert!(text.contains("NORMAL"), "{text}");
+        assert!(text.contains("update check fail"), "{text}");
+        assert!(text.contains(&running_version_label()), "{text}");
+    }
 
     #[test]
     fn branch_label_drops_before_shortcut_hints_on_narrow_width() {

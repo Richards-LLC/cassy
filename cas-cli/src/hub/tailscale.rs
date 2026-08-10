@@ -17,6 +17,14 @@ use serde_json::Value;
 
 use crate::bounded_process::{self, BoundedCommandError, Deadline};
 
+#[cfg(test)]
+fn private_tempdir() -> tempfile::TempDir {
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .expect("temporary directory must be canonicalizable");
+    tempfile::tempdir_in(parent).expect("canonical temporary fixture directory")
+}
+
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const RECEIPT_FILE: &str = "tailscale-serve.json";
 const TEARDOWN_RECEIPT_FILE: &str = "tailscale-serve-teardown.json";
@@ -349,7 +357,7 @@ mod tests {
 
     #[test]
     fn absent_tailscale_has_clear_sanitized_refusal() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let manager = TailscaleServeManager::with_executable(
             temp.path().join("hub"),
             temp.path().join("definitely-not-installed"),
@@ -364,7 +372,7 @@ mod tests {
     fn mocked_binary_proves_idempotent_setup_and_owned_teardown() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
         let calls = temp.path().join("calls");
         let state = temp.path().join("serve-state");
@@ -396,7 +404,7 @@ mod tests {
     fn mocked_binary_refuses_unrelated_mapping_without_mutation() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
         let calls = temp.path().join("calls");
         let script = format!(
@@ -417,7 +425,7 @@ mod tests {
     fn failed_post_creation_verification_rolls_back_without_receipt() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
         let calls = temp.path().join("calls");
         let count = temp.path().join("status-count");
@@ -450,12 +458,12 @@ mod tests {
     fn owned_teardown_refuses_externally_altered_mapping_and_keeps_receipt() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
         let calls = temp.path().join("calls");
         let state = temp.path().join("serve-state");
         let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n'status --json') printf '%s' '{{\"Self\":{{\"DNSName\":\"node.tail.ts.net.\"}}}}' ;;\n'serve status --json') if [ -f '{}' ]; then if /bin/grep -q 9999 '{}'; then printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:9999\"}}}}}}}}}}'; else printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:4173\"}}}}}}}}}}'; fi; else printf '%s' '{{}}'; fi ;;\n'serve --bg --yes --https=443 http://127.0.0.1:4173') printf '%s' 4173 > '{}' ;;\n'serve --https=443 off') rm -f '{}' ;;\n*) exit 9 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n'status --json') printf '%s' '{{\"Self\":{{\"DNSName\":\"node.tail.ts.net.\"}}}}' ;;\n'serve status --json') if [ -f '{}' ]; then if grep -q 9999 '{}'; then printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:9999\"}}}}}}}}}}'; else printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:4173\"}}}}}}}}}}'; fi; else printf '%s' '{{}}'; fi ;;\n'serve --bg --yes --https=443 http://127.0.0.1:4173') printf '%s' 4173 > '{}' ;;\n'serve --https=443 off') rm -f '{}' ;;\n*) exit 9 ;;\nesac\n",
             calls.display(),
             state.display(),
             state.display(),
@@ -469,6 +477,11 @@ mod tests {
 
         assert!(manager.ensure(4173, 443).unwrap().created_by_cas);
         fs::write(&state, "9999").unwrap();
+        assert_eq!(
+            handlers_on_port(&manager.serve_status().unwrap(), 443),
+            vec![("/".into(), "http://127.0.0.1:9999".into())],
+            "the mock must expose the external mapping before teardown checks it"
+        );
         let error = manager.disable_owned().unwrap_err().to_string();
         assert!(error.contains("mapping changed"), "{error}");
         assert!(hub.join(RECEIPT_FILE).exists());

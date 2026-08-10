@@ -5346,6 +5346,27 @@ fn format_not_waking_status(
     )
 }
 
+/// Whether old unread mail is evidence that a worker failed to react.
+///
+/// An unread row is historical evidence. It becomes a NOT WAKING signal only
+/// when the worker has also been inactive for the same sustained interval.
+/// In particular, a recent activity / turn-start observation proves the worker
+/// is alive *after* old inbox residue was created, so that residue must not
+/// accuse the worker of failing to wake. Keep this predicate separate from the
+/// broader `is_worker_stalled` classifier: cas-058e can extend the shared
+/// liveness inputs without having to reconstruct this conjunction from an
+/// output-formatting branch.
+fn has_unreacted_stale_inbox(
+    unread_inbox: usize,
+    oldest_unread_secs: Option<i64>,
+    last_activity: Option<(i64, &'static str)>,
+    inactivity_threshold_secs: i64,
+) -> bool {
+    unread_inbox > 0
+        && oldest_unread_secs.is_some_and(|age| age >= inactivity_threshold_secs)
+        && last_activity.is_none_or(|(age, _)| age >= inactivity_threshold_secs)
+}
+
 /// Render the highest-priority worker-status alert.
 ///
 /// A confirmed InProgress stall is more urgent than a second assigned Open
@@ -5374,11 +5395,15 @@ fn format_priority_worker_status_alert(
         let heartbeat_lapsed = heartbeat_elapsed_secs >= WORKER_STALE_SECS;
         if !turn_start_observable && !heartbeat_lapsed {
             // Handed work and did not react: a real, actionable stall the
-            // heartbeat cannot see.
-            if let Some(oldest) = oldest_unread_secs
-                && unread_inbox > 0
-                && oldest >= stall_threshold_secs
-            {
+            // heartbeat cannot see. Old unread mail alone is not enough: the
+            // worker must also have been inactive for the entire threshold.
+            if has_unreacted_stale_inbox(
+                unread_inbox,
+                oldest_unread_secs,
+                last_activity,
+                stall_threshold_secs,
+            ) {
+                let oldest = oldest_unread_secs.expect("predicate requires unread age");
                 return Some(format_not_waking_status(
                     last_activity,
                     unread_inbox,
@@ -8086,6 +8111,50 @@ effort = "high"
             "must say what to check: {rendered}"
         );
         assert!(!rendered.contains("between turns"), "{rendered}");
+    }
+
+    /// cas-bcf5 (GH #162): stale inbox residue does not outweigh a worker's
+    /// own recent-activity line. This was the live contradiction: NOT WAKING
+    /// rendered alongside "last activity 348s ago" because the unread-age
+    /// branch was independently sufficient.
+    #[test]
+    fn recent_activity_suppresses_not_waking_even_with_old_unread_mail() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((348, "activity")),
+            600,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            inbox(3, Some(2_884)),
+        )
+        .expect("a stalled-by-threshold worker must still render a status line");
+
+        assert!(!rendered.contains("NOT WAKING"), "{rendered}");
+        assert!(
+            rendered.contains("between turns since 348s ago"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("3 unread messages waiting"), "{rendered}");
+    }
+
+    /// cas-bcf5 (GH #162): both halves of the evidence remain actionable when
+    /// no activity has been observed at all and unread work is old.
+    #[test]
+    fn silent_worker_with_old_unread_mail_still_flags_not_waking() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            None,
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            inbox(1, Some(900)),
+        )
+        .expect("genuinely silent worker with unread work must alert");
+
+        assert!(rendered.contains("⚠ NOT WAKING"), "{rendered}");
+        assert!(rendered.contains("1 message unread for 900s"), "{rendered}");
     }
 
     /// Mail that arrived a moment ago is not evidence of anything — the worker

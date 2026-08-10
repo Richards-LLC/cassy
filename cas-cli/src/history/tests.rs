@@ -39,6 +39,12 @@ impl Fixture {
         run(&repo, &["config", "user.email", "fixture@example.com"]);
         run(&repo, &["config", "user.name", "Fixture Author"]);
         run(&repo, &["config", "commit.gpgsign", "false"]);
+        // The chunk-boundary fixture creates 503 tiny commits. Keep Git's
+        // host-dependent auto-maintenance out of that deterministic loop:
+        // maintenance can repack loose objects concurrently with a commit on
+        // macOS, producing an unrelated "unable to read tree" failure.
+        run(&repo, &["config", "gc.auto", "0"]);
+        run(&repo, &["config", "maintenance.auto", "false"]);
 
         Self {
             _dir: dir,

@@ -29,18 +29,13 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
 
 ## Task Types
 
-- **Spike** (`task_type=spike`) — produces understanding, not code. Deliverable is a decision/comparison/recommendation captured via `note_type=decision`. Spike acceptance criteria are question-based.
-- **Demo statements** — if a task has a `demo_statement`, the work must produce that observable outcome.
-- **Report / evidence tasks** — Deliverable is a report, incident summary, or evidence packet. Prefer MCP task/search/coordination surfaces, `.cas/logs`, task notes, and existing local artifacts over live `.cas/cas.db` inspection; if the DB is truly necessary, note why and use a read-only SQLite URI or a copied snapshot ([details.md](cas-worker/references/details.md)).
+- **Spike** — record its decision with `note_type=decision`; its criteria are question-based.
+- **Demo statements** — produce the stated observable outcome.
+- **Report / evidence tasks** — prefer MCP task/search/coordination surfaces, `.cas/logs`, and artifacts; if database access is necessary, use a read-only SQLite URI or copied snapshot ([details.md](cas-worker/references/details.md)).
 
 ## Task Depth
 
-Tasks carry a `depth` field, shown as `Depth:` in `task show`/`task mine`. Read it when you **start** — it sets your working style. Depth comes from the **task record**, never an env var.
-
-- **`light`** — Speed mode for feel-driven iteration. Ship the **minimal diff** that satisfies the ask, then stop. NO gold-plating: no unasked tests, docs, edge-case handling, or refactors. **Skip the 6 pre-close self-checks** in [close-gate.md](cas-worker/references/close-gate.md). The Definition of Done is "it runs on localhost" — the human is the evaluator, so stop there.
-- **`deep` or unset** — Default. Full discipline: the close-gate and everything below apply unchanged.
-
-`light` relaxes thoroughness, not integrity: stay in your layer, respect non-goals, and never claim a proof you didn't run.
+Read `depth` in `task show`: **`light`** ships the minimal requested diff and skips the six [close-gate.md](cas-worker/references/close-gate.md) self-checks; **`deep` or unset** uses full discipline. Light never relaxes integrity, layer boundaries, or proof.
 
 ## Execution Posture
 
@@ -61,9 +56,9 @@ Your scope is locked at assignment:
 - **Scope is frozen.** Build exactly the spec; note related improvements without implementing them.
 - **Honor non-goals and layer boundaries.** Modify only assigned files/modules.
 - **Match existing patterns.** Follow established conventions; don't introduce new ones without asking.
-- **Stow/install only from the main checkout, never a worktree.** Persistent symlinks from `stow`, `chezmoi`, or install scripts otherwise break when the worktree is cleaned.
+- **Stow/install only from the main checkout, never a worktree.** Persistent symlinks otherwise break when the worktree is cleaned.
 - **No config surprises.** Don't hardcode values that should be configurable. Don't add config that wasn't requested.
-- **Use sanctioned storage.** Write source and short-lived build output in the worktree; write durable task proof only under `[factory] artifacts_root/<task-id>/` (default `~/.cas/artifacts/<task-id>/`). Bare `/tmp` and stray `$HOME` files are off-limits. Harness scratchpads may be under `/tmp`, but are ephemeral and must never be cited as close evidence.
+- **Use sanctioned storage.** Keep source/build output in the worktree; durable proof goes under `[factory] artifacts_root/<task-id>/`. `/tmp` scratchpads are ephemeral and never close evidence.
 - **Document important choices.** Use `cas__task action=notes note_type=decision` for non-obvious decisions.
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
 - **Report context headroom** ("context: ~60% used") in every milestone progress note.
@@ -76,10 +71,9 @@ cas__coordination action=message target=supervisor \
   summary="<brief preview>" message="<full body>"
 ```
 
-- **Use the literal string `supervisor` as `target`.** CAS resolves it from `CAS_SUPERVISOR_NAME` or the active supervisor agent, so it can't go stale. A display name (e.g. `sturdy-finch-2`) is accepted only when it exactly matches that resolved supervisor.
-- **Both `summary` and `message` are required** on every send — `message` alone is rejected with `summary required`.
-- **You may ONLY message the supervisor.** Anything else, including peer workers, is rejected with `"Workers can only message their supervisor"`. Need something from another worker? Ask the supervisor to relay.
-- Use `cas__coordination action=message`, not the built-in `SendMessage`, from your first ready-ping onward. `SendMessage` isn't blocked — a factory PreToolUse hook auto-routes it onto the same CAS queue and returns success (cas-f32b) — but it only carries what that layer can parse. Call the coordination tool directly.
+- **Use the literal string `supervisor` as `target`** and include both `summary` and `message`.
+- **You may ONLY message the supervisor.** Ask them to relay peer requests.
+- Use `cas__coordination action=message`, not built-in `SendMessage`.
 - Use task notes for ongoing updates (`note_type=progress|blocker|decision|discovery`); the supervisor sees these in the TUI. Message them when you complete a task or need help.
 
 ## Blockers
@@ -94,11 +88,9 @@ Before setting `status=blocked`, re-read with `action=show`. If it already shows
 
 ## Running Tests in a Worker
 
-**Batch the fixes, then verify once.** Collect every fix you know you need first — a full re-run per micro-fix is your biggest time sink.
+**Batch the fixes, then verify once.** **Inner loop:** `cargo test --lib <module>` / `cargo test --test <name>` / a name filter. **Final proof:** full scoped suite, at most twice; prefer `cargo nextest run`. Background long runs; never foreground-`sleep`.
 
-**Inner loop — seconds:** `cargo test --lib <module>` / `cargo test --test <name>` / a name filter, guard armed. **Final proof — the full scoped suite, at most twice:** after the batch, then as the pre-close receipt. Prefer `cargo nextest run` if installed. Background anything over ~2 min and do other work meanwhile — never foreground-`sleep` on it.
-
-**Then check the clean-CI shape.** Your shell exports ~15 `CAS_*` variables; a test that reads one passes for you and fails only in CI. Before pushing env-reading code, re-run the scoped binary through `make -C cas-cli test-clean-env`.
+For env-reading code, check the clean-CI shape with `make -C cas-cli test-clean-env`.
 
 ## References
 

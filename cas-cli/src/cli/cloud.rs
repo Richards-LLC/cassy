@@ -236,6 +236,10 @@ pub struct CloudQueueArgs {
     #[arg(long)]
     pub prune: Option<i64>,
 
+    /// Requeue all terminally failed items, preserving their last error
+    #[arg(long, conflicts_with_all = ["prune", "clear"])]
+    pub retry: bool,
+
     /// Clear all items from the queue
     #[arg(long)]
     pub clear: bool,
@@ -1568,6 +1572,23 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                 "Pruned {} failed items older than {} days",
                 pruned, days
             ))?;
+        }
+        return Ok(());
+    }
+
+    // Reset only terminal failures. Their diagnostics remain on the rows so
+    // operators retain the server evidence while a repaired cloud endpoint
+    // gets another chance to accept them.
+    if args.retry {
+        let max_retries = 5;
+        let retried = queue.retry_failed(max_retries)?;
+        if cli.json {
+            println!(r#"{{"status":"ok","retried":{retried}}}"#);
+        } else {
+            let theme = ActiveTheme::default();
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, theme);
+            fmt.success(&format!("Requeued {retried} failed item(s)"))?;
         }
         return Ok(());
     }

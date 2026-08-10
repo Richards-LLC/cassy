@@ -40,6 +40,16 @@ struct UpdateCheckCache {
 impl StatusBar {
     /// Render the status bar
     pub fn render(frame: &mut Frame, area: Rect, app: &FactoryApp) {
+        let update_badge = Self::update_badge(app.cas_dir());
+        Self::render_with_update_badge(frame, area, app, update_badge);
+    }
+
+    fn render_with_update_badge(
+        frame: &mut Frame,
+        area: Rect,
+        app: &FactoryApp,
+        update_badge: Option<String>,
+    ) {
         let palette = &app.theme().palette;
         let styles = &app.theme().styles;
         let mut left_spans = Vec::new();
@@ -91,17 +101,6 @@ impl StatusBar {
                     .add_modifier(Modifier::BOLD),
             ));
             left_spans.push(Span::raw(" "));
-        }
-
-        // Update indicator (if cached check says update is available)
-        if area.width >= 70 {
-            if let Some(update_label) = Self::update_badge(app.cas_dir()) {
-                left_spans.push(Span::styled(
-                    update_label,
-                    styles.text_warning.add_modifier(Modifier::BOLD),
-                ));
-                left_spans.push(Span::raw(" "));
-            }
         }
 
         // Show layout percentages in resize mode
@@ -540,6 +539,23 @@ impl StatusBar {
             }
         }
 
+        // Responsive priority, lowest to highest: shortcut hints, the
+        // network-derived latest-release badge, then the compiled/running CAS
+        // identity. `trim_spans_from_front` sheds that list in the same order.
+        // Mode and error indicators stay on the untrimmed left and therefore
+        // win when a terminal is too narrow to render every meaningful status.
+        if let Some(update_label) = update_badge {
+            right_spans.push(Span::raw(" │ "));
+            right_spans.push(Span::styled(
+                update_label,
+                styles.text_warning.add_modifier(Modifier::BOLD),
+            ));
+        }
+        right_spans.push(Span::raw(" │ "));
+        right_spans.push(Span::styled(
+            format!("CAS v{}", env!("CARGO_PKG_VERSION")),
+            styles.text_accent.add_modifier(Modifier::BOLD),
+        ));
         right_spans.push(Span::raw(" "));
 
         // Keep right hints within visible width (especially 80-col tmux panes).
@@ -885,7 +901,7 @@ mod tests {
     fn failed_update_check_preserves_critical_error_and_running_version() {
         let text = render_status_bar(50, None, Some("update check failed"));
         assert!(text.contains("NORMAL"), "{text}");
-        assert!(text.contains("update check fail"), "{text}");
+        assert!(text.contains("update check fa"), "{text}");
         assert!(text.contains(&running_version_label()), "{text}");
     }
 

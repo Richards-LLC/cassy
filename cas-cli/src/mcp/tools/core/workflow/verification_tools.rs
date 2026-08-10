@@ -595,7 +595,7 @@ impl CasCore {
                 verification.status,
                 VerificationStatus::Approved | VerificationStatus::Skipped
             );
-            if let Some(delivery_transaction_id) = dispatch.delivery_transaction_id.as_deref()
+            let delivery_transitioned = if let Some(delivery_transaction_id) = dispatch.delivery_transaction_id.as_deref()
                 && cas_store::transition_worker_delivery_verification_with_conn(
                     &tx,
                     delivery_transaction_id,
@@ -612,6 +612,55 @@ impl CasCore {
                 })?
                 .is_some()
             {
+                true
+            } else {
+                false
+            };
+
+            if !approved_delivery && task.status == TaskStatus::PendingSupervisorReview {
+                // A rejected exact supervisor review is a completed proof
+                // cycle, not a terminal task state. Reopen every PSR boundary
+                // (plain task, repository-proof, or delivery-backed) so the
+                // assigned worker can amend and immediately restart. Keeping
+                // this projection independent of the boundary shape avoids a
+                // repository proof silently leaving the task wedged in PSR.
+                let decision = format!(
+                    "Decision: supervisor review rejected (dispatch {}; verification {}): {}",
+                    dispatch.id, verification.id, verification.summary
+                );
+                let notes = if task.notes.trim().is_empty() {
+                    decision
+                } else {
+                    format!("{}\n\n{}", task.notes.trim_end(), decision)
+                };
+                let changed = tx
+                    .execute(
+                        "UPDATE tasks
+                         SET status = 'open', pending_verification = 0, notes = ?2, updated_at = ?3
+                         WHERE id = ?1 AND status = 'pending_supervisor_review'",
+                        rusqlite::params![
+                            req.task_id,
+                            notes,
+                            chrono::Utc::now().to_rfc3339(),
+                        ],
+                    )
+                    .map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to project supervisor-review rejection: {e}"
+                        )),
+                        data: None,
+                    })?;
+                if changed != 1 {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Supervisor-review rejection raced with a task status change.",
+                        ),
+                        data: None,
+                    });
+                }
+            } else if delivery_transitioned {
                 tx.execute(
                     "UPDATE tasks
                      SET status = ?2, pending_verification = 0, updated_at = ?3
@@ -630,28 +679,6 @@ impl CasCore {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
                         "Failed to project delivery verification state: {e}"
-                    )),
-                    data: None,
-                })?;
-            } else if dispatch.receipt_id.is_none()
-                && dispatch.delivery_transaction_id.is_none()
-                && task.status == TaskStatus::PendingSupervisorReview
-                && !approved_delivery
-            {
-                // A task-only supervisor-review rejection returns the work to
-                // Blocked for amendment. Approval remains in the review queue
-                // with its pending flag cleared so the supervisor can close
-                // or merge it using the durable verdict.
-                tx.execute(
-                    "UPDATE tasks
-                     SET status = 'blocked', pending_verification = 0, updated_at = ?2
-                     WHERE id = ?1 AND status = 'pending_supervisor_review'",
-                    rusqlite::params![req.task_id, chrono::Utc::now().to_rfc3339()],
-                )
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to project supervisor-review rejection: {e}"
                     )),
                     data: None,
                 })?;

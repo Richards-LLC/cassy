@@ -11,8 +11,12 @@ use cas::config::{CodeReviewConfig, Config};
 use cas::mcp::CasService;
 use cas::mcp::tools::VerificationAddRequest;
 use cas::store::{open_agent_store, open_task_store, open_verification_store};
-use cas::types::{TaskStatus, Verification, VerificationStatus};
+use cas::types::{
+    RepositoryProofBoundary, Task, TaskStatus, Verification, VerificationProofBoundary,
+    VerificationStatus,
+};
 use rmcp::handler::server::wrapper::Parameters;
+use sha2::{Digest, Sha256};
 use std::process::Command;
 
 // ---------------------------------------------------------------------------
@@ -90,6 +94,64 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
     std::fs::write(project_root.join("feature.rs"), "pub fn feature() -> u32 { 42 }\n")
         .expect("write should succeed");
     git(&["add", "feature.rs"]);
+}
+
+/// Build the same repository boundary that a close-time dispatch carries.
+/// This fixture has no untracked non-CAS files, so only the tracked Git diff
+/// participates in the digest.
+fn repository_proof_fixture(project_root: &std::path::Path) -> RepositoryProofBoundary {
+    let root = project_root.canonicalize().expect("canonical repository root");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        output.stdout
+    };
+    let head_commit = String::from_utf8(git(&["rev-parse", "--verify", "HEAD"]))
+        .expect("UTF-8 HEAD")
+        .trim()
+        .to_string();
+    let tracked = git(&[
+        "diff",
+        "--no-ext-diff",
+        "--binary",
+        "--full-index",
+        "HEAD",
+        "--",
+        ".",
+        ":(exclude).cas",
+        ":(exclude).cas/**",
+    ]);
+    let untracked = git(&[
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ".",
+        ":(exclude).cas",
+        ":(exclude).cas/**",
+    ]);
+    assert!(
+        untracked.is_empty(),
+        "fixture must not add untracked non-CAS files"
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas-verification-repository-proof-v1\0");
+    hasher.update(head_commit.as_bytes());
+    hasher.update(b"\0tracked\0");
+    hasher.update(tracked);
+    hasher.update(b"\0untracked\0");
+    RepositoryProofBoundary {
+        repository_root: root.to_string_lossy().into_owned(),
+        worktree_root: root.to_string_lossy().into_owned(),
+        head_commit,
+        state_digest: format!("{:x}", hasher.finalize()),
+    }
 }
 
 /// Init a git repo where the staged diff contains a `todo!()` violation so
@@ -428,6 +490,7 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
         cas_store::get_latest_verification_dispatch(&cas_dir, &rejected_task_id)
             .unwrap()
             .expect("rejection task dispatch");
+    assert!(rejected_dispatch.repository.is_none());
     drop(worker_guard);
     drop(worker_service);
 
@@ -489,8 +552,28 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
         .await
         .expect("supervisor rejects exact pending review dispatch");
     let rejected_task = open_task_store(&cas_dir).unwrap().get(&rejected_task_id).unwrap();
-    assert_eq!(rejected_task.status, TaskStatus::Blocked);
+    assert_eq!(rejected_task.status, TaskStatus::Open);
+    assert_eq!(rejected_task.assignee.as_deref(), Some("test-agent"));
     assert!(!rejected_task.pending_verification);
+    assert!(
+        rejected_task.notes.contains("Decision: supervisor review rejected"),
+        "the rejected verdict must leave an audited decision note"
+    );
+
+    let restarted_worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    restarted_worker_core.set_agent_id_for_testing(worker_id.to_string());
+    let restarted_worker_service = CasService::new(restarted_worker_core, None);
+    let _restarted_worker_guard = FactoryWorkerGuard::enter();
+    restarted_worker_service
+        .task(Parameters(task_req(
+            serde_json::json!({"action": "start", "id": rejected_task_id}),
+        )))
+        .await
+        .expect("task-only rejection must allow the assigned worker to restart");
+    assert_eq!(
+        open_task_store(&cas_dir).unwrap().get(&rejected_task_id).unwrap().status,
+        TaskStatus::InProgress
+    );
 
     let latest = open_verification_store(&cas_dir)
         .unwrap()
@@ -512,6 +595,104 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
         )
         .unwrap();
     assert_eq!((dispatches, verdicts, capabilities, handoffs), (1, 1, 0, 0));
+}
+
+/// cas-f985: a rejected repository-proof supervisor dispatch is a completed review
+/// cycle. It must reopen the same assigned worker without requiring a force
+/// reset or leaving the exact proof scope locked.
+#[tokio::test]
+async fn test_repository_proof_rejection_reopens_and_allows_worker_restart_cas_f985() {
+    let (temp, _core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    init_git_repo_with_staged_changes(temp.path());
+    let session = "cas-f985-repository-proof";
+    let worker_id = "cas-f985-worker";
+    let supervisor_id = "cas-f985-supervisor";
+    let agent_store = open_agent_store(&cas_dir).unwrap();
+
+    let mut worker =
+        cas::types::Agent::new(worker_id.to_string(), worker_id.to_string());
+    worker.role = cas::types::AgentRole::Worker;
+    worker.agent_type = cas::types::AgentType::Worker;
+    worker.factory_session = Some(session.to_string());
+    worker.heartbeat();
+    agent_store.register(&worker).unwrap();
+    let mut supervisor =
+        cas::types::Agent::new(supervisor_id.to_string(), "supervisor".to_string());
+    supervisor.role = cas::types::AgentRole::Supervisor;
+    supervisor.factory_session = Some(session.to_string());
+    supervisor.heartbeat();
+    agent_store.register(&supervisor).unwrap();
+
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let mut task = Task::new(
+        "cas-f985-repository-proof".to_string(),
+        "repository-proof rejected supervisor review".to_string(),
+    );
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(worker_id.to_string());
+    task_store.add(&task).unwrap();
+    let mut pending = task.clone();
+    pending.status = TaskStatus::PendingSupervisorReview;
+    pending.pending_verification = true;
+    task_store.update(&pending).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &cas_dir,
+        &task.id,
+        worker_id,
+        supervisor_id,
+        &VerificationProofBoundary::task_at(repository_proof_fixture(temp.path())),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("repository-proof pending review transition");
+    assert!(dispatch.repository.is_some());
+    assert!(dispatch.receipt_id.is_none());
+    assert!(dispatch.delivery_transaction_id.is_none());
+
+    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing(supervisor_id.to_string());
+    supervisor_core
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task.id.clone(),
+            status: "rejected".to_string(),
+            summary: "Needs the missing regression case.".to_string(),
+            confidence: Some(0.9),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect("supervisor rejects exact repository-proof dispatch");
+
+    let reopened = task_store.get(&task.id).unwrap();
+    assert_eq!(reopened.status, TaskStatus::Open);
+    assert_eq!(reopened.assignee.as_deref(), Some(worker_id));
+    assert!(!reopened.pending_verification);
+    assert!(reopened.notes.contains(&dispatch.id));
+    assert!(reopened.notes.contains("Needs the missing regression case."));
+
+    let worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id.to_string());
+    let worker_service = CasService::new(worker_core, None);
+    let _worker_guard = FactoryWorkerGuard::enter();
+    worker_service
+        .task(Parameters(task_req(
+            serde_json::json!({"action": "start", "id": task.id}),
+        )))
+        .await
+        .expect("repository-proof rejection must allow the assigned worker to restart");
+    assert_eq!(
+        task_store
+            .get("cas-f985-repository-proof")
+            .unwrap()
+            .status,
+        TaskStatus::InProgress
+    );
 }
 
 /// AC5 test 5: the `CodeReviewConfig` default owner is "supervisor" (cas-865b).

@@ -1,16 +1,13 @@
-# Commander v1 runtime release — v2.55.5 candidate, unposted Slack drafts
+# Commander v1 runtime release — v2.60.0 acceptance in progress, unposted Slack drafts
 
-> **DO NOT POST.** The immutable public `v2.55.4` artifact is authentic and identically installed on
-> two real machines, but its assembled H7 verdict is **NOT RELEASABLE**. In two fresh Chrome 151
-> phone-class attempts, local controller pairing succeeded and the authorized machine-B preflight
-> returned the exact controller origin, but the subsequent cross-origin pairing exchange failed in
-> Chrome with `MissingAllowOriginHeader`. Direct multi-machine pairing never completed, so the gate
-> stopped before later acceptance rows. All published tags, releases, and assets remain unchanged.
-> Source candidate `v2.55.5` contains the reviewed controller-origin CORS correction; it is not
-> tagged, published, installed, or accepted yet. **H7 remains NOT YET RELEASABLE. Do not post these
-> drafts.** Re-review only after a new immutable corrective release is independently verified and
-> passes the complete two-machine H7 matrix from its exact public bytes. Slack remains unposted until
-> the user elects to post after a green gate.
+> **DO NOT POST.** Immutable public `v2.60.0` is authentic, and real Chrome 151 at `390×844`
+> successfully paired soundwave from the prowl controller origin. The operator then rebound the
+> Commander v1 two-machine gate to prowl + soundwave only; unicron and shield are out of scope. The
+> captured unicron `MissingAllowOriginHeader` result is a separate anomaly, not an H7 failure.
+> **H7 remains IN PROGRESS with no release verdict.** Fan-out, controller arbitration,
+> replay/revocation/scope, restart/reconnect, compatibility, no-polling/count, and `SIGILL` rows remain
+> to execute against prowl + soundwave. Do not post these drafts until that binding matrix is green
+> and the user explicitly elects to publish.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -78,8 +75,8 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Replace `[PUBLISHED VERSION]` only after one new immutable corrective tag exists; do not reuse or
-      move `v2.55.4` or any earlier tag.
+- [ ] Replace `[PUBLISHED VERSION]` only after the rebound prowl + soundwave H7 matrix is green; do not
+      move `v2.60.0` or any earlier tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the

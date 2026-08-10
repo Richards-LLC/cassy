@@ -48,85 +48,84 @@
 </head>
 <body>
 <header>
-  <div class="eyebrow">Engineering investigation · practitioner review · 2026-08-09</div>
+  <div class="eyebrow">Engineering investigation · practitioner review · updated 2026-08-10</div>
   <h1>Commander v1 assembled acceptance gate</h1>
-  <div class="verdict"><strong>NOT RELEASABLE · high confidence</strong><p class="lede">Immutable public <code>v2.55.4</code> passed artifact, clean-home, and supported TLS/HSTS checks, but real Chrome 151 at <code>390×844</code> could not complete the documented controller-origin pairing to the second machine. Chrome named <code>MissingAllowOriginHeader</code>. The gate stopped immediately; later rows are not inferred green.</p></div>
+  <div class="verdict"><strong>IN PROGRESS · no release verdict · high confidence</strong><p class="lede">Immutable public <code>v2.60.0</code> is authentic, and real Chrome 151 at <code>390×844</code> paired soundwave from the prowl controller origin. The operator rebound Commander v1 to prowl + soundwave only. A captured unicron CORS anomaly is out of scope; the binding live matrix remains incomplete.</p></div>
   <p>The binding contract is the <a href="../specs/2026-08-08-commander-security-architecture.md">Commander security architecture ADR</a>, especially <code>H7-ADV-01</code>, <code>H7-FLEET-02</code>, <code>H7-INVARIANT-03</code>, and <code>H7-CRASH-04</code>.</p>
 </header>
 <main>
   <section aria-labelledby="overview"><h2 id="overview">Overview</h2>
     <div class="proof-strip" aria-label="Key executed facts">
-      <div class="proof"><b>v2.55.4</b><span>exact immutable public release</span></div>
-      <div class="proof"><b>2 machines</b><span>identical public Linux bytes</span></div>
-      <div class="proof"><b>2 attempts</b><span>Chrome 151, phone-class 390×844</span></div>
-      <div class="proof"><b>CORS fail</b><span>machine-B pairing exchange</span></div>
+      <div class="proof"><b>v2.60.0</b><span>exact immutable public release</span></div>
+      <div class="proof"><b>prowl + soundwave</b><span>binding two-machine scope</span></div>
+      <div class="proof"><b>390×844</b><span>real Chrome 151 phone viewport</span></div>
+      <div class="proof"><b>In progress</b><span>live invariant matrix deferred</span></div>
     </div>
     <div class="table-wrap"><table><caption>Scope and verdict</caption><tbody>
-      <tr><th scope="row">Question</th><td>Is Commander v1 releasable from exact public <code>v2.55.4</code> bytes?</td></tr>
-      <tr><th scope="row">Verdict</th><td><strong>No — controller-origin Chrome cannot complete direct pairing to machine B.</strong></td></tr>
-      <tr><th scope="row">Confidence</th><td>High; the failure repeated in two isolated profiles and Chrome CDP supplied the exact CORS classification.</td></tr>
-      <tr><th scope="row">Source</th><td>Clean <code>HEAD == origin/main == Commander epic</code> at <code>4c03e116d508adf69574f927bd46650f86106a07</code>; release peel <code>408673b44a86ab306ab6fc59b578bf214b24d483</code>.</td></tr>
-      <tr><th scope="row">Release</th><td>Tag object <code>207b9cfe…</code>; official run <code>31315462369</code> terminal success; release <code>367487518</code>.</td></tr>
-      <tr><th scope="row">Linux asset</th><td>21,794,612 bytes; archive SHA-256 <code>a9c8a28a…</code>; binary SHA-256 <code>d6f352a3…</code>.</td></tr>
-      <tr><th scope="row">Topology</th><td><code>soundwave</code> + distinct <code>unicron</code>; real Chrome <code>151.0.7922.75</code> at <code>390×844</code>.</td></tr>
+      <tr><th scope="row">Question</th><td>What is the current state of Commander v1 acceptance from exact public <code>v2.60.0</code> bytes?</td></tr>
+      <tr><th scope="row">Verdict</th><td><strong>In progress — the rebound prowl + soundwave live matrix is incomplete.</strong></td></tr>
+      <tr><th scope="row">Confidence</th><td>High; executed and deferred rows plus the operator scope decision are explicit.</td></tr>
+      <tr><th scope="row">Source</th><td>Clean <code>HEAD == origin/main</code> at <code>4636518f121054b612bef56ddf770b2d8a72ef63</code>; release peel <code>0cb8962d</code>.</td></tr>
+      <tr><th scope="row">Release</th><td>Tag object <code>20c42c8f…</code>; official run <code>31412591350</code> terminal success.</td></tr>
+      <tr><th scope="row">Linux asset</th><td>21,991,526 bytes; archive SHA-256 <code>b2533266…</code>; binary SHA-256 <code>8ec9dea6…</code>.</td></tr>
+      <tr><th scope="row">Binding topology</th><td><code>prowl</code> controller + distinct <code>soundwave</code>; unicron and shield out of scope; Chrome <code>151.0.7922.108</code> at <code>390×844</code>.</td></tr>
       <tr><th scope="row">Physical Android</th><td>Offline and explicitly not claimed.</td></tr>
-      <tr><th scope="row">Window</th><td>2026-08-09 13:45–13:55 UTC.</td></tr>
+      <tr><th scope="row">Window</th><td>2026-08-10 19:29–19:37 UTC.</td></tr>
       <tr><th scope="row">Author</th><td>H7 assembled release gate (<code>cas-3d85</code>).</td></tr>
     </tbody></table></div>
   </section>
 
   <section aria-labelledby="evidence"><h2 id="evidence">Evidence</h2>
     <div class="table-wrap"><table><caption>Executed evidence and conclusion</caption><thead><tr><th scope="col">Observation</th><th scope="col">Redacted source</th><th scope="col">What it proves</th></tr></thead><tbody>
-      <tr><td>Fresh Git/GitHub reads matched tag, peel, successful run, public release, assets, and API digests. Both installed binaries report exact <code>2.55.4/408673b</code> and SHA-256 <code>d6f352a3…</code>.</td><td>Git objects; GitHub APIs; local + SSH <code>sha256sum</code> and <code>cas --version</code>.</td><td>The gate used identical public bytes on two real machines, not a local build.</td></tr>
-      <tr><td>With <code>~/.cas</code> genuinely absent, unicron created owner-only state, served cross-machine TLS 1.3 health <code>200</code> with exact HSTS, stopped its owned mapping, and restored the original tree byte-identically (<code>6824c3ec…</code>).</td><td>Reversible isolation, modes, TLS curl, canonical tree digest.</td><td>Clean-home startup and owned teardown pass without a manual prerequisite.</td></tr>
+      <tr><td>Release metadata and installed-binary checks matched the immutable peel, successful run, asset size/digests, and exact public <code>2.60.0/0cb8962</code> identity with SHA-256 <code>8ec9dea6…</code>.</td><td>Git/GitHub receipts; SSH <code>sha256sum</code> and <code>cas --version</code>.</td><td>The live row used public bytes, not a local build.</td></tr>
+      <tr><td>The out-of-scope unicron hub provided fresh verified TLS 1.3 health and exact HSTS, then owned teardown returned Serve to <code>{}</code>.</td><td>Hub/Serve status, OpenSSL, HTTPS health, owned stop receipt.</td><td>The exploratory lane was real and left no service residue; it does not decide H7.</td></tr>
       <tr><td>Both TLS origins returned health <code>200</code>, sessions <code>401</code>, catch-all <code>405</code>, and exact HSTS. Spoofed loopback headers produced no HSTS; non-loopback plaintext startup exited <code>1</code>.</td><td>Forced TLS 1.3 headers, loopback negatives, installed-public CLI refusal.</td><td>TLS/HSTS is listener-bound and plaintext fails closed remotely.</td></tr>
       <tr><td>Wrong-Origin API, preflight, CSRF mutation, and cross-site WebSocket probes received no CORS grant or session data.</td><td>Redacted curl codes, headers, and bodies.</td><td>Pre-auth hostile-origin requests fail closed.</td></tr>
-      <tr><td>Twice, local pairing to soundwave succeeded and authenticated streams returned <code>200</code>. Direct pairing to unicron then received preflight <code>204</code>, but Chrome stopped Fetch with <code>net::ERR_FAILED</code> and <code>MissingAllowOriginHeader</code>; the UI never added unicron and its active-device count stayed zero.</td><td><code>/tmp/cas-3d85-browser-v2554.exit</code> = <code>1</code>; <code>.log</code>; recoverable attempt-one receipt.</td><td>The required controller-origin → target-hub pairing fails repeatably in a real browser.</td></tr>
-      <tr><td>An independent authorized preflight returned <code>204</code> with exact soundwave <code>Access-Control-Allow-Origin</code>, <code>Vary: Origin</code>, allowed <code>POST</code>/<code>Content-Type</code>, and HSTS.</td><td><code>/tmp/cas-3d85-v2554-good-preflight.headers</code>.</td><td>The browser/curl contrast isolates the missing CORS grant to the later exchange response path.</td></tr>
-      <tr><td>Counts: soundwave <code>0/3/0 → 0/4/0</code> Claude/Codex/Grok with <code>4→4</code> sessions; unicron <code>0/0/0 → 0/0/0</code> and <code>0→0</code>. The sole new Codex process is the registered <code>cas-ac47</code> worker.</td><td>Process counts/start times, <code>cas list --json</code>, CAS agent registry.</td><td>Commander created no model process or logical session; the global delta is externally attributed.</td></tr>
-      <tr><td>Attempt devices revoked; invitation/profile secrets moved to recoverable Trash; fixture stopped; original session and exit receipt byte-identical; hubs/Serve stopped; active devices, Chrome processes, listeners, and runtime records zero.</td><td>Auth filters, server registry, <code>cmp</code>, process/socket/status assertions.</td><td>The failed gate left zero active authority or runtime residue.</td></tr>
+      <tr><td>Chrome paired soundwave from exact prowl origin and authenticated sessions/events returned <code>200</code>. A later out-of-scope unicron attempt received preflight <code>204</code>, then <code>MissingAllowOriginHeader</code>; unicron was never added.</td><td>Durable mode-0600 <code>artifacts/cas-3d85/wild-leopard-18/browser.exit</code> and <code>browser.log</code>.</td><td>The binding prowl→soundwave pairing prerequisite is green; unicron is anomaly evidence only.</td></tr>
+      <tr><td>The deterministic two-pane no-agent fixture was ready with exact PID/start fingerprint and protocol-v2 capabilities, but its ledger recorded zero connections.</td><td><code>fixture-state.json</code>, <code>fixture-events.jsonl</code>.</td><td>Fan-out, arbitration, restart, and crash were not accidentally exercised or inferred green.</td></tr>
+      <tr><td>Counts: soundwave <code>2/0/0 → 1/0/0</code> Claude/Codex/Grok with <code>7→6</code> sessions; unicron <code>0/0/0 → 0/0/0</code>. The independently named soundwave configuration session ended; Commander created none.</td><td>Process counts and exact session-name diff.</td><td>No model process or logical session multiplication occurred.</td></tr>
+      <tr><td>Test device revoked; invitation/profile secrets moved to recoverable Trash; fixture metadata and prior receipt restored byte-identically; unicron hub/Serve stopped; soundwave service remained PID <code>2256851</code>, active, with zero restarts.</td><td>Auth filters, <code>cmp</code>, process/socket/status assertions.</td><td>The checkpoint left zero active test authority or runtime residue.</td></tr>
     </tbody></table></div>
-    <p class="small">Sources extracted 2026-08-09 during the stated evidence window. Values are measured, not estimated.</p>
+    <p class="small">Sources extracted 2026-08-10 during the stated evidence window. Values are measured, not estimated.</p>
   </section>
 
   <section aria-labelledby="reasoning"><h2 id="reasoning">Reasoning chain</h2><ol class="reasoning">
-    <li>Tag, workflow, assets, executable identity, and two-host digests bind this to public <code>v2.55.4</code>.</li>
-    <li>Clean-home, TLS/HSTS, spoof, plaintext-refusal, and hostile-origin probes pass; prior defects are not recycled.</li>
-    <li>Local pairing succeeds, proving the same browser, app, and credential-generation path works without a cross-origin response.</li>
-    <li>Cross-machine pairing fails twice with the same Chrome CORS error, while curl sees a correct preflight. That rules out outage, spelling mismatch, consumed invitation, and preflight policy.</li>
-    <li>Direct multi-hub pairing is prerequisite to <code>H7-FLEET-02</code>; later rows were correctly stopped and cannot be filled by prior tests.</li>
+    <li>Tag, workflow, assets, and executable identity bind this to public <code>v2.60.0</code>.</li>
+    <li>Banked prowl/soundwave TLS and hostile-origin receipts remain the accepted pre-auth subset.</li>
+    <li>Real Chrome paired soundwave from prowl and reached authenticated sessions/events.</li>
+    <li>The operator removed unicron and shield from v1 scope, so the captured unicron CORS anomaly cannot decide H7.</li>
+    <li>The fixture had zero upstream connections; the remaining live rows are genuinely deferred, making the gate in progress.</li>
   </ol></section>
 
   <section aria-labelledby="matrix"><h2 id="matrix">Acceptance matrix</h2>
     <div class="table-wrap"><table><caption>Binding gate state from this public-artifact pass</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Executed conclusion</th></tr></thead><tbody>
-      <tr><th scope="row">Public artifact / two installs</th><td><span class="state pass">PASS</span></td><td>Exact identities and identical installed bytes.</td></tr>
+      <tr><th scope="row">Public artifact</th><td><span class="state pass">PASS</span></td><td>Exact public v2.60.0 identity; soundwave installed bytes and prowl hub identity banked.</td></tr>
       <tr><th scope="row">Clean-home / TLS / HSTS</th><td><span class="state pass">PASS</span></td><td>Absent-state startup, TLS 1.3, listener-bound HSTS, plaintext refusal, and owned teardown.</td></tr>
-      <tr><th scope="row"><code>H7-ADV-01</code></th><td><span class="state fail">FAIL / STOPPED</span></td><td>Hostile-origin negatives passed, but authorized cross-origin pairing lacked Chrome's required CORS grant. Later adversarial rows stopped.</td></tr>
-      <tr><th scope="row"><code>H7-FLEET-02</code></th><td><span class="state fail">FAIL</span></td><td>Two machines and phone Chrome were present, but machine-B pairing could not complete.</td></tr>
-      <tr><th scope="row"><code>H7-INVARIANT-03</code></th><td><span class="state partial">NOT EXECUTED</span></td><td>Fixture fan-out/backpressure/one-upstream stopped; count invariants alone are green.</td></tr>
+      <tr><th scope="row"><code>H7-ADV-01</code></th><td><span class="state partial">IN PROGRESS</span></td><td>Hostile-origin subset and soundwave pairing green; replay/copied-key/scope/expiry/revocation deferred.</td></tr>
+      <tr><th scope="row"><code>H7-FLEET-02</code></th><td><span class="state partial">IN PROGRESS</span></td><td>Binding prowl + soundwave and phone Chrome present; soundwave pairing green; observation/control deferred.</td></tr>
+      <tr><th scope="row"><code>H7-INVARIANT-03</code></th><td><span class="state partial">NOT EXECUTED</span></td><td>Fixture fan-out/backpressure/one-upstream and final count proof deferred.</td></tr>
       <tr><th scope="row"><code>H7-CRASH-04</code></th><td><span class="state partial">NOT EXECUTED</span></td><td>Exact SIGILL followed the blocked fleet path and was correctly skipped.</td></tr>
-      <tr><th scope="row">Compatibility / full guards</th><td><span class="state partial">NOT EXECUTED</span></td><td>Stopped fail-closed; no green inference.</td></tr>
+      <tr><th scope="row">Compatibility / full guards</th><td><span class="state partial">NOT EXECUTED</span></td><td>Deferred to the fresh rebound-scope continuation.</td></tr>
     </tbody></table></div>
   </section>
 
-  <section aria-labelledby="falsify"><h2 id="falsify">What would falsify this</h2><p>A new immutable public artifact must let controller-origin Chrome complete the direct pairing exchange to machine B, with successful or generic denied responses carrying only the exact authorized CORS grant. Corrective P0 <code>cas-ac47</code> owns that path. A fresh H7 run must then pass every remaining adversarial, fan-out/backpressure, arbitration, restart/reconnect, crash, compatibility, count, vendoring, workspace, release, ISA, and cleanup row. A local fix, curl-only preflight, or focused test is insufficient.</p></section>
+  <section aria-labelledby="falsify"><h2 id="falsify">Continuation protocol</h2><p>Use prowl as controller origin and soundwave as the sole target. Reuse banked public-release, TLS/pre-auth, soundwave pairing, and cleanup receipts; do not enter unicron or shield. Revive the fixture, mint fresh soundwave invitations, and run Chrome at 390×844 through fan-out, arbitration, replay/copied-key/scope/revocation, restart/reconnect, compatibility, no-polling/count, and exact SIGILL diagnostics. Then run assembled/vendor/release/ISA proof and set the verdict only from executed evidence.</p></section>
 
   <section aria-labelledby="actions"><h2 id="actions">Next actions</h2>
     <div class="table-wrap"><table><caption>Required corrective path</caption><thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Completion proof</th></tr></thead><tbody>
-      <tr><td>Correct and regress pairing-exchange CORS (<code>cas-ac47</code>).</td><td>Hub/auth</td><td>Real controller-origin Chrome pairs machine B; success and generic denial responses carry exact ACAO + <code>Vary: Origin</code>.</td></tr>
-      <tr><td>Publish one new immutable artifact without moving earlier tags.</td><td>Release owner</td><td>Tag peel, terminal workflow, asset digests, final ELF audit, identical installs.</td></tr>
-      <tr><td>Rerun complete binary H7.</td><td>Fresh H7 worker</td><td>Every binding row green; paired report updated; zero residue.</td></tr>
+      <tr><td>Investigate the out-of-scope unicron CORS anomaly separately.</td><td>Hub/auth follow-up</td><td>Reproduction and root cause remain outside Commander v1 verdict.</td></tr>
+      <tr><td>Complete rebound prowl + soundwave H7.</td><td>Fresh H7 worker</td><td>Every binding row executed; paired report updated; zero residue.</td></tr>
       <tr><td>Keep Slack unposted until green and user-elected.</td><td>Release owner</td><td>Explicit human posting decision after green report.</td></tr>
     </tbody></table></div>
   </section>
 
   <section aria-labelledby="cleanup"><h2 id="cleanup">Cleanup and redaction</h2>
-    <div class="callout"><strong>Zero active task authority or service remains.</strong></div>
+    <div class="callout"><strong>Zero active test authority or task-started service remains.</strong></div>
     <ul>
       <li>No pairing capability, credential, proof, key, ticket, Authorization value, tailnet IP, terminal input, prompt content, or raw audit payload appears here.</li>
-      <li>Both local attempt devices were revoked; neither remote exchange created a device. Active devices: zero on both hubs.</li>
-      <li>Eight invitation files, six Chrome profiles, and the reversible clean-home state moved to recoverable user Trash.</li>
-      <li>Fixture supervisor/child are stopped; original session JSON and daemon-exit receipt are byte-identical; hubs and Serve mappings are stopped; tested ports, runtime records, and task Chrome processes are absent.</li>
+      <li>The one soundwave attempt device was revoked; unicron created no device. Active devices: zero.</li>
+      <li>Four invitation files, temporary links, and three Chrome profiles moved to recoverable user Trash.</li>
+      <li>Fixture stopped; original session JSON and daemon-exit receipt are byte-identical; task-started unicron hub/Serve stopped; soundwave operator service unchanged.</li>
       <li>Physical Android remains unclaimed. Slack remains explicitly unposted.</li>
     </ul>
   </section>
@@ -135,9 +134,9 @@
     <ul>
       <li>Markdown source: <a href="2026-08-09-commander-v1-acceptance-gate.md"><code>2026-08-09-commander-v1-acceptance-gate.md</code></a>.</li>
       <li>Unposted draft: <code>docs/release-notes/2026-08-09-commander-v1-slack-draft.md</code>.</li>
-      <li>Executed source boundary: <code>4c03e116d508adf69574f927bd46650f86106a07</code>; public peel: <code>408673b44a86ab306ab6fc59b578bf214b24d483</code>.</li>
-      <li>Durable failure: <code>/tmp/cas-3d85-browser-v2554.exit</code> + <code>.log</code>, 2026-08-09 13:53 UTC; preflight contrast: <code>/tmp/cas-3d85-v2554-good-preflight.headers</code>, 13:52 UTC.</li>
-      <li>Commands: Git/GitHub identity reads; installed-public hashes/versions; local + SSH counts/state; reversible clean-home; TLS 1.3/HSTS/spoof/plaintext/origin/CSRF/CSWSH probes; registered fixture; two Chrome CDP 390×844 attempts; auth/server/process/socket/receipt/session cleanup assertions.</li>
+      <li>Executed source boundary: <code>4636518f121054b612bef56ddf770b2d8a72ef63</code>; public peel: <code>0cb8962d</code>.</li>
+      <li>Durable anomaly/checkpoint evidence: <code>artifacts/cas-3d85/wild-leopard-18/browser.exit</code>, <code>browser.log</code>, <code>fixture-state.json</code>, and <code>fixture-events.jsonl</code>, 2026-08-10 19:29–19:37 UTC.</li>
+      <li>Commands: Git/GitHub identity reads; installed-public hashes/versions; SSH counts/state; TLS 1.3/HSTS/origin probes; deterministic fixture; one Chrome CDP 390×844 attempt; auth/server/process/socket/receipt/session cleanup assertions.</li>
     </ul>
   </section>
 </main>

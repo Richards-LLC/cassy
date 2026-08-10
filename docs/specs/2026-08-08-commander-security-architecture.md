@@ -40,7 +40,7 @@ The host OS account and the controller origin are explicit trust boundaries. A p
 | Option | Browser catalog | Fleet traffic | Security and operating result | Decision |
 |---|---|---|---|---|
 | Per-hub origins with independent catalogs | Fragmented per origin | Browser to each hub | Simple, but users repeatedly pair and cannot get one coherent fleet view | Rejected |
-| Hosted static Commander origin | Central browser origin | Browser to each hub | Creates a new hosted availability and supply-chain boundary and complicates private deployment | Rejected |
+| Hosted static Commander origin | Central browser origin | Browser to each hub | Rejected on 2026-08-08 for a new hosted availability/supply-chain boundary; **superseded 2026-08-10 as an optional, explicitly trusted static deployment** under the binding controls below | Opt-in only |
 | Controller hub origin | One explicit hub origin per browser profile | Browser directly to each paired hub | One coherent catalog without a central proxy or new service; exact origin can be bound at pairing | **Selected** |
 | Central hub proxy | Server-side fleet catalog | Browser through one hub | Makes one machine a privileged fleet control plane and stores remote session data there | Rejected |
 
@@ -49,6 +49,23 @@ The host OS account and the controller origin are explicit trust boundaries. A p
 The selected design keeps fleet metadata and credentials local to one browser origin, leaves hub-to-daemon traffic local to each machine, and gives every target hub an exact browser-origin policy. A controller hub outage prevents that browser profile from loading Commander, but does not stop daemons, CLI/TUI access, or already-running work. Users may deliberately choose another controller origin by re-pairing; there is no implicit migration.
 
 Changing the controller origin invalidates its origin-scoped IndexedDB and every target hub's origin binding. Reversal therefore requires explicit device re-pairing and new credentials. That cost is intentional: an origin move is a security-domain move, not a cosmetic URL change.
+
+## Amendment — 2026-08-10: optional hosted static controller origin (GH #211)
+
+The controller-hub origin remains the default and selected deployment mode. A fleet operator MAY instead choose the HTTPS hosted static controller origin `https://hub.petrastella.io` (serving the reviewed `hub-web/dist/`) for a browser profile. This supersedes the earlier outright rejection because the t3code reference design has demonstrated the same static-SPA/direct-machine shape at `app.t3.codes`; it does **not** remove the hosted origin's availability or supply-chain boundary. Choosing it is an explicit, per-machine trust grant: every target must be paired with `cas hub pair --origin https://hub.petrastella.io`, and changing from a hub origin (or between hosted origins) is a security-domain move requiring revocation/re-pairing, never catalog or credential migration.
+
+The following controls are normative for any hosted deployment:
+
+1. The host serves static files only: no application API, redirect service, server-side session state, or credentials. Deploys are immutable; rollback redeploys a previously pinned artifact.
+2. The live files are byte-identical to a reviewed `hub-web/dist/` from one named `cas-src` commit. A deploy record MUST name that commit, immutable artifact digest, deploy owner, and rollback artifact. The two Ghostty WASM files retain the SHA-256 hashes published in `hub-web/README.md`; CI verifies them before publishing. The cloud team consumes a versioned artifact named by commit + digest, not a rebuilt approximation.
+3. The hosted response CSP MUST forbid third-party runtime, inline script, eval, forms, framing, and credential egress. It may allow `connect-src 'self' https: wss:` because a static CSP cannot enumerate a browser's dynamic paired-machine catalog; catalog membership is instead the application authority: all authenticated fetches/WebSockets are constructed only from a paired `StoredMachine.baseUrl`, while the pairing ceremony may contact only the operator-entered target URL. No telemetry, analytics, beacon, credential, DPoP, catalog, or session request may be sent to the hosted origin after the static application loads.
+4. Commander MUST fetch authenticated `GET /v1/machine` before enabling controls, compare `schema_version` and named capabilities, and show a visible version-skew banner for missing/unknown/newer capabilities. Unsupported controls remain disabled; it must never silently assume a capability from its own build version.
+5. Exact-Origin hub authorization remains unchanged: pairing records the literal HTTPS origin, API preflight reflects it only when an active paired credential authorizes it, and authenticated API/WS requests bind the DPoP credential and ticket to that same origin. A hosted SPA is not a wildcard or a proxy.
+6. Residual risk is accepted and revocable: compromise of the hosted host, DNS, or deploy authority can serve malicious same-origin JavaScript until detected. This is a paired-device compromise; operators revoke affected devices/origin bindings, roll back to a recorded artifact, and re-pair after recovery.
+
+### CSP and origin review finding
+
+Reviewed against the shipped implementation on 2026-08-10. `cas-cli/src/hub/server.rs` supplies restrictive hub-asset CSP headers and gates CORS preflight with `AuthStore::is_paired_origin`; `AuthStore::authorize` requires literal equality of the request Origin and stored `controller_origin`, and the pairing exchange repeats that equality. `hub-web/src/connection.ts` previously did not inspect `/v1/machine`; this amendment adds the required capability check and visible degraded state. No hosted-origin wildcard was found. The broad `https:`/`wss:` connection schemes are necessary for direct, dynamically paired hubs and are not treated as authorization; the catalog-bound construction and exact Origin checks above are the enforcement boundary.
 
 ## Normative trust boundaries and topology
 

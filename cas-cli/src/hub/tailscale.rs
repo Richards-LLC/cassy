@@ -5,6 +5,7 @@
 //! receipt and never resets or replaces an unrelated Serve configuration.
 
 use std::ffi::{OsStr, OsString};
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ pub struct TailscaleServeReceipt {
     pub local_target: String,
     pub https_port: u16,
     pub created_by_cas: bool,
+    pub executable: String,
     pub status_before: Value,
     pub status_after: Value,
     pub recorded_at: String,
@@ -68,6 +70,10 @@ impl TailscaleServeManager {
             executable: executable.as_ref().to_owned(),
             state_dir: state_dir.as_ref().to_path_buf(),
         }
+    }
+
+    pub fn executable_display(&self) -> String {
+        self.executable.to_string_lossy().into_owned()
     }
 
     pub fn ensure(&self, local_port: u16, https_port: u16) -> Result<TailscaleServeReceipt> {
@@ -116,6 +122,7 @@ impl TailscaleServeManager {
                 local_target: local_target.clone(),
                 https_port,
                 created_by_cas,
+                executable: self.executable_display(),
                 status_before: before,
                 status_after: after,
                 recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -241,12 +248,44 @@ impl TailscaleServeManager {
     }
 }
 
-fn tailscale_executable() -> &'static str {
+fn tailscale_executable() -> OsString {
     if cfg!(windows) {
-        "tailscale.exe"
-    } else {
-        "tailscale"
+        return OsString::from("tailscale.exe");
     }
+    #[cfg(target_os = "macos")]
+    let bundle_paths = [
+        Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+        Path::new("/Applications/Tailscale.app/Contents/MacOS/tailscale"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let bundle_paths: [&Path; 0] = [];
+    select_tailscale_executable(executable_on_path("tailscale"), &bundle_paths)
+}
+
+fn select_tailscale_executable(path_cli: Option<PathBuf>, bundle_paths: &[&Path]) -> OsString {
+    if let Some(path) = path_cli {
+        return path.into_os_string();
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(path) = bundle_paths.iter().copied().find(|path| app_bundle_cli_responds(path)) {
+        return path.as_os_str().to_owned();
+    }
+    OsString::from("tailscale")
+}
+
+fn executable_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn app_bundle_cli_responds(path: &Path) -> bool {
+    Command::new(path)
+        .arg("version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn valid_dns_name(name: &str) -> bool {
@@ -353,6 +392,33 @@ mod tests {
             handlers_on_port(&status, 443),
             vec![("/".into(), "http://127.0.0.1:4173".into())]
         );
+    }
+
+    #[test]
+    fn path_cli_precedes_bundle_cli() {
+        let path_cli = PathBuf::from("/operator/tailscale");
+        let selected = select_tailscale_executable(Some(path_cli.clone()), &[]);
+        assert_eq!(selected, path_cli.into_os_string());
+    }
+
+    #[test]
+    fn no_cli_keeps_existing_unavailable_command() {
+        assert_eq!(select_tailscale_executable(None, &[]), OsString::from("tailscale"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_bundle_cli_is_invoked_at_its_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = private_tempdir();
+        let app_cli = temp.path().join("Tailscale.app/Contents/MacOS/Tailscale");
+        fs::create_dir_all(app_cli.parent().unwrap()).unwrap();
+        fs::write(&app_cli, "#!/bin/sh\n[ \"$1\" = version ]\n").unwrap();
+        fs::set_permissions(&app_cli, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let selected = select_tailscale_executable(None, &[&app_cli]);
+        assert_eq!(selected, app_cli.into_os_string());
     }
 
     #[test]

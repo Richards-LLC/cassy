@@ -3,8 +3,15 @@ import type { HubSession, LeaseState, PaneInfo, SessionState, StoredMachine } fr
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "auth-blocked" | "offline";
 
+export interface HubMachineInfo {
+  schema_version: number;
+  version: string;
+  capabilities: string[];
+}
+
 export interface HubCallbacks {
   onState(state: ConnectionState, detail?: string): void;
+  onMachineInfo?(machine: HubMachineInfo | undefined): void;
   onSessions(sessions: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>): void;
@@ -48,6 +55,7 @@ export class HubConnectionSupervisor {
     if (!this.desired) return;
     this.callbacks.onState(this.attempt === 0 ? "connecting" : "reconnecting");
     try {
+      await this.refreshMachineInfo();
       await this.refreshSessions();
       this.attempt = 0;
       this.callbacks.onState("connected");
@@ -89,6 +97,16 @@ export class HubConnectionSupervisor {
     const response = await this.request<{ sessions: HubSession[] }>("GET", "/v1/sessions");
     this.callbacks.onSessions(response.sessions);
     return response.sessions;
+  }
+
+  private async refreshMachineInfo(): Promise<void> {
+    try {
+      this.callbacks.onMachineInfo?.(await this.request<HubMachineInfo>("GET", "/v1/machine"));
+    } catch {
+      // Older hubs can still offer the read-only session surface. The UI shows
+      // a visible compatibility warning and leaves capability-gated controls off.
+      this.callbacks.onMachineInfo?.(undefined);
+    }
   }
 
   async status(session: string): Promise<Record<string, unknown>> {

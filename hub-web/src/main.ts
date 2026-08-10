@@ -1,5 +1,5 @@
 import "./styles.css";
-import { HubConnectionSupervisor, type ConnectionState } from "./connection";
+import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { attentionStore, catalog } from "./storage";
@@ -12,6 +12,7 @@ const machines = new Map<string, StoredMachine>();
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
+const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
@@ -47,6 +48,7 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state === "reconnecting") void addAttention(machine, undefined, "hub_disconnected", detail ?? "Hub disconnected");
       render();
     },
+    onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items) => { sessions.set(machine.id, items); render(); },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
@@ -244,8 +246,12 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   }
 }
 
+function hubSupports(machineId: string, capability: string): boolean {
+  return machineInfo.get(machineId)?.capabilities.includes(capability) === true;
+}
+
 function canControl(machineId: string, session: string, scope: Scope): boolean {
-  return machines.get(machineId)?.scopes.includes(scope) === true && leases.get(sessionKey(machineId, session))?.held_by_me === true;
+  return hubSupports(machineId, "daemon_attach") && machines.get(machineId)?.scopes.includes(scope) === true && leases.get(sessionKey(machineId, session))?.held_by_me === true;
 }
 
 function sendControl(machineId: string, session: string, message: unknown): void {
@@ -287,6 +293,7 @@ function render(): void {
   const machineSessions = selected ? sessions.get(selected.id) ?? [] : [];
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
+  const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -299,8 +306,8 @@ function render(): void {
   app.innerHTML = `
     <div class="shell">
       <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair machine</button><nav id="machine-list"></nav></aside>
-      <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
-      <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div></header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
+      <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
+      <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div></header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
       <aside class="context"><section><h2>Attention <span class="badge">${attention.filter((item) => !item.acknowledgedAt).length}</span></h2><div id="attention-list"></div></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea><button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
     </div><dialog id="pair-dialog"><form id="pair-form"><h2>Pair a machine</h2><p>${pendingPairing ? "One-time invitation ready. Confirm the target hub." : "Open a pairing URL generated by cas hub pair."}</p><label>Hub URL<input name="url" type="url" required value="${escapeAttr(location.origin)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac"></label><label>Device label<input name="device" required placeholder="My phone"></label><label>Operator label<input name="operator" required placeholder="Your name"></label><fieldset><legend>Scopes requested</legend>${scopeChecks()}</fieldset><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pendingPairing ? "" : "disabled"}>Pair</button></div></form></dialog><div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
@@ -314,6 +321,16 @@ function render(): void {
     const state = sessionStates.get(sessionKey(selected.id, selectedSession));
     if (state) queueMicrotask(() => void renderSessionState(selected.id, selectedSession!, state));
   }
+}
+
+function compatibilityWarning(machineId: string): string | undefined {
+  const info = machineInfo.get(machineId);
+  if (!info) return "Compatibility check unavailable: this hub may be older or newer. Read-only discovery may work, but controls stay disabled until it reports capabilities.";
+  const missing = ["session_index", "daemon_attach", "machine_events"].filter((capability) => !info.capabilities.includes(capability));
+  if (info.schema_version !== 1 || missing.length > 0) {
+    return `Hub ${info.version} is version-skewed (schema ${info.schema_version}; missing ${missing.join(", ") || "no required capabilities"}). Upgrade or use a compatible Commander build; unsupported controls are disabled.`;
+  }
+  return undefined;
 }
 
 function machineButton(machine: StoredMachine): HTMLButtonElement {

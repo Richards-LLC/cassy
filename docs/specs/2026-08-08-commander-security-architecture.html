@@ -103,7 +103,7 @@
   </header>
 
   <nav aria-label="Report sections"><div>
-    <a href="#decision">Decision</a><a href="#options">Options</a><a href="#boundaries">Boundaries</a><a href="#identity">Identity</a><a href="#web">Web policy</a><a href="#capabilities">Capabilities</a><a href="#control">Control</a><a href="#threats">Threats</a><a href="#tests">Tests</a>
+    <a href="#decision">Decision</a><a href="#options">Options</a><a href="#hosted-amendment">Hosted amendment</a><a href="#boundaries">Boundaries</a><a href="#identity">Identity</a><a href="#web">Web policy</a><a href="#capabilities">Capabilities</a><a href="#control">Control</a><a href="#threats">Threats</a><a href="#tests">Tests</a>
   </div></nav>
 
   <main>
@@ -131,12 +131,20 @@
         <thead><tr><th>Option</th><th>Catalog</th><th>Traffic</th><th>Result</th><th>Decision</th></tr></thead>
         <tbody>
           <tr><td>Per-hub origins</td><td>Fragmented</td><td>Direct</td><td>Repeated pairing; no coherent fleet view</td><td class="bad">Rejected</td></tr>
-          <tr><td>Hosted static origin</td><td>Central browser origin</td><td>Direct</td><td>New hosted availability and supply-chain boundary</td><td class="bad">Rejected</td></tr>
+          <tr><td>Hosted static origin</td><td>Central browser origin</td><td>Direct</td><td>Rejected on 2026-08-08 for hosted availability/supply-chain risk; superseded on 2026-08-10 as an explicitly trusted static deployment</td><td class="warn">Opt-in only</td></tr>
           <tr class="selected"><td>Controller hub origin</td><td>One explicit origin/profile</td><td>Direct</td><td>Coherent catalog, exact origin binding, no new service</td><td class="good">Selected</td></tr>
           <tr><td>Central hub proxy</td><td>Server-side</td><td>Proxied</td><td>One machine becomes a fleet control plane and remote data store</td><td class="bad">Rejected</td></tr>
         </tbody>
       </table></div>
       <p><strong>Consequence:</strong> if the controller hub is unavailable, that profile cannot load Commander, but daemons, CLI/TUI access, and running work continue. Moving origins deliberately costs a full re-pair because it changes the browser security domain.</p>
+    </section>
+
+    <section id="hosted-amendment">
+      <h2>Amendment · 2026-08-10 · optional hosted static controller origin</h2>
+      <p>The controller-hub origin remains the default. An operator may choose the HTTPS hosted static controller origin <code>https://hub.petrastella.io</code> for a browser profile only as an explicit, per-machine trust grant; every target must be paired with <code>cas hub pair --origin https://hub.petrastella.io</code>. This supersedes the former outright rejection because t3code demonstrates the same static-SPA/direct-machine shape at <code>app.t3.codes</code>; it does not remove the hosted availability or supply-chain boundary.</p>
+      <div class="normative"><strong>Binding controls:</strong> static-only host (no APIs, redirects, server sessions, or credentials); immutable byte-identical <code>hub-web/dist</code> deployment named by cas-src commit, artifact digest, deploy owner, and rollback artifact; published Ghostty WASM hashes verified before deployment; no telemetry or credential egress to the host; and explicit device revocation/re-pairing for every origin move.</div>
+      <p>The deployment CSP forbids third-party runtime, inline/eval, forms, and framing. It may permit <code>connect-src 'self' https: wss:</code> because static CSP cannot enumerate the dynamic paired-machine catalog; Commander constructs authenticated fetches and WebSockets only from paired catalog entries, and hubs retain literal exact-Origin + DPoP + ticket checks. The hosted host is never a wildcard or proxy.</p>
+      <p>Commander fetches authenticated <code>GET /v1/machine</code> before enabling controls. Missing, unknown, newer, or incompatible schema/capabilities produce a visible banner and leave unsupported controls disabled. A compromised host/DNS/deploy authority can serve malicious same-origin JavaScript until detected; that accepted residual risk is revocable through rollback, device/origin revocation, and re-pairing.</p>
     </section>
 
     <section id="boundaries">

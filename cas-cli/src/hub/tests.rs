@@ -1072,6 +1072,7 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
         started_at: "2026-08-09T00:00:00Z".into(),
         public_url: None,
         tailscale_serve_port: None,
+        tailscale_cli: None,
         transport_warning: None,
     };
     paths.write_process_record(&record).unwrap();

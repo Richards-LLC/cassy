@@ -5510,7 +5510,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // origin Git state masquerade as integration. Missing origin ref
     // simply skips this block (no rescue); KnownPositive and Unknown
     // fall through to Reject.
-    fetch_parent_branch_best_effort(repo_path, parent_branch);
+    let origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
     let origin_parent_branch = format!("origin/{parent_branch}");
     if git_ref_exists(repo_path, &origin_parent_branch)
         && matches!(
@@ -5667,6 +5667,30 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     let parent_published_on_origin = git_ref_exists(repo_path, &origin_parent_branch);
     let branch_tip = resolve_branch_sha(repo_path, &factory_branch)
         .unwrap_or_else(|| "unresolved at close rejection".to_string());
+    // cas-aa47 (GH #202 remainder): the observed close bounce has not yet
+    // reproduced under a test fixture, so a future rejection must state the
+    // exact ref state this invocation saw. This is diagnostic-only: all gate
+    // decisions above remain untouched.
+    let local_target_tip = resolve_branch_sha(repo_path, parent_branch)
+        .unwrap_or_else(|| "unresolved".to_string());
+    let origin_target_tip = resolve_branch_sha(repo_path, &origin_parent_branch)
+        .unwrap_or_else(|| "absent".to_string());
+    let unreachable_commits = unmerged_commit_shas_against_targets(
+        repo_path,
+        commit_ish,
+        parent_branch,
+        12,
+    );
+    let unreachable_display = if unreachable_commits.is_empty() {
+        "unresolved".to_string()
+    } else {
+        unreachable_commits.join(",")
+    };
+    let diagnostic_receipt = format!(
+        "Close-gate receipt: targets={parent_branch}@{local_target_tip},\
+         {origin_parent_branch}@{origin_target_tip}; unreachable=[{unreachable_display}]; \
+         origin_fetch_attempted={origin_fetch_attempted}."
+    );
     let coord = worker_coordination_tool();
 
     let epic_push_state_step = if parent_published_on_origin {
@@ -5759,7 +5783,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     MergeStateGateOutcome::Reject(format!(
         "⚠️ MERGE REQUIRED\n\n\
          task close rejected: {factory_branch} has {stranded} commit(s) from this task \
-         not on {parent_branch}.\n{receipt_note}\n\
+         not on {parent_branch}.\n{diagnostic_receipt}\n{receipt_note}\n\
          The branch must be merged into {parent_branch} before closing. This \
          guard cannot be bypassed (use of bypass_code_review=true does not \
          skip merge-state checks — it is a data-state guard, not a review \
@@ -5986,6 +6010,46 @@ pub(crate) fn count_unmerged_against_targets(
         return None;
     }
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Return a bounded list of commits on `commit_ish` that are reachable from
+/// neither close-gate target. Used only to make a rejection self-diagnosing;
+/// an empty result is deliberately not interpreted as merge evidence.
+fn unmerged_commit_shas_against_targets(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+    limit: usize,
+) -> Vec<String> {
+    use std::process::Command;
+
+    if limit == 0
+        || !is_safe_git_refname(commit_ish)
+        || !is_safe_git_refname(parent_branch)
+        || !git_ref_exists(repo_path, commit_ish)
+        || !git_ref_exists(repo_path, parent_branch)
+    {
+        return Vec::new();
+    }
+
+    let origin_parent = format!("origin/{parent_branch}");
+    let limit = format!("--max-count={limit}");
+    let mut args = vec!["rev-list", limit.as_str(), commit_ish, "--not", parent_branch];
+    if git_ref_exists(repo_path, &origin_parent) {
+        args.push(origin_parent.as_str());
+    }
+    let Ok(out) = Command::new("git").args(&args).current_dir(repo_path).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// cas-fdc9 (GH #56): is a supplied `commit_receipt` even present in the
@@ -6295,12 +6359,15 @@ fn anchor_work_patches_equivalent_on_parent(
 ///   a ref name.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-pub(crate) fn fetch_parent_branch_best_effort(repo_path: &std::path::Path, parent_branch: &str) {
+pub(crate) fn fetch_parent_branch_best_effort(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+) -> bool {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
     if !is_safe_git_refname(parent_branch) {
-        return;
+        return false;
     }
 
     // Force-update the exact remote-tracking ref. The leading `+` is
@@ -6318,22 +6385,22 @@ pub(crate) fn fetch_parent_branch_best_effort(repo_path: &std::path::Path, paren
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let deadline = Instant::now() + FETCH_TIMEOUT;
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => return, // finished (success or failure — don't care)
+            Ok(Some(_status)) => return true, // finished (success or failure — don't care)
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return;
+                    return true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(_) => return,
+            Err(_) => return true,
         }
     }
 }
@@ -13550,6 +13617,8 @@ mod merge_state_gate_tests {
         std::fs::write(dir.path().join("b.rs"), "// b\n").unwrap();
         git(dir.path(), &["add", "b.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: b"]);
+        let target_tip = resolve_branch_sha(dir.path(), "main").unwrap();
+        let unreachable_tip = resolve_branch_sha(dir.path(), "factory/worker").unwrap();
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
@@ -13576,6 +13645,14 @@ mod merge_state_gate_tests {
                         msg.contains("2 commit"),
                         "expected stranded count of 2 in message (anchored to 'commit' \
                          to avoid weak digit-anywhere match): {msg}"
+                    );
+                    assert!(
+                        msg.contains(&format!(
+                            "Close-gate receipt: targets=main@{target_tip},origin/main@absent"
+                        )) && msg.contains(&unreachable_tip)
+                            && msg.contains("origin_fetch_attempted=true"),
+                        "rejection must name the exact checked ref tips, an unreachable commit, \
+                         and whether a fetch was attempted: {msg}"
                     );
                     assert!(
                         msg.contains("bypass_code_review=true"),
@@ -13862,16 +13939,23 @@ mod merge_state_gate_tests {
         std::fs::write(p.join("stranded.rs"), "// not merged\n").unwrap();
         git(p, &["add", "stranded.rs"]);
         git(p, &["commit", "-q", "-m", "feat: stranded work"]);
+        let target_tip = resolve_branch_sha(p, parent).unwrap();
+        let unreachable_tip = resolve_branch_sha(p, "factory/worker").unwrap();
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
-        assert!(
-            matches!(
-                run_factory_branch_merge_gate(&task, &req, parent, p),
-                MergeStateGateOutcome::Reject(_)
+        match run_factory_branch_merge_gate(&task, &req, parent, p) {
+            MergeStateGateOutcome::Reject(msg) => assert!(
+                msg.contains(&format!(
+                    "targets={parent}@{target_tip},origin/{parent}@absent"
+                )) && msg.contains(&unreachable_tip)
+                    && msg.contains("origin_fetch_attempted=true"),
+                "local-only rejection must carry the self-diagnosing receipt: {msg}"
             ),
-            "an unchanged local-only epic ref must still reject genuinely unmerged work"
-        );
+            other => panic!(
+                "an unchanged local-only epic ref must still reject genuinely unmerged work, got {other:?}"
+            ),
+        }
     }
 
     #[test]

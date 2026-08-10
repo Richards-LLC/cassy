@@ -919,19 +919,70 @@ mod tests {
         assert_eq!(blank.display_text(), None);
     }
 
-    /// `Notification` really does use `message`, so aliasing `delta` onto the
-    /// same field must not have broken it.
+    /// cas-5e46: raw interactive `idle_prompt` capture confirms that Notification
+    /// really does use `message`, so aliasing `delta` onto the same field must
+    /// not have broken it. `notification_type` is intentionally undeclared: no
+    /// current CAS handler consumes it.
     #[test]
-    fn notification_payload_still_uses_the_message_key() {
+    fn notification_idle_prompt_payload_uses_the_message_key() {
         let input: HookInput = serde_json::from_str(
-            r#"{"hook_event_name":"Notification","session_id":"s",
-                "message":"Claude needs your permission to use Bash"}"#,
+            r#"{"session_id":"d59d0086-c4cf-4a81-94ef-30ca97b8490e",
+                "transcript_path":"/tmp/wirecap/projects/-home-pippenz-Petrastella-cas-src--cas-worktrees-warm-newt-60/d59d0086-c4cf-4a81-94ef-30ca97b8490e.jsonl",
+                "cwd":"/home/pippenz/Petrastella/cas-src/.cas/worktrees/warm-newt-60",
+                "prompt_id":"3b983dd9-56b7-4672-b40a-161b8cad74f1",
+                "hook_event_name":"Notification",
+                "message":"Claude is waiting for your input",
+                "notification_type":"idle_prompt"}"#,
         )
-        .unwrap();
+        .expect("the real Notification payload must deserialize");
         assert_eq!(
             input.message.as_deref(),
-            Some("Claude needs your permission to use Bash")
+            Some("Claude is waiting for your input")
         );
+    }
+
+    /// cas-5e46: these verbatim, interactive captures must remain parseable.
+    /// PermissionRequest's live handler consumes `tool_name` and `tool_input`;
+    /// PreCompact currently consumes neither of its event-specific keys, so the
+    /// raw fixture pins the observed shape without adding dead fields.
+    #[test]
+    fn interactive_permission_request_and_precompact_payloads_keep_their_wire_shape() {
+        let permission_raw = include_str!("fixtures/cas-5e46-permission-request-write.json");
+        let permission: HookInput = serde_json::from_str(permission_raw)
+            .expect("the real PermissionRequest payload must deserialize");
+        assert_eq!(permission.hook_event_name, "PermissionRequest");
+        assert_eq!(permission.tool_name.as_deref(), Some("Write"));
+        assert_eq!(
+            permission
+                .tool_input
+                .as_ref()
+                .and_then(|input| input.get("file_path"))
+                .and_then(|value| value.as_str()),
+            Some("/home/pippenz/hooktest.txt")
+        );
+
+        let denied_permission: HookInput = serde_json::from_str(include_str!(
+            "fixtures/cas-5e46-permission-request-bash-denied.json"
+        ))
+        .expect("the denied interactive PermissionRequest payload must deserialize");
+        assert_eq!(denied_permission.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(
+            denied_permission
+                .tool_input
+                .as_ref()
+                .and_then(|input| input.get("command"))
+                .and_then(|value| value.as_str()),
+            Some("curl -sS -i https://google.com --max-time 20 | head -40")
+        );
+
+        let pre_compact_raw = include_str!("fixtures/cas-5e46-pre-compact.json");
+        let pre_compact: HookInput = serde_json::from_str(pre_compact_raw)
+            .expect("the real PreCompact payload must deserialize");
+        assert_eq!(pre_compact.hook_event_name, "PreCompact");
+        let pre_compact_value: serde_json::Value = serde_json::from_str(pre_compact_raw)
+            .expect("the real PreCompact payload must remain valid JSON");
+        assert_eq!(pre_compact_value["trigger"], "manual");
+        assert!(pre_compact_value["custom_instructions"].is_null());
     }
 
     /// Stop carries `stop_hook_active`, the harness's loop-prevention signal.

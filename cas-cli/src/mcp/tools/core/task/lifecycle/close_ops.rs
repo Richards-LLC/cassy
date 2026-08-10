@@ -13801,6 +13801,79 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-ff65 (GH #202): a local-only epic ref is shared by the supervisor's
+    /// merge and the worker's close gate. Once `worktree_merge` updates that
+    /// ref, the very next close must resolve the moved ref and proceed; it must
+    /// not wait for a periodic repository-view refresh.
+    #[test]
+    fn immediate_close_after_local_epic_merge_proceeds_cas_ff65() {
+        let parent = "epic/close-live-ref";
+        let dir = init_factory_repo_with_parent("worker", parent);
+        let p = dir.path();
+
+        std::fs::write(p.join("delivered.rs"), "// worker delivery\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: delivered work"]);
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, parent, p),
+                MergeStateGateOutcome::Reject(_)
+            ),
+            "precondition: unmerged worker work must require a merge"
+        );
+
+        // Mirrors the supervisor's local-only epic merge. There is
+        // deliberately no origin remote to rescue this path: the moved local
+        // ref itself is the authority the immediate close must observe.
+        git(p, &["checkout", "-q", parent]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge worker delivery",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, parent, p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "the close immediately following a local epic merge must see the live ref"
+        );
+    }
+
+    /// Negative companion to the immediate-merge regression: local-only
+    /// branches remain fail-closed until the supervisor actually integrates
+    /// the worker tip.
+    #[test]
+    fn local_only_epic_without_merge_still_rejects_cas_ff65() {
+        let parent = "epic/close-live-ref";
+        let dir = init_factory_repo_with_parent("worker", parent);
+        let p = dir.path();
+        std::fs::write(p.join("stranded.rs"), "// not merged\n").unwrap();
+        git(p, &["add", "stranded.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: stranded work"]);
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, parent, p),
+                MergeStateGateOutcome::Reject(_)
+            ),
+            "an unchanged local-only epic ref must still reject genuinely unmerged work"
+        );
+    }
+
     #[test]
     fn worker_task_close_with_bypass_still_rejects_on_unmerged() {
         // Confirms `bypass_code_review=true` does NOT skip the

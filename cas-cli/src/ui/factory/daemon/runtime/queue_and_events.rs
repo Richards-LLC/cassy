@@ -7762,6 +7762,10 @@ mod tests {
     fn registration_preassignment_reports_a_conflicting_holder() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut holder = cas_types::Agent::new("holder-agent-id".into(), "happy-owl-73".into());
+        holder.role = cas_types::AgentRole::Worker;
+        agents.register(&holder).unwrap();
         let store = crate::store::open_task_store(&cas_dir).unwrap();
         let mut task = Task::new("cas-e74c".to_string(), "merge guard".to_string());
         task.assignee = Some("happy-owl-73".to_string());

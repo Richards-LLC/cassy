@@ -937,13 +937,25 @@ impl CasService {
                             ),
                         )
                     })?;
-                    let alive = agents
-                        .get(assignee)
-                        .map(|agent| {
-                            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(&agent)
-                                .is_live()
-                        })
-                        .unwrap_or(false);
+                    // `Task.assignee` is a worker display name, whereas
+                    // `AgentStore::get` is keyed by opaque agent ID. Resolve
+                    // every same-name row: a live respawn must not be hidden
+                    // by an older stale registration. A registry read failure
+                    // is uncertain ownership, so fail closed rather than
+                    // stealing the task.
+                    let registered_agents = agents.list(None).map_err(|e| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Failed to list assignee {assignee} for task {task_id}: {e}; \
+                                 refusing replacement spawn while liveness is uncertain"
+                            ),
+                        )
+                    })?;
+                    let alive = crate::mcp::tools::service::agent_liveness::has_live_agent_named(
+                        &registered_agents,
+                        assignee,
+                    );
                     if alive {
                         return Err(Self::error(
                             ErrorCode::INVALID_REQUEST,

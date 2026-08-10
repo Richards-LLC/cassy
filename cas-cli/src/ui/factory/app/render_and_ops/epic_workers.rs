@@ -769,13 +769,14 @@ fn reset_stale_preassign_holder(
 ) -> Result<(), String> {
     let agents = open_agent_store(cas_dir)
         .map_err(|e| format!("could not inspect current assignee '{holder}': {e}"))?;
-    if agents
-        .get(holder)
-        .map(|agent| {
-            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(&agent)
-                .is_live()
-        })
-        .unwrap_or(false)
+    // Task assignees are display names, not registry IDs. Inspect every
+    // same-name row so an older stale registration cannot mask a fresh live
+    // respawn. Listing failure means ownership is uncertain and must refuse
+    // the destructive reset (cas-2327).
+    let registered_agents = agents
+        .list(None)
+        .map_err(|e| format!("could not list current assignee '{holder}': {e}"))?;
+    if crate::mcp::tools::service::agent_liveness::has_live_agent_named(&registered_agents, holder)
     {
         return Err(format!("task is still held by live worker '{holder}'"));
     }
@@ -3248,6 +3249,36 @@ mod tests {
         // Matching worker → cleared
         release_preassign_if_bound(&cas_dir, "cas-abc1", "recipes-fixer");
         assert_eq!(store.get("cas-abc1").unwrap().assignee, None);
+    }
+
+    /// A task persists a display-name assignee, not the registry's opaque ID.
+    /// A fresh row under that name must prevent the reset path from stealing
+    /// its task (GH #170).
+    #[test]
+    fn preassign_refuses_live_display_name_holder() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let holder = "fresh-heartbeat-worker";
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut agent = cas_types::Agent::new("opaque-agent-id".into(), holder.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agents.register(&agent).unwrap();
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        store
+            .add(&task_with(
+                "cas-live-holder",
+                Some(holder),
+                TaskStatus::InProgress,
+            ))
+            .unwrap();
+
+        assert!(
+            !assign_task_to_new_worker(&cas_dir, "cas-live-holder", "replacement-worker"),
+            "a fresh display-name holder must prevent destructive reset"
+        );
+        let unchanged = store.get("cas-live-holder").unwrap();
+        assert_eq!(unchanged.assignee.as_deref(), Some(holder));
+        assert_eq!(unchanged.status, TaskStatus::InProgress);
     }
 
     /// Closed tasks must never be reopened by shutdown release.

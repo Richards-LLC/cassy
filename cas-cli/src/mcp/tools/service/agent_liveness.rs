@@ -119,6 +119,18 @@ pub fn evaluate_supervision_liveness(agent: &Agent) -> SupervisionLiveness {
     evaluate_supervision_liveness_with(agent, agent_process_is_alive(agent), WORKER_STALE_SECS)
 }
 
+/// Whether any registry row for a visible worker name is supervision-live.
+///
+/// Task assignees persist the worker's display name, while `AgentStore::get`
+/// is keyed by the opaque agent ID.  Keep this name-based resolution beside
+/// the authoritative liveness formula so task-ownership paths cannot confuse
+/// the two identities (cas-2327).
+pub fn has_live_agent_named<'a>(agents: impl IntoIterator<Item = &'a Agent>, name: &str) -> bool {
+    agents
+        .into_iter()
+        .any(|agent| agent.name == name && evaluate_supervision_liveness(agent).is_live())
+}
+
 /// Live factory worker for roster agreement (`worker_status` ↔ `agent_list`).
 pub fn is_live_factory_worker(agent: &Agent) -> bool {
     agent.role == AgentRole::Worker && evaluate_supervision_liveness(agent).is_live()
@@ -149,9 +161,7 @@ pub fn agent_list_status_label(agent: &Agent) -> String {
             AgentStatus::Idle => "idle".to_string(),
             _ => "active".to_string(),
         },
-        SupervisionLiveness::AliveHeartbeatStale => {
-            "active,alive-heartbeat-stale".to_string()
-        }
+        SupervisionLiveness::AliveHeartbeatStale => "active,alive-heartbeat-stale".to_string(),
         SupervisionLiveness::NotLive => format!("{}", agent.status).to_lowercase(),
     }
 }

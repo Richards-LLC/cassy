@@ -132,7 +132,11 @@ async fn team_push_nested_skip_response_becomes_visible_failed_queue_item() {
 
     let (results, queue) = tokio::task::spawn_blocking(move || {
         let results = (0..5)
-            .map(|_| syncer.push_team(TEST_TEAM).expect("team push should return a result"))
+            .map(|_| {
+                syncer
+                    .push_team(TEST_TEAM)
+                    .expect("team push should return a result")
+            })
             .collect::<Vec<_>>();
         (results, queue)
     })
@@ -160,14 +164,64 @@ async fn team_push_nested_skip_response_becomes_visible_failed_queue_item() {
         "queue output must expose why this team row failed: {items:?}"
     );
     assert!(
-        items[0]
-            .last_error
-            .as_deref()
-            .is_some_and(|diagnostic| {
-                diagnostic.contains("server response:") && diagnostic.contains("\"synced\"")
-            }),
+        items[0].last_error.as_deref().is_some_and(|diagnostic| {
+            diagnostic.contains("server response:") && diagnostic.contains("\"synced\"")
+        }),
         "queue output must preserve the raw team server response: {items:?}"
     );
+}
+
+#[tokio::test]
+async fn team_itemized_rejection_syncs_owned_row_and_names_scope_mismatch() {
+    let server = MockServer::start().await;
+    let body: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/cloud_push/team-itemized-scope-mismatch.json"
+    ))
+    .expect("team itemized rejection fixture must be valid JSON");
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(5)
+        .mount(&server)
+        .await;
+
+    let tmp = make_cas_root_with_team_item();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            "rejected-team-entry-002",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"rejected-team-entry-002","scope":"project","content":"no"}"#),
+            TEST_TEAM,
+        )
+        .unwrap();
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+    let (results, queue) = tokio::task::spawn_blocking(move || {
+        let results = (0..5)
+            .map(|_| syncer.push_team(TEST_TEAM))
+            .collect::<Vec<_>>();
+        (results, queue)
+    })
+    .await
+    .expect("spawn_blocking join");
+
+    assert!(results.iter().all(|result| {
+        result
+            .as_ref()
+            .is_ok_and(|result| !result.errors.is_empty())
+    }));
+    assert_eq!(queue.stats(5).unwrap().failed, 1);
+    assert_eq!(queue.list_all(10).unwrap().len(), 1);
+    let failed = &queue.list_all(10).unwrap()[0];
+    assert_eq!(failed.entity_id, "rejected-team-entry-002");
+    assert!(failed.last_error.as_deref().is_some_and(|error| {
+        error.contains("scope_mismatch") && error.contains("existing canonical project: cas-src")
+    }));
 }
 
 /// No team configured → early return, zero HTTP traffic, `Ok(())`.

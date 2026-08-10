@@ -56,6 +56,21 @@ A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges 
 | **Liveness triage** | `cas factory is-wedged`, `debug`, `kill` classify and recover a stuck worker; `cas factory preflight` reports readiness before spawning |
 | **Headless control** | `cas factory status|agents|activity|message` drive a running session without attaching a terminal |
 
+### Bare Claude account picker
+
+Claude Code's updater owns `~/.local/bin/claude` and replaces that entry with
+its current binary, so a wrapper installed at that path will not survive an
+update. Put this shell function in your interactive shell startup file instead
+(for example `~/.zshrc`), then open a new terminal:
+
+```bash
+claude() { command cas claude --bare "$@"; }
+```
+
+With two or more logged-in Claude profiles, bare `claude` now offers a picker.
+The picker is intentionally bypassed for non-interactive invocations, so
+scripts keep Claude Code's normal argument and input behavior.
+
 ## Context System
 
 `cas serve` speaks [MCP](https://modelcontextprotocol.io/). It exposes twelve umbrella tools — each dispatching dozens of actions — plus two proxy tools when upstream MCP servers are configured:

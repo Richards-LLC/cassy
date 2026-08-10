@@ -14,15 +14,15 @@
 //! `--bare` keeps the plain "just open Claude Code on this profile" launcher.
 
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::{Args, FromArgMatches};
 
-use super::factory::FactoryArgs;
 use super::Cli;
+use super::factory::FactoryArgs;
 
 /// Arguments for `cas claude [profile] [factory-args...]`.
 #[derive(Args, Clone, Debug)]
@@ -124,6 +124,37 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
     }
 
     Ok(output)
+}
+
+/// Return whether a bare launch should ask the user to select an account.
+///
+/// A profile explicitly named by the caller always wins. We must also leave
+/// pipe/script launches alone: a prompt there would either hang or consume
+/// caller input that belongs to Claude Code.
+fn should_prompt_for_profile(
+    explicit_profile: Option<&str>,
+    profiles: &[Profile],
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    explicit_profile.is_none()
+        && stdin_is_terminal
+        && stdout_is_terminal
+        && profiles.iter().filter(|profile| profile.logged_in).count() > 1
+}
+
+/// Prompt for one of the logged-in account profiles.
+fn prompt_for_profile(profiles: &[Profile]) -> Result<String> {
+    let choices = profiles
+        .iter()
+        .filter(|profile| profile.logged_in)
+        .map(|profile| profile.name.clone())
+        .collect();
+
+    inquire::Select::new("Choose Claude account", choices)
+        .with_help_message("This selection applies only to this Claude session")
+        .prompt()
+        .context("Claude account selection cancelled")
 }
 
 /// Build the command used for a `--bare` profile launch without executing it.
@@ -228,8 +259,20 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
 /// Plain Claude Code launch. On Unix this replaces the CAS process with Claude.
 fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-    let profile = args.profile.as_deref().unwrap_or("main");
-    let profile_dir = resolve_profile_dir(&home, profile);
+    let profile = match args.profile.as_deref() {
+        Some(profile) => profile.to_string(),
+        None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
+            let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+            let profiles = scan_profiles(&home, active_dir.as_deref())?;
+            if should_prompt_for_profile(None, &profiles, true, true) {
+                prompt_for_profile(&profiles)?
+            } else {
+                "main".to_string()
+            }
+        }
+        None => "main".to_string(),
+    };
+    let profile_dir = resolve_profile_dir(&home, &profile);
 
     warn_about_profile_state(&profile_dir);
     eprintln!("Using Claude account config: {}", profile_dir.display());
@@ -323,6 +366,35 @@ mod tests {
             Some(OsStr::new("/tmp/.claude-alt"))
         )));
         assert!(envs.contains(&(OsStr::new("ANTHROPIC_API_KEY"), None)));
+    }
+
+    #[test]
+    fn bare_launch_prompts_only_for_interactive_ambiguous_account_selection() {
+        let profiles = vec![
+            Profile {
+                name: "main".to_string(),
+                directory: PathBuf::from("/tmp/.claude"),
+                logged_in: true,
+                active: false,
+            },
+            Profile {
+                name: "alt".to_string(),
+                directory: PathBuf::from("/tmp/.claude-alt"),
+                logged_in: true,
+                active: false,
+            },
+        ];
+
+        assert!(should_prompt_for_profile(None, &profiles, true, true));
+        assert!(!should_prompt_for_profile(None, &profiles, false, true));
+        assert!(!should_prompt_for_profile(None, &profiles, true, false));
+        assert!(!should_prompt_for_profile(
+            Some("alt"),
+            &profiles,
+            true,
+            true
+        ));
+        assert!(!should_prompt_for_profile(None, &profiles[..1], true, true));
     }
 
     #[test]

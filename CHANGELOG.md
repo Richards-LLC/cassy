@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.58.0] - 2026-08-10
+
+### Added
+- **CAS now carries its own built-in CLI routing guidance.** Common command-line work can reach the right product guidance without relying on a separate external skill setup.
+- **Workers now checkpoint before compaction and can retain a sync-conflict journal.** A constrained turn leaves a usable handoff, while a conflicted sync keeps enough history to explain and reconcile the result.
+
+### Changed
+- **Factory work now follows a clearer workspace contract.** Writes are constrained to sanctioned roots, durable task artifacts are collected safely, and close evidence cannot point into transient tmpfs paths.
+- **Release inputs now fail fast before artifact builds begin.** The release workflow validates the annotated tag, exact version train, changelog, clean inputs, and locked dependency graph before it spends time building platform artifacts.
+- **Legacy session and model-effort context now remain attached to the work that needs them.** Daemonized sessions retain their source session through muxing, and queued work preserves the selected model effort.
+
+### Fixed
+- **Memory sync no longer drops a daily entry when remote IDs collide.** Collisions are skipped safely instead of silently replacing local history.
+- **Verification storage repairs its required schema at open time.** Existing installations converge before verification state is used.
+- **Rejected supervisor reviews return through the sanctioned amendment path.** Review state and epic close reporting now agree on the intended target.
+- **Cloud sync now exposes intentionally skipped queue work.** Operators can distinguish a retained diagnostic from an unexplained missing update.
+- **The factory test and workspace suite is portable across the supported macOS environment.** PTY aliases, hub fixtures, watcher behavior, history cleanup, migration projections, and reminder references now remain stable without Linux-only assumptions.
+
 ## [2.57.0] - 2026-08-09
 
 ### Added

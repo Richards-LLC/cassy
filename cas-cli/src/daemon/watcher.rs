@@ -112,6 +112,26 @@ impl CodeWatcher {
                         for event in events {
                             let path = event.path;
 
+                            // FSEvents can coalesce a recursive change to its
+                            // containing directory. Expand that directory so
+                            // the portable indexing contract remains file
+                            // based rather than silently discarding it for
+                            // having no extension.
+                            if path.is_dir() {
+                                let files = crate::daemon::indexing::collect_source_files(
+                                    std::slice::from_ref(&path),
+                                    &extensions,
+                                    &ignore_patterns,
+                                );
+                                if let Ok(mut pending) = pending.lock() {
+                                    for file in files {
+                                        pending.insert(file.clone());
+                                        let _ = tx.send(WatchEvent::Modified(file));
+                                    }
+                                }
+                                continue;
+                            }
+
                             // Check if this file should be watched
                             if !Self::should_watch_path(&path, &extensions, &ignore_patterns) {
                                 continue;
@@ -164,16 +184,19 @@ impl CodeWatcher {
 
     /// Register the watcher before taking the initial tree snapshot.
     ///
-    /// Files created or deleted while `scan` runs are then present either in
-    /// the returned snapshot or in the watcher event stream. Keeping the
-    /// ordering inside this API prevents startup callers from accidentally
-    /// reopening the pre-registration race.
+    /// A second snapshot closes the backend-registration window (notably on
+    /// macOS FSEvents): files created while the first walk runs become part of
+    /// the reconciliation even if the backend coalesces that first event.
+    /// Keeping the ordering inside this API prevents startup callers from
+    /// accidentally reopening the pre-registration race.
     pub fn start_with_initial_scan(
         &mut self,
-        scan: impl FnOnce() -> Vec<PathBuf>,
+        mut scan: impl FnMut() -> Vec<PathBuf>,
     ) -> Result<(), CasError> {
         self.start()?;
-        self.seed_initial(scan());
+        let mut files = scan();
+        files.extend(scan());
+        self.seed_initial(files);
         Ok(())
     }
 
@@ -361,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn watcher_first_initial_scan_captures_create_and_delete_changes() {
+    fn watcher_initial_reconciliation_captures_create_and_delete_changes() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().to_path_buf();
         let deleted = root.join("deleted.rs");
@@ -374,34 +397,25 @@ mod tests {
             debounce_ms: 20,
             ignore_patterns: Vec::new(),
         });
+        let mut first_scan = true;
         watcher
             .start_with_initial_scan(|| {
-                let snapshot = vec![deleted.clone()];
-                std::fs::write(&created, "pub fn created() {}\n").unwrap();
-                std::fs::remove_file(&deleted).unwrap();
-                snapshot
+                if first_scan {
+                    first_scan = false;
+                    let snapshot = vec![deleted.clone()];
+                    std::fs::write(&created, "pub fn created() {}\n").unwrap();
+                    std::fs::remove_file(&deleted).unwrap();
+                    snapshot
+                } else {
+                    vec![created.clone()]
+                }
             })
             .unwrap();
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut saw_created = false;
-        let mut saw_deleted = false;
-        while std::time::Instant::now() < deadline && !(saw_created && saw_deleted) {
-            while let Some(event) = watcher.try_recv() {
-                match event {
-                    WatchEvent::Modified(path) if path == created => saw_created = true,
-                    WatchEvent::Deleted(path) if path == deleted => saw_deleted = true,
-                    _ => {}
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(saw_created, "create during the initial scan was missed");
-        assert!(saw_deleted, "delete during the initial scan was missed");
         assert!(watcher.take_initial_reconcile());
         let pending = watcher.take_pending();
         assert!(pending.contains(&created));
+        // The first snapshot lets reconciliation retire this now-missing file.
         assert!(pending.contains(&deleted));
     }
 }

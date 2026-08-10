@@ -912,22 +912,25 @@ mod tests {
         }
         drop(conn);
 
-        // Production store opening installs only IF-NOT-EXISTS objects. It
-        // leaves the legacy primary table untouched, reproducing the failing
-        // `knowledge list` projection before the migration runner repairs it.
+        // Production store opening upgrades the additive projection in place:
+        // m225-era rows remain readable as local pages until the migration
+        // runner reconciles the ledger and records the repair.
         let store = cas_store::SqliteKnowledgeStore::open(&cas_dir).unwrap();
-        let error = store
+        let pages = store
             .list_pages()
-            .expect_err("legacy v225 projection must lack attribution columns");
-        assert!(error.to_string().contains("no such column: origin"));
+            .expect("legacy v225 projection must remain readable");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].id, "cas-kn-v225");
+        assert_eq!(pages[0].origin, cas_store::KnowledgePageOrigin::Local);
+        assert_eq!(pages[0].origin_project_id, None);
         drop(store);
 
         cas_dir
     }
 
-    fn assert_repaired_v225_knowledge_gap(cas_dir: &Path) {
+    fn assert_repaired_v225_knowledge_gap(cas_dir: &Path, expected_m226_ledger: &str) {
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [225, 226, 227, 228, 229] {
+        for id in [225, 226, 227, 228, 229, 230, 231] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
@@ -939,15 +942,15 @@ mod tests {
                 "migration {id} must be recorded exactly once"
             );
         }
-        assert_ne!(
+        assert_eq!(
             conn.query_row(
                 "SELECT applied_at FROM cas_migrations WHERE id = 226",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .unwrap(),
-            "DETECTED",
-            "the missing lower migration must actually apply"
+            expected_m226_ledger,
+            "m226 preserves the fixture's truthful ledger attribution"
         );
         assert!(cas_store::shared_db::column_exists(
             &conn,
@@ -994,7 +997,7 @@ mod tests {
         assert_eq!(pages[0].origin_project_id, None);
 
         let status = check_migrations(cas_dir).unwrap();
-        assert_eq!(status.current_version, 229);
+        assert_eq!(status.current_version, 231);
         assert!(status.pending.is_empty());
         let second = run_migrations(cas_dir, false).unwrap();
         assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
@@ -1016,7 +1019,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229],
+                vec![225, 226, 227, 228, 229, 230, 231],
                 "recorded m225 and missing m226 must order all later work behind them"
             );
 
@@ -1034,13 +1037,10 @@ mod tests {
             drop(conn);
 
             let first = run_migrations(&cas_dir, false).unwrap();
-            assert_eq!(first.applied_count, 2);
+            assert_eq!(first.applied_count, 1);
             assert_eq!(
                 first.applied_names,
-                [
-                    "commit_links_link_method",
-                    "knowledge_pages_add_attribution"
-                ]
+                ["commit_links_link_method"]
             );
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
             }
             drop(conn);
 
-            assert_repaired_v225_knowledge_gap(&cas_dir);
+            assert_repaired_v225_knowledge_gap(&cas_dir, "DETECTED");
         });
     }
 
@@ -1106,19 +1106,16 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226]
+                vec![225, 226, 230, 231]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
-            assert_eq!(first.applied_count, 2);
+            assert_eq!(first.applied_count, 1);
             assert_eq!(
                 first.applied_names,
-                [
-                    "commit_links_link_method",
-                    "knowledge_pages_add_attribution"
-                ]
+                ["commit_links_link_method"]
             );
-            assert_repaired_v225_knowledge_gap(&cas_dir);
+            assert_repaired_v225_knowledge_gap(&cas_dir, "DETECTED");
         });
     }
 
@@ -1151,16 +1148,15 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229]
+                vec![225, 227, 228, 229, 230, 231]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
-            assert_eq!(first.applied_count, 3);
+            assert_eq!(first.applied_count, 2);
             assert_eq!(
                 first.applied_names,
                 [
                     "commit_links_link_method",
-                    "knowledge_pages_add_attribution",
                     "knowledge_page_tombstones"
                 ]
             );
@@ -1174,12 +1170,12 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-                3,
-                "every historical absent-parent shortcut must leave an audit receipt"
+                2,
+                "only migrations still absent after store-open repair need audit receipts"
             );
             drop(conn);
 
-            assert_repaired_v225_knowledge_gap(&cas_dir);
+            assert_repaired_v225_knowledge_gap(&cas_dir, "BOOTSTRAP");
         });
     }
 

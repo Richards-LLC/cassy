@@ -16,6 +16,16 @@ use crate::ui::factory::{
     daemon_capabilities,
 };
 
+/// Hub state initialization intentionally refuses to traverse symlinked path
+/// components. macOS exposes its temporary directory through `/var`, which is
+/// a symlink to `/private/var`, so fixtures must start at the canonical root.
+fn private_tempdir() -> tempfile::TempDir {
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .expect("temporary directory must be canonicalizable");
+    tempfile::tempdir_in(parent).expect("canonical temporary fixture directory")
+}
+
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
     let auth = PreAuthAuthorizer;
@@ -190,7 +200,7 @@ fn h1_death_05_fixture_process_entry() {
 #[cfg(unix)]
 #[tokio::test]
 async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_multiplication() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let port_file = temp.path().join("port");
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -255,7 +265,7 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
         DaemonDeathCause::Signal {
             signal: libc::SIGILL,
             name: Some("SIGILL".into()),
-            core_dumped: Some(true),
+            core_dumped: Some(cfg!(target_os = "linux")),
         }
     );
     assert!(diagnostic.next_action.contains("portable release artifact"));
@@ -269,7 +279,7 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
 
 #[tokio::test]
 async fn h1_death_05_receipts_distinguish_exit_and_signal_and_reject_stale_epoch() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let store = DaemonExitEvidenceStore::new(temp.path());
     let identity = DaemonIdentity {
         session: "factory-a".into(),
@@ -326,7 +336,7 @@ async fn h1_death_05_receipts_distinguish_exit_and_signal_and_reject_stale_epoch
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn h1_death_05_live_fingerprinted_daemon_is_transport_loss_not_a_signal() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let identity = DaemonIdentity {
         session: "factory-a".into(),
         pid: std::process::id(),
@@ -355,7 +365,7 @@ async fn h1_zero_06_read_paths_never_write_pty_or_create_logical_sessions() {
 
 #[test]
 fn h1_machine_identity_is_stable_on_disk() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let state_dir = temp.path().join("hub");
     let store = MachineIdentityStore::new(&state_dir);
 
@@ -448,7 +458,7 @@ async fn h4_real_browser_safe_reads_derive_only_a_trusted_same_origin() {
     use p256::ecdsa::SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let signing = SigningKey::random(&mut OsRng);
@@ -638,7 +648,7 @@ async fn h4_pairing_preflight_allows_only_the_exact_bootstrap_shape() {
 async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
     use chrono::Utc;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let origin = "https://controller.example";
@@ -1049,7 +1059,7 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
 
 #[test]
 fn h1_runtime_state_is_single_instance_and_round_trips() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let paths = HubRuntimePaths::new(temp.path().join("hub"));
     let first_lock = paths.acquire_instance_lock().unwrap();
     assert!(paths.acquire_instance_lock().is_err());
@@ -1075,7 +1085,7 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
 fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     use chrono::{Duration, Utc};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let state_dir = temp.path().join("hub");
     let now = Utc::now();
     let auth = AuthStore::open(&state_dir, "machine-test").unwrap();
@@ -1126,7 +1136,7 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
 async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
     use chrono::{Duration, Utc};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let (_, context) = paired_context(&auth, now, Scope::default_read_only());
@@ -1184,7 +1194,7 @@ fn h2_pair_02_independent_store_instances_reload_and_serialize_mutations() {
     use chrono::Utc;
     use std::sync::Barrier;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let state_dir = temp.path().join("hub");
     let first = AuthStore::open(&state_dir, "machine-test").unwrap();
     let second = AuthStore::open(&state_dir, "machine-test").unwrap();
@@ -1231,7 +1241,7 @@ fn h2_pair_02_independent_store_instances_reload_and_serialize_mutations() {
 fn h2_scope_05_missing_device_context_is_fail_closed() {
     use chrono::Utc;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let context = AuthContext::test_fixture(
         "missing-device",
@@ -1253,7 +1263,7 @@ fn h2_scope_05_missing_device_context_is_fail_closed() {
 async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
     use chrono::Utc;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let state_dir = temp.path().join("hub");
     let running_hub_auth = AuthStore::open(&state_dir, "machine-test").unwrap();
     let cli_auth = AuthStore::open(&state_dir, "machine-test").unwrap();
@@ -1399,7 +1409,7 @@ fn h2_audit_06_independent_process_writers_append_complete_records() {
     use chrono::Utc;
     use std::sync::Barrier;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let state_dir = temp.path().join("hub");
     let first = AuthStore::open(&state_dir, "machine-test").unwrap();
     let second = AuthStore::open(&state_dir, "machine-test").unwrap();
@@ -1477,7 +1487,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
 fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeover() {
     use chrono::{Duration, Utc};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let scopes: std::collections::BTreeSet<Scope> = [
@@ -1558,7 +1568,7 @@ fn h2_perm_01_rejects_loose_or_symlinked_machine_auth_state() {
     {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let loose = temp.path().join("loose");
         std::fs::create_dir(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1579,7 +1589,7 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     use p256::ecdsa::SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_tempdir();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let signing = SigningKey::random(&mut OsRng);

@@ -41,6 +41,7 @@
 //! worktree was recently written.
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -126,6 +127,43 @@ pub(crate) struct WorkerEvidence {
     /// supervisor reading `is-wedged` output can see WHY a stale-looking
     /// transcript still classified Alive.
     pub in_flight_tool_call: bool,
+    /// Live user-work descendants of the resolved worker pane. This is
+    /// intentionally process-tree evidence rather than durable hook state:
+    /// backgrounded builds continue after the harness reports no in-flight
+    /// tool call (cas-058e).
+    pub background_processes: BackgroundProcessState,
+}
+
+/// A descendant process that is doing worker-owned work in the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackgroundProcess {
+    pub command: String,
+    pub age_secs: u64,
+}
+
+/// The process tree is either observed completely enough to report, or not
+/// available. `Unavailable` is deliberately distinct from an empty list: an
+/// inaccessible `/proc` must never be rendered as "no background jobs".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BackgroundProcessState {
+    Available(Vec<BackgroundProcess>),
+    Unavailable,
+}
+
+impl BackgroundProcessState {
+    pub(crate) fn is_active(&self) -> bool {
+        matches!(self, Self::Available(processes) if !processes.is_empty())
+    }
+}
+
+/// Shared positive-work predicate for every liveness surface. A transcript
+/// can say that no tool call is in flight while a background `cargo`/`rustc`
+/// descendant is still running, so neither signal alone is authoritative.
+pub(crate) fn has_active_work(
+    in_flight_tool_call: bool,
+    background_processes: &BackgroundProcessState,
+) -> bool {
+    in_flight_tool_call || background_processes.is_active()
 }
 
 /// Liveness classification produced by [`classify_worker`]. The variants are
@@ -242,9 +280,34 @@ pub(crate) fn classify_from_evidence(
     fresh_window: Duration,
     in_flight_tool_call: bool,
 ) -> WorkerLivenessState {
+    classify_from_evidence_with_background(
+        pid_alive,
+        transcript_mtime_age,
+        crash_signature,
+        worktree_recent_edit_age,
+        process_busy,
+        fresh_window,
+        in_flight_tool_call,
+        false,
+    )
+}
+
+/// Extended classifier used by the live process-tree orchestrator. Kept
+/// separate from [`classify_from_evidence`] so existing pure callers retain a
+/// compact fixture shape while both activity signals still meet at one branch.
+pub(crate) fn classify_from_evidence_with_background(
+    pid_alive: bool,
+    transcript_mtime_age: Option<Duration>,
+    crash_signature: bool,
+    worktree_recent_edit_age: Option<Duration>,
+    process_busy: bool,
+    fresh_window: Duration,
+    in_flight_tool_call: bool,
+    background_process_active: bool,
+) -> WorkerLivenessState {
     // Distinguish unresolved (None) from resolved-but-stale (Some(age ≥ window)).
     let transcript_resolved = transcript_mtime_age.is_some();
-    let fresh = in_flight_tool_call
+    let fresh = (in_flight_tool_call || background_process_active)
         || transcript_mtime_age
             .map(|age| age < fresh_window)
             .unwrap_or(false);
@@ -365,7 +428,10 @@ pub(crate) fn worktree_branch_tip_age(clone_path: &Path) -> Option<Duration> {
     if !output.status.success() {
         return None;
     }
-    let ts: u64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+    let ts: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
     let commit_time = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(ts))?;
     SystemTime::now().duration_since(commit_time).ok()
 }
@@ -380,8 +446,7 @@ pub(crate) fn collect_tail_lines<R: Read>(reader: R, n: usize) -> Vec<String> {
         return Vec::new();
     }
     let bufread = BufReader::new(reader);
-    let mut ring: std::collections::VecDeque<String> =
-        std::collections::VecDeque::with_capacity(n);
+    let mut ring: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(n);
     for line in bufread.lines().map_while(Result::ok) {
         if ring.len() == n {
             ring.pop_front();
@@ -398,8 +463,11 @@ pub(crate) fn collect_tail_lines<R: Read>(reader: R, n: usize) -> Vec<String> {
 /// window in memory.
 pub(crate) fn has_crash_signature<R: Read>(reader: R, tail_lines: usize) -> bool {
     let tail = collect_tail_lines(reader, tail_lines);
-    tail.iter()
-        .any(|l| CRASH_SIGNATURE_NEEDLES.iter().any(|needle| l.contains(*needle)))
+    tail.iter().any(|l| {
+        CRASH_SIGNATURE_NEEDLES
+            .iter()
+            .any(|needle| l.contains(*needle))
+    })
 }
 
 /// Convenience wrapper that opens `path` and runs [`has_crash_signature`].
@@ -494,10 +562,7 @@ fn claude_has_pending_tool_call(lines: &[String]) -> bool {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let Some(content) = value
-            .pointer("/message/content")
-            .and_then(|c| c.as_array())
-        else {
+        let Some(content) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
             continue;
         };
         for block in content {
@@ -605,7 +670,10 @@ fn grok_activity_age(updates_jsonl_path: &Path) -> Option<Duration> {
 /// transcript-freshness primitive `is-wedged`/the director's stall gate
 /// already trust, instead of a second ad-hoc mtime read that would drift
 /// out of sync with Grok's `signals.json` preference.
-pub(crate) fn effective_transcript_age(path: &Path, cli: cas_mux::SupervisorCli) -> Option<Duration> {
+pub(crate) fn effective_transcript_age(
+    path: &Path,
+    cli: cas_mux::SupervisorCli,
+) -> Option<Duration> {
     match cli {
         cas_mux::SupervisorCli::Grok => grok_activity_age(path),
         cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex => {
@@ -670,15 +738,32 @@ where
         None => (None, false, false),
     };
     let worktree_age = clone_path.and_then(worktree_age_probe);
-    let state = classify_from_evidence(
-        pid_alive,
-        age_opt,
-        sig,
-        worktree_age,
-        process_busy,
-        activity_fresh_window(cli),
-        in_flight,
-    );
+    let background_processes = pid
+        .filter(|_| pid_alive)
+        .map(background_processes_for)
+        .unwrap_or(BackgroundProcessState::Unavailable);
+    let state = if background_processes.is_active() {
+        classify_from_evidence_with_background(
+            pid_alive,
+            age_opt,
+            sig,
+            worktree_age,
+            process_busy,
+            activity_fresh_window(cli),
+            in_flight,
+            true,
+        )
+    } else {
+        classify_from_evidence(
+            pid_alive,
+            age_opt,
+            sig,
+            worktree_age,
+            process_busy,
+            activity_fresh_window(cli),
+            in_flight,
+        )
+    };
     let evidence = WorkerEvidence {
         pid,
         pid_alive,
@@ -688,6 +773,7 @@ where
         worktree_edit_age_secs: worktree_age.map(|d| d.as_secs()),
         session_id: session_id.to_string(),
         in_flight_tool_call: in_flight,
+        background_processes,
     };
     (state, evidence)
 }
@@ -696,14 +782,10 @@ where
 /// name. Reads the active agent row from AgentStore. Returns an error if the
 /// worker is unknown or has no registered PID — the verbs treat that as a
 /// hard stop rather than making up evidence.
-pub(crate) fn resolve_worker(
-    cas_root: &Path,
-    worker_name: &str,
-) -> Result<ResolvedWorker> {
+pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<ResolvedWorker> {
     use cas_store::{AgentStore, SqliteAgentStore};
     use cas_types::AgentStatus;
-    let store = SqliteAgentStore::open(cas_root)
-        .with_context(|| "open agent store")?;
+    let store = SqliteAgentStore::open(cas_root).with_context(|| "open agent store")?;
     let mut matches: Vec<_> = [AgentStatus::Active, AgentStatus::Stale]
         .iter()
         .flat_map(|s| store.list(Some(*s)).unwrap_or_default())
@@ -748,8 +830,7 @@ pub(crate) fn resolve_worker(
     // resolver as worker_status so the human and director stall surfaces
     // cannot disagree about which transcript is evidence.
     let cli = worker_cli_from_agent(&agent);
-    let transcript_path =
-        resolve_worker_transcript_path(clone_path.as_deref(), &session_id, cli);
+    let transcript_path = resolve_worker_transcript_path(clone_path.as_deref(), &session_id, cli);
     Ok(ResolvedWorker {
         name: worker_name.to_string(),
         pid,
@@ -792,11 +873,7 @@ pub(crate) struct ResolvedWorker {
 // ---------------------------------------------------------------------------
 
 /// `cas factory is-wedged <worker>`: classify + print evidence + exit.
-pub(crate) fn execute_is_wedged(
-    cas_root: Option<&Path>,
-    worker: &str,
-    json: bool,
-) -> Result<()> {
+pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a CAS project"))?;
     // Scope the store opens so their SqliteConnection drops (running any
@@ -831,11 +908,7 @@ pub(crate) fn execute_is_wedged(
 }
 
 /// `cas factory debug <worker>`: print tail of worker transcript.
-pub(crate) fn execute_debug(
-    cas_root: Option<&Path>,
-    worker: &str,
-    tail: usize,
-) -> Result<()> {
+pub(crate) fn execute_debug(cas_root: Option<&Path>, worker: &str, tail: usize) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a CAS project"))?;
     let w = resolve_worker(cas_root, worker)?;
@@ -934,12 +1007,15 @@ pub(crate) fn agent_name_from_cmdline(cmdline: &[u8]) -> Option<String> {
 /// `/proc/<pid>/environ` bytes — the Codex worker identity signal, since
 /// Codex's argv carries no `--agent-name` flag (cas-f781 investigation).
 pub(crate) fn agent_name_from_environ(environ: &[u8]) -> Option<String> {
-    environ.split(|b| *b == 0).filter(|s| !s.is_empty()).find_map(|entry| {
-        std::str::from_utf8(entry)
-            .ok()
-            .and_then(|s| s.strip_prefix("CAS_AGENT_NAME="))
-            .map(|v| v.to_string())
-    })
+    environ
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .find_map(|entry| {
+            std::str::from_utf8(entry)
+                .ok()
+                .and_then(|s| s.strip_prefix("CAS_AGENT_NAME="))
+                .map(|v| v.to_string())
+        })
 }
 
 /// Scan the live process table for the pid whose cmdline or environ
@@ -1059,6 +1135,111 @@ pub(crate) fn environ_candidate_score(cmdline: Option<&[u8]>) -> i32 {
     50
 }
 
+/// Enumerate live descendants of a worker's resolved pane PID on Linux.
+///
+/// The kernel's `children` files give a bounded, ownership-preserving walk:
+/// a cargo build started by the worker is a descendant, while an unrelated
+/// host build never is. Process start ages use the same `/proc/<pid>/stat`
+/// starttime fingerprint source used elsewhere in CAS. If either the root
+/// traversal or uptime clock cannot be read, return `Unavailable` rather than
+/// pretending there are no jobs (cas-058e's fail-honest contract).
+pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(uptime_secs) = proc_uptime_secs() else {
+            return BackgroundProcessState::Unavailable;
+        };
+        let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if ticks_per_second <= 0 {
+            return BackgroundProcessState::Unavailable;
+        }
+        let mut queue = VecDeque::from([root_pid]);
+        let mut visited = HashSet::from([root_pid]);
+        let mut processes = Vec::new();
+        while let Some(parent) = queue.pop_front() {
+            let Ok(raw_children) =
+                std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))
+            else {
+                // A vanished descendant is normal; a root we cannot inspect
+                // is not. The latter would turn an unknown tree into a false
+                // "none" claim, so surface unavailable.
+                if parent == root_pid {
+                    return BackgroundProcessState::Unavailable;
+                }
+                continue;
+            };
+            for child in raw_children
+                .split_whitespace()
+                .filter_map(|pid| pid.parse::<u32>().ok())
+            {
+                if !visited.insert(child) {
+                    continue;
+                }
+                queue.push_back(child);
+                let Some(start_ticks) = crate::mcp::daemon::read_pid_starttime(child) else {
+                    // The process exited during the walk. It is no longer a
+                    // running job; continue rather than reporting stale data.
+                    continue;
+                };
+                let age_secs =
+                    (uptime_secs - start_ticks as f64 / ticks_per_second as f64).max(0.0) as u64;
+                let command = process_command_name(child);
+                if !is_cas_sidecar(&command, child) {
+                    processes.push(BackgroundProcess { command, age_secs });
+                }
+            }
+        }
+        processes.sort_by(|a, b| a.command.cmp(&b.command).then(a.age_secs.cmp(&b.age_secs)));
+        BackgroundProcessState::Available(processes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root_pid;
+        BackgroundProcessState::Unavailable
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_uptime_secs() -> Option<f64> {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn process_command_name(pid: u32) -> String {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
+    cmdline
+        .as_deref()
+        .and_then(|raw| raw.split(|b| *b == 0).find(|part| !part.is_empty()))
+        .and_then(|arg0| std::str::from_utf8(arg0).ok())
+        .and_then(|arg0| Path::new(arg0).file_name().and_then(|name| name.to_str()))
+        .map(str::to_owned)
+        .or_else(|| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .ok()
+                .map(|name| name.trim().to_owned())
+        })
+        .unwrap_or_else(|| "<command unavailable>".to_string())
+}
+
+/// `cas serve` is a persistent harness sidecar inherited by every worker;
+/// treating it as a job would suppress stall detection forever. It is not a
+/// user background command, unlike the cargo/rustc descendants this feature
+/// reports.
+#[cfg(target_os = "linux")]
+fn is_cas_sidecar(command: &str, pid: u32) -> bool {
+    if command != "cas" && !command.starts_with("cas-") {
+        return false;
+    }
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .is_some_and(|raw| raw.split(|b| *b == 0).any(|part| part == b"serve"))
+}
+
 /// Sum of user+system jiffies from `/proc/<pid>/stat` (fields 14 and 15
 /// after the parenthesized `comm`). `None` when unreadable or non-Linux.
 pub(crate) fn process_cpu_ticks(pid: u32) -> Option<u64> {
@@ -1126,7 +1307,10 @@ pub(crate) fn pick_kill_pid(tracked_pid: Option<u32>, resolved_pid: Option<u32>)
 /// AC b: a still-alive process — whether because the kill was refused or
 /// because it demonstrably survived the signal — must never have its lease
 /// reset out from under it.
-pub(crate) fn decide_post_kill_action(verdict: &KillVerdict, death_confirmed_after_kill: bool) -> bool {
+pub(crate) fn decide_post_kill_action(
+    verdict: &KillVerdict,
+    death_confirmed_after_kill: bool,
+) -> bool {
     match verdict {
         KillVerdict::AlreadyDead => true,
         KillVerdict::Go => death_confirmed_after_kill,
@@ -1215,11 +1399,7 @@ fn verify_death(pid: u32) -> bool {
 /// refused (fingerprint mismatch / no fingerprint) or that demonstrably
 /// didn't take never resets the task lease out from under a still-running
 /// worker.
-pub(crate) fn execute_kill(
-    cas_root: Option<&Path>,
-    worker: &str,
-    force: bool,
-) -> Result<()> {
+pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a CAS project"))?;
     let w = resolve_worker(cas_root, worker)?;
@@ -1277,9 +1457,7 @@ pub(crate) fn execute_kill(
                                 verify_death(group_pid)
                             }
                             Err(e) => {
-                                summary.push(format!(
-                                    "SIGKILL failed for pid {group_pid}: {e}"
-                                ));
+                                summary.push(format!("SIGKILL failed for pid {group_pid}: {e}"));
                                 // cas-a91b: do NOT fall through to verify_death
                                 // on a failed/refused kill — a failure here
                                 // must never be treated as "confirmed dead".
@@ -1433,8 +1611,7 @@ fn reset_worker_tasks(cas_root: &Path, worker_name: &str) -> Result<usize> {
     use cas_store::{AgentStore, SqliteAgentStore, SqliteTaskStore, TaskStore};
     use cas_types::TaskStatus;
     let task_store = SqliteTaskStore::open(cas_root).with_context(|| "open task store")?;
-    let agent_store =
-        SqliteAgentStore::open(cas_root).with_context(|| "open agent store")?;
+    let agent_store = SqliteAgentStore::open(cas_root).with_context(|| "open agent store")?;
     let assigned: Vec<_> = task_store
         .list(None)
         .unwrap_or_default()
@@ -1502,6 +1679,22 @@ fn format_state_human(state: &WorkerLivenessState, ev: &WorkerEvidence) -> Strin
         "  in-flight tool call: {}\n",
         ev.in_flight_tool_call
     ));
+    match &ev.background_processes {
+        BackgroundProcessState::Available(processes) if processes.is_empty() => {
+            s.push_str("  background processes: none\n");
+        }
+        BackgroundProcessState::Available(processes) => {
+            let detail = processes
+                .iter()
+                .map(|process| format!("{} ({}s)", process.command, process.age_secs))
+                .collect::<Vec<_>>()
+                .join(", ");
+            s.push_str(&format!("  background processes: {detail}\n"));
+        }
+        BackgroundProcessState::Unavailable => {
+            s.push_str("  background-process state unavailable\n");
+        }
+    }
     s
 }
 
@@ -1526,6 +1719,13 @@ fn format_state_json(state: &WorkerLivenessState, ev: &WorkerEvidence) -> String
         "worktree_edit_age_secs": ev.worktree_edit_age_secs,
         "session_id": ev.session_id,
         "in_flight_tool_call": ev.in_flight_tool_call,
+        "background_processes": match &ev.background_processes {
+            BackgroundProcessState::Available(processes) => serde_json::Value::Array(processes.iter().map(|process| serde_json::json!({
+                "command": process.command,
+                "age_secs": process.age_secs,
+            })).collect()),
+            BackgroundProcessState::Unavailable => serde_json::Value::Null,
+        },
     });
     body.to_string()
 }
@@ -1540,7 +1740,15 @@ mod tests {
         // cas-f781 AC c: Dead requires TWO independent signals to agree —
         // pid gone AND (transcript stale AND worktree not recently edited).
         for sig in [true, false] {
-            let got = classify_from_evidence(false, Some(Duration::from_secs(5 * 60)), sig, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+            let got = classify_from_evidence(
+                false,
+                Some(Duration::from_secs(5 * 60)),
+                sig,
+                None,
+                false,
+                TRANSCRIPT_FRESH_WINDOW,
+                false,
+            );
             assert_eq!(got, WorkerLivenessState::Dead, "sig={sig}");
         }
     }
@@ -1554,7 +1762,15 @@ mod tests {
         // Report Unverified so an operator investigates before a caller
         // (e.g. a supervisor auto-reset) treats it as ground truth.
         for sig in [true, false] {
-            let got = classify_from_evidence(false, Some(Duration::from_secs(5)), sig, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+            let got = classify_from_evidence(
+                false,
+                Some(Duration::from_secs(5)),
+                sig,
+                None,
+                false,
+                TRANSCRIPT_FRESH_WINDOW,
+                false,
+            );
             assert_eq!(got, WorkerLivenessState::Unverified, "sig={sig}");
         }
     }
@@ -1581,19 +1797,43 @@ mod tests {
         // No transcript resolved, no worktree resolved, pid gone: nothing
         // contradicts "dead", so Dead still fires — matches the
         // no-pid-registered case (classify_worker_no_pid_short_circuits_to_dead).
-        let got = classify_from_evidence(false, None, true, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+        let got = classify_from_evidence(
+            false,
+            None,
+            true,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+        );
         assert_eq!(got, WorkerLivenessState::Dead);
     }
 
     #[test]
     fn classify_wedged_when_alive_fresh_and_signature_matches() {
-        let got = classify_from_evidence(true, Some(Duration::from_secs(5)), true, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+        let got = classify_from_evidence(
+            true,
+            Some(Duration::from_secs(5)),
+            true,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+        );
         assert_eq!(got, WorkerLivenessState::Wedged);
     }
 
     #[test]
     fn classify_alive_when_fresh_and_no_signature() {
-        let got = classify_from_evidence(true, Some(Duration::from_secs(5)), false, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+        let got = classify_from_evidence(
+            true,
+            Some(Duration::from_secs(5)),
+            false,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+        );
         assert_eq!(got, WorkerLivenessState::Alive);
     }
 
@@ -1606,7 +1846,15 @@ mod tests {
         // cas-7e85: TRANSCRIPT_FRESH_WINDOW widened 60s -> 3min, so the
         // fixture moved from 120s to 200s to stay past the window.
         for sig in [true, false] {
-            let got = classify_from_evidence(true, Some(Duration::from_secs(200)), sig, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+            let got = classify_from_evidence(
+                true,
+                Some(Duration::from_secs(200)),
+                sig,
+                None,
+                false,
+                TRANSCRIPT_FRESH_WINDOW,
+                false,
+            );
             assert_eq!(got, WorkerLivenessState::Starved, "sig={sig}");
         }
     }
@@ -1615,10 +1863,25 @@ mod tests {
     fn classify_unverified_when_no_mtime_available() {
         // cas-de95: missing/unresolved transcript is missing evidence, not
         // Starved — even if a crash needle were claimed without a file.
-        let got = classify_from_evidence(true, None, true, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+        let got = classify_from_evidence(
+            true,
+            None,
+            true,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+        );
         assert_eq!(got, WorkerLivenessState::Unverified);
-        let got_clean =
-            classify_from_evidence(true, None, false, None, false, TRANSCRIPT_FRESH_WINDOW, false);
+        let got_clean = classify_from_evidence(
+            true,
+            None,
+            false,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+        );
         assert_eq!(got_clean, WorkerLivenessState::Unverified);
     }
 
@@ -1635,11 +1898,7 @@ mod tests {
                 window,
                 false,
             );
-            assert_eq!(
-                got,
-                WorkerLivenessState::Alive,
-                "window={window:?}"
-            );
+            assert_eq!(got, WorkerLivenessState::Alive, "window={window:?}");
         }
     }
 
@@ -1998,8 +2257,7 @@ mod tests {
         // cas-4513 scope note: we only look at the LAST N lines. A crash
         // signature buried earlier in a long transcript should NOT fire
         // — the worker recovered from it.
-        let mut lines: Vec<String> =
-            vec!["createElement(\"ink-\")".to_string()];
+        let mut lines: Vec<String> = vec!["createElement(\"ink-\")".to_string()];
         for i in 0..50 {
             lines.push(format!("{{\"msg\":\"line {i}\"}}"));
         }
@@ -2129,13 +2387,17 @@ mod tests {
             crash_signature_match: true,
             worktree_edit_age_secs: Some(3),
             session_id: "ses-xyz".to_string(),
-        in_flight_tool_call: false,
+            in_flight_tool_call: false,
+            background_processes: BackgroundProcessState::Available(vec![]),
         };
         let out = format_state_human(&WorkerLivenessState::Wedged, &ev);
         assert!(out.contains("state: wedged"));
         assert!(out.contains("session: ses-xyz"));
         // cas-4513 maintainability P3: bare integer, not Debug `Some(4242)`.
-        assert!(out.contains("pid: 4242"), "expected bare integer, got:\n{out}");
+        assert!(
+            out.contains("pid: 4242"),
+            "expected bare integer, got:\n{out}"
+        );
         assert!(!out.contains("Some(4242)"));
         assert!(out.contains("transcript: /p/a.jsonl"));
         assert!(out.contains("crash signature match: true"));
@@ -2155,7 +2417,8 @@ mod tests {
             crash_signature_match: false,
             worktree_edit_age_secs: None,
             session_id: "ses-abc".to_string(),
-        in_flight_tool_call: false,
+            in_flight_tool_call: false,
+            background_processes: BackgroundProcessState::Unavailable,
         };
         let out = format_state_human(&WorkerLivenessState::Dead, &ev);
         assert!(out.contains("pid: <none>"));
@@ -2176,11 +2439,11 @@ mod tests {
             worktree_edit_age_secs: None,
             session_id: "ses\"id".to_string(),
             in_flight_tool_call: false,
+            background_processes: BackgroundProcessState::Available(vec![]),
         };
         let out = format_state_json(&WorkerLivenessState::Alive, &ev);
         // Should be parseable as JSON.
-        let parsed: serde_json::Value =
-            serde_json::from_str(&out).expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["state"], "alive");
         assert_eq!(parsed["pid"], 4242);
         assert_eq!(parsed["session_id"], "ses\"id");
@@ -2416,6 +2679,86 @@ mod tests {
         );
     }
 
+    /// cas-058e: a backgrounded command is a live activity signal even after
+    /// the transcript records that no tool call is currently in flight.
+    #[test]
+    fn classify_background_process_overrides_stale_mtime() {
+        let got = classify_from_evidence_with_background(
+            true,
+            Some(Duration::from_secs(10 * 60)),
+            false,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
+            true,
+        );
+        assert_eq!(got, WorkerLivenessState::Alive);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn background_processes_reports_a_real_long_running_child_and_no_child_case() {
+        // This process is the fake pane PID. Its direct `sleep` child is the
+        // same shape as `codex -> shell -> cargo` after a backgrounded build.
+        assert_eq!(
+            background_processes_for(std::process::id()),
+            BackgroundProcessState::Available(vec![]),
+            "the fake pane must begin with no descendants"
+        );
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn long-running fake background job");
+        // Linux publishes the child relationship asynchronously relative to
+        // `spawn` returning; settle only the test fixture, never production.
+        std::thread::sleep(Duration::from_millis(20));
+        let observed = background_processes_for(std::process::id());
+        child.kill().expect("stop fake background job");
+        child.wait().expect("reap fake background job");
+
+        let BackgroundProcessState::Available(processes) = observed else {
+            panic!("live /proc child walk unexpectedly unavailable: {observed:?}");
+        };
+        assert!(
+            processes
+                .iter()
+                .any(|process| process.command == "sleep" && process.age_secs < 5),
+            "expected named, age-bearing child evidence: {processes:?}"
+        );
+        assert!(BackgroundProcessState::Available(processes).is_active());
+    }
+
+    #[test]
+    fn format_state_human_names_background_processes_and_unavailable_state() {
+        let active = WorkerEvidence {
+            pid: Some(42),
+            pid_alive: true,
+            transcript_path: None,
+            transcript_mtime_age_secs: Some(600),
+            crash_signature_match: false,
+            worktree_edit_age_secs: None,
+            session_id: "s".to_string(),
+            in_flight_tool_call: false,
+            background_processes: BackgroundProcessState::Available(vec![BackgroundProcess {
+                command: "cargo".to_string(),
+                age_secs: 1_832,
+            }]),
+        };
+        assert!(
+            format_state_human(&WorkerLivenessState::Alive, &active)
+                .contains("background processes: cargo (1832s)")
+        );
+        let unavailable = WorkerEvidence {
+            background_processes: BackgroundProcessState::Unavailable,
+            ..active
+        };
+        assert!(
+            format_state_human(&WorkerLivenessState::Unverified, &unavailable)
+                .contains("background-process state unavailable")
+        );
+    }
+
     #[test]
     fn kill_verdict_refuses_legacy_agent_without_force() {
         // cas-4513 adversarial P0: legacy agent (no pid_starttime) must
@@ -2477,7 +2820,8 @@ mod tests {
             worktree_edit_age_secs: None,
             // Newline + backslash inside session_id — worst-case.
             session_id: "ses\nfoo\\bar".to_string(),
-        in_flight_tool_call: false,
+            in_flight_tool_call: false,
+            background_processes: BackgroundProcessState::Available(vec![]),
         };
         let out = format_state_json(&WorkerLivenessState::Alive, &ev);
         // Parse round-trip. If escaping is wrong, this panics with a clear
@@ -2561,9 +2905,7 @@ mod tests {
         entries.insert(
             4242,
             (
-                Some(
-                    b"claude\0--dangerously-skip-permissions\0--agent-name\0hv-live\0".to_vec(),
-                ),
+                Some(b"claude\0--dangerously-skip-permissions\0--agent-name\0hv-live\0".to_vec()),
                 None,
             ),
         );
@@ -2858,7 +3200,9 @@ mod tests {
     fn is_zombie_state_handles_comm_with_parens_and_spaces() {
         // comm can itself contain spaces/parens — must split on the LAST
         // `)`, same caveat as daemon::parse_starttime_from_stat.
-        assert!(is_zombie_state("1234 (my (weird) proc) Z 1 1234 1234 0 -1 ..."));
+        assert!(is_zombie_state(
+            "1234 (my (weird) proc) Z 1 1234 1234 0 -1 ..."
+        ));
     }
 
     #[test]
@@ -2963,7 +3307,10 @@ mod tests {
         // forever) until its parent reaps it — use `wait()` rather than
         // `verify_death` to confirm the leader specifically.
         let status = leader.wait().expect("wait on killed leader");
-        assert!(!status.success(), "leader should have been SIGKILLed, not exited cleanly");
+        assert!(
+            !status.success(),
+            "leader should have been SIGKILLed, not exited cleanly"
+        );
 
         // `child_pid` (the backgrounded grandchild) is NOT a child of this
         // test process — it's reparented away once the shell dies, so

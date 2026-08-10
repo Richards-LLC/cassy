@@ -25,12 +25,17 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 echo "ok: working tree is clean"
 
-# `^{tag}` only resolves for an annotated tag. `^{}` then peels it to the
-# commit Actions checked out (or local HEAD), rejecting a stale/re-pointed tag.
-if ! git rev-parse --verify --quiet "refs/tags/$tag^{tag}" >/dev/null; then
+# actions/checkout can materialize the event tag as its peeled commit/tree
+# rather than retaining the tag object. Re-fetch the exact remote tag object
+# before inspecting it, so this remains an annotated-tag check instead of an
+# accidental check of checkout's local ref shape.
+git fetch origin --no-tags --force "+refs/tags/$tag:refs/tags/$tag"
+if [ "$(git cat-file -t "refs/tags/$tag" 2>/dev/null || true)" != "tag" ]; then
   echo "error: $tag must exist locally as an annotated tag" >&2
   exit 1
 fi
+# `^{}` peels the verified tag object to the commit Actions checked out,
+# rejecting a stale or re-pointed tag.
 tag_commit="$(git rev-parse "refs/tags/$tag^{}")"
 build_commit="$(git rev-parse HEAD)"
 if [ "$tag_commit" != "$build_commit" ]; then

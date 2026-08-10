@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "public_url": "https://node.tail.ts.net/",
+  "local_target": "http://127.0.0.1:4173",
+  "https_port": 443,
+  "status_before": {
+    "Web": {
+      "node.tail.ts.net:443": {
+        "Handlers": {
+          "/": {
+            "Proxy": "http://127.0.0.1:4173"
+          }
+        }
+      }
+    }
+  },
+  "status_after": {},
+  "recorded_at": "2026-08-10T19:31:00Z"
+}

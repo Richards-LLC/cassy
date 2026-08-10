@@ -92,6 +92,18 @@ impl SyncQueue {
         Ok(deleted)
     }
 
+    /// Requeue every terminally failed row without discarding its last server
+    /// diagnostic. This is the recovery path after an operator resolves a
+    /// remote-side rejection (for example a project identity collision).
+    pub fn retry_failed(&self, max_retries: i32) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let reset = conn.execute(
+            "UPDATE sync_queue SET retry_count = 0 WHERE retry_count >= ?1",
+            params![max_retries],
+        )?;
+        Ok(reset)
+    }
+
     /// Clear all items from the queue.
     pub fn clear(&self) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();

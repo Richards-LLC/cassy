@@ -320,6 +320,12 @@ impl CloudSyncer {
         }
 
         let mut synced_count = 0;
+        // A 2xx response that explicitly reports skipped rows is not a
+        // successful push. The server does not identify the rejected rows,
+        // so conservatively count each item in the sub-batch as a failed
+        // attempt. Repeated explicit refusals then reach the queue's visible
+        // failed state instead of remaining pending forever.
+        let mut skip_errors = Vec::new();
 
         // Split upserts into size-limited sub-batches (consuming values to avoid cloning)
         if !upsert_entries.is_empty() {
@@ -337,47 +343,54 @@ impl CloudSyncer {
                         // any rows skipped for this entity type, we cannot
                         // know *which* items in `batch_items` were dropped
                         // (the server returns a count, not IDs). Conservative
-                        // policy: leave the entire sub-batch un-marked-synced
-                        // so all items remain retryable in the local queue.
-                        // The next push cycle will re-send them; if the
-                        // underlying cross-project conflict still stands the
-                        // user will keep seeing the warning until the
-                        // project_canonical_id mismatch is resolved.
+                        // policy: do not mark the entire sub-batch synced.
+                        // Each explicitly rejected row consumes one bounded
+                        // retry and preserves the raw response in its queue
+                        // diagnostic. Persistent collisions consequently
+                        // become visible failed rows rather than silently
+                        // pending forever.
                         //
                         // Backward-compat: older cloud builds omit `skipped`
                         // entirely, in which case `skipped_count` is 0 and
                         // we fall through to the legacy mark-synced path.
                         let skipped_count = response.skipped_count_for(entity_type);
                         if let Err(error) = &skipped_count {
+                            let diagnostic = format!(
+                                "cloud returned an unrecognized skip signal for {entity_type}: {error}; marking {} row(s) failed; server response: {}",
+                                batch_items.len(), response.raw_body
+                            );
                             warn!(
                                 entity_type = entity_type,
                                 error = error,
-                                "Cloud response contained an unrecognized skip signal; leaving sub-batch un-synced for retry",
+                                "Cloud response contained an unrecognized skip signal; marking sub-batch failed",
                             );
+                            for item in &batch_items {
+                                let _ = self.queue.mark_failed(item.id, &diagnostic);
+                            }
+                            skip_errors.push(diagnostic);
                             continue;
                         }
                         let skipped_count = skipped_count.unwrap_or_default();
                         if skipped_count > 0 {
                             let batch_size = batch_items.len();
                             let diagnostic = format!(
-                                "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); retained pending because the server did not identify the rejected row(s)"
+                                "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); marking the indistinguishable sub-batch failed; server response: {}",
+                                response.raw_body
                             );
                             warn!(
                                 entity_type = entity_type,
                                 skipped = skipped_count,
                                 batch_size = batch_size,
                                 "Cloud server skipped {skipped_count} {entity_type} row(s) in a sub-batch of {batch_size} \
-                                 (likely cross-project project_canonical_id conflict); leaving sub-batch un-synced for retry",
+                                 (likely cross-project project_canonical_id conflict); marking sub-batch failed",
                             );
-                            // Do NOT mark items synced and do NOT return an
-                            // Err here: the HTTP call itself succeeded; only
-                            // some rows were silently rejected. Leaving items
-                            // un-touched keeps them retryable in the local
-                            // queue. Continuing the loop lets later
-                            // sub-batches and entity types proceed normally.
+                            // Do not mark server-skipped rows synced. An
+                            // explicit refusal consumes a retry so it becomes
+                            // terminally visible after `max_retries`.
                             for item in &batch_items {
-                                let _ = self.queue.record_diagnostic(item.id, &diagnostic);
+                                let _ = self.queue.mark_failed(item.id, &diagnostic);
                             }
+                            skip_errors.push(diagnostic);
                         } else {
                             for item in &batch_items {
                                 let _ = self.queue.mark_synced(item.id);
@@ -395,6 +408,10 @@ impl CloudSyncer {
                     }
                 }
             }
+        }
+
+        if let Some(error) = skip_errors.into_iter().next() {
+            return Err(CasError::Other(error));
         }
 
         // Send individual delete requests
@@ -701,11 +718,12 @@ impl CloudSyncer {
                         // the 2xx status is the source of truth that the
                         // HTTP exchange itself succeeded.
                         let body = resp.into_string().unwrap_or_default();
-                        let parsed: PushResponse = if body.is_empty() {
+                        let mut parsed: PushResponse = if body.is_empty() {
                             PushResponse::default()
                         } else {
                             serde_json::from_str(&body).unwrap_or_default()
                         };
+                        parsed.raw_body = body;
                         return Ok(parsed);
                     } else {
                         let status = resp.status();

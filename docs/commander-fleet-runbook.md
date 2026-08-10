@@ -8,6 +8,7 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 - Install Tailscale, join every machine and browser device to the same tailnet, enable MagicDNS and HTTPS certificates for the tailnet, and confirm `tailscale status` reports `Running`.
 - On Linux, authorize the account that runs the hub to operate Tailscale without sudo: `sudo tailscale set --operator="$USER"`. Verify it with `sudo tailscale debug prefs`; `OperatorUser` must equal that account. Without this one-time host setting, CAS reports `permission-denied` and keeps the hub loopback-only.
 - Choose one machine URL as the browser profile's controller origin. Pair every other machine to that exact origin; changing it requires re-pairing.
+- The default controller origin is a paired hub. A hosted static origin is an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes, then create new invitations with `cas hub pair --origin https://HOSTED-ORIGIN` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
 - Do not expose port 4173 on a LAN interface. The CAS hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
 
 ## Start and verify one machine

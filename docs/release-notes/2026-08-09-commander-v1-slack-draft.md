@@ -1,15 +1,16 @@
-# Commander v1 runtime release — v2.60.0 acceptance in progress, unposted Slack drafts
+# Commander v1 runtime release — v2.60.0 not releasable, unposted Slack drafts
 
-> **DO NOT POST.** Immutable public `v2.60.0` is authentic, and real Chrome 151 at `390×844`
-> successfully paired soundwave from the prowl controller origin. The operator then rebound the
-> Commander v1 two-machine gate to prowl + soundwave only; unicron and shield are out of scope. The
-> captured unicron `MissingAllowOriginHeader` result is a separate anomaly, not an H7 failure.
-> **H7 remains IN PROGRESS with no release verdict.** Fan-out, controller arbitration,
-> replay/revocation/scope, restart/reconnect, compatibility, no-polling/count, and `SIGILL` rows remain
-> to execute against prowl + soundwave. Do not post these drafts until that binding matrix is green
-> and the user explicitly elects to publish.
+> **DO NOT POST. Public `v2.60.0` is NOT RELEASABLE as Commander v1.** The binding prowl + soundwave
+> real-Chrome matrix passed pairing, observation/control, fan-out, controller arbitration,
+> replay/copied-key/scope/revocation, typed `SIGILL`, protocol-v1 daemon restart, no-polling, and count
+> rows. One narrow gate failed: stock macOS hub restart cannot discover the Tailscale app-bundle CLI,
+> so it cannot republish the stable HTTPS Serve endpoint without an undocumented manual step. The
+> corrective `cas-a13a` is merged but not present in an immutable release. These post bodies are a
+> future template only. Publish the next tag containing the corrective, rerun the prowl restart +
+> Serve spot check, flip the paired acceptance report to releasable only if green, and still wait for
+> explicit user approval before posting.
 
-Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
+Destination only after the corrective release gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
 replies. Status: **unposted**.
 
@@ -75,16 +76,20 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Replace `[PUBLISHED VERSION]` only after the rebound prowl + soundwave H7 matrix is green; do not
-      move `v2.60.0` or any earlier tag.
+- [ ] Publish a new immutable version containing merged corrective `cas-a13a`; do not move `v2.60.0`
+      or any earlier tag.
+- [ ] On stock prowl with no wrapper or stray PATH entry, rerun only macOS hub restart plus the
+      Serve-republish spot check; require stable machine identity/URL and HTTPS health `200`.
+- [ ] Replace `[PUBLISHED VERSION]` only after that corrective row is green and the paired report has
+      flipped from **NOT RELEASABLE** to releasable.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the
       same downloaded version.
 - [ ] Confirm controller-origin Chrome completes direct pairing to machine B and that successful and
       generic denied exchange responses expose only the exact authorized origin.
-- [ ] Confirm the documented paired-client Tailscale Serve restart reaches ready, preserves the stable
-      machine identity and URL, reconnects clients, and does not restore a lease automatically.
+- [ ] Confirm the documented paired-client Tailscale Serve restart reaches ready without a wrapper,
+      preserves the stable machine identity and URL, reconnects clients, and does not restore a lease automatically.
 - [ ] Confirm the final acceptance verdict is green, not merely the source-only guards.
 - [ ] Re-read both posts for zero task IDs, zero agent/factory narration, impact-first Was → Now prose,
       and exactly two top-level posts.

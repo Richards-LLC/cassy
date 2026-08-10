@@ -3,129 +3,150 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Commander v1 assembled acceptance gate — 2026-08-09</title>
+  <title>Commander v1 assembled acceptance gate — 2026-08-10</title>
   <style>
-    :root { color-scheme: light dark; --bg:#f6f7f9; --panel:#fff; --text:#18212b; --muted:#52606d; --line:#c8d0d9; --accent:#8b1e2d; --accent-bg:#fff1f2; --pass:#17663a; --pass-bg:#edf9f1; --warn:#7a4d00; --warn-bg:#fff8e6; --code:#eef1f4; }
+    :root { color-scheme:light dark; --bg:#f6f7f9; --panel:#fff; --text:#18212b; --muted:#52606d; --line:#c8d0d9; --bad:#8b1e2d; --bad-bg:#fff1f2; --good:#17663a; --good-bg:#edf9f1; --warn:#7a4d00; --warn-bg:#fff8e6; --code:#eef1f4; }
     * { box-sizing:border-box; }
-    html { font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.55; background:var(--bg); color:var(--text); }
+    html { font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.55; background:var(--bg); color:var(--text); }
     body { margin:0; }
+    .skip { position:absolute; left:-9999px; top:.5rem; padding:.5rem; background:var(--panel); border:2px solid var(--bad); z-index:2; }
+    .skip:focus { left:.5rem; }
+    :focus-visible { outline:3px solid var(--warn); outline-offset:2px; }
     header, main, footer { width:min(76rem,calc(100% - 2rem)); margin-inline:auto; }
-    header { padding:2.5rem 0 1.25rem; }
+    header { padding:2.4rem 0 1.25rem; }
     main { padding-bottom:3rem; }
     footer { border-top:1px solid var(--line); padding:1.25rem 0 2.5rem; color:var(--muted); font-size:.9rem; }
-    h1 { margin:0 0 .55rem; font-size:clamp(2rem,5vw,3.4rem); line-height:1.05; letter-spacing:-.035em; }
+    h1 { margin:0 0 .6rem; font-size:clamp(2rem,5vw,3.4rem); line-height:1.05; letter-spacing:-.035em; }
     h2 { margin:2.2rem 0 .75rem; font-size:1.45rem; }
-    p, li { max-width:76ch; }
+    p, li { max-width:82ch; }
     a { color:inherit; text-decoration-thickness:.1em; text-underline-offset:.18em; }
     code { background:var(--code); border-radius:.25rem; padding:.08rem .28rem; overflow-wrap:anywhere; }
     .eyebrow { color:var(--muted); font-weight:700; letter-spacing:.09em; text-transform:uppercase; font-size:.78rem; }
-    .verdict { border:2px solid var(--accent); border-left-width:.65rem; background:var(--accent-bg); border-radius:.65rem; padding:1.2rem 1.35rem; margin:1.25rem 0; }
-    .verdict strong { color:var(--accent); font-size:1.15rem; }
+    .verdict { border:2px solid var(--bad); border-left-width:.65rem; background:var(--bad-bg); border-radius:.65rem; padding:1.2rem 1.35rem; margin:1.25rem 0; }
+    .verdict strong { color:var(--bad); font-size:1.18rem; }
     .lede { font-size:1.05rem; }
-    .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:.55rem; background:var(--panel); }
-    table { width:100%; border-collapse:collapse; min-width:42rem; }
-    caption { text-align:left; font-weight:700; padding:.8rem 1rem; border-bottom:1px solid var(--line); }
-    th, td { padding:.68rem .85rem; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
-    thead th { background:color-mix(in srgb,var(--panel) 82%,var(--line)); font-size:.85rem; position:sticky; top:0; }
-    tbody tr:last-child th, tbody tr:last-child td { border-bottom:0; }
-    th[scope="row"] { width:18%; }
-    .state { display:inline-block; border:1px solid currentColor; border-radius:999px; padding:.12rem .5rem; font-weight:800; font-size:.76rem; white-space:nowrap; }
-    .fail { color:var(--accent); background:var(--accent-bg); }
-    .pass { color:var(--pass); background:var(--pass-bg); }
-    .partial { color:var(--warn); background:var(--warn-bg); }
     .proof-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.7rem; margin:1rem 0 1.4rem; }
     .proof { background:var(--panel); border:1px solid var(--line); border-radius:.5rem; padding:.85rem; }
-    .proof b { display:block; font-size:1.2rem; }
+    .proof b { display:block; font-size:1.15rem; }
     .proof span { color:var(--muted); font-size:.85rem; }
-    ol.reasoning li { margin:.55rem 0; padding-left:.25rem; }
-    .callout { background:var(--warn-bg); border:1px solid var(--warn); border-radius:.5rem; padding:.85rem 1rem; }
+    .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:.55rem; background:var(--panel); }
+    table { width:100%; border-collapse:collapse; min-width:44rem; }
+    caption { text-align:left; font-weight:700; padding:.8rem 1rem; border-bottom:1px solid var(--line); }
+    th, td { padding:.68rem .85rem; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    thead th { background:var(--code); font-size:.85rem; position:sticky; top:0; }
+    tbody tr:last-child th, tbody tr:last-child td { border-bottom:0; }
+    th[scope="row"] { width:19%; }
+    .state { display:inline-block; border:1px solid currentColor; border-radius:999px; padding:.12rem .5rem; font-weight:800; font-size:.76rem; white-space:nowrap; }
+    .pass { color:var(--good); background:var(--good-bg); }
+    .fail { color:var(--bad); background:var(--bad-bg); }
+    .pending { color:var(--warn); background:var(--warn-bg); }
+    .callout { border:1px solid var(--warn); border-left-width:.45rem; background:var(--warn-bg); border-radius:.5rem; padding:.9rem 1rem; }
     .small { font-size:.9rem; color:var(--muted); }
-    @media (prefers-color-scheme:dark) { :root { --bg:#10151b; --panel:#171e26; --text:#edf2f7; --muted:#aab7c4; --line:#394552; --accent:#ff9aa8; --accent-bg:#32171d; --pass:#8ce0ac; --pass-bg:#153023; --warn:#ffd27a; --warn-bg:#332713; --code:#252e38; } }
-    @media (max-width:720px) { header, main, footer { width:min(100% - 1rem,76rem); } header { padding-top:1.4rem; } .proof-strip { grid-template-columns:1fr 1fr; } th,td { padding:.55rem .65rem; } }
+    ol li { margin:.55rem 0; padding-left:.25rem; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#10151b; --panel:#171e26; --text:#edf2f7; --muted:#b7c2ce; --line:#465463; --bad:#ffadb8; --bad-bg:#32171d; --good:#98e7b5; --good-bg:#153023; --warn:#ffda8d; --warn-bg:#332713; --code:#252e38; } }
+    @media (max-width:720px) { header,main,footer { width:min(100% - 1rem,76rem); } header { padding-top:1.4rem; } .proof-strip { grid-template-columns:1fr 1fr; } th,td { padding:.55rem .65rem; } }
     @media (max-width:420px) { .proof-strip { grid-template-columns:1fr; } h1 { font-size:2rem; } }
-    @media print { :root { --bg:#fff; --panel:#fff; --text:#000; --muted:#333; --line:#777; --accent:#000; --accent-bg:#fff; --pass:#000; --pass-bg:#fff; --warn:#000; --warn-bg:#fff; --code:#eee; } @page { margin:.55in; } header,main,footer { width:100%; } header { padding-top:0; } a[href]::after { content:" (" attr(href) ")"; font-size:.75em; overflow-wrap:anywhere; } .table-wrap { overflow:visible; } table { min-width:0; font-size:8.5pt; } thead { display:table-header-group; } tr,.proof,.verdict,.callout { break-inside:avoid; } h2 { break-after:avoid; } }
+    @media print { :root { --bg:#fff; --panel:#fff; --text:#000; --muted:#333; --line:#777; --bad:#000; --bad-bg:#fff; --good:#000; --good-bg:#fff; --warn:#000; --warn-bg:#fff; --code:#eee; } @page { margin:.55in; } header,main,footer { width:100%; } header { padding-top:0; } a[href]::after { content:" (" attr(href) ")"; font-size:.75em; overflow-wrap:anywhere; } .table-wrap { overflow:visible; } table { min-width:0; font-size:8.3pt; } thead { display:table-header-group; } tr,.proof,.verdict,.callout { break-inside:avoid; } h2 { break-after:avoid; } }
   </style>
 </head>
 <body>
+<a class="skip" href="#content">Skip to report content</a>
 <header>
   <div class="eyebrow">Engineering investigation · practitioner review · updated 2026-08-10</div>
   <h1>Commander v1 assembled acceptance gate</h1>
-  <div class="verdict"><strong>IN PROGRESS · no release verdict · high confidence</strong><p class="lede">Immutable public <code>v2.60.0</code> is authentic, and real Chrome 151 at <code>390×844</code> paired soundwave from the prowl controller origin. The operator rebound Commander v1 to prowl + soundwave only. A captured unicron CORS anomaly is out of scope; the binding live matrix remains incomplete.</p></div>
+  <div class="verdict"><strong>NOT RELEASABLE at public v2.60.0 · high confidence</strong><p class="lede">The binding prowl + soundwave phone-browser, security, fan-out, arbitration, crash, compatibility, and zero-agent rows passed. One narrow gate failed: stock macOS hub restart cannot discover the Tailscale app-bundle CLI, so it cannot republish the stable HTTPS Serve endpoint without an undocumented manual step. Corrective <code>cas-a13a</code> is merged at epic tip <code>e29b22fb</code>, but is not yet in an immutable release.</p></div>
   <p>The binding contract is the <a href="../specs/2026-08-08-commander-security-architecture.md">Commander security architecture ADR</a>, especially <code>H7-ADV-01</code>, <code>H7-FLEET-02</code>, <code>H7-INVARIANT-03</code>, and <code>H7-CRASH-04</code>.</p>
 </header>
-<main>
+<main id="content">
   <section aria-labelledby="overview"><h2 id="overview">Overview</h2>
-    <div class="proof-strip" aria-label="Key executed facts">
-      <div class="proof"><b>v2.60.0</b><span>exact immutable public release</span></div>
-      <div class="proof"><b>prowl + soundwave</b><span>binding two-machine scope</span></div>
+    <div class="proof-strip" aria-label="Key measured facts">
+      <div class="proof"><b>v2.60.0</b><span>exact immutable public artifact</span></div>
+      <div class="proof"><b>3 viewers → 1 upstream</b><span>measured in both protocol phases</span></div>
       <div class="proof"><b>390×844</b><span>real Chrome 151 phone viewport</span></div>
-      <div class="proof"><b>In progress</b><span>live invariant matrix deferred</span></div>
+      <div class="proof"><b>1 failed row</b><span>macOS restart Serve republish</span></div>
     </div>
     <div class="table-wrap"><table><caption>Scope and verdict</caption><tbody>
-      <tr><th scope="row">Question</th><td>What is the current state of Commander v1 acceptance from exact public <code>v2.60.0</code> bytes?</td></tr>
-      <tr><th scope="row">Verdict</th><td><strong>In progress — the rebound prowl + soundwave live matrix is incomplete.</strong></td></tr>
-      <tr><th scope="row">Confidence</th><td>High; executed and deferred rows plus the operator scope decision are explicit.</td></tr>
-      <tr><th scope="row">Source</th><td>Clean <code>HEAD == origin/main</code> at <code>4636518f121054b612bef56ddf770b2d8a72ef63</code>; release peel <code>0cb8962d</code>.</td></tr>
-      <tr><th scope="row">Release</th><td>Tag object <code>20c42c8f…</code>; official run <code>31412591350</code> terminal success.</td></tr>
+      <tr><th scope="row">Question</th><td>Is Commander v1 releasable from exact public <code>v2.60.0</code> bytes on the operator-bound prowl + soundwave topology?</td></tr>
+      <tr><th scope="row">Verdict</th><td><strong>No. All binding live rows passed except stock macOS hub restart cannot republish Tailscale Serve without an undocumented CLI-discovery step.</strong></td></tr>
+      <tr><th scope="row">Confidence</th><td>High; public artifact, installed binaries, real browser, fixture identity, audit attribution, process/session counts, cleanup, and the failing restart transition were observed directly.</td></tr>
+      <tr><th scope="row">Executed source boundary</th><td>Clean <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>, equal to <code>origin/main</code> before this evidence-only report commit; immutable release peel <code>0cb8962d</code>.</td></tr>
+      <tr><th scope="row">Public release</th><td><code>v2.60.0</code>; official run <code>31412591350</code> terminal success.</td></tr>
       <tr><th scope="row">Linux asset</th><td>21,991,526 bytes; archive SHA-256 <code>b2533266…</code>; binary SHA-256 <code>8ec9dea6…</code>.</td></tr>
-      <tr><th scope="row">Binding topology</th><td><code>prowl</code> controller + distinct <code>soundwave</code>; unicron and shield out of scope; Chrome <code>151.0.7922.108</code> at <code>390×844</code>.</td></tr>
-      <tr><th scope="row">Physical Android</th><td>Offline and explicitly not claimed.</td></tr>
-      <tr><th scope="row">Window</th><td>2026-08-10 19:29–19:37 UTC.</td></tr>
+      <tr><th scope="row">Binding topology</th><td><code>prowl</code> controller hub + distinct <code>soundwave</code> target hub. Unicron and shield are explicitly out of scope.</td></tr>
+      <tr><th scope="row">Browser</th><td>Real Google Chrome <code>151.0.7922.108</code>; <code>390×844</code>; controller origin prowl. Physical Android was offline and is not claimed.</td></tr>
+      <tr><th scope="row">Evidence window</th><td>2026-08-10 19:51–19:58 UTC, with banked public-release/TLS evidence from earlier H7 passes.</td></tr>
       <tr><th scope="row">Author</th><td>H7 assembled release gate (<code>cas-3d85</code>).</td></tr>
     </tbody></table></div>
   </section>
 
   <section aria-labelledby="evidence"><h2 id="evidence">Evidence</h2>
     <div class="table-wrap"><table><caption>Executed evidence and conclusion</caption><thead><tr><th scope="col">Observation</th><th scope="col">Redacted source</th><th scope="col">What it proves</th></tr></thead><tbody>
-      <tr><td>Release metadata and installed-binary checks matched the immutable peel, successful run, asset size/digests, and exact public <code>2.60.0/0cb8962</code> identity with SHA-256 <code>8ec9dea6…</code>.</td><td>Git/GitHub receipts; SSH <code>sha256sum</code> and <code>cas --version</code>.</td><td>The live row used public bytes, not a local build.</td></tr>
-      <tr><td>The out-of-scope unicron hub provided fresh verified TLS 1.3 health and exact HSTS, then owned teardown returned Serve to <code>{}</code>.</td><td>Hub/Serve status, OpenSSL, HTTPS health, owned stop receipt.</td><td>The exploratory lane was real and left no service residue; it does not decide H7.</td></tr>
-      <tr><td>Both TLS origins returned health <code>200</code>, sessions <code>401</code>, catch-all <code>405</code>, and exact HSTS. Spoofed loopback headers produced no HSTS; non-loopback plaintext startup exited <code>1</code>.</td><td>Forced TLS 1.3 headers, loopback negatives, installed-public CLI refusal.</td><td>TLS/HSTS is listener-bound and plaintext fails closed remotely.</td></tr>
-      <tr><td>Wrong-Origin API, preflight, CSRF mutation, and cross-site WebSocket probes received no CORS grant or session data.</td><td>Redacted curl codes, headers, and bodies.</td><td>Pre-auth hostile-origin requests fail closed.</td></tr>
-      <tr><td>Chrome paired soundwave from exact prowl origin and authenticated sessions/events returned <code>200</code>. A later out-of-scope unicron attempt received preflight <code>204</code>, then <code>MissingAllowOriginHeader</code>; unicron was never added.</td><td>Durable mode-0600 <code>artifacts/cas-3d85/wild-leopard-18/browser.exit</code> and <code>browser.log</code>.</td><td>The binding prowl→soundwave pairing prerequisite is green; unicron is anomaly evidence only.</td></tr>
-      <tr><td>The deterministic two-pane no-agent fixture was ready with exact PID/start fingerprint and protocol-v2 capabilities, but its ledger recorded zero connections.</td><td><code>fixture-state.json</code>, <code>fixture-events.jsonl</code>.</td><td>Fan-out, arbitration, restart, and crash were not accidentally exercised or inferred green.</td></tr>
-      <tr><td>Counts: soundwave <code>2/0/0 → 1/0/0</code> Claude/Codex/Grok with <code>7→6</code> sessions; unicron <code>0/0/0 → 0/0/0</code>. The independently named soundwave configuration session ended; Commander created none.</td><td>Process counts and exact session-name diff.</td><td>No model process or logical session multiplication occurred.</td></tr>
-      <tr><td>Test device revoked; invitation/profile secrets moved to recoverable Trash; fixture metadata and prior receipt restored byte-identically; unicron hub/Serve stopped; soundwave service remained PID <code>2256851</code>, active, with zero restarts.</td><td>Auth filters, <code>cmp</code>, process/socket/status assertions.</td><td>The checkpoint left zero active test authority or runtime residue.</td></tr>
+      <tr><td>Public <code>v2.60.0</code> tag/workflow/assets were authenticated; binding hosts ran the intended public version, and soundwave's Linux ELF matched SHA-256 <code>8ec9dea6…</code>.</td><td>Banked release receipts; fresh local/SSH version, executable, and hub-status checks.</td><td>The pass exercised public bytes, not a local corrective build.</td></tr>
+      <tr><td>TLS 1.3, minimal health, HSTS, non-loopback plaintext refusal, wrong Origin, preflight, CSRF, CSWSH, and hostile pairing exchange remained green.</td><td>Banked forced-TLS and redacted HTTP receipts under <code>artifacts/cas-3d85/</code>.</td><td>Remote control is TLS-only; hostile origins receive no state or CORS grant.</td></tr>
+      <tr><td>Three fresh soundwave devices paired from prowl: two full-scope controllers and one read-only observer. Each opened two panes at <code>390×844</code>.</td><td><code>ready-viper-55/browser.log</code>; phone screenshot.</td><td><code>H7-FLEET-02</code> used two real machines and a phone-class browser.</td></tr>
+      <tr><td>A acquired control; B observed A, then force-took control; A observed B. Observer C's lease, interrupt, and message controls remained disabled.</td><td>Browser DOM assertions and attributed audit records.</td><td>One explicit controller lease and admin takeover match the ADR.</td></tr>
+      <tr><td>Input, targeted interrupt, attributed message, and resize reached the fixture. Phase 1 recorded exactly one daemon connection for three viewers.</td><td><code>remote-phase1/fixture-events.jsonl</code>.</td><td>Pane viewers fan out through one daemon/session upstream; mutations are attributed.</td></tr>
+      <tr><td>DPoP first use returned <code>200</code>; replay, copied key, method mismatch, and observer escalation were browser-rejected. Consumed pairing replay was <code>401</code>; ticket replay was exactly one open and one rejection.</td><td>Browser auth matrix; <code>audit-h7.jsonl</code>.</td><td><code>H7-ADV-01</code> rejects replay, copied state, and over-scope access without exposing protected bodies.</td></tr>
+      <tr><td>Revoking A produced <code>auth-blocked</code> while B remained connected. All three devices were then revoked; active count is zero.</td><td>Browser state; guarded CLI revocations; <code>auth-after.json</code>.</td><td>Revocation is immediate and isolated.</td></tr>
+      <tr><td>PID <code>2289931</code>, starttime <code>2571583</code>, was killed by <code>SIGILL</code>. Receipt: signal <code>4</code>, <code>core_dumped=true</code>. B and C rendered actionable SIGILL guidance while sessions and prowl health stayed <code>200</code>.</td><td><code>remote-phase1/daemon-exit.sigill.json</code>; browser assertions.</td><td><code>H7-CRASH-04</code> is identity-bound and does not invent a generic cause.</td></tr>
+      <tr><td>A protocol-v1 fixture restarted after SIGILL. B and C reattached and each rendered two panes; phase 2 again recorded exactly one upstream.</td><td><code>remote-phase2/fixture-state.json</code> and <code>fixture-events.jsonl</code>.</td><td>Daemon restart recovers and the current client accepts the legacy protocol shape.</td></tr>
+      <tr><td>The 5.6-second trace contains event streams and event-triggered/action requests only; no model/agent endpoint and no idle polling interval.</td><td>Timestamped <code>networkTrace</code> in <code>browser.log</code>.</td><td>Commander does not poll an agent or create model traffic.</td></tr>
+      <tr><td>Prowl stayed Claude/Codex/Grok <code>1/1/0</code> + <code>1</code> session. Soundwave changed <code>1/0/0</code> + <code>6</code> → <code>1/1/0</code> + <code>6</code>; PID <code>2299566</code> was independently spawned at 15:56:20 by <code>crisp-spider-66</code> under unrelated daemon <code>2144744</code>.</td><td><code>baseline.json</code>, <code>after.json</code>, process parent/command and session names.</td><td>Commander created no model process or logical session; the ambient Codex delta is externally attributed.</td></tr>
+      <tr><td>A supervisor-created <code>/opt/homebrew/bin/tailscale</code> symlink contaminated the first restart, causing an app bundle-identifier abort and HTTPS <code>502</code>. It is removed. Stock <code>v2.60.0</code> takes the CLI-unavailable warning path, but still restarts loopback-only and cannot republish Serve.</td><td><code>prowl-restart-intermediate.json</code>; supervisor correction preserved verbatim in the task ledger.</td><td>The abort was environmental; the stock product defect is the same failed Serve-republish outcome.</td></tr>
+      <tr><td>A task-local absolute-app wrapper recovered prowl to PID <code>59538</code>, unchanged machine-id SHA/mtime and URL, health <code>200</code>. Both wrapper and stray symlink are absent.</td><td><code>prowl-restart.json</code>; absence/status/health assertions.</td><td>Recovery is possible, but it is an undocumented step. No prowl factory daemon was restarted.</td></tr>
+      <tr><td>Canonical Linux CI run <code>31425559709</code> completed successfully at exact source SHA <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>. Local Commander hub/H1–H5, protocol, and session suites were green; soundwave's installed public ELF independently passed the strict no-EVEX/AVX-512 audit at SHA <code>8ec9dea6…</code>.</td><td>Exact-commit CI receipt; local scoped-suite output; <code>public-linux-isa.log</code>.</td><td>The assembled workspace, release, vendor, and ISA guard is green. Separate macOS full-suite findings are not a Commander seam.</td></tr>
     </tbody></table></div>
-    <p class="small">Sources extracted 2026-08-10 during the stated evidence window. Values are measured, not estimated.</p>
+    <p class="small">Sources were extracted during the stated window. Values are measured, not estimated.</p>
   </section>
 
-  <section aria-labelledby="reasoning"><h2 id="reasoning">Reasoning chain</h2><ol class="reasoning">
-    <li>Tag, workflow, assets, and executable identity bind this to public <code>v2.60.0</code>.</li>
-    <li>Banked prowl/soundwave TLS and hostile-origin receipts remain the accepted pre-auth subset.</li>
-    <li>Real Chrome paired soundwave from prowl and reached authenticated sessions/events.</li>
-    <li>The operator removed unicron and shield from v1 scope, so the captured unicron CORS anomaly cannot decide H7.</li>
-    <li>The fixture had zero upstream connections; the remaining live rows are genuinely deferred, making the gate in progress.</li>
+  <section aria-labelledby="reasoning"><h2 id="reasoning">Reasoning chain</h2><ol>
+    <li>Release identity and installed-byte checks bind behavior to public <code>v2.60.0</code>.</li>
+    <li>Real Chrome paired soundwave, rendered two panes for three viewers, enforced one controller, and exercised the adversarial and revocation matrix.</li>
+    <li>Both protocol phases opened one daemon upstream. The SIGILL receipt matched the killed process identity; the legacy fixture then reattached without new sessions or agents.</li>
+    <li>Process/session deltas are zero or attributed to an unrelated factory. The browser trace is push/event driven, not idle agent polling.</li>
+    <li>The supervisor-created symlink explains the abort shape, not the stock defect. With it removed, stock <code>v2.60.0</code> still cannot discover the app CLI or restore Serve.</li>
+    <li>The private wrapper restored service, but undocumented recovery violates acceptance; one failed restart row outweighs the otherwise-green matrix.</li>
   </ol></section>
 
   <section aria-labelledby="matrix"><h2 id="matrix">Acceptance matrix</h2>
-    <div class="table-wrap"><table><caption>Binding gate state from this public-artifact pass</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Executed conclusion</th></tr></thead><tbody>
-      <tr><th scope="row">Public artifact</th><td><span class="state pass">PASS</span></td><td>Exact public v2.60.0 identity; soundwave installed bytes and prowl hub identity banked.</td></tr>
-      <tr><th scope="row">Clean-home / TLS / HSTS</th><td><span class="state pass">PASS</span></td><td>Absent-state startup, TLS 1.3, listener-bound HSTS, plaintext refusal, and owned teardown.</td></tr>
-      <tr><th scope="row"><code>H7-ADV-01</code></th><td><span class="state partial">IN PROGRESS</span></td><td>Hostile-origin subset and soundwave pairing green; replay/copied-key/scope/expiry/revocation deferred.</td></tr>
-      <tr><th scope="row"><code>H7-FLEET-02</code></th><td><span class="state partial">IN PROGRESS</span></td><td>Binding prowl + soundwave and phone Chrome present; soundwave pairing green; observation/control deferred.</td></tr>
-      <tr><th scope="row"><code>H7-INVARIANT-03</code></th><td><span class="state partial">NOT EXECUTED</span></td><td>Fixture fan-out/backpressure/one-upstream and final count proof deferred.</td></tr>
-      <tr><th scope="row"><code>H7-CRASH-04</code></th><td><span class="state partial">NOT EXECUTED</span></td><td>Exact SIGILL followed the blocked fleet path and was correctly skipped.</td></tr>
-      <tr><th scope="row">Compatibility / full guards</th><td><span class="state partial">NOT EXECUTED</span></td><td>Deferred to the fresh rebound-scope continuation.</td></tr>
+    <div class="table-wrap"><table><caption>Binding gate state for public v2.60.0</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Executed conclusion</th></tr></thead><tbody>
+      <tr><th scope="row">Public artifact</th><td><span class="state pass">PASS</span></td><td>Exact immutable public version on the binding hosts.</td></tr>
+      <tr><th scope="row">Clean-home / TLS / hostile Origin / plaintext</th><td><span class="state pass">PASS</span></td><td>Banked public-artifact receipts remain green.</td></tr>
+      <tr><th scope="row"><code>H7-ADV-01</code></th><td><span class="state pass">PASS</span></td><td>Hostile browser cases, DPoP/pairing/ticket replay, copied key, method mismatch, scope escalation, and revocation rejected; child suite owns accelerated expiry.</td></tr>
+      <tr><th scope="row"><code>H7-FLEET-02</code></th><td><span class="state pass">PASS</span></td><td>Prowl + soundwave, phone Chrome, direct observation/control, arbitration, audit attribution.</td></tr>
+      <tr><th scope="row"><code>H7-INVARIANT-03</code></th><td><span class="state pass">PASS</span></td><td>Three viewers, one upstream, two panes, no logical-session or Commander-attributable model-process delta, no idle polling.</td></tr>
+      <tr><th scope="row"><code>H7-CRASH-04</code></th><td><span class="state pass">PASS</span></td><td>Exact SIGILL produced typed guidance; other reads stayed healthy.</td></tr>
+      <tr><th scope="row">Daemon restart / compatibility</th><td><span class="state pass">PASS</span></td><td>Protocol-v1 fixture restarted; both viewers reattached through one new upstream.</td></tr>
+      <tr><th scope="row">macOS hub restart / Serve</th><td><span class="state fail">FAIL</span></td><td>Stock public v2.60.0 cannot discover the app CLI; restart needs an undocumented step to restore HTTPS.</td></tr>
+      <tr><th scope="row">Assembled workspace / release / vendor / ISA</th><td><span class="state pass">PASS</span></td><td>Canonical Linux CI run <code>31425559709</code> is green at exact SHA <code>69c3a1c6</code>; local Commander-scoped suites and exact installed Linux ELF ISA audit are green.</td></tr>
+      <tr><th scope="row">Cleanup / authority</th><td><span class="state pass">PASS</span></td><td>Zero active H7 devices, fixture/browser processes, listener, or invitation/profile state; original metadata restored.</td></tr>
     </tbody></table></div>
   </section>
 
-  <section aria-labelledby="falsify"><h2 id="falsify">Continuation protocol</h2><p>Use prowl as controller origin and soundwave as the sole target. Reuse banked public-release, TLS/pre-auth, soundwave pairing, and cleanup receipts; do not enter unicron or shield. Revive the fixture, mint fresh soundwave invitations, and run Chrome at 390×844 through fan-out, arbitration, replay/copied-key/scope/revocation, restart/reconnect, compatibility, no-polling/count, and exact SIGILL diagnostics. Then run assembled/vendor/release/ISA proof and set the verdict only from executed evidence.</p></section>
+  <section aria-labelledby="environment"><h2 id="environment">Additional environment finding — outside the Commander verdict</h2>
+    <p>Prowl's macOS full-workspace runner exposed three test-infrastructure findings, now tracked by P2 bug <code>cas-d20f</code>: the default soft descriptor limit of 256 caused an <code>EMFILE</code> cascade; after raising only the proof subprocess limit, one socket-election race failed once and passed twice in isolation; and <code>retrieval_parity_test::excluded_rows_do_not_shift_the_ranks_of_real_rows</code> reproduced a deterministic macOS list-rank mismatch even in isolation. Failed receipts are preserved as <code>assembled-emfile.*</code> and <code>assembled-flake.*</code> in the durable task artifacts.</p>
+    <p>Canonical Linux CI run <code>31425559709</code> passes the full suite at the exact same <code>69c3a1c6</code> commit. The retrieval test has no Commander seam, so this finding is preserved and filed but does not create a second H7 gate failure or weaken the macOS Serve-republish failure.</p>
+  </section>
+
+  <section aria-labelledby="falsify"><h2 id="falsify">What would falsify this</h2>
+    <div class="callout"><strong>Exact flip condition:</strong> an immutable tagged release containing merged corrective <code>cas-a13a</code> (<code>42d0a69c</code>, in epic tip <code>e29b22fb</code>) must, on stock prowl with no wrapper or stray PATH entry, preserve machine identity and URL across <code>cas hub restart --tailscale-serve</code>, republish Serve, and return HTTPS health <code>200</code>. Rerun only that restart row plus a Serve spot check; all other green rows carry forward.</div>
+  </section>
 
   <section aria-labelledby="actions"><h2 id="actions">Next actions</h2>
-    <div class="table-wrap"><table><caption>Required corrective path</caption><thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Completion proof</th></tr></thead><tbody>
-      <tr><td>Investigate the out-of-scope unicron CORS anomaly separately.</td><td>Hub/auth follow-up</td><td>Reproduction and root cause remain outside Commander v1 verdict.</td></tr>
-      <tr><td>Complete rebound prowl + soundwave H7.</td><td>Fresh H7 worker</td><td>Every binding row executed; paired report updated; zero residue.</td></tr>
-      <tr><td>Keep Slack unposted until green and user-elected.</td><td>Release owner</td><td>Explicit human posting decision after green report.</td></tr>
+    <div class="table-wrap"><table><caption>Exact re-verification handoff</caption><thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Completion proof</th></tr></thead><tbody>
+      <tr><td>Publish the next immutable release containing <code>cas-a13a</code>; do not move <code>v2.60.0</code> or an earlier tag.</td><td>Release owner</td><td>Tag peel contains <code>42d0a69c</code>; workflow, assets, and digests recorded.</td></tr>
+      <tr><td>Rerun only stock macOS hub restart plus Serve-republish spot check on prowl.</td><td>H7 verifier</td><td>No wrapper/PATH contamination; stable machine-id/URL; HTTPS health <code>200</code>.</td></tr>
+      <tr><td>If green, flip Commander v1 to releasable while carrying forward all other rows.</td><td>H7 verifier</td><td>Paired report updated from the new artifact; Slack still needs explicit user approval.</td></tr>
     </tbody></table></div>
   </section>
 
   <section aria-labelledby="cleanup"><h2 id="cleanup">Cleanup and redaction</h2>
-    <div class="callout"><strong>Zero active test authority or task-started service remains.</strong></div>
     <ul>
-      <li>No pairing capability, credential, proof, key, ticket, Authorization value, tailnet IP, terminal input, prompt content, or raw audit payload appears here.</li>
-      <li>The one soundwave attempt device was revoked; unicron created no device. Active devices: zero.</li>
-      <li>Four invitation files, temporary links, and three Chrome profiles moved to recoverable user Trash.</li>
-      <li>Fixture stopped; original session JSON and daemon-exit receipt are byte-identical; task-started unicron hub/Serve stopped; soundwave operator service unchanged.</li>
+      <li>No pairing capability, credential, proof, private key, ticket, Authorization value, tailnet IP, terminal content, prompt content, or raw secret is retained in the report or repository.</li>
+      <li>All three H7 devices are revoked. Consumed invitations and six isolated Chrome profiles were deleted after remote <code>/tmp</code> refused recoverable Trash; those ephemeral deletions are not recoverable.</li>
+      <li>Fixtures are stopped, port <code>39459</code> is clear, and original session JSON and daemon-exit receipt are restored byte-for-byte.</li>
+      <li>Soundwave's operator service remains PID <code>2256851</code>, active/running, <code>NRestarts=0</code>; its unit, linger, and operator devices were unchanged.</li>
+      <li>Prowl's factory daemon was never restarted. Hub PID <code>59538</code> is healthy; task wrapper and supervisor-created symlink are absent.</li>
       <li>Physical Android remains unclaimed. Slack remains explicitly unposted.</li>
     </ul>
   </section>
@@ -134,12 +155,13 @@
     <ul>
       <li>Markdown source: <a href="2026-08-09-commander-v1-acceptance-gate.md"><code>2026-08-09-commander-v1-acceptance-gate.md</code></a>.</li>
       <li>Unposted draft: <code>docs/release-notes/2026-08-09-commander-v1-slack-draft.md</code>.</li>
-      <li>Executed source boundary: <code>4636518f121054b612bef56ddf770b2d8a72ef63</code>; public peel: <code>0cb8962d</code>.</li>
-      <li>Durable anomaly/checkpoint evidence: <code>artifacts/cas-3d85/wild-leopard-18/browser.exit</code>, <code>browser.log</code>, <code>fixture-state.json</code>, and <code>fixture-events.jsonl</code>, 2026-08-10 19:29–19:37 UTC.</li>
-      <li>Commands: Git/GitHub identity reads; installed-public hashes/versions; SSH counts/state; TLS 1.3/HSTS/origin probes; deterministic fixture; one Chrome CDP 390×844 attempt; auth/server/process/socket/receipt/session cleanup assertions.</li>
+      <li>Source boundary <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>; public peel <code>0cb8962d</code>; unpublished corrective <code>42d0a69c</code> in <code>e29b22fb</code>.</li>
+      <li>Canonical assembled receipt: Linux CI run <code>31425559709</code>, completed successfully at exact source SHA <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>; macOS infrastructure follow-up <code>cas-d20f</code>.</li>
+      <li>Redacted artifacts: <code>.cas/artifacts/cas-3d85/ready-viper-55/</code>, observed 2026-08-10 19:51–19:58 UTC.</li>
+      <li>Commands: Git/release and installed-binary reads; SSH process/session/service/auth probes; protocol-v2/v1 fixtures; Chrome CDP <code>390×844</code>; DPoP/pairing/ticket adversarial requests; exact PID SIGILL; guarded revocation; metadata restoration; canonical exact-commit Linux workspace/release/vendor proof, local Commander-scoped suites, and exact installed-public-Linux ISA audit.</li>
     </ul>
   </section>
 </main>
-<footer>Practitioner acceptance investigation · source of truth is the adjacent Markdown · no external assets, scripts, or network dependencies.</footer>
+<footer>Practitioner acceptance investigation · adjacent Markdown is the source of truth · self-contained, no scripts or external assets.</footer>
 </body>
 </html>

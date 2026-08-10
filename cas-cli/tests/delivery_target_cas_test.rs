@@ -375,6 +375,71 @@ fn assert_no_delivery_projection(fixture: &DeliveryFixture, state: WorkerDeliver
 // Regressions
 // =============================================================================
 
+/// cas-96ba: transactional delivery must accept the task binding consumed by
+/// worktree target resolution. The destructive-action field guard runs before
+/// that resolver, so this proves `task_id` reaches the real merge path rather
+/// than being rejected as an unrelated union field.
+#[tokio::test]
+async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
+    let home = TempDir::new().expect("temp HOME");
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
+    let fixture = arm_delivery("taskidaccepted", "task-id-accepted").await;
+
+    env.set_current_dir(&fixture.repo.root);
+    let output = run_merge(&fixture).await;
+
+    assert!(
+        !output.contains("Unsupported parameter(s)"),
+        "task_id must reach target resolution, not fail the destructive-action guard:\n{output}"
+    );
+    assert!(
+        matches!(
+            delivery_state(&fixture),
+            WorkerDeliveryState::Merged
+                | WorkerDeliveryState::CloseReady
+                | WorkerDeliveryState::Delivered
+        ),
+        "a task_id-bearing delivery merge must enter the typed merge flow:\n{output}"
+    );
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "main~1"]),
+        fixture.receipt.target_sha,
+        "the task-bound merge must resolve and merge against the reviewed target"
+    );
+}
+
+/// cas-96ba: accepting the legitimate `task_id` must not broaden the
+/// destructive action's union-field surface. `target` belongs to messaging,
+/// not worktree_merge, and therefore remains fail-closed before any delivery
+/// state can change.
+#[tokio::test]
+async fn delivery_merge_rejects_unrelated_union_parameter_before_target_resolution() {
+    let home = TempDir::new().expect("temp HOME");
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
+    let fixture = arm_delivery("taskidrejectsother", "task-id-rejects-other").await;
+    let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some(fixture.receipt.source_branch.clone());
+    merge.task_id = Some(fixture.task_id.clone());
+    merge.target = Some("not-a-worktree-merge-parameter".to_string());
+
+    let error = supervisor_service
+        .coordination(Parameters(merge))
+        .await
+        .expect_err("unrelated worktree_merge parameter must fail closed");
+    assert!(
+        error.message.contains("Unsupported parameter(s)") && error.message.contains("target"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        delivery_state(&fixture),
+        WorkerDeliveryState::AwaitingMerge,
+        "the rejected request must not reach target resolution or mutate delivery state"
+    );
+}
+
 /// Drift that lands *before* the merge is entered must be refused as the
 /// typed, recoverable `TipChanged` — target drift is a tip change, and the
 /// supervisor needs `is_recoverable_failure()` to offer recovery.

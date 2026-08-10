@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
 use crate::cloud::sync_queue::{
-    EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncQueue,
+    EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord, SyncQueue,
 };
 use crate::error::CasError;
 
@@ -119,13 +119,94 @@ impl SyncQueue {
                 |row| row.get(0),
             )
             .optional()?;
+        let has_conflict_table: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_conflicts')",
+            [],
+            |row| row.get(0),
+        )?;
+        let unreviewed_conflicts = if has_conflict_table {
+            conn.query_row("SELECT COUNT(*) FROM sync_conflicts", [], |row| {
+                row.get::<_, i64>(0)
+            })? as usize
+        } else {
+            0
+        };
 
         Ok(QueueHealth {
             pending: pending as usize,
             oldest_age_secs: oldest_item.map(|created_at| (now - created_at).num_seconds().max(0)),
             oldest_item,
             last_error,
+            unreviewed_conflicts,
         })
+    }
+
+    /// Persist a full local row before a pull replaces or merges it.
+    pub fn record_conflict(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        discarded_row_json: &str,
+        winner_side: &str,
+        strategy: &str,
+    ) -> Result<(), CasError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_conflicts (entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![entity_type, entity_id, discarded_row_json, winner_side, strategy, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this machine still has a local queued mutation for the row.
+    pub fn has_pending_entity_change(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+    ) -> Result<bool, CasError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sync_queue WHERE entity_type = ?1 AND entity_id = ?2)",
+            params![entity_type.as_str(), entity_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn list_conflicts(&self, limit: usize) -> Result<Vec<SyncConflictRecord>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_type, entity_id, discarded_row_json, winner_side, strategy, resolved_at FROM sync_conflicts ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(SyncConflictRecord {
+                id: row.get(0)?,
+                entity_type: row.get(1)?,
+                entity_id: row.get(2)?,
+                discarded_row_json: row.get(3)?,
+                winner_side: row.get(4)?,
+                strategy: row.get(5)?,
+                resolved_at: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn unreviewed_conflict_count(&self) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(
+            conn.query_row("SELECT COUNT(*) FROM sync_conflicts", [], |row| {
+                row.get::<_, i64>(0)
+            })? as usize,
+        )
+    }
+
+    pub fn prune_conflicts(&self, older_than_days: i64) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = Utc::now() - chrono::Duration::days(older_than_days);
+        Ok(conn.execute(
+            "DELETE FROM sync_conflicts WHERE resolved_at <= ?1",
+            params![cutoff.to_rfc3339()],
+        )?)
     }
 
     fn group_pending_items(items: Vec<QueuedSync>) -> PendingByType {

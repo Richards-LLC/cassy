@@ -416,7 +416,7 @@ fn classify_cloud_queue(facts: CloudQueueFacts, findings: &mut Vec<PreflightFind
     let age_wedged = health
         .oldest_age_secs
         .is_some_and(|age| age >= facts.oldest_warning_secs as i64);
-    if !pending_wedged && !age_wedged {
+    if !pending_wedged && !age_wedged && health.unreviewed_conflicts == 0 {
         return;
     }
 
@@ -426,8 +426,8 @@ fn classify_cloud_queue(facts: CloudQueueFacts, findings: &mut Vec<PreflightFind
         .unwrap_or_else(|| "none".to_string());
     let last_error = health.last_error.as_deref().unwrap_or("none recorded");
     let message = format!(
-        "Cloud sync queue warning: {} pending; oldest pending age {}; last push error: {}.",
-        health.pending, oldest, last_error
+        "Cloud sync queue warning: {} pending; oldest pending age {}; last push error: {}; unreviewed conflicts: {}.",
+        health.pending, oldest, last_error, health.unreviewed_conflicts
     );
     findings.push(warning(
         "cloud.queue_unhealthy",
@@ -1387,6 +1387,7 @@ mod tests {
             oldest_item: Some(chrono::Utc::now() - chrono::Duration::hours(7)),
             oldest_age_secs: Some(7 * 60 * 60),
             last_error: Some("Network error: offline".to_string()),
+            unreviewed_conflicts: 3,
         });
 
         let report = build_report(facts);
@@ -1399,6 +1400,7 @@ mod tests {
         assert!(finding.message.contains("201 pending"));
         assert!(finding.message.contains("7h 0m"));
         assert!(finding.message.contains("Network error: offline"));
+        assert!(finding.message.contains("unreviewed conflicts: 3"));
         assert!(!report.factory_blocked);
     }
 
@@ -1410,6 +1412,7 @@ mod tests {
             oldest_item: Some(chrono::Utc::now()),
             oldest_age_secs: Some(5),
             last_error: None,
+            unreviewed_conflicts: 0,
         });
 
         let report = build_report(facts);

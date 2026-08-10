@@ -21,7 +21,10 @@ mod stats;
 mod tests;
 mod types;
 
-pub use types::{EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncOperation};
+pub use types::{
+    EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
+    SyncOperation,
+};
 
 /// Persistent sync queue backed by SQLite
 pub struct SyncQueue {

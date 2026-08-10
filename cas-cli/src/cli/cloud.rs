@@ -28,6 +28,8 @@ pub enum CloudCommands {
     Status,
     /// Show sync queue (pending changes)
     Queue(CloudQueueArgs),
+    /// List locally retained pull-side conflicts, or prune old records
+    Conflicts(CloudConflictsArgs),
     /// Push local data to cloud
     Push(CloudPushArgs),
     /// Pull data from cloud
@@ -239,10 +241,22 @@ pub struct CloudQueueArgs {
     pub clear: bool,
 }
 
+#[derive(Parser)]
+pub struct CloudConflictsArgs {
+    /// Maximum conflict rows to show
+    #[arg(long, default_value = "20")]
+    pub limit: usize,
+
+    /// Delete retained rows older than N days
+    #[arg(long)]
+    pub prune: Option<i64>,
+}
+
 pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
         CloudCommands::Status => execute_status(cli, cas_root),
         CloudCommands::Queue(args) => execute_queue(args, cli, cas_root),
+        CloudCommands::Conflicts(args) => execute_conflicts(args, cli, cas_root),
         CloudCommands::Push(args) => execute_push(args, cli, cas_root),
         CloudCommands::Pull(args) => execute_pull(args, cli, cas_root),
         CloudCommands::Sync(args) => execute_sync(args, cli, cas_root),
@@ -1084,6 +1098,45 @@ fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
             "No team was configured"
         })?;
         fmt.newline()?;
+    }
+    Ok(())
+}
+
+fn execute_conflicts(
+    args: &CloudConflictsArgs,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<()> {
+    let queue = SyncQueue::open(cas_root)?;
+    queue.init()?;
+    if let Some(days) = args.prune {
+        let pruned = queue.prune_conflicts(days)?;
+        if cli.json {
+            println!("{}", serde_json::json!({"status": "ok", "pruned": pruned}));
+        } else {
+            println!("Pruned {pruned} retained conflicts older than {days} days");
+        }
+        return Ok(());
+    }
+
+    let conflicts = queue.list_conflicts(args.limit)?;
+    let count = queue.unreviewed_conflict_count()?;
+    if cli.json {
+        println!("{}", serde_json::json!({"count": count, "conflicts": conflicts}));
+    } else if conflicts.is_empty() {
+        println!("No retained cloud sync conflicts.");
+    } else {
+        println!("{count} retained cloud sync conflict(s):");
+        for conflict in conflicts {
+            println!(
+                "{} {} — winner: {}, strategy: {}, resolved: {}",
+                conflict.entity_type,
+                conflict.entity_id,
+                conflict.winner_side,
+                conflict.strategy,
+                conflict.resolved_at
+            );
+        }
     }
     Ok(())
 }

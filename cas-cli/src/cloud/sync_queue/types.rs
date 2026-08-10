@@ -174,6 +174,20 @@ pub struct QueueHealth {
     pub oldest_age_secs: Option<i64>,
     /// Most recently recorded push error, if a push has failed.
     pub last_error: Option<String>,
+    /// Pull-side conflicts retained for operator review.
+    pub unreviewed_conflicts: usize,
+}
+
+/// A local copy of a row that a cloud pull had to supersede or merge.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncConflictRecord {
+    pub id: i64,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub discarded_row_json: String,
+    pub winner_side: String,
+    pub strategy: String,
+    pub resolved_at: String,
 }
 
 /// Pending items grouped by entity type

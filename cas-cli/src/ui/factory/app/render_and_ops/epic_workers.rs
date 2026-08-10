@@ -1372,19 +1372,7 @@ impl FactoryApp {
             anyhow::bail!("Worker '{name}' not found");
         }
 
-        // cas-7a94: release pre-assigns / leases bound to this worker *before*
-        // tearing down the agent record. Assignees are display names (cas-dbbb),
-        // so match on `name` not agent_id. Without this, spawn-time pre-assigns
-        // and InProgress ghosts survive shutdown and block transfer/start.
         let cas_dir = self.cas_dir().to_path_buf();
-        let released = release_worker_task_bindings(&cas_dir, name);
-        if released > 0 {
-            tracing::info!(
-                worker = %name,
-                released,
-                "cas-7a94: released task bindings on shutdown_worker"
-            );
-        }
 
         // Mark agent as shutdown in CAS first; this must succeed so supervisor sees errors
         // instead of silently leaving stale idle agents in director panels.
@@ -1452,6 +1440,31 @@ impl FactoryApp {
         self.mux.kill_worker(name, force).await?;
         if let Some(pgid) = process_group {
             self.untrack_worker_process_group_if_gone(pgid).await;
+        }
+
+        // Emit the same durable supervisor lifecycle relay used for unexpected
+        // PTY exits. Do this only after the process is actually gone, but
+        // before the legacy binding cleanup, so the relay records and parks
+        // any task that was held at termination instead of reporting a
+        // misleading empty task set.
+        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+            &cas_dir,
+            agent_store.as_ref(),
+            agent,
+            &[],
+            "worker terminated by shutdown request",
+        );
+
+        // cas-7a94: clear pure Open pre-assigns and any binding the recovery
+        // path could not inspect. Assignees are display names (cas-dbbb), so
+        // match on `name` rather than the registration UUID.
+        let released = release_worker_task_bindings(&cas_dir, name);
+        if released > 0 {
+            tracing::info!(
+                worker = %name,
+                released,
+                "cas-7a94: released remaining task bindings on shutdown_worker"
+            );
         }
 
         // Remove from tracking

@@ -54,34 +54,34 @@
 <header>
   <div class="eyebrow">Engineering investigation · practitioner review · updated 2026-08-10</div>
   <h1>Commander v1 assembled acceptance gate</h1>
-  <div class="verdict"><strong>NOT RELEASABLE at public v2.60.0 · high confidence</strong><p class="lede">The binding prowl + soundwave phone-browser, security, fan-out, arbitration, crash, compatibility, and zero-agent rows passed. One narrow gate failed: stock macOS hub restart cannot discover the Tailscale app-bundle CLI, so it cannot republish the stable HTTPS Serve endpoint without an undocumented manual step. Corrective <code>cas-a13a</code> is merged at epic tip <code>e29b22fb</code>, but is not yet in an immutable release.</p></div>
+  <div class="verdict"><strong>NOT RELEASABLE at public v2.61.0 · high confidence</strong><p class="lede">The binding prowl + soundwave phone-browser, security, fan-out, arbitration, crash, compatibility, and zero-agent rows carry forward as passed. Public <code>v2.61.0</code> fixes stock macOS app-bundle CLI discovery, but its exact upgrade restart cannot deserialize the CAS-owned <code>v2.60.0</code> Serve receipt after adding a required <code>executable</code> field. The stale mapping remains and HTTPS returns <code>502</code> until an undocumented manual reset.</p></div>
   <p>The binding contract is the <a href="../specs/2026-08-08-commander-security-architecture.md">Commander security architecture ADR</a>, especially <code>H7-ADV-01</code>, <code>H7-FLEET-02</code>, <code>H7-INVARIANT-03</code>, and <code>H7-CRASH-04</code>.</p>
 </header>
 <main id="content">
   <section aria-labelledby="overview"><h2 id="overview">Overview</h2>
     <div class="proof-strip" aria-label="Key measured facts">
-      <div class="proof"><b>v2.60.0</b><span>exact immutable public artifact</span></div>
+      <div class="proof"><b>v2.61.0</b><span>exact immutable public macOS artifact</span></div>
       <div class="proof"><b>3 viewers → 1 upstream</b><span>measured in both protocol phases</span></div>
       <div class="proof"><b>390×844</b><span>real Chrome 151 phone viewport</span></div>
-      <div class="proof"><b>1 failed row</b><span>macOS restart Serve republish</span></div>
+      <div class="proof"><b>1 failed row</b><span>upgrade restart Serve republish</span></div>
     </div>
     <div class="table-wrap"><table><caption>Scope and verdict</caption><tbody>
-      <tr><th scope="row">Question</th><td>Is Commander v1 releasable from exact public <code>v2.60.0</code> bytes on the operator-bound prowl + soundwave topology?</td></tr>
-      <tr><th scope="row">Verdict</th><td><strong>No. All binding live rows passed except stock macOS hub restart cannot republish Tailscale Serve without an undocumented CLI-discovery step.</strong></td></tr>
-      <tr><th scope="row">Confidence</th><td>High; public artifact, installed binaries, real browser, fixture identity, audit attribution, process/session counts, cleanup, and the failing restart transition were observed directly.</td></tr>
-      <tr><th scope="row">Executed source boundary</th><td>Clean <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>, equal to <code>origin/main</code> before this evidence-only report commit; immutable release peel <code>0cb8962d</code>.</td></tr>
-      <tr><th scope="row">Public release</th><td><code>v2.60.0</code>; official run <code>31412591350</code> terminal success.</td></tr>
-      <tr><th scope="row">Linux asset</th><td>21,991,526 bytes; archive SHA-256 <code>b2533266…</code>; binary SHA-256 <code>8ec9dea6…</code>.</td></tr>
+      <tr><th scope="row">Question</th><td>Does the exact public <code>v2.61.0</code> prowl restart recheck clear the final Commander v1 gate while every other prowl + soundwave row carries forward?</td></tr>
+      <tr><th scope="row">Verdict</th><td><strong>No. App-bundle CLI discovery is fixed, but upgrade restart cannot consume the CAS-owned <code>v2.60.0</code> Serve receipt and needs a manual reset before republish.</strong></td></tr>
+      <tr><th scope="row">Confidence</th><td>High; public asset, atomic install, stock PATH, old/new receipts, stop/start transition, selected CLI, identity, HTTPS result, recovery, and unchanged factory daemons were observed directly.</td></tr>
+      <tr><th scope="row">Executed source boundary</th><td>Public release peel <code>1fd2b1465cf7ecf8fa70fa92a1b1006a590198b9</code>; annotated tag <code>ba8ada8b62eae1c00869012963cf7d02fa06e4f9</code>; contains <code>cas-a13a</code> corrective <code>42d0a69c</code>.</td></tr>
+      <tr><th scope="row">Public release</th><td><code>v2.61.0</code>; GitHub Release published 2026-08-10 21:48 UTC, neither draft nor prerelease.</td></tr>
+      <tr><th scope="row">macOS ARM64 asset</th><td>19,384,139 bytes; archive SHA-256 <code>1b18c8fc7fc60d81fae4490fd88ffacd0785cd1ece71db142ff82820fd2eaec8</code>; extracted binary SHA-256 <code>6e9c36379fdf88e5995215ad81c524abd75e4c8a8fb9bf8aa01bed114aa98d0d</code>.</td></tr>
       <tr><th scope="row">Binding topology</th><td><code>prowl</code> controller hub + distinct <code>soundwave</code> target hub. Unicron and shield are explicitly out of scope.</td></tr>
       <tr><th scope="row">Browser</th><td>Real Google Chrome <code>151.0.7922.108</code>; <code>390×844</code>; controller origin prowl. Physical Android was offline and is not claimed.</td></tr>
-      <tr><th scope="row">Evidence window</th><td>2026-08-10 19:51–19:58 UTC, with banked public-release/TLS evidence from earlier H7 passes.</td></tr>
-      <tr><th scope="row">Author</th><td>H7 assembled release gate (<code>cas-3d85</code>).</td></tr>
+      <tr><th scope="row">Evidence window</th><td>2026-08-10 22:03–22:06 UTC for the <code>v2.61.0</code> recheck, with non-restart rows carried from the 19:51–19:58 UTC H7 pass.</td></tr>
+      <tr><th scope="row">Author</th><td>H7 assembled release gate (<code>cas-3d85</code>) and focused re-verification (<code>cas-f382</code>).</td></tr>
     </tbody></table></div>
   </section>
 
   <section aria-labelledby="evidence"><h2 id="evidence">Evidence</h2>
     <div class="table-wrap"><table><caption>Executed evidence and conclusion</caption><thead><tr><th scope="col">Observation</th><th scope="col">Redacted source</th><th scope="col">What it proves</th></tr></thead><tbody>
-      <tr><td>Public <code>v2.60.0</code> tag/workflow/assets were authenticated; binding hosts ran the intended public version, and soundwave's Linux ELF matched SHA-256 <code>8ec9dea6…</code>.</td><td>Banked release receipts; fresh local/SSH version, executable, and hub-status checks.</td><td>The pass exercised public bytes, not a local corrective build.</td></tr>
+      <tr><td>Public <code>v2.61.0</code> is an immutable annotated tag containing <code>cas-a13a</code>. A fresh macOS download matched GitHub's 19,384,139-byte size and SHA-256 <code>1b18c8fc…</code>; its arm64 binary reports <code>2.61.0</code>/<code>1fd2b14</code>. Prowl received an atomic install with the exact <code>v2.60.0</code> SHA backed up.</td><td><code>cas-f382/fast-panda-84/install-receipt.txt</code>; downloaded public archive; GitHub tag/release reads.</td><td>The focused row used independently verified public bytes and preserved rollback evidence. Soundwave remained untouched under the carry-forward contract.</td></tr>
       <tr><td>TLS 1.3, minimal health, HSTS, non-loopback plaintext refusal, wrong Origin, preflight, CSRF, CSWSH, and hostile pairing exchange remained green.</td><td>Banked forced-TLS and redacted HTTP receipts under <code>artifacts/cas-3d85/</code>.</td><td>Remote control is TLS-only; hostile origins receive no state or CORS grant.</td></tr>
       <tr><td>Three fresh soundwave devices paired from prowl: two full-scope controllers and one read-only observer. Each opened two panes at <code>390×844</code>.</td><td><code>ready-viper-55/browser.log</code>; phone screenshot.</td><td><code>H7-FLEET-02</code> used two real machines and a phone-class browser.</td></tr>
       <tr><td>A acquired control; B observed A, then force-took control; A observed B. Observer C's lease, interrupt, and message controls remained disabled.</td><td>Browser DOM assertions and attributed audit records.</td><td>One explicit controller lease and admin takeover match the ADR.</td></tr>
@@ -92,32 +92,33 @@
       <tr><td>A protocol-v1 fixture restarted after SIGILL. B and C reattached and each rendered two panes; phase 2 again recorded exactly one upstream.</td><td><code>remote-phase2/fixture-state.json</code> and <code>fixture-events.jsonl</code>.</td><td>Daemon restart recovers and the current client accepts the legacy protocol shape.</td></tr>
       <tr><td>The 5.6-second trace contains event streams and event-triggered/action requests only; no model/agent endpoint and no idle polling interval.</td><td>Timestamped <code>networkTrace</code> in <code>browser.log</code>.</td><td>Commander does not poll an agent or create model traffic.</td></tr>
       <tr><td>Prowl stayed Claude/Codex/Grok <code>1/1/0</code> + <code>1</code> session. Soundwave changed <code>1/0/0</code> + <code>6</code> → <code>1/1/0</code> + <code>6</code>; PID <code>2299566</code> was independently spawned at 15:56:20 by <code>crisp-spider-66</code> under unrelated daemon <code>2144744</code>.</td><td><code>baseline.json</code>, <code>after.json</code>, process parent/command and session names.</td><td>Commander created no model process or logical session; the ambient Codex delta is externally attributed.</td></tr>
-      <tr><td>A supervisor-created <code>/opt/homebrew/bin/tailscale</code> symlink contaminated the first restart, causing an app bundle-identifier abort and HTTPS <code>502</code>. It is removed. Stock <code>v2.60.0</code> takes the CLI-unavailable warning path, but still restarts loopback-only and cannot republish Serve.</td><td><code>prowl-restart-intermediate.json</code>; supervisor correction preserved verbatim in the task ledger.</td><td>The abort was environmental; the stock product defect is the same failed Serve-republish outcome.</td></tr>
-      <tr><td>A task-local absolute-app wrapper recovered prowl to PID <code>59538</code>, unchanged machine-id SHA/mtime and URL, health <code>200</code>. Both wrapper and stray symlink are absent.</td><td><code>prowl-restart.json</code>; absence/status/health assertions.</td><td>Recovery is possible, but it is an undocumented step. No prowl factory daemon was restarted.</td></tr>
+      <tr><td>Stock proof used an explicit system PATH with no <code>tailscale</code>, no <code>/opt/homebrew/bin/tailscale</code>, and no scratch wrapper; Tailscale.app was running. Public <code>v2.61.0</code> stopped PID <code>59538</code> truthfully and started PID <code>12234</code>, recording <code>/Applications/Tailscale.app/Contents/MacOS/Tailscale</code>.</td><td><code>stock-path.txt</code>; <code>prowl-v2610-restart.log</code>; process record.</td><td><code>cas-a13a</code> works under the exact stock condition that blocked <code>v2.60.0</code>.</td></tr>
+      <tr><td>The same restart reported <code>invalid CAS Tailscale receipt</code>, preserved the stale <code>v2.60.0</code> mapping, and started loopback-only because port 443 remained owned by that mapping. The URL returned <code>502</code>; machine-id SHA/mtime and both factory daemon PIDs were unchanged.</td><td>Old schema-version-1 receipt; <code>prowl-v2610-restart.log</code>; <code>failed-restart-state.log</code>; <code>cas-cli/src/hub/tailscale.rs</code>.</td><td>The newly required receipt <code>executable</code> field lacks a deserialization default, so public upgrade cannot teardown and republish its prior mapping.</td></tr>
+      <tr><td>After a manual reset of only the exact CAS-owned stale mapping, another stock-PATH restart started PID <code>12867</code>, wrote the new receipt with the app CLI, preserved machine identity and URL, and returned HTTPS <code>200</code>. <code>cas hub service status</code> ran without installing supervision.</td><td><code>manual-recovery-reset.log</code>; second restart log; <code>recovered-state.log</code>.</td><td>Discovery and publication work and prowl is healthy, but the manual reset keeps the upgrade row red. No factory daemon restarted.</td></tr>
       <tr><td>Canonical Linux CI run <code>31425559709</code> completed successfully at exact source SHA <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>. Local Commander hub/H1–H5, protocol, and session suites were green; soundwave's installed public ELF independently passed the strict no-EVEX/AVX-512 audit at SHA <code>8ec9dea6…</code>.</td><td>Exact-commit CI receipt; local scoped-suite output; <code>public-linux-isa.log</code>.</td><td>The assembled workspace, release, vendor, and ISA guard is green. Separate macOS full-suite findings are not a Commander seam.</td></tr>
     </tbody></table></div>
     <p class="small">Sources were extracted during the stated window. Values are measured, not estimated.</p>
   </section>
 
   <section aria-labelledby="reasoning"><h2 id="reasoning">Reasoning chain</h2><ol>
-    <li>Release identity and installed-byte checks bind behavior to public <code>v2.60.0</code>.</li>
+    <li>Release identity and installed-byte checks bind the focused restart to public <code>v2.61.0</code>; non-restart rows carry from public <code>v2.60.0</code>.</li>
     <li>Real Chrome paired soundwave, rendered two panes for three viewers, enforced one controller, and exercised the adversarial and revocation matrix.</li>
     <li>Both protocol phases opened one daemon upstream. The SIGILL receipt matched the killed process identity; the legacy fixture then reattached without new sessions or agents.</li>
     <li>Process/session deltas are zero or attributed to an unrelated factory. The browser trace is push/event driven, not idle agent polling.</li>
-    <li>The supervisor-created symlink explains the abort shape, not the stock defect. With it removed, stock <code>v2.60.0</code> still cannot discover the app CLI or restore Serve.</li>
-    <li>The private wrapper restored service, but undocumented recovery violates acceptance; one failed restart row outweighs the otherwise-green matrix.</li>
+    <li>With no PATH entry or wrapper, <code>v2.61.0</code> selects the signed app-bundle CLI, proving the original discovery fix.</li>
+    <li>The upgrade cannot read its own <code>v2.60.0</code> receipt, so it preserves the stale mapping and cannot republish. Manual reset restores health, but violates acceptance; one failed row still outweighs the carried-green matrix.</li>
   </ol></section>
 
   <section aria-labelledby="matrix"><h2 id="matrix">Acceptance matrix</h2>
-    <div class="table-wrap"><table><caption>Binding gate state for public v2.60.0</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Executed conclusion</th></tr></thead><tbody>
-      <tr><th scope="row">Public artifact</th><td><span class="state pass">PASS</span></td><td>Exact immutable public version on the binding hosts.</td></tr>
+    <div class="table-wrap"><table><caption>Binding gate state after the public v2.61.0 focused recheck</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Executed conclusion</th></tr></thead><tbody>
+      <tr><th scope="row">Public artifact</th><td><span class="state pass">PASS</span></td><td>Exact immutable public <code>v2.61.0</code> macOS bytes were verified and installed on prowl; the peel contains <code>cas-a13a</code>.</td></tr>
       <tr><th scope="row">Clean-home / TLS / hostile Origin / plaintext</th><td><span class="state pass">PASS</span></td><td>Banked public-artifact receipts remain green.</td></tr>
       <tr><th scope="row"><code>H7-ADV-01</code></th><td><span class="state pass">PASS</span></td><td>Hostile browser cases, DPoP/pairing/ticket replay, copied key, method mismatch, scope escalation, and revocation rejected; child suite owns accelerated expiry.</td></tr>
       <tr><th scope="row"><code>H7-FLEET-02</code></th><td><span class="state pass">PASS</span></td><td>Prowl + soundwave, phone Chrome, direct observation/control, arbitration, audit attribution.</td></tr>
       <tr><th scope="row"><code>H7-INVARIANT-03</code></th><td><span class="state pass">PASS</span></td><td>Three viewers, one upstream, two panes, no logical-session or Commander-attributable model-process delta, no idle polling.</td></tr>
       <tr><th scope="row"><code>H7-CRASH-04</code></th><td><span class="state pass">PASS</span></td><td>Exact SIGILL produced typed guidance; other reads stayed healthy.</td></tr>
       <tr><th scope="row">Daemon restart / compatibility</th><td><span class="state pass">PASS</span></td><td>Protocol-v1 fixture restarted; both viewers reattached through one new upstream.</td></tr>
-      <tr><th scope="row">macOS hub restart / Serve</th><td><span class="state fail">FAIL</span></td><td>Stock public v2.60.0 cannot discover the app CLI; restart needs an undocumented step to restore HTTPS.</td></tr>
+      <tr><th scope="row">macOS hub restart / Serve</th><td><span class="state fail">FAIL</span></td><td>Stock public <code>v2.61.0</code> discovers the app CLI but cannot parse/teardown the CAS-owned <code>v2.60.0</code> receipt; HTTPS is <code>502</code> until manual reset.</td></tr>
       <tr><th scope="row">Assembled workspace / release / vendor / ISA</th><td><span class="state pass">PASS</span></td><td>Canonical Linux CI run <code>31425559709</code> is green at exact SHA <code>69c3a1c6</code>; local Commander-scoped suites and exact installed Linux ELF ISA audit are green.</td></tr>
       <tr><th scope="row">Cleanup / authority</th><td><span class="state pass">PASS</span></td><td>Zero active H7 devices, fixture/browser processes, listener, or invitation/profile state; original metadata restored.</td></tr>
     </tbody></table></div>
@@ -129,13 +130,14 @@
   </section>
 
   <section aria-labelledby="falsify"><h2 id="falsify">What would falsify this</h2>
-    <div class="callout"><strong>Exact flip condition:</strong> an immutable tagged release containing merged corrective <code>cas-a13a</code> (<code>42d0a69c</code>, in epic tip <code>e29b22fb</code>) must, on stock prowl with no wrapper or stray PATH entry, preserve machine identity and URL across <code>cas hub restart --tailscale-serve</code>, republish Serve, and return HTTPS health <code>200</code>. Rerun only that restart row plus a Serve spot check; all other green rows carry forward.</div>
+    <div class="callout"><strong>Exact flip condition:</strong> public <code>v2.61.1</code> with corrective <code>cas-0c54</code> must consume the legacy schema-version-1 receipt and, on stock prowl with no wrapper, stray PATH entry, or manual mapping reset, preserve machine identity and URL across <code>cas hub restart --tailscale-serve</code>, republish Serve, and return HTTPS <code>200</code>. Rerun only that row plus a Serve spot check; all others carry forward.</div>
   </section>
 
   <section aria-labelledby="actions"><h2 id="actions">Next actions</h2>
     <div class="table-wrap"><table><caption>Exact re-verification handoff</caption><thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Completion proof</th></tr></thead><tbody>
-      <tr><td>Publish the next immutable release containing <code>cas-a13a</code>; do not move <code>v2.60.0</code> or an earlier tag.</td><td>Release owner</td><td>Tag peel contains <code>42d0a69c</code>; workflow, assets, and digests recorded.</td></tr>
-      <tr><td>Rerun only stock macOS hub restart plus Serve-republish spot check on prowl.</td><td>H7 verifier</td><td>No wrapper/PATH contamination; stable machine-id/URL; HTTPS health <code>200</code>.</td></tr>
+      <tr><td>Complete P0 corrective <code>cas-0c54</code>: legacy-receipt compatibility, receipt-field audit since <code>v2.60.0</code>, and legacy-shape fixtures.</td><td>Runtime owner</td><td>Upgrade test loads the old receipt, removes only its unchanged CAS mapping, and writes the new receipt with <code>executable</code>.</td></tr>
+      <tr><td>Publish immutable <code>v2.61.1</code> containing <code>cas-0c54</code>; do not move earlier tags.</td><td>Release owner</td><td>Official tag peel, assets, and digests recorded.</td></tr>
+      <tr><td>Rerun only stock macOS upgrade restart plus Serve-republish spot check on prowl.</td><td>H7 verifier</td><td>No wrapper, PATH contamination, or manual reset; stable identity/URL; HTTPS <code>200</code>.</td></tr>
       <tr><td>If green, flip Commander v1 to releasable while carrying forward all other rows.</td><td>H7 verifier</td><td>Paired report updated from the new artifact; Slack still needs explicit user approval.</td></tr>
     </tbody></table></div>
   </section>
@@ -146,7 +148,7 @@
       <li>All three H7 devices are revoked. Consumed invitations and six isolated Chrome profiles were deleted after remote <code>/tmp</code> refused recoverable Trash; those ephemeral deletions are not recoverable.</li>
       <li>Fixtures are stopped, port <code>39459</code> is clear, and original session JSON and daemon-exit receipt are restored byte-for-byte.</li>
       <li>Soundwave's operator service remains PID <code>2256851</code>, active/running, <code>NRestarts=0</code>; its unit, linger, and operator devices were unchanged.</li>
-      <li>Prowl's factory daemon was never restarted. Hub PID <code>59538</code> is healthy; task wrapper and supervisor-created symlink are absent.</li>
+      <li>Prowl's two pre-existing factory daemons remained PIDs <code>9324</code> and <code>21707</code> throughout the recheck. The hub is healthy on public <code>v2.61.0</code> as PID <code>12867</code> after resetting only the exact stale CAS-owned root mapping; machine identity and URL are unchanged, and no wrapper or <code>/opt/homebrew/bin/tailscale</code> entry exists.</li>
       <li>Physical Android remains unclaimed. Slack remains explicitly unposted.</li>
     </ul>
   </section>
@@ -155,9 +157,11 @@
     <ul>
       <li>Markdown source: <a href="2026-08-09-commander-v1-acceptance-gate.md"><code>2026-08-09-commander-v1-acceptance-gate.md</code></a>.</li>
       <li>Unposted draft: <code>docs/release-notes/2026-08-09-commander-v1-slack-draft.md</code>.</li>
-      <li>Source boundary <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>; public peel <code>0cb8962d</code>; unpublished corrective <code>42d0a69c</code> in <code>e29b22fb</code>.</li>
+      <li>Focused source boundary: public peel <code>1fd2b1465cf7ecf8fa70fa92a1b1006a590198b9</code>, annotated tag <code>ba8ada8b62eae1c00869012963cf7d02fa06e4f9</code>, containing <code>42d0a69c</code>.</li>
+      <li>Public macOS asset: 19,384,139 bytes; archive SHA-256 <code>1b18c8fc7fc60d81fae4490fd88ffacd0785cd1ece71db142ff82820fd2eaec8</code>; extracted SHA-256 <code>6e9c36379fdf88e5995215ad81c524abd75e4c8a8fb9bf8aa01bed114aa98d0d</code>.</li>
       <li>Canonical assembled receipt: Linux CI run <code>31425559709</code>, completed successfully at exact source SHA <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>; macOS infrastructure follow-up <code>cas-d20f</code>.</li>
       <li>Redacted artifacts: <code>.cas/artifacts/cas-3d85/ready-viper-55/</code>, observed 2026-08-10 19:51–19:58 UTC.</li>
+      <li>Focused artifacts: <code>.cas/artifacts/cas-f382/fast-panda-84/</code>, observed 2026-08-10 22:03–22:06 UTC.</li>
       <li>Commands: Git/release and installed-binary reads; SSH process/session/service/auth probes; protocol-v2/v1 fixtures; Chrome CDP <code>390×844</code>; DPoP/pairing/ticket adversarial requests; exact PID SIGILL; guarded revocation; metadata restoration; canonical exact-commit Linux workspace/release/vendor proof, local Commander-scoped suites, and exact installed-public-Linux ISA audit.</li>
     </ul>
   </section>

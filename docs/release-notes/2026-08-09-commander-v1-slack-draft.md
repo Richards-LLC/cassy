@@ -1,14 +1,14 @@
-# Commander v1 runtime release — v2.60.0 not releasable, unposted Slack drafts
+# Commander v1 runtime release — v2.61.0 not releasable, unposted Slack drafts
 
-> **DO NOT POST. Public `v2.60.0` is NOT RELEASABLE as Commander v1.** The binding prowl + soundwave
+> **DO NOT POST. Public `v2.61.0` is NOT RELEASABLE as Commander v1.** The binding prowl + soundwave
 > real-Chrome matrix passed pairing, observation/control, fan-out, controller arbitration,
 > replay/copied-key/scope/revocation, typed `SIGILL`, protocol-v1 daemon restart, no-polling, and count
-> rows. One narrow gate failed: stock macOS hub restart cannot discover the Tailscale app-bundle CLI,
-> so it cannot republish the stable HTTPS Serve endpoint without an undocumented manual step. The
-> corrective `cas-a13a` is merged but not present in an immutable release. These post bodies are a
-> future template only. Publish the next tag containing the corrective, rerun the prowl restart +
-> Serve spot check, flip the paired acceptance report to releasable only if green, and still wait for
-> explicit user approval before posting.
+> rows. Public `v2.61.0` fixes stock macOS app-bundle CLI discovery, but the exact upgrade restart still
+> cannot read the CAS-owned `v2.60.0` Serve receipt after adding the CLI field. It preserves the stale
+> mapping and returns HTTPS `502` until a manual Serve reset. These post bodies remain a future template
+> only. Publish the receipt-compatible patch, rerun the prowl upgrade restart + Serve spot check with
+> no manual reset, flip the paired acceptance report only if green, and still wait for explicit user
+> approval before posting.
 
 Destination only after the corrective release gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -76,10 +76,15 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Publish a new immutable version containing merged corrective `cas-a13a`; do not move `v2.60.0`
-      or any earlier tag.
-- [ ] On stock prowl with no wrapper or stray PATH entry, rerun only macOS hub restart plus the
-      Serve-republish spot check; require stable machine identity/URL and HTTPS health `200`.
+- [x] Publish immutable `v2.61.0` containing app-bundle discovery corrective `cas-a13a`; exact public
+      asset, tag peel, installed binary, and selected absolute app CLI are recorded.
+- [x] On stock prowl with no wrapper or stray PATH entry, rerun only macOS hub restart plus the Serve
+      spot check: the upgrade row failed on the legacy receipt shape and reached HTTPS `502`; the hub
+      was restored only after an explicitly recorded manual reset of the exact CAS-owned stale mapping.
+- [ ] Publish immutable `v2.61.1` containing backward-compatible legacy-receipt parsing; do not move
+      `v2.61.0` or any earlier tag.
+- [ ] Rerun the stock prowl upgrade restart with a legacy receipt and require zero manual reset, stable
+      machine identity/URL, the absolute app-bundle CLI in the new receipt, and HTTPS health `200`.
 - [ ] Replace `[PUBLISHED VERSION]` only after that corrective row is green and the paired report has
       flipped from **NOT RELEASABLE** to releasable.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,

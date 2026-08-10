@@ -218,9 +218,15 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn private_tempdir() -> tempfile::TempDir {
+        let parent = std::env::temp_dir().canonicalize().unwrap();
+        tempfile::tempdir_in(parent).unwrap()
+    }
+
+    #[cfg(unix)]
     #[test]
     fn creates_an_absent_private_hierarchy_and_preserves_existing_state() {
-        let home = tempfile::tempdir().unwrap();
+        let home = private_tempdir();
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let hub = home.path().join(".cas/hub");
 
@@ -239,7 +245,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn preserves_a_safe_legacy_cas_parent_mode() {
-        let home = tempfile::tempdir().unwrap();
+        let home = private_tempdir();
         let cas = home.path().join(".cas");
         fs::create_dir(&cas).unwrap();
         fs::set_permissions(&cas, fs::Permissions::from_mode(0o775)).unwrap();
@@ -257,11 +263,11 @@ mod tests {
     fn rejects_symlink_file_loose_mode_and_unwritable_collisions_without_paths() {
         let cases = ["symlink", "file", "loose", "unwritable"];
         for case in cases {
-            let home = tempfile::tempdir().unwrap();
+            let home = private_tempdir();
             let cas = home.path().join(".cas");
             match case {
                 "symlink" => {
-                    let target = tempfile::tempdir().unwrap();
+                    let target = private_tempdir();
                     symlink(target.path(), &cas).unwrap();
                     let error = ensure_private_dir(&cas.join("hub"))
                         .unwrap_err()
@@ -304,7 +310,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn concurrent_bootstrap_converges_on_one_private_hierarchy() {
-        let home = tempfile::tempdir().unwrap();
+        let home = private_tempdir();
         let hub = std::sync::Arc::new(home.path().join(".cas/hub"));
         let threads = (0..8)
             .map(|_| {

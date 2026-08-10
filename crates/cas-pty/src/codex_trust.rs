@@ -232,11 +232,11 @@ pub fn ensure_project_trusted_in(
         ));
     }
 
-    let mut missing = Vec::new();
-    for key in keys {
+    let mut already_present = false;
+    for key in &keys {
         match config_has_project(&existing, &key) {
-            Ok(false) => missing.push(key),
-            Ok(true) => {}
+            Ok(false) => {}
+            Ok(true) => already_present = true,
             Err(e) => {
                 tracing::warn!(
                     config = %config_path.display(),
@@ -249,7 +249,7 @@ pub fn ensure_project_trusted_in(
             }
         }
     }
-    if missing.is_empty() {
+    if already_present {
         return Ok(CodexTrustOutcome::AlreadyPresent);
     }
 
@@ -257,7 +257,7 @@ pub fn ensure_project_trusted_in(
     if !updated.is_empty() && !updated.ends_with('\n') {
         updated.push('\n');
     }
-    for key in &missing {
+    for key in &keys {
         updated.push_str(&trust_entry_block(key));
     }
     if let Err(e) = toml::from_str::<toml::Value>(&updated) {
@@ -289,7 +289,7 @@ pub fn ensure_project_trusted_in(
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(CodexTrustOutcome::Added(missing))
+    Ok(CodexTrustOutcome::Added(keys))
 }
 
 /// Ensure `workdir` is trusted in the resolved Codex config

@@ -36,7 +36,8 @@ fn system_path() -> OsString {
 }
 
 fn private_home() -> TempDir {
-    let home = tempfile::tempdir().unwrap();
+    let parent = std::env::temp_dir().canonicalize().unwrap();
+    let home = tempfile::tempdir_in(parent).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -595,15 +596,18 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             .output()
             .unwrap();
         assert!(status.status.success());
-        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
-        let pid = status["record"]["pid"].as_u64().unwrap();
-        let lock_path = home.path().join(".cas/hub/hub.lock");
-        let lock_fds = fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| fs::read_link(entry.path()).ok().as_deref() == Some(&lock_path))
-            .count();
-        assert_eq!(lock_fds, 1, "the recorded hub must own exactly one lock FD");
+        let _status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let pid = _status["record"]["pid"].as_u64().unwrap();
+            let lock_path = home.path().join(".cas/hub/hub.lock");
+            let lock_fds = fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| fs::read_link(entry.path()).ok().as_deref() == Some(&lock_path))
+                .count();
+            assert_eq!(lock_fds, 1, "the recorded hub must own exactly one lock FD");
+        }
         assert!(
             HubRuntimePaths::new(home.path().join(".cas/hub"))
                 .acquire_instance_lock()

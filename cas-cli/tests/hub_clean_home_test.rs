@@ -36,7 +36,8 @@ fn system_path() -> OsString {
 }
 
 fn private_home() -> TempDir {
-    let home = tempfile::tempdir().unwrap();
+    let parent = std::env::temp_dir().canonicalize().unwrap();
+    let home = tempfile::tempdir_in(parent).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

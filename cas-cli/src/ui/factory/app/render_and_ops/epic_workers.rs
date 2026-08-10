@@ -3121,11 +3121,20 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_does_not_overwrite_existing_assignee() {
         let (_temp, cas_dir) = seeded_cas_dir();
+        // cas-2327 permits a replacement to reclaim a missing/dead holder.
+        // Register this existing display-name holder so this fixture continues
+        // to exercise the intended live-worker steal-protection contract.
+        let holder = "other-worker";
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut agent = cas_types::Agent::new("other-worker-id".into(), holder.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agents.register(&agent).unwrap();
+
         let store = crate::store::open_task_store(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-abc1",
-                Some("other-worker"),
+                Some(holder),
                 TaskStatus::Open,
             ))
             .unwrap();
@@ -3138,7 +3147,7 @@ mod tests {
         let updated = store.get("cas-abc1").unwrap();
         assert_eq!(
             updated.assignee.as_deref(),
-            Some("other-worker"),
+            Some(holder),
             "existing assignee must be preserved, not overwritten"
         );
     }

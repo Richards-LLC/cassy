@@ -452,19 +452,48 @@ pub const MIGRATIONS: &[Migration] = &[
 #[cfg(test)]
 mod tests {
     use crate::migration::migrations::*;
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
+
+    fn assert_migration_registry_is_valid(migrations: &[Migration]) {
+        let mut ids = BTreeMap::new();
+        let mut previous: Option<&Migration> = None;
+
+        for migration in migrations {
+            if let Some(first) = ids.insert(migration.id, migration) {
+                panic!(
+                    "Duplicate migration ID {} registered by {} and {}",
+                    migration.id, first.name, migration.name
+                );
+            }
+            if let Some(previous) = previous {
+                assert!(
+                    migration.id > previous.id,
+                    "Migration ID ordering violation: {} ({}) follows {} ({})",
+                    migration.id,
+                    migration.name,
+                    previous.id,
+                    previous.name
+                );
+            }
+            previous = Some(migration);
+        }
+    }
 
     #[test]
-    fn test_migration_ids_unique() {
-        let mut seen = HashSet::new();
-        for m in MIGRATIONS {
-            assert!(
-                seen.insert(m.id),
-                "Duplicate migration ID: {} ({})",
-                m.id,
-                m.name
-            );
-        }
+    fn migration_registry_ids_are_unique_and_ordered() {
+        assert_migration_registry_is_valid(MIGRATIONS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate migration ID 1 registered by entries_add_session_id and synthetic_duplicate")]
+    fn migration_registry_duplicate_id_names_both_migrations() {
+        let first = MIGRATIONS[0].clone();
+        let duplicate = Migration {
+            name: "synthetic_duplicate",
+            ..first.clone()
+        };
+
+        assert_migration_registry_is_valid(&[first, duplicate]);
     }
 
     #[test]
@@ -484,21 +513,6 @@ mod tests {
                 m.id,
                 m.name
             );
-        }
-    }
-
-    #[test]
-    fn test_migrations_ordered() {
-        let mut last_id = 0;
-        for m in MIGRATIONS {
-            assert!(
-                m.id > last_id,
-                "Migration {} ({}) not in order (after {})",
-                m.id,
-                m.name,
-                last_id
-            );
-            last_id = m.id;
         }
     }
 

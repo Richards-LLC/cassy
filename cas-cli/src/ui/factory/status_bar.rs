@@ -40,10 +40,32 @@ struct UpdateCheckCache {
 impl StatusBar {
     /// Render the status bar
     pub fn render(frame: &mut Frame, area: Rect, app: &FactoryApp) {
+        let update_badge = Self::update_badge(app.cas_dir());
+        Self::render_with_update_badge(frame, area, app, update_badge);
+    }
+
+    fn render_with_update_badge(
+        frame: &mut Frame,
+        area: Rect,
+        app: &FactoryApp,
+        update_badge: Option<String>,
+    ) {
         let palette = &app.theme().palette;
         let styles = &app.theme().styles;
         let mut left_spans = Vec::new();
         let mut right_spans = Vec::new();
+        let claude_account = Self::focused_claude_profile(app).map(|profile| {
+            let is_alt = profile != "main";
+            let profile_style = if is_alt {
+                Style::default()
+                    .fg(palette.chip_fg)
+                    .bg(palette.status_warning)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                styles.text_muted
+            };
+            Span::styled(format!("CLAUDE {profile}"), profile_style)
+        });
 
         // Left side: Mode indicator
         let mode = match &app.input_mode {
@@ -81,26 +103,6 @@ impl StatusBar {
         left_spans.push(mode);
         left_spans.push(Span::raw(" "));
 
-        // Show the actual account used by the focused Claude pane. Worker panes may
-        // deliberately run with a different config directory than the factory
-        // supervisor, so read their resolved WorkerSpec rather than the parent env.
-        if let Some(profile) = Self::focused_claude_profile(app) {
-            let is_alt = profile != "main";
-            let profile_style = if is_alt {
-                Style::default()
-                    .fg(palette.chip_fg)
-                    .bg(palette.status_warning)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                styles.text_muted
-            };
-            left_spans.push(Span::styled(
-                format!(" CLAUDE {profile} "),
-                profile_style,
-            ));
-            left_spans.push(Span::raw(" "));
-        }
-
         // SELECT MODE indicator (mouse capture disabled for native drag-select)
         if app.select_mode {
             left_spans.push(Span::styled(
@@ -111,17 +113,6 @@ impl StatusBar {
                     .add_modifier(Modifier::BOLD),
             ));
             left_spans.push(Span::raw(" "));
-        }
-
-        // Update indicator (if cached check says update is available)
-        if area.width >= 70 {
-            if let Some(update_label) = Self::update_badge(app.cas_dir()) {
-                left_spans.push(Span::styled(
-                    update_label,
-                    styles.text_warning.add_modifier(Modifier::BOLD),
-                ));
-                left_spans.push(Span::raw(" "));
-            }
         }
 
         // Show layout percentages in resize mode
@@ -560,6 +551,28 @@ impl StatusBar {
             }
         }
 
+        // Responsive priority, lowest to highest: shortcut hints, the
+        // network-derived latest-release badge, focused Claude account, then
+        // the compiled/running CAS identity. `trim_spans_from_front` sheds
+        // that list in the same order. Mode and error indicators stay on the
+        // untrimmed left and therefore win when a terminal is too narrow to
+        // render every meaningful status.
+        if let Some(account) = claude_account {
+            right_spans.push(Span::raw(" │ "));
+            right_spans.push(account);
+        }
+        if let Some(update_label) = update_badge {
+            right_spans.push(Span::raw(" │ "));
+            right_spans.push(Span::styled(
+                update_label,
+                styles.text_warning.add_modifier(Modifier::BOLD),
+            ));
+        }
+        right_spans.push(Span::raw(" │ "));
+        right_spans.push(Span::styled(
+            format!("CAS v{}", env!("CARGO_PKG_VERSION")),
+            styles.text_accent.add_modifier(Modifier::BOLD),
+        ));
         right_spans.push(Span::raw(" "));
 
         // Keep right hints within visible width (especially 80-col tmux panes).
@@ -898,6 +911,79 @@ mod tests {
         )
         .ok()?;
         Pane::with_pty(name, PaneKind::Worker, pty, 24, 80, SupervisorCli::Claude).ok()
+    }
+
+    fn render_status_bar(width: u16, update_badge: Option<&str>, error: Option<&str>) -> String {
+        let mut app = crate::ui::factory::app::FactoryApp::for_test();
+        app.error_message = error.map(str::to_string);
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                StatusBar::render_with_update_badge(
+                    frame,
+                    frame.area(),
+                    &app,
+                    update_badge.map(str::to_string),
+                )
+            })
+            .unwrap();
+
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn running_version_label() -> String {
+        format!("CAS v{}", env!("CARGO_PKG_VERSION"))
+    }
+
+    #[test]
+    fn wide_status_bar_always_shows_running_version() {
+        let text = render_status_bar(120, None, None);
+        assert!(text.contains(&running_version_label()), "{text}");
+    }
+
+    #[test]
+    fn narrow_status_bar_keeps_running_version_after_critical_mode() {
+        let text = render_status_bar(30, None, None);
+        assert!(text.contains("NORMAL"), "{text}");
+        assert!(text.contains(&running_version_label()), "{text}");
+    }
+
+    #[test]
+    fn update_available_keeps_current_and_latest_versions_unambiguous() {
+        let text = render_status_bar(120, Some("⬆ v99.0.0 available"), None);
+        assert!(text.contains(&running_version_label()), "{text}");
+        assert!(text.contains("⬆ v99.0.0 available"), "{text}");
+    }
+
+    #[test]
+    fn narrow_update_available_keeps_both_versions_when_space_allows() {
+        let text = render_status_bar(50, Some("⬆ v99.0.0 available"), None);
+        assert!(text.contains(&running_version_label()), "{text}");
+        assert!(text.contains("⬆ v99.0.0 available"), "{text}");
+    }
+
+    #[test]
+    fn disabled_or_unavailable_update_check_does_not_hide_running_version() {
+        let text = render_status_bar(80, None, None);
+        assert!(text.contains(&running_version_label()), "{text}");
+        assert!(!text.contains("available"), "{text}");
+    }
+
+    #[test]
+    fn failed_update_check_preserves_critical_error_and_running_version() {
+        let text = render_status_bar(50, None, Some("update check failed"));
+        assert!(text.contains("NORMAL"), "{text}");
+        assert!(text.contains("update check fa"), "{text}");
+        assert!(text.contains(&running_version_label()), "{text}");
     }
 
     #[test]

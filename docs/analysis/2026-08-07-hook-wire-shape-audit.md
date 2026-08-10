@@ -41,9 +41,10 @@ Run 1 (bash call + a `Task` subagent) yielded SessionStart, UserPromptSubmit, Me
 PreToolUse, PostToolUse, SubagentStart, SubagentStop, Stop, SessionEnd. Run 2 (a command exiting
 non-zero) added PostToolUseFailure.
 
-Not captured, and therefore still `DOC`-only below: `Notification`, `PreCompact`,
-`PermissionRequest`, `PermissionDenied`, `StopFailure`. These need an interactive session or a
-compaction to fire; they are **not** claimed as verified.
+The later interactive session captured `Notification`, `PreCompact`, and
+`PermissionRequest`. `PermissionDenied` and `StopFailure` remained absent even after the operator
+denied a network request and attempted an Esc interrupt, so they remain `DOC` with those explicit
+capture limits recorded below.
 
 Every captured payload is reproduced verbatim as a test fixture in
 `crates/cas-core/src/hooks/types.rs` (`mod tests`), so the evidence lives in CI, not only here.
@@ -66,8 +67,8 @@ makes this class of bug invisible.
 | `source` | SessionStart | WIRE | `source` | OK — observed `"startup"` |
 | `reason` | SessionEnd | WIRE | `reason` | OK — observed `"other"` |
 | `prompt` | UserPromptSubmit | WIRE | `user_prompt` (+alias `prompt`) | OK — **fixed by cas-78d3**, now re-confirmed on the wire |
-| `tool_name` | Pre/PostToolUse, PostToolUseFailure | WIRE | `tool_name` (+alias `toolName`) | OK |
-| `tool_input` | Pre/PostToolUse, PostToolUseFailure | WIRE | `tool_input` (+alias `toolInput`) | OK |
+| `tool_name` | Pre/PostToolUse, PostToolUseFailure, PermissionRequest | WIRE | `tool_name` (+alias `toolName`) | OK — verified on interactive `Write` and `Bash` permission prompts. |
+| `tool_input` | Pre/PostToolUse, PostToolUseFailure, PermissionRequest | WIRE | `tool_input` (+alias `toolInput`) | OK — `handle_permission_request` reads `file_path` from it. |
 | `tool_use_id` | Pre/PostToolUse, PostToolUseFailure | WIRE | `tool_use_id` (+alias `toolUseId`) | OK |
 | `tool_response` | PostToolUse | WIRE | `tool_response` (+alias `toolResult`) | OK — field name matches the wire key; the `toolResult` alias is Grok-only surplus |
 | `duration_ms` | PostToolUse, PostToolUseFailure | WIRE | — none — | undeclared, unconsumed — no impact |
@@ -83,10 +84,12 @@ makes this class of bug invisible.
 | `agent_type` | SubagentStart/Stop | WIRE | `agent_type` (+alias `agentType`) | OK — observed `"general-purpose"` |
 | *(no key)* | SubagentStart/Stop | WIRE | `subagent_type` (+alias `subagentType`) | **DEAD FIELD — Finding 3 resolved.** No such key is sent; the real one is `agent_type`. |
 | *(no key)* | SubagentStart | WIRE | `subagent_prompt` | DEAD FIELD. SubagentStart sends no prompt at all — independent proof that cas-78d3's alias move cost nothing. |
-| `message` | Notification | DOC | `message` | OK by docs; **not observed** (Notification did not fire in either headless run) |
-| `notification_type`, `title` | Notification | DOC | — none — | undeclared, unconsumed — no impact |
-| `trigger` | PreCompact | DOC | — none — | undeclared (latent — Finding 2) |
-| `custom_instructions` | PreCompact | DOC | — none — | undeclared (latent — Finding 2) |
+| `message` | Notification | WIRE | `message` | **verified in interactive capture** — text is `"Claude is waiting for your input"`; no current handler reads it. |
+| `notification_type` | Notification | WIRE | — none — | verified value `"idle_prompt"`; undeclared, unconsumed — no impact. |
+| `title` | Notification | DOC | — none — | documented, but absent from the captured idle-notification envelope; undeclared, unconsumed — no impact. |
+| `permission_suggestions` | PermissionRequest | WIRE | — none — | observed on both interactive prompts; undeclared, unconsumed — no impact. |
+| `trigger` | PreCompact | WIRE | — none — | observed value `"manual"`; undeclared, unconsumed (latent — Finding 2). |
+| `custom_instructions` | PreCompact | WIRE | — none — | observed as `null`; undeclared, unconsumed (latent — Finding 2). |
 
 Grok Build's camelCase envelope (`hookEventName`, `sessionId`, `toolResult`, `workspaceRoot`,
 `toolInputTruncated`) is unchanged by this pass and is still covered by
@@ -204,16 +207,24 @@ which is an entirely different thing from a top-level `HookInput` field.
 
 ## Still not observed (open — do NOT guess)
 
-These events did not fire during the headless captures and remain documentation-only. They are
-listed as `DOC` in the table and are **not** claimed as verified:
+The interactive follow-up captured the following additional events. Their verbatim raw envelopes
+are retained under `crates/cas-core/src/hooks/fixtures/` so they survive capture cleanup:
 
-- `Notification` — including whether its text really is `message`. This is the one open item with
-  a live consumer (`handle_notification` reads `input.message`), so it is the highest-value next
-  capture. It needs an interactive session (permission prompt / idle notification).
-- `PreCompact` — `trigger`, `custom_instructions` (Finding 2). Needs a real compaction.
-- `PermissionRequest` / `PermissionDenied` — a headless run with a disallowed tool did not emit
-  them; they appear to require interactive permission flow.
-- `StopFailure` — never observed; may not exist in 2.1.224.
+- `Notification` is now captured (see the table). The exact interactive `idle_prompt` envelope was
+  `{session_id, transcript_path, cwd, prompt_id, hook_event_name:"Notification",
+  message:"Claude is waiting for your input", notification_type:"idle_prompt"}`. The earlier
+  task wording was stale: current `handle_notification` switches on `hook_event_name` and does
+  **not** read `input.message`; the verified `message` field is therefore not a live consumer key.
+- `PreCompact` — the operator's `/compact` emitted `{trigger:"manual",
+  custom_instructions:null}`. Both keys remain undeclared because `handle_pre_compact` consumes
+  neither; this confirms Finding 2 is a latent capability gap, not a live key mismatch.
+- `PermissionRequest` — approved `Write` and denied `Bash`/`curl` attempts both emitted
+  `{tool_name, tool_input, permission_suggestions}`. The handler's consumed `tool_name` and
+  `tool_input.file_path` keys match the wire; `permission_suggestions` is unconsumed.
+- `PermissionDenied` — **DOC retained**: the operator denied the `curl` permission prompt, but
+  Claude Code 2.1.224 emitted no `PermissionDenied` envelope in the capture.
+- `StopFailure` — **DOC retained**: the operator attempted Esc during a response, but no
+  `StopFailure` envelope was emitted; only normal `Stop`/`SubagentStop` records appeared.
 
 Observed-but-not-exhaustive enums: `permission_mode` was only ever `"default"`;
 `SessionStart.source` only `"startup"`; `SessionEnd.reason` only `"other"`. One capture cannot

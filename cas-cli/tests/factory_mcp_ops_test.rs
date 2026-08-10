@@ -23,8 +23,7 @@ use cas::store::{
     open_task_store,
 };
 use cas::types::{
-    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType,
-    WorkTarget,
+    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType, WorkTarget,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
@@ -1117,10 +1116,12 @@ async fn test_spawn_workers_with_task_id_succeeds_with_no_epic_at_all() {
 
 /// cas-549c review follow-up: standing in for an EPIC is a stronger claim
 /// than being a legal pre-assignment target. A task that a newly spawned
-/// worker cannot actually pick up — already owned by another worker, or
+/// worker cannot actually pick up — owned by a *live* worker, or
 /// parked awaiting the supervisor — must NOT authorize an epic-free spawn,
 /// or the factory boots a pane and worktree for a worker that then sits
-/// permanently idle (assign_task_to_new_worker refuses to steal an assignee).
+/// permanently idle (assign_task_to_new_worker refuses to steal a live
+/// assignee). A missing/dead holder is intentionally dispatchable under
+/// cas-2327's stale-holder reset contract.
 #[tokio::test]
 async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
     let undispatchable = [
@@ -1138,17 +1139,24 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
         (
             TaskStatus::Open,
             Some("alpha"),
-            "already assigned to 'alpha'",
+            "already assigned to live worker 'alpha'",
         ),
         (
             TaskStatus::InProgress,
             Some("alpha"),
-            "already assigned to 'alpha'",
+            "already assigned to live worker 'alpha'",
         ),
     ];
 
     for (status, assignee, expected) in undispatchable {
         let env = FactoryTestEnv::new();
+        if let Some(holder) = assignee {
+            // cas-2327 makes an unregistered holder stale and resettable, so
+            // register this fixture holder to retain its live-owner contract.
+            let mut agent = Agent::new("alpha-agent-id".to_string(), holder.to_string());
+            agent.role = AgentRole::Worker;
+            env.agent_store().register(&agent).expect("register live holder");
+        }
         let task_store = env.task_store();
         let id = task_store.generate_id().expect("generate_id");
         let mut task = Task::new(id.clone(), format!("{status:?} task"));
@@ -1351,6 +1359,61 @@ async fn test_spawn_workers_task_id_enqueues_for_single_worker() {
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].task_id.as_deref(), Some(task_id.as_str()));
+}
+
+/// GH #170: a task held by a vanished session remains dispatchable. The queue
+/// receipt makes the pending reset explicit; registration performs the reset
+/// before the new worker is bound (covered in queue_and_events).
+#[tokio::test]
+async fn test_spawn_workers_task_id_accepts_stale_assignee_for_reset_preassign() {
+    let env = FactoryTestEnv::new();
+    let task_id = env.task_store().generate_id().expect("generate_id");
+    let mut task = Task::new(task_id.clone(), "Orphaned but pushed work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("dead-session-worker".to_string());
+    task.notes = "Keep this history".to_string();
+    task.branch = Some("factory/dead-session-worker".to_string());
+    env.task_store().add(&task).expect("add stale task");
+
+    let mut req = factory_req("spawn_workers");
+    req.task_id = Some(task_id.clone());
+    let text = get_text(
+        &env.service
+            .factory(Parameters(req))
+            .await
+            .expect("stale holder must not strand a replacement spawn"),
+    );
+
+    assert!(text.contains("dead-session-worker"), "{text}");
+    assert!(text.contains("force-released"), "{text}");
+    assert_eq!(
+        env.spawn_queue().peek(10).unwrap()[0].task_id.as_deref(),
+        Some(task_id.as_str())
+    );
+}
+
+/// A fresh heartbeat is an authoritative live-holder signal even without a
+/// recorded harness PID. It must fail before anything reaches the spawn queue.
+#[tokio::test]
+async fn test_spawn_workers_task_id_refuses_fresh_heartbeat_holder() {
+    let env = FactoryTestEnv::new();
+    let holder = "fresh-heartbeat-worker";
+    env.register_worker(holder);
+    let task_id = env.task_store().generate_id().expect("generate_id");
+    let mut task = Task::new(task_id.clone(), "Live holder".to_string());
+    task.assignee = Some(holder.to_string());
+    env.task_store().add(&task).expect("add held task");
+
+    let mut req = factory_req("spawn_workers");
+    req.task_id = Some(task_id);
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("fresh holder must reject replacement spawn");
+
+    assert!(error.message.contains(holder), "{}", error.message);
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
 
 /// cas-6913 AC3: task_id with a single explicit worker_names entry is also
@@ -4319,6 +4382,65 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     );
 }
 
+/// cas-53a7: the MCP reader must mirror its real receipt across every alias a
+/// supervisor answers to.  A broadcast reaches the pane-name alias first; if
+/// this reader drops `mirror_receipts_across_aliases`, the logical
+/// `supervisor` alias remains unread and this assertion fails without any
+/// unit mock of the helper.
+#[tokio::test]
+async fn inbox_poll_writes_receipts_for_every_supervisor_alias() {
+    const SUPERVISOR: &str = "receipt-supervisor";
+
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some(SUPERVISOR)),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("receipt-supervisor-id");
+    let store = env.agent_store();
+    let mut supervisor = Agent::new("receipt-supervisor-id".to_string(), SUPERVISOR.to_string());
+    supervisor.role = AgentRole::Supervisor;
+    store
+        .register(&supervisor)
+        .expect("register calling supervisor");
+
+    let aliases = cas::harness_policy::inbox_aliases(SUPERVISOR, true);
+    assert!(
+        aliases.len() > 1,
+        "precondition: this must exercise the supervisor's full alias set"
+    );
+    let queue = env.prompt_queue();
+    // Fill the first alias's poll limit. The remaining alias is not polled in
+    // this response, so only the production mirror call can receipt it.
+    for index in 0..10 {
+        queue
+            .enqueue(
+                "director",
+                "all_workers",
+                &format!("receipt must mirror through MCP inbox_poll #{index}"),
+            )
+            .expect("enqueue broadcast");
+    }
+
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("inbox_poll"),
+    );
+    assert!(
+        text.contains("receipt must mirror through MCP inbox_poll #0"),
+        "precondition: the real MCP handler must return the broadcast: {text}"
+    );
+    for alias in aliases {
+        assert_eq!(
+            queue.count_unseen_for_recipient(&alias, None).unwrap(),
+            0,
+            "inbox_poll must write a receipt for supervisor alias {alias}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn inbox_poll_sessionless_registered_agent_only_reads_legacy_rows() {
     let _guard = EnvGuard::set_optional(&[
@@ -6560,7 +6682,12 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     git(&["init", "-q", "-b", "main"]);
     git(&["config", "user.email", "test@cas"]);
     git(&["config", "user.name", "CAS Test"]);
-    git(&["remote", "add", "origin", "https://github.com/example/main-only.git"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/main-only.git",
+    ]);
     std::fs::write(project.join("seed.rs"), "// seed\n").unwrap();
     git(&["add", "seed.rs"]);
     git(&["commit", "-q", "-m", "seed"]);
@@ -6585,7 +6712,10 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     .to_string();
 
     let store = env.task_store();
-    let mut epic = Task::new("cas-50fe-main-only".to_string(), "main-only epic".to_string());
+    let mut epic = Task::new(
+        "cas-50fe-main-only".to_string(),
+        "main-only epic".to_string(),
+    );
     epic.task_type = TaskType::Epic;
     epic.status = TaskStatus::InProgress;
     epic.branch = Some("epic/main-only".to_string());
@@ -6603,14 +6733,14 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     let mut status_req = factory_req("epic_status");
     status_req.id = Some(epic.id.clone());
     let status = get_text(
-        &env
-            .service
+        &env.service
             .factory(Parameters(status_req))
             .await
             .expect("epic_status"),
     );
     assert!(
-        status.contains("Parent branch: main") && status.contains("✓ All child factory branches are merged"),
+        status.contains("Parent branch: main")
+            && status.contains("✓ All child factory branches are merged"),
         "status must evaluate the configured integration target, not the cosmetic epic branch: {status}"
     );
 
@@ -6627,8 +6757,7 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     }))
     .expect("close request");
     let close = get_text(
-        &env
-            .service
+        &env.service
             .task(Parameters(close_req))
             .await
             .expect("epic close against declared target"),

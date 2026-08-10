@@ -845,7 +845,7 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::{open_spawn_queue_store, open_task_store};
+        use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use cas_types::{TaskStatus, TaskType};
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
@@ -882,6 +882,7 @@ impl CasService {
         // string says why, and is only surfaced when there is also no epic, so
         // epic-present behaviour is unchanged.
         let mut task_id_authorization: Option<Result<(), String>> = None;
+        let mut stale_assignee_notice = String::new();
         if let Some(ref task_id) = req.task_id {
             let requested_worker_count = if worker_names.is_empty() {
                 count
@@ -921,6 +922,58 @@ impl CasService {
                 ));
             }
 
+            // cas-2327 (GH #170): a display-name assignee can outlive its
+            // worker session. Apply the same dual liveness rule that the
+            // factory roster uses: a fresh heartbeat OR a live harness process
+            // owns the task; a missing/dead row is stale and will be reset at
+            // pre-assignment time. Never boot a worker just to discover this.
+            let stale_holder = match task.assignee.as_deref() {
+                Some(assignee) => {
+                    let agents = open_agent_store(&self.inner.cas_root).map_err(|e| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Failed to inspect assignee {assignee} for task {task_id}: {e}"
+                            ),
+                        )
+                    })?;
+                    // `Task.assignee` is a worker display name, whereas
+                    // `AgentStore::get` is keyed by opaque agent ID. Resolve
+                    // every same-name row: a live respawn must not be hidden
+                    // by an older stale registration. A registry read failure
+                    // is uncertain ownership, so fail closed rather than
+                    // stealing the task.
+                    let registered_agents = agents.list(None).map_err(|e| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Failed to list assignee {assignee} for task {task_id}: {e}; \
+                                 refusing replacement spawn while liveness is uncertain"
+                            ),
+                        )
+                    })?;
+                    let alive = crate::mcp::tools::service::agent_liveness::has_live_agent_named(
+                        &registered_agents,
+                        assignee,
+                    );
+                    if alive {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            format!(
+                                "task {task_id} is already assigned to live worker '{assignee}'; \\
+                                 refusing to spawn another worker for it"
+                            ),
+                        ));
+                    }
+                    stale_assignee_notice = format!(
+                        "\nStale assignee '{assignee}' was detected; its task binding will be \\
+                         force-released with reset semantics before pre-assignment."
+                    );
+                    true
+                }
+                None => false,
+            };
+
             // Standing in for an epic is a stronger claim than being a legal
             // pre-assignment target, so it is held to a stricter bar: the task
             // must be work a NEW worker can actually pick up. A task parked in
@@ -934,11 +987,10 @@ impl CasService {
             // an open epic behaves exactly as before.
             task_id_authorization = Some(match (&task.status, &task.assignee) {
                 (TaskStatus::Open | TaskStatus::InProgress, None) => Ok(()),
+                (TaskStatus::Open | TaskStatus::InProgress, Some(_)) if stale_holder => Ok(()),
                 (TaskStatus::Open | TaskStatus::InProgress, Some(assignee)) => Err(format!(
                     "task {task_id} is already assigned to '{assignee}', so it cannot stand in \
-                     for an EPIC — that worker owns it and the pre-assignment would be refused. \
-                     Clear it first (mcp__cas__task action=update id={task_id} assignee=) or \
-                     reset it (action=reset) if that worker is gone."
+                     for an EPIC — that worker owns it and the pre-assignment would be refused."
                 )),
                 (status, _) => Err(format!(
                     "task {task_id} is {status:?}, which is not work a newly spawned worker can \
@@ -1114,7 +1166,11 @@ impl CasService {
         let task_id_note = req
             .task_id
             .as_ref()
-            .map(|id| format!("\nTask: {id} will be pre-assigned once the worker boots"))
+            .map(|id| {
+                format!(
+                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}"
+                )
+            })
             .unwrap_or_default();
         let request_id_text = request_id.to_string();
         let count_text = count.to_string();
@@ -2176,6 +2232,22 @@ impl CasService {
                 let in_flight_tool_call = transcript_path_for_worker.as_deref().is_some_and(|p| {
                     crate::cli::factory::wedged::transcript_has_in_flight_tool_call(p, worker_cli)
                 });
+                // cas-058e: a completed tool call may have left a real cargo
+                // build running under the worker pane. Resolve the harness PID
+                // exactly as `is-wedged` does; an unreadable process tree is
+                // deliberately not positive evidence and therefore cannot
+                // suppress a real stall.
+                let background_processes = crate::cli::factory::wedged::find_worker_pid(
+                    &crate::cli::factory::wedged::RealProcessTable,
+                    &agent.name,
+                )
+                .or(agent.pid)
+                .map(crate::cli::factory::wedged::background_processes_for)
+                .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+                let has_active_work = crate::cli::factory::wedged::has_active_work(
+                    in_flight_tool_call,
+                    &background_processes,
+                );
                 let assigned_open_task = assigned_open_tasks.iter().find(|task| {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
@@ -2197,7 +2269,7 @@ impl CasService {
                     has_in_progress_task,
                     last_activity.map(|(secs, _)| secs),
                     stall_threshold_secs,
-                    in_flight_tool_call,
+                    has_active_work,
                 );
                 // cas-e728 (GH #105): inbox depth is rendered on EVERY row, not
                 // only on a row that already tripped the stall path. The most
@@ -2246,7 +2318,7 @@ impl CasService {
                                 .to_string()
                         }
                     }
-                } else if in_flight_tool_call {
+                } else if has_active_work {
                     // Has an assignment, would otherwise read as stalled
                     // (old/absent checkpoint), but an in-flight tool call
                     // is direct evidence of real work in progress — never
@@ -2254,9 +2326,9 @@ impl CasService {
                     // hedge for a worker holding an assignment (AC3).
                     match last_activity {
                         Some((secs, phase)) => format!(
-                            "\n    last activity: {secs}s ago ({phase}) — in-flight tool call (busy, not stalled)"
+                            "\n    last activity: {secs}s ago ({phase}) — live background work (busy, not stalled)"
                         ),
-                        None => "\n    in-flight tool call in progress (busy, not stalled — no checkpoint-class activity yet)"
+                        None => "\n    live background work in progress (busy, not stalled — no checkpoint-class activity yet)"
                             .to_string(),
                     }
                 } else {
@@ -2266,7 +2338,7 @@ impl CasService {
                         }
                         None => {
                             // Unreachable in practice: has_in_progress_task
-                            // && !in_flight_tool_call && last_activity==None
+                            // && !has_active_work && last_activity==None
                             // always makes is_worker_stalled return true
                             // above (the None arm there stalls
                             // unconditionally absent in-flight evidence).
@@ -3526,9 +3598,7 @@ impl CasService {
                     .ok()
                 })
                 .map(|context| context.target_branch)
-                .or_else(|| {
-                    crate::config::Config::configured_epic_base_branch(&close_project_root)
-                })
+                .or_else(|| crate::config::Config::configured_epic_base_branch(&close_project_root))
                 .unwrap_or_else(|| {
                     GitOperations::new(close_project_root.to_path_buf()).detect_default_branch()
                 });
@@ -4435,6 +4505,63 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String,
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Paths that belong to the worker's own scope signal.
+///
+/// Ordinarily this is exactly the path list from `git status --porcelain`.
+/// During an unresolved merge, though, Git stages every cleanly merged
+/// incoming path in the index. Those paths belong to the branch being merged
+/// *into* the worker, not to the worker's contribution; treating that index
+/// residue as worker drift caused the cas-7a21 false merge block. In that
+/// state, use the worker branch's committed range from the common merge base
+/// to `HEAD` instead. The index is deliberately not consulted.
+///
+/// This is only a status/drift classifier. Operational safety checks that
+/// decide whether to stash, rebase, or remove a worktree intentionally keep
+/// reading the raw index, because an unfinished merge must never be treated as
+/// safe for those destructive actions.
+pub(crate) fn worker_scope_paths(
+    path: &std::path::Path,
+) -> std::result::Result<Vec<String>, String> {
+    let merge_head_present = run_git(path, &["rev-parse", "--verify", "-q", "MERGE_HEAD"]).is_ok();
+    if merge_head_present {
+        let merge_base = run_git(path, &["merge-base", "HEAD", "MERGE_HEAD"])?;
+        let range = format!("{merge_base}..HEAD");
+        let diff = run_git(path, &["diff", "--name-only", &range])?;
+        return Ok(diff
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect());
+    }
+
+    // `run_git` intentionally trims its text result for scalar Git replies.
+    // Porcelain's leading space is itself a status column, so retain raw stdout
+    // here rather than shifting an unstaged path one byte left.
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| format!("git status --porcelain failed to start: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let status = String::from_utf8_lossy(&output.stdout);
+    Ok(status
+        .lines()
+        .filter_map(|line| {
+            // `git status --porcelain` has two state columns, one separator,
+            // then the path. For a rename, retain the destination path.
+            line.get(3..)
+                .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim().to_owned())
+        })
+        .filter(|path| !path.is_empty())
+        .collect())
 }
 
 /// The integration branch a worker's task will actually be merged into
@@ -5346,6 +5473,27 @@ fn format_not_waking_status(
     )
 }
 
+/// Whether old unread mail is evidence that a worker failed to react.
+///
+/// An unread row is historical evidence. It becomes a NOT WAKING signal only
+/// when the worker has also been inactive for the same sustained interval.
+/// In particular, a recent activity / turn-start observation proves the worker
+/// is alive *after* old inbox residue was created, so that residue must not
+/// accuse the worker of failing to wake. Keep this predicate separate from the
+/// broader `is_worker_stalled` classifier: cas-058e can extend the shared
+/// liveness inputs without having to reconstruct this conjunction from an
+/// output-formatting branch.
+fn has_unreacted_stale_inbox(
+    unread_inbox: usize,
+    oldest_unread_secs: Option<i64>,
+    last_activity: Option<(i64, &'static str)>,
+    inactivity_threshold_secs: i64,
+) -> bool {
+    unread_inbox > 0
+        && oldest_unread_secs.is_some_and(|age| age >= inactivity_threshold_secs)
+        && last_activity.is_none_or(|(age, _)| age >= inactivity_threshold_secs)
+}
+
 /// Render the highest-priority worker-status alert.
 ///
 /// A confirmed InProgress stall is more urgent than a second assigned Open
@@ -5374,11 +5522,15 @@ fn format_priority_worker_status_alert(
         let heartbeat_lapsed = heartbeat_elapsed_secs >= WORKER_STALE_SECS;
         if !turn_start_observable && !heartbeat_lapsed {
             // Handed work and did not react: a real, actionable stall the
-            // heartbeat cannot see.
-            if let Some(oldest) = oldest_unread_secs
-                && unread_inbox > 0
-                && oldest >= stall_threshold_secs
-            {
+            // heartbeat cannot see. Old unread mail alone is not enough: the
+            // worker must also have been inactive for the entire threshold.
+            if has_unreacted_stale_inbox(
+                unread_inbox,
+                oldest_unread_secs,
+                last_activity,
+                stall_threshold_secs,
+            ) {
+                let oldest = oldest_unread_secs.expect("predicate requires unread age");
                 return Some(format_not_waking_status(
                     last_activity,
                     unread_inbox,
@@ -5420,15 +5572,15 @@ fn format_priority_worker_status_alert(
 /// True when the worker has an in-progress task (a lease and/or a real
 /// task assignment — see the `has_in_progress_task` computation in
 /// `factory_worker_status`, cas-d165 Finding 2) AND there is no in-flight
-/// tool call (cas-d165 Finding 1) AND either:
+/// tool call or live background process (cas-d165/cas-058e) AND either:
 /// - its last observable activity is at/past `stall_threshold_secs`, or
 /// - no activity was observed at all within the query window (`None`).
 ///
 /// A worker with no in-progress task is never "stalled" in this sense —
 /// idle-with-no-task is a distinct, already-signaled state (`WorkerIdle`).
 ///
-/// `in_flight_tool_call` is the SAME evidence cas-7e85 / `cas factory
-/// is-wedged` consume (`wedged::transcript_has_in_flight_tool_call`) —
+/// `has_active_work` is the shared evidence cas-7e85 / cas-058e / `cas factory
+/// is-wedged` consume —
 /// checked first and short-circuits to "not stalled" unconditionally,
 /// mirroring `transcript_confirms_stall_for_age`'s AC1 in
 /// `director/events.rs`. Before this parameter existed, this
@@ -5440,9 +5592,9 @@ fn is_worker_stalled(
     has_in_progress_task: bool,
     last_activity_secs_ago: Option<i64>,
     stall_threshold_secs: i64,
-    in_flight_tool_call: bool,
+    has_active_work: bool,
 ) -> bool {
-    if !has_in_progress_task || in_flight_tool_call {
+    if !has_in_progress_task || has_active_work {
         return false;
     }
     match last_activity_secs_ago {
@@ -6603,7 +6755,8 @@ pub(crate) struct WorkerGitStatus {
     pub behind: usize,
     /// Branch used as the ahead/behind baseline (e.g. "origin/main")
     pub base_branch: String,
-    /// `true` if the working tree has staged or unstaged changes
+    /// `true` if the worker scope has changes: porcelain index state normally,
+    /// or the committed contribution range while a merge is in progress.
     pub dirty: bool,
     /// `"origin/<branch>"` when the branch has been pushed, otherwise `"none"`
     pub pushed_ref: String,
@@ -6685,9 +6838,12 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
     })
     .unwrap_or((0, 0));
 
-    // --- dirty? ---------------------------------------------------------------
-    let dirty = run_git(worktree_path, &["status", "--porcelain"])
-        .map(|s| !s.is_empty())
+    // --- worker scope changes -------------------------------------------------
+    // `MERGE_HEAD` stages clean incoming paths. `worker_scope_paths` switches
+    // to merge-base..HEAD there so another lane's incoming files do not render
+    // as this worker's dirty/drift signal (cas-d04f / cas-7a21).
+    let dirty = worker_scope_paths(worktree_path)
+        .map(|paths| !paths.is_empty())
         .unwrap_or(false);
 
     // --- pushed ref -----------------------------------------------------------
@@ -8086,6 +8242,50 @@ effort = "high"
             "must say what to check: {rendered}"
         );
         assert!(!rendered.contains("between turns"), "{rendered}");
+    }
+
+    /// cas-bcf5 (GH #162): stale inbox residue does not outweigh a worker's
+    /// own recent-activity line. This was the live contradiction: NOT WAKING
+    /// rendered alongside "last activity 348s ago" because the unread-age
+    /// branch was independently sufficient.
+    #[test]
+    fn recent_activity_suppresses_not_waking_even_with_old_unread_mail() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((348, "activity")),
+            600,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            inbox(3, Some(2_884)),
+        )
+        .expect("a stalled-by-threshold worker must still render a status line");
+
+        assert!(!rendered.contains("NOT WAKING"), "{rendered}");
+        assert!(
+            rendered.contains("between turns since 348s ago"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("3 unread messages waiting"), "{rendered}");
+    }
+
+    /// cas-bcf5 (GH #162): both halves of the evidence remain actionable when
+    /// no activity has been observed at all and unread work is old.
+    #[test]
+    fn silent_worker_with_old_unread_mail_still_flags_not_waking() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            None,
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            inbox(1, Some(900)),
+        )
+        .expect("genuinely silent worker with unread work must alert");
+
+        assert!(rendered.contains("⚠ NOT WAKING"), "{rendered}");
+        assert!(rendered.contains("1 message unread for 900s"), "{rendered}");
     }
 
     /// Mail that arrived a moment ago is not evidence of anything — the worker
@@ -10744,6 +10944,87 @@ effort = "high"
         assert_eq!(
             status.head_sha, expected_sha,
             "head_sha must match git rev-parse HEAD (full width, cas-ea51)"
+        );
+    }
+
+    fn setup_mid_merge_with_incoming_and_worker_contributions() -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        let path = repo.path();
+        run_git_ok(path, &["init", "-b", "main"]);
+        run_git_ok(path, &["config", "user.email", "test@cas"]);
+        run_git_ok(path, &["config", "user.name", "CAS Test"]);
+
+        std::fs::write(path.join("shared.txt"), "base\n").unwrap();
+        run_git_ok(path, &["add", "."]);
+        run_git_ok(path, &["commit", "-m", "base"]);
+
+        run_git_ok(path, &["checkout", "-b", "factory/m1"]);
+        std::fs::write(path.join("worker-only.rs"), "// m1 contribution\n").unwrap();
+        std::fs::write(path.join("shared.txt"), "m1 side\n").unwrap();
+        run_git_ok(path, &["add", "."]);
+        run_git_ok(path, &["commit", "-m", "m1 contribution"]);
+
+        run_git_ok(path, &["checkout", "main"]);
+        std::fs::write(path.join("incoming-m2.rs"), "// m2 incoming\n").unwrap();
+        std::fs::write(path.join("shared.txt"), "m2 side\n").unwrap();
+        run_git_ok(path, &["add", "."]);
+        run_git_ok(path, &["commit", "-m", "m2 contribution"]);
+
+        run_git_ok(path, &["checkout", "factory/m1"]);
+        let merge = std::process::Command::new("git")
+            .args(["merge", "main"])
+            .current_dir(path)
+            .output()
+            .expect("start conflicting merge");
+        assert!(!merge.status.success(), "fixture merge must conflict");
+        assert!(
+            run_git(path, &["rev-parse", "--verify", "-q", "MERGE_HEAD"]).is_ok(),
+            "fixture must retain MERGE_HEAD"
+        );
+        repo
+    }
+
+    /// cas-d04f: cleanly merged M2 paths are staged during a conflict, but are
+    /// not M1 drift. The status classifier must inspect M1's committed range.
+    #[test]
+    fn merge_head_scope_excludes_staged_incoming_paths() {
+        let repo = setup_mid_merge_with_incoming_and_worker_contributions();
+        let porcelain =
+            run_git(repo.path(), &["status", "--porcelain"]).expect("read fixture porcelain");
+        assert!(
+            porcelain.contains("incoming-m2.rs"),
+            "precondition: Git staged the clean incoming M2 file: {porcelain}"
+        );
+
+        let paths = worker_scope_paths(repo.path()).expect("scope paths");
+        assert!(
+            paths.iter().any(|path| path == "worker-only.rs"),
+            "{paths:?}"
+        );
+        assert!(paths.iter().any(|path| path == "shared.txt"), "{paths:?}");
+        assert!(
+            !paths.iter().any(|path| path == "incoming-m2.rs"),
+            "an incoming staged merge path is not a worker contribution: {paths:?}"
+        );
+    }
+
+    /// The MERGE_HEAD exception must not turn into an all-clear: a real worker
+    /// contribution remains visible to worker-status even while the index is
+    /// full of another lane's cleanly merged files.
+    #[test]
+    fn merge_head_scope_keeps_genuine_worker_contribution_flagged() {
+        let repo = setup_mid_merge_with_incoming_and_worker_contributions();
+        let status = collect_worker_git_status(repo.path());
+        assert!(
+            status.dirty,
+            "worker-only.rs is a real factory/m1 contribution and must remain flagged"
+        );
+        assert!(
+            worker_scope_paths(repo.path())
+                .expect("scope paths")
+                .iter()
+                .any(|path| path == "worker-only.rs"),
+            "the real worker contribution must remain in the contribution diff"
         );
     }
 

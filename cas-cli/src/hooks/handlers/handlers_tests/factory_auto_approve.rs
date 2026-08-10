@@ -267,6 +267,29 @@ fn factory_bash_redirect_to_bare_tmp_is_denied() {
 }
 
 #[test]
+fn factory_bash_stream_device_redirects_are_allowed() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    for command in [
+        "printf proof 2>/dev/null",
+        "printf proof 1>/dev/null",
+        "printf proof &>/dev/null",
+        "printf proof >/dev/stdout",
+        "printf proof >/dev/stderr",
+        "printf proof >/dev/tty",
+    ] {
+        let input = bash_input(command);
+        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+        assert!(
+            allow_reason(&out).is_some(),
+            "stream-device redirect must not be treated as file creation: {command}"
+        );
+    }
+}
+
+#[test]
 fn factory_bash_touch_under_home_is_denied() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("worker"));

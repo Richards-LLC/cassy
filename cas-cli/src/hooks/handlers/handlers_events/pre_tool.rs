@@ -23,6 +23,34 @@ pub fn handle_pre_tool_use(
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================
+    // WORKER TEST-SCOPE GUARD (cas-eb39)
+    //
+    // A full test invocation links dozens of binaries. Multiplied by every
+    // isolated worktree, that is the dominant local test-gate tax. Workers
+    // iterate with cargo check and run a test target (`--lib`, `--test`, etc.);
+    // the supervisor integration merge and release gate own full-suite runs.
+    // Hoist this before the cas_root early return and factory Bash auto-allow so
+    // an unscoped run always gets the loud, actionable refusal.
+    // ========================================================================
+    if is_factory_agent && crate::harness_policy::is_worker(input) && tool_name == "Bash" {
+        let command = input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str());
+        if command.is_some_and(worker_command_runs_unscoped_tests) {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "🚫 UNSCOPED WORKER TEST RUN: a full suite links dozens of test binaries in this worktree.\n\n\
+                 Iterate with `cargo check -p cas --lib --tests`, then run the affected target through the guarded nextest recipe:\n  \
+                 `scripts/run-scoped-tests.sh -p cas --lib <module>`\n  \
+                 `scripts/run-scoped-tests.sh -p cas --test <name>`\n\n\
+                 Full-suite runs are reserved for the supervisor integration merge and the release gate.",
+            ));
+        }
+    }
+
+    // ========================================================================
     // REVIEW DISPATCH GATE — hoisted to the top (cas-62b0, GH #152)
     //
     // cas-bcfb put this gate below, above the `cas_root` check. That was
@@ -855,6 +883,52 @@ pub fn handle_pre_tool_use(
 
     // No rule matched, no protection triggered - let Claude ask the user
     Ok(HookOutput::empty())
+}
+
+/// Detect a worker shell command that launches an entire Cargo test matrix.
+///
+/// Package selection alone (`-p cas`) is not a test-target scope: this repo's
+/// one package still owns dozens of integration binaries. A target selector is
+/// required. Runtime name filters do not count either because Cargo links all
+/// test targets before applying them.
+fn worker_command_runs_unscoped_tests(command: &str) -> bool {
+    super::attribution::split_shell_statements(command)
+        .iter()
+        .any(|words| test_invocation_without_target_scope(words))
+}
+
+fn test_invocation_without_target_scope(words: &[String]) -> bool {
+    let Some(cargo_index) = words
+        .iter()
+        .position(|word| word == "cargo" || word.ends_with("/cargo"))
+    else {
+        return false;
+    };
+    let cargo_args = &words[cargo_index + 1..];
+    let is_test = cargo_args.first().is_some_and(|arg| arg == "test")
+        || (cargo_args.first().is_some_and(|arg| arg == "nextest")
+            && cargo_args.get(1).is_some_and(|arg| arg == "run"));
+    if !is_test {
+        return false;
+    }
+
+    !cargo_args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--lib"
+                | "--test"
+                | "--bin"
+                | "--bins"
+                | "--example"
+                | "--examples"
+                | "--bench"
+                | "--benches"
+                | "--doc"
+        ) || arg.starts_with("--test=")
+            || arg.starts_with("--bin=")
+            || arg.starts_with("--example=")
+            || arg.starts_with("--bench=")
+    })
 }
 
 // ── Worker commit guard helpers (cas-bea2, LAYER 1) ───────────────────────

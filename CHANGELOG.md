@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.60.0] - 2026-08-10
+
+### Added
+- **Failed factory CI runs now reach the supervisor automatically.** The daemon watches completed runs for main and active factory lanes, relays one actionable failure per branch and commit, and includes the run, failing job, and first failing test when available.
+- **Merge receipts now report the source lane's latest CI verdict.** A completed red run is surfaced with its URL before a merge decision; unavailable or still-running CI is called out honestly as unknown without changing merge semantics.
+- **Cloud sync rejections now explain which records need attention.** Personal and team push failures retain itemized reasons, including partial server-side rejection, so accepted work can continue while the rejected items remain actionable.
+
+### Changed
+- **Factory coordination exposes more reliable liveness and recovery signals.** Preassigned workers retain live holders, background process activity is observed across threads, close-gate rejections explain their cause, and a worker wakes only when both delivery and inactivity evidence permit it.
+- **Routine checks are more precise and economical.** Scoped test filters explain regex-like input, hook wire captures are audited, migration registry IDs are guarded, workspace write checks recognize valid targets, and CI/test fixtures are isolated consistently.
+
+### Fixed
+- **Destructive worker shutdown and merge handling now stay bound to the intended work.** Shutdown targets are validated safely, task-bound delivery merges retain their correct task identity, and merge-conflict status is limited to the affected contribution.
+- **Factory startup, test, and interface behavior now tell a truer story.** Startup pulls do not requeue work, panic isolation runs under the intended test profile, ambient recall filters weak matches, and the factory strip consistently shows the running version.
+
 ## [2.59.0] - 2026-08-10
 
 ### Added

@@ -96,6 +96,8 @@ For env-reading code, check the clean-CI shape with `make -C cas-cli test-clean-
 
 Open only what the situation needs:
 
+- [Reminder discipline](cas-supervisor/references/reminders.md) for bounded checkpoint and recovery timing.
+
 - [close-gate.md](cas-worker/references/close-gate.md) before a deep-task close (six checks, review/P0 handling, simplification).
 - [recovery.md](cas-worker/references/recovery.md) for errors, verification jail, reassignment, worktree/MCP trouble, exhaustion, or a silent supervisor.
 - [discipline.md](cas-worker/references/discipline.md) before >2-minute work and for backgrounding, test-loop, and checkpoint recipes.

@@ -161,8 +161,8 @@ test-release-panic-release:
 	$(CARGO) nextest run -p cas --release --test search_utf8_regression_test
 
 test-release-panic-release-fast:
-	$(CARGO) nextest run -p cas --profile release-fast --lib panic_regression
-	$(CARGO) nextest run -p cas --profile release-fast --test search_utf8_regression_test
+	$(CARGO) nextest run -p cas --cargo-profile release-fast --lib panic_regression
+	$(CARGO) nextest run -p cas --cargo-profile release-fast --test search_utf8_regression_test
 
 # Prove a test run writes nothing into a real CAS store (cas-78c8 / GH #156).
 #

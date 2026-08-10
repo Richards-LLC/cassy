@@ -283,6 +283,9 @@ jobs:
         with:
           cache-key: panic-isolation-release
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Panic-isolation tests (--release)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -305,6 +308,9 @@ jobs:
       - uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: panic-isolation-release-fast
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Panic-isolation tests (--profile release-fast)
         env:

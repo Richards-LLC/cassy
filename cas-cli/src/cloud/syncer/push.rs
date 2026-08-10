@@ -357,7 +357,8 @@ impl CloudSyncer {
                         if let Err(error) = &skipped_count {
                             let diagnostic = format!(
                                 "cloud returned an unrecognized skip signal for {entity_type}: {error}; marking {} row(s) failed; server response: {}",
-                                batch_items.len(), response.raw_body
+                                batch_items.len(),
+                                response.raw_body
                             );
                             warn!(
                                 entity_type = entity_type,
@@ -373,24 +374,58 @@ impl CloudSyncer {
                         let skipped_count = skipped_count.unwrap_or_default();
                         if skipped_count > 0 {
                             let batch_size = batch_items.len();
-                            let diagnostic = format!(
-                                "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); marking the indistinguishable sub-batch failed; server response: {}",
-                                response.raw_body
+                            let itemized = response.itemized_rejections_for(
+                                entity_type,
+                                skipped_count,
+                                batch_items.iter().map(|item| item.entity_id.clone()),
                             );
-                            warn!(
-                                entity_type = entity_type,
-                                skipped = skipped_count,
-                                batch_size = batch_size,
-                                "Cloud server skipped {skipped_count} {entity_type} row(s) in a sub-batch of {batch_size} \
-                                 (likely cross-project project_canonical_id conflict); marking sub-batch failed",
-                            );
-                            // Do not mark server-skipped rows synced. An
-                            // explicit refusal consumes a retry so it becomes
-                            // terminally visible after `max_retries`.
+                            let itemized = match itemized {
+                                Ok(Some(rejections)) => rejections,
+                                Ok(None) => {
+                                    // Aggregate-only servers cannot identify the rejected rows.
+                                    // Preserve cas-607a's conservative whole-batch retry path.
+                                    let diagnostic = format!(
+                                        "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); marking the indistinguishable sub-batch failed; server response: {}",
+                                        response.raw_body
+                                    );
+                                    for item in &batch_items {
+                                        let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                    }
+                                    skip_errors.push(diagnostic);
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let diagnostic = format!(
+                                        "cloud returned invalid itemized rejections for {entity_type}: {error}; marking {batch_size} row(s) failed; server response: {}",
+                                        response.raw_body
+                                    );
+                                    for item in &batch_items {
+                                        let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                    }
+                                    skip_errors.push(diagnostic);
+                                    continue;
+                                }
+                            };
+
+                            // The server supplied a complete identity mapping: only named
+                            // rows are terminal failures; owned neighbors in the same request
+                            // are safely removed from the local queue.
                             for item in &batch_items {
-                                let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                if let Some(rejection) = itemized.get(&item.entity_id) {
+                                    let diagnostic = format!(
+                                        "cloud rejected {entity_type} {}: {} (existing canonical project: {}); server response: {}",
+                                        rejection.id,
+                                        rejection.reason.as_str(),
+                                        rejection.existing_canonical_id,
+                                        response.raw_body
+                                    );
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                    skip_errors.push(diagnostic);
+                                } else {
+                                    let _ = self.queue.mark_synced(item.id);
+                                    synced_count += 1;
+                                }
                             }
-                            skip_errors.push(diagnostic);
                         } else {
                             for item in &batch_items {
                                 let _ = self.queue.mark_synced(item.id);

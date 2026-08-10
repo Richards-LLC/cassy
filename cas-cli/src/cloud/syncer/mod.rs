@@ -506,6 +506,78 @@ struct TeamPushResponse {
     raw_body: String,
 }
 
+/// A row the cloud accepted at HTTP level but refused to write because the
+/// existing global-keyed row belongs to a different project or sync scope.
+///
+/// The client deliberately keeps this wire type strict.  An itemized response
+/// is useful only when it names a unique local queue row; malformed itemization
+/// must therefore retain the whole sub-batch for retry rather than guessing.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PushRejection {
+    pub id: String,
+    pub reason: PushRejectionReason,
+    pub existing_canonical_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PushRejectionReason {
+    ProjectMismatch,
+    ScopeMismatch,
+}
+
+impl PushRejectionReason {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProjectMismatch => "project_mismatch",
+            Self::ScopeMismatch => "scope_mismatch",
+        }
+    }
+}
+
+/// Parse and validate the server's optional per-row rejection list.
+///
+/// `None` preserves the aggregate-only server contract.  `Some` requires an
+/// exact one-to-one mapping to the rows that the server counted as skipped;
+/// callers can safely mark only those rows failed and sync the remainder.
+pub(crate) fn itemized_rejections_for(
+    entity: &serde_json::Value,
+    location: &str,
+    skipped: usize,
+    queued_ids: impl Iterator<Item = String>,
+) -> Result<Option<HashMap<String, PushRejection>>, String> {
+    let detail = entity
+        .as_object()
+        .ok_or_else(|| format!("{location} is not an object: {entity}"))?;
+    let Some(value) = detail.get("rejected") else {
+        return Ok(None);
+    };
+    let rejected: Vec<PushRejection> = serde_json::from_value(value.clone())
+        .map_err(|error| format!("unrecognized {location}.rejected: {error}"))?;
+
+    if rejected.len() != skipped {
+        return Err(format!(
+            "{location}.rejected count {} does not match skipped count {skipped}",
+            rejected.len()
+        ));
+    }
+
+    let queued_ids = queued_ids.collect::<std::collections::HashSet<_>>();
+    let mut by_id = HashMap::with_capacity(rejected.len());
+    for rejection in rejected {
+        if !queued_ids.contains(&rejection.id) {
+            return Err(format!(
+                "{location}.rejected names row {} that was not in this sub-batch",
+                rejection.id
+            ));
+        }
+        if by_id.insert(rejection.id.clone(), rejection).is_some() {
+            return Err(format!("{location}.rejected contains a duplicate id"));
+        }
+    }
+    Ok(Some(by_id))
+}
+
 /// Response shape from the personal push endpoint (`POST /api/sync/push`).
 ///
 /// Backward-compatible contract: every field is `#[serde(default)]` so a
@@ -591,6 +663,18 @@ impl PushResponse {
             (Some(value), _) | (_, Some(value)) => Ok(value),
             (None, None) => Ok(0),
         }
+    }
+
+    pub(crate) fn itemized_rejections_for(
+        &self,
+        entity_type: &str,
+        skipped: usize,
+        queued_ids: impl Iterator<Item = String>,
+    ) -> Result<Option<HashMap<String, PushRejection>>, String> {
+        let Some(entity) = self.fields.get(entity_type) else {
+            return Ok(None);
+        };
+        itemized_rejections_for(entity, entity_type, skipped, queued_ids)
     }
 }
 

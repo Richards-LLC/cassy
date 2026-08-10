@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use crate::cloud::syncer::{CloudSyncer, GroupedQueuedItems, SyncResult, TeamPushResponse};
+use crate::cloud::syncer::{
+    CloudSyncer, GroupedQueuedItems, SyncResult, TeamPushResponse, itemized_rejections_for,
+};
 use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_id};
 use crate::error::CasError;
 use chrono::Utc;
@@ -213,9 +215,7 @@ impl CloudSyncer {
                         self.maybe_adopt_team_canonical_id(body);
                     }
 
-                    let raw_response = response
-                        .as_ref()
-                        .map_or("", |body| body.raw_body.as_str());
+                    let raw_response = response.as_ref().map_or("", |body| body.raw_body.as_str());
                     let (accepted, skipped) = match response.as_ref() {
                         Some(body) => match Self::team_counts_for(body, entity_key) {
                             Ok(Some(counts)) => counts,
@@ -223,7 +223,8 @@ impl CloudSyncer {
                             Err(error) => {
                                 let diagnostic = format!(
                                     "{entity_key} push returned an unrecognized count/skip signal: {error}; marking {} team row(s) failed; server response: {}",
-                                    batch_items.len(), body.raw_body
+                                    batch_items.len(),
+                                    body.raw_body
                                 );
                                 for item in &batch_items {
                                     let _ = self.queue.mark_failed(item.id, &diagnostic);
@@ -234,23 +235,66 @@ impl CloudSyncer {
                         },
                         None => (sent_count, 0),
                     };
-                    synced += accepted;
-
                     if skipped > 0 {
-                        let diagnostic = format!(
-                            "cloud skipped {skipped} of {} team {entity_key} row(s); marking the indistinguishable sub-batch failed; server response: {}",
-                            batch_items.len(), raw_response
+                        let itemized = Self::team_itemized_rejections_for(
+                            response
+                                .as_ref()
+                                .expect("skipped counts require a team response body"),
+                            entity_key,
+                            skipped,
+                            batch_items.iter().map(|item| item.entity_id.clone()),
                         );
+                        let itemized = match itemized {
+                            Ok(Some(rejections)) => rejections,
+                            Ok(None) => {
+                                let diagnostic = format!(
+                                    "cloud skipped {skipped} of {} team {entity_key} row(s); marking the indistinguishable sub-batch failed; server response: {}",
+                                    batch_items.len(),
+                                    raw_response
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                errors.push(diagnostic);
+                                continue;
+                            }
+                            Err(error) => {
+                                let diagnostic = format!(
+                                    "team {entity_key} push returned invalid itemized rejections: {error}; marking {} row(s) failed; server response: {}",
+                                    batch_items.len(),
+                                    raw_response
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                errors.push(diagnostic);
+                                continue;
+                            }
+                        };
+
                         for item in &batch_items {
-                            let _ = self.queue.mark_failed(item.id, &diagnostic);
+                            if let Some(rejection) = itemized.get(&item.entity_id) {
+                                let diagnostic = format!(
+                                    "cloud rejected team {entity_key} {}: {} (existing canonical project: {}); server response: {}",
+                                    rejection.id,
+                                    rejection.reason.as_str(),
+                                    rejection.existing_canonical_id,
+                                    raw_response
+                                );
+                                let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                errors.push(diagnostic);
+                            } else {
+                                let _ = self.queue.mark_synced(item.id);
+                                synced += 1;
+                            }
                         }
-                        errors.push(diagnostic);
                         continue;
                     }
 
                     for item in &batch_items {
                         let _ = self.queue.mark_synced(item.id);
                     }
+                    synced += accepted;
                 }
                 Err(e) => {
                     for item in &batch_items {
@@ -403,6 +447,25 @@ impl CloudSyncer {
         }
 
         Ok(Some((inserted.saturating_add(updated), skipped)))
+    }
+
+    fn team_itemized_rejections_for(
+        response: &TeamPushResponse,
+        entity_key: &str,
+        skipped: usize,
+        queued_ids: impl Iterator<Item = String>,
+    ) -> Result<
+        Option<std::collections::HashMap<String, crate::cloud::syncer::PushRejection>>,
+        String,
+    > {
+        let synced = response
+            .synced
+            .as_object()
+            .ok_or_else(|| format!("synced is not an object: {}", response.synced))?;
+        let entity = synced
+            .get(entity_key)
+            .ok_or_else(|| format!("synced.{entity_key} missing despite skipped count"))?;
+        itemized_rejections_for(entity, &format!("synced.{entity_key}"), skipped, queued_ids)
     }
 
     fn add_team_count(result: &mut SyncResult, entity_key: &str, count: usize) {

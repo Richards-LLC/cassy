@@ -11,6 +11,22 @@ pub async fn run_server() -> anyhow::Result<()> {
     run_server_impl().await
 }
 
+// Startup pull is an apply-remote path: using the normal openers here wraps
+// the stores in Syncing*, which feeds each pulled row back into SyncQueue.
+// Keep these narrow helpers so the startup call site and its regression test
+// share the same non-syncing contract.
+fn open_startup_pull_entry_store(
+    cas_root: &std::path::Path,
+) -> crate::error::Result<Arc<dyn crate::store::Store>> {
+    crate::store::open_store_local(cas_root)
+}
+
+fn open_startup_pull_task_store(
+    cas_root: &std::path::Path,
+) -> crate::error::Result<Arc<dyn crate::store::TaskStore>> {
+    crate::store::open_task_store_local(cas_root)
+}
+
 /// Internal implementation for running the MCP server
 async fn run_server_impl() -> anyhow::Result<()> {
     let enable_daemon = true;
@@ -19,7 +35,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     use crate::mcp::tools::CasService;
     use crate::store::{
         open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
-        open_rule_store, open_skill_store, open_spec_store, open_store, open_task_store,
+        open_rule_store_local, open_skill_store_local, open_spec_store,
     };
     use rmcp::ServiceExt;
     use rmcp::transport::stdio;
@@ -102,16 +118,16 @@ async fn run_server_impl() -> anyhow::Result<()> {
                         ..Default::default()
                     };
                     let syncer = CloudSyncer::new(std::sync::Arc::new(queue), cloud_config, config);
-                    let Ok(store) = open_store(&cas_root_bg) else {
+                    let Ok(store) = open_startup_pull_entry_store(&cas_root_bg) else {
                         return;
                     };
-                    let Ok(task_store) = open_task_store(&cas_root_bg) else {
+                    let Ok(task_store) = open_startup_pull_task_store(&cas_root_bg) else {
                         return;
                     };
-                    let Ok(rule_store) = open_rule_store(&cas_root_bg) else {
+                    let Ok(rule_store) = open_rule_store_local(&cas_root_bg) else {
                         return;
                     };
-                    let Ok(skill_store) = open_skill_store(&cas_root_bg) else {
+                    let Ok(skill_store) = open_skill_store_local(&cas_root_bg) else {
                         return;
                     };
                     let Ok(spec_store) = open_spec_store(&cas_root_bg) else {
@@ -1131,10 +1147,86 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 // =============================================================================
 #[cfg(test)]
 mod tests {
-    use super::resolve_mcp_serve_root;
-    use crate::store::init_cas_dir;
+    use super::{
+        open_startup_pull_entry_store, open_startup_pull_task_store, resolve_mcp_serve_root,
+    };
+    use crate::cloud::{CloudConfig, EntityType, SyncQueue};
+    use crate::store::{init_cas_dir, open_store, open_task_store};
     use crate::test_support::TestEnvGuard;
+    use crate::types::{Entry, Task};
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn startup_pull_apply_leaves_personal_and_team_queues_empty() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = init_cas_dir(temp.path()).unwrap();
+        let team_id = "550e8400-e29b-41d4-a716-446655440000";
+
+        let mut cloud = CloudConfig::default();
+        cloud.token = Some("test-token".to_string());
+        cloud.team_id = Some(team_id.to_string());
+        cloud.save_to_cas_dir(&cas_root).unwrap();
+
+        let queue = Arc::new(SyncQueue::open(&cas_root).unwrap());
+        queue.init().unwrap();
+
+        // These adds stand in for the Created branch of CloudSyncer::pull's
+        // remote apply. Both entities are team-eligible, so a syncing wrapper
+        // would recreate the personal + team pair observed in production.
+        let remote_entry = Entry::new("p-startup-pull".to_string(), "remote entry".to_string());
+        let remote_task = Task::new("cas-startup-pull".to_string(), "remote task".to_string());
+        open_startup_pull_entry_store(&cas_root)
+            .unwrap()
+            .add(&remote_entry)
+            .unwrap();
+        open_startup_pull_task_store(&cas_root)
+            .unwrap()
+            .add(&remote_task)
+            .unwrap();
+
+        for entity_type in [EntityType::Entry, EntityType::Task] {
+            assert!(
+                queue
+                    .pending_for_entity_type(Some(entity_type), 10, 10)
+                    .unwrap()
+                    .is_empty(),
+                "startup pull must not enqueue personal {entity_type:?} rows"
+            );
+        }
+        assert!(
+            queue.pending_for_team(team_id, 10, 10).unwrap().is_empty(),
+            "startup pull must not enqueue team rows"
+        );
+
+        // Local edits retain their existing Syncing* behavior: each eligible
+        // entity is still queued once for the personal and team scopes.
+        open_store(&cas_root)
+            .unwrap()
+            .add(&Entry::new(
+                "p-local-edit".to_string(),
+                "local entry".to_string(),
+            ))
+            .unwrap();
+        open_task_store(&cas_root)
+            .unwrap()
+            .add(&Task::new(
+                "cas-local-edit".to_string(),
+                "local task".to_string(),
+            ))
+            .unwrap();
+        for entity_type in [EntityType::Entry, EntityType::Task] {
+            assert_eq!(
+                queue
+                    .pending_for_entity_type(Some(entity_type), 10, 10)
+                    .unwrap()
+                    .len(),
+                1,
+                "local edit must enqueue one personal {entity_type:?} row"
+            );
+        }
+        assert_eq!(queue.pending_for_team(team_id, 10, 10).unwrap().len(), 2);
+    }
 
     #[cfg(feature = "mcp-proxy")]
     #[tokio::test(flavor = "current_thread")]

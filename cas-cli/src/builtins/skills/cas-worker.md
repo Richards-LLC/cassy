@@ -63,6 +63,7 @@ Your scope is locked at assignment:
 - **Match existing patterns.** Follow established conventions; don't introduce new ones without asking.
 - **Stow/install only from the main checkout, never a worktree.** Persistent symlinks from `stow`, `chezmoi`, or install scripts otherwise break when the worktree is cleaned.
 - **No config surprises.** Don't hardcode values that should be configurable. Don't add config that wasn't requested.
+- **Use sanctioned storage.** Write source and short-lived build output in the worktree; write durable task proof only under `[factory] artifacts_root/<task-id>/` (default `~/.cas/artifacts/<task-id>/`). Bare `/tmp` and stray `$HOME` files are off-limits. Harness scratchpads may be under `/tmp`, but are ephemeral and must never be cited as close evidence.
 - **Document important choices.** Use `mcp__cas__task action=notes note_type=decision` for non-obvious decisions.
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
 - **Report context headroom** ("context: ~60% used") in every milestone progress note.

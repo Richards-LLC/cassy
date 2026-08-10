@@ -56,12 +56,9 @@ fn short_session(session_id: &str) -> &str {
 /// session. Prefer the freshest heartbeat: it is the strongest evidence of
 /// which same-name process is currently answering. This keeps a live respawn
 /// from being hidden behind its older ghost row.
-fn dedupe_authoritative_agents(
-    agents: Vec<cas_types::Agent>,
-) -> (Vec<cas_types::Agent>, usize) {
+fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
     let original_len = agents.len();
-    let mut by_identity =
-        std::collections::BTreeMap::<(String, String), cas_types::Agent>::new();
+    let mut by_identity = std::collections::BTreeMap::<(String, String), cas_types::Agent>::new();
 
     for candidate in agents {
         let key = (candidate.role.to_string(), candidate.name.clone());
@@ -287,7 +284,10 @@ fn strict_cli_from_project_config(project_config: Option<&std::path::Path>) -> b
         .and_then(|p| p.parent())
         .map(|cas_root| {
             use crate::config::Config;
-            Config::load(cas_root).unwrap_or_default().factory().strict_cli
+            Config::load(cas_root)
+                .unwrap_or_default()
+                .factory()
+                .strict_cli
         })
         .unwrap_or(false)
 }
@@ -477,7 +477,10 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
         rows.len()
     );
     for row in rows {
-        let what = row.summary.as_deref().unwrap_or("task lifecycle transition");
+        let what = row
+            .summary
+            .as_deref()
+            .unwrap_or("task lifecycle transition");
         out.push_str(&format!(
             "  • {what} (queued {}, source {})\n",
             row.created_at.to_rfc3339(),
@@ -1194,7 +1197,11 @@ impl CasService {
         use crate::ui::factory::{metadata_path, persist_session_metadata_worker_hold_at};
         use cas_types::{AgentRole, AgentStatus};
 
-        let action = if held { "hold_worker" } else { "release_worker" };
+        let action = if held {
+            "hold_worker"
+        } else {
+            "release_worker"
+        };
         worker_hold_role_gate(is_supervisor_from_env(), action)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
@@ -1291,12 +1298,17 @@ impl CasService {
         let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
             &self.inner.cas_root,
             event_type,
-            &[("worker", worker_name), ("factory_session", &factory_session)],
+            &[
+                ("worker", worker_name),
+                ("factory_session", &factory_session),
+            ],
         );
 
         let verb = if held { "Held" } else { "Released" };
         let reminder_summary = if held {
-            format!(" Cancelled {cancelled_reminders} pending reminder(s) targeted to this worker; release does not revive cancelled one-shot reminders.")
+            format!(
+                " Cancelled {cancelled_reminders} pending reminder(s) targeted to this worker; release does not revive cancelled one-shot reminders."
+            )
         } else {
             String::new()
         };
@@ -1790,16 +1802,14 @@ impl CasService {
                 // same lookup feeds context/activity/in-flight evidence and
                 // hard-dead salvage diagnostics. Claude retains its single
                 // stat fast path.
-                let transcript_resolution_for_worker = worker_status_uses_scanned_transcript(
-                    worker_cli,
-                )
-                .then(|| {
-                    worker_status_cached_transcript_resolution(
-                        clone_path.as_deref(),
-                        session_uuid,
-                        worker_cli,
-                    )
-                });
+                let transcript_resolution_for_worker =
+                    worker_status_uses_scanned_transcript(worker_cli).then(|| {
+                        worker_status_cached_transcript_resolution(
+                            clone_path.as_deref(),
+                            session_uuid,
+                            worker_cli,
+                        )
+                    });
                 let transcript_path_for_worker = transcript_resolution_for_worker
                     .as_ref()
                     .and_then(|cached| {
@@ -1964,14 +1974,9 @@ impl CasService {
                 // `wedged::transcript_has_in_flight_tool_call` primitive
                 // against the same transcript path/cli resolution already
                 // computed for `context_info` above.
-                let in_flight_tool_call = transcript_path_for_worker
-                    .as_deref()
-                    .is_some_and(|p| {
-                        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
-                            p,
-                            worker_cli,
-                        )
-                    });
+                let in_flight_tool_call = transcript_path_for_worker.as_deref().is_some_and(|p| {
+                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(p, worker_cli)
+                });
                 let assigned_open_task = assigned_open_tasks.iter().find(|task| {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
@@ -2236,8 +2241,7 @@ impl CasService {
                 let cli = worker_cli_from_agent(agent);
                 let clone_path = agent.metadata.get("clone_path").map(String::as_str);
                 let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-                let transcript_path =
-                    worker_status_transcript_path(clone_path, session_id, cli)?;
+                let transcript_path = worker_status_transcript_path(clone_path, session_id, cli)?;
                 let event_activity = last_worker_activity_secs(&worker_events, &agent.id);
                 let effective_activity = last_worker_activity_secs_with_transcript(
                     &worker_events,
@@ -2248,11 +2252,10 @@ impl CasService {
                 if event_activity.is_some_and(|(event_age, _)| event_age <= effective_activity.0) {
                     return None;
                 }
-                let in_flight =
-                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
-                        &transcript_path,
-                        cli,
-                    );
+                let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                    &transcript_path,
+                    cli,
+                );
                 Some((agent.name.clone(), effective_activity.0, in_flight))
             })
             .collect();
@@ -3026,8 +3029,19 @@ impl CasService {
             .filter(|wt| !Path::new(&wt.path).exists())
             .collect();
 
+        let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
+            .ok()
+            .and_then(|store| store.list(Some(cas_types::TaskStatus::Closed)).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        let artifact_report = factory_artifact_inventory(
+            factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+            &closed_task_ids,
+        );
         let target_cache_report = {
-            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let live_roots = live_target_cache_worktrees(agent_store.as_ref());
             let known_roots = known_target_cache_worktrees(
@@ -3067,6 +3081,7 @@ impl CasService {
             orphan_processes.reapable_count(),
         ));
         out.push_str(&orphan_processes.render());
+        out.push_str(&artifact_report.render());
 
         if !stale_agents.is_empty() {
             out.push_str("\nStale agents:\n");
@@ -3320,12 +3335,8 @@ impl CasService {
             GitOperations::new(close_project_root.clone())
                 .unlanded_epic_ancestry(parent_branch, &trunk)
         };
-        let report = render_epic_status_report_with_stack(
-            epic_id,
-            parent_branch,
-            &statuses,
-            &stacked_on,
-        );
+        let report =
+            render_epic_status_report_with_stack(epic_id, parent_branch, &statuses, &stacked_on);
 
         Ok(Self::success(report))
     }
@@ -3467,12 +3478,8 @@ impl CasService {
         })?;
         let live_workers = live_factory_workers(agent_store.as_ref());
         let live_target_cache_roots = live_target_cache_worktrees(agent_store.as_ref());
-        let (
-            orphan_process_groups,
-            live_owned_process_groups,
-            _,
-            unverifiable_process_groups,
-        ) = orphan_process_groups(&self.inner.cas_root, stale_after, &live_workers);
+        let (orphan_process_groups, live_owned_process_groups, _, unverifiable_process_groups) =
+            orphan_process_groups(&self.inner.cas_root, stale_after, &live_workers);
         let mut orphan_process_groups_reaped = 0usize;
         let mut live_owned_process_groups_skipped = live_owned_process_groups.len();
         let mut stale_process_group_records_removed = 0usize;
@@ -3480,18 +3487,14 @@ impl CasService {
 
         // Dead/recycled records are safe to discard. Live groups are reaped
         // only through gc_cleanup's existing explicit force gate.
-        for record in crate::ui::factory::process_groups::list(&self.inner.cas_root)
-            .unwrap_or_default()
+        for record in
+            crate::ui::factory::process_groups::list(&self.inner.cas_root).unwrap_or_default()
         {
             if matches!(
                 crate::ui::factory::process_groups::status(&record),
                 crate::ui::factory::process_groups::ProcessGroupStatus::Gone
                     | crate::ui::factory::process_groups::ProcessGroupStatus::FingerprintMismatch
-            )
-                && crate::ui::factory::process_groups::untrack(
-                    &self.inner.cas_root,
-                    record.pgid,
-                )
+            ) && crate::ui::factory::process_groups::untrack(&self.inner.cas_root, record.pgid)
                 .is_ok()
             {
                 stale_process_group_records_removed += 1;
@@ -3502,19 +3505,12 @@ impl CasService {
                 // Re-read canonical liveness immediately before the destructive
                 // action. A worker may have registered or recovered after the
                 // report/classification snapshot.
-                if process_group_has_live_owner(
-                    record,
-                    &live_factory_workers(agent_store.as_ref()),
-                ) {
+                if process_group_has_live_owner(record, &live_factory_workers(agent_store.as_ref()))
+                {
                     live_owned_process_groups_skipped += 1;
                     continue;
                 }
-                match crate::ui::factory::process_groups::reap(
-                    &self.inner.cas_root,
-                    record,
-                )
-                .await
-                {
+                match crate::ui::factory::process_groups::reap(&self.inner.cas_root, record).await {
                     Ok(crate::ui::factory::process_groups::ReapOutcome::Reaped) => {
                         orphan_process_groups_reaped += 1;
                     }
@@ -3549,10 +3545,8 @@ impl CasService {
                 if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
                     continue;
                 }
-                if crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(
-                    &agent,
-                )
-                .is_live()
+                if crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(&agent)
+                    .is_live()
                 {
                     continue;
                 }
@@ -3629,8 +3623,24 @@ impl CasService {
             &orphan_processes,
             target_cache_mutation_authorized,
         );
+        let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
+            .ok()
+            .and_then(|store| store.list(Some(cas_types::TaskStatus::Closed)).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        let artifact_root = factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        // Durable receipts are deleted only after their task is closed, and
+        // only through the same explicit destructive gate as cache reclamation.
+        // Unknown directories are inventory-only: an operator must review them.
+        let artifact_cleanup = factory_artifact_cleanup(
+            &artifact_root,
+            &closed_task_ids,
+            target_cache_mutation_authorized,
+        );
         let target_cache_result = {
-            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let known_roots = known_target_cache_worktrees(
                 &self.inner.cas_root,
@@ -3665,6 +3675,7 @@ impl CasService {
             orphan_process_summary.records_cleared.len(),
             orphan_process_summary.skipped,
         );
+        output.push_str(&artifact_cleanup.render());
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -3753,11 +3764,123 @@ fn process_command_line(pid: u32) -> String {
     }
 }
 
+/// Inventory and reclaim the durable per-task artifact root from the factory
+/// workspace contract (GH #196). Directories are named for task IDs, so task
+/// lifecycle is the only authority that makes a receipt eligible for removal.
+#[derive(Default)]
+struct FactoryArtifactInventory {
+    root: std::path::PathBuf,
+    closed: Vec<std::path::PathBuf>,
+    stray: Vec<std::path::PathBuf>,
+    error: Option<String>,
+    removed: usize,
+    dry_run: bool,
+}
+
+impl FactoryArtifactInventory {
+    fn render(&self) -> String {
+        let mut out = format!(
+            "\nDurable task artifacts: root={} closed-task candidates={} stray inventory={} mode={}\n",
+            self.root.display(),
+            self.closed.len(),
+            self.stray.len(),
+            if self.dry_run {
+                "review-only"
+            } else {
+                "cleanup"
+            },
+        );
+        for path in &self.closed {
+            out.push_str(&format!("  - closed-task artifact: {}\n", path.display()));
+        }
+        for path in &self.stray {
+            out.push_str(&format!(
+                "  - review-only stray artifact: {}\n",
+                path.display()
+            ));
+        }
+        if let Some(error) = &self.error {
+            out.push_str(&format!("  - artifact inventory unavailable: {error}\n"));
+        } else if self.dry_run && !self.closed.is_empty() {
+            out.push_str("  Reclaim closed-task artifacts with gc_cleanup force=true dry_run=false. Strays are never auto-deleted.\n");
+        } else if self.removed > 0 {
+            out.push_str(&format!(
+                "  Closed-task artifact directories removed: {}\n",
+                self.removed
+            ));
+        }
+        out
+    }
+}
+
+fn factory_artifacts_root(configured: Option<&str>) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("~") => home.unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
+        Some(value) if value.starts_with("~/") => home
+            .map(|base| base.join(&value[2..]))
+            .unwrap_or_else(|| std::path::PathBuf::from(value)),
+        Some(value) => std::path::PathBuf::from(value),
+        None => home
+            .map(|base| base.join(".cas/artifacts"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
+    }
+}
+
+fn factory_artifact_inventory(
+    root: std::path::PathBuf,
+    closed_task_ids: &std::collections::BTreeSet<String>,
+) -> FactoryArtifactInventory {
+    let mut inventory = FactoryArtifactInventory {
+        root,
+        dry_run: true,
+        ..Default::default()
+    };
+    let entries = match std::fs::read_dir(&inventory.root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return inventory,
+        Err(error) => {
+            inventory.error = Some(error.to_string());
+            return inventory;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if closed_task_ids.contains(&name) {
+            inventory.closed.push(path);
+        } else {
+            inventory.stray.push(path);
+        }
+    }
+    inventory.closed.sort();
+    inventory.stray.sort();
+    inventory
+}
+
+fn factory_artifact_cleanup(
+    root: &std::path::Path,
+    closed_task_ids: &std::collections::BTreeSet<String>,
+    authorized: bool,
+) -> FactoryArtifactInventory {
+    let mut inventory = factory_artifact_inventory(root.to_path_buf(), closed_task_ids);
+    inventory.dry_run = !authorized;
+    if authorized {
+        for path in &inventory.closed {
+            if std::fs::remove_dir_all(path).is_ok() {
+                inventory.removed += 1;
+            }
+        }
+    }
+    inventory
+}
+
 type LiveFactoryWorkers = std::collections::HashSet<(String, Option<String>)>;
 
-fn live_factory_workers(
-    agent_store: &dyn cas_store::AgentStore,
-) -> LiveFactoryWorkers {
+fn live_factory_workers(agent_store: &dyn cas_store::AgentStore) -> LiveFactoryWorkers {
     live_factory_workers_from_agents(agent_store.list(None).unwrap_or_default())
 }
 
@@ -3770,7 +3893,12 @@ fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore) -> Vec<s
             crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
                 .is_live()
         })
-        .filter_map(|agent| agent.metadata.get("clone_path").map(std::path::PathBuf::from))
+        .filter_map(|agent| {
+            agent
+                .metadata
+                .get("clone_path")
+                .map(std::path::PathBuf::from)
+        })
         .collect()
 }
 
@@ -3786,7 +3914,12 @@ fn known_target_cache_worktrees(
             .list(None)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|agent| agent.metadata.get("clone_path").map(std::path::PathBuf::from)),
+            .filter_map(|agent| {
+                agent
+                    .metadata
+                    .get("clone_path")
+                    .map(std::path::PathBuf::from)
+            }),
     );
     roots.extend(
         worktree_store
@@ -4685,13 +4818,15 @@ fn format_harness_turn_observation_at(
     let observations =
         crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli);
     let Some(wake) = observations.wake else {
-        let completion = observations.completion.map_or_else(String::new, |completion| {
-            format!(
-                "; completion observed at {} from {}",
-                completion.at.to_rfc3339(),
-                completion.evidence
-            )
-        });
+        let completion = observations
+            .completion
+            .map_or_else(String::new, |completion| {
+                format!(
+                    "; completion observed at {} from {}",
+                    completion.at.to_rfc3339(),
+                    completion.evidence
+                )
+            });
         return format!(
             "\n    harness turn: unobserved (resolved {} artifact has no authoritative turn-start record{})",
             cli.as_str(),
@@ -5275,8 +5410,10 @@ fn resolve_claude_transcript(
     clone_path: Option<&str>,
     session_id: &str,
 ) -> TranscriptResolution {
-    let roots: Vec<std::path::PathBuf> =
-        projects_dir.map(std::path::Path::to_path_buf).into_iter().collect();
+    let roots: Vec<std::path::PathBuf> = projects_dir
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
     resolve_claude_transcript_in_roots(&roots, clone_path, session_id)
 }
 
@@ -5498,7 +5635,8 @@ fn resolve_grok_transcript(
         1 => TranscriptResolution::Resolved(matches.remove(0)),
         _ => TranscriptResolution::Ambiguous {
             matches,
-            synthesized: synthesized.unwrap_or_else(|| synthesized_unknown_grok_clone_path(session_id)),
+            synthesized: synthesized
+                .unwrap_or_else(|| synthesized_unknown_grok_clone_path(session_id)),
             truncated,
         },
     }
@@ -5560,9 +5698,7 @@ impl CodexRolloutMetadata {
         // was absent and independently confirms today's cli/exec values.
         match self.source.as_deref() {
             Some(source) if source.eq_ignore_ascii_case("exec") => CodexRolloutKind::Exec,
-            Some(source) if source.eq_ignore_ascii_case("cli") => {
-                CodexRolloutKind::InteractiveCli
-            }
+            Some(source) if source.eq_ignore_ascii_case("cli") => CodexRolloutKind::InteractiveCli,
             _ => match self.originator.as_deref() {
                 Some(originator)
                     if originator.eq_ignore_ascii_case("codex_exec")
@@ -5843,7 +5979,10 @@ fn worker_status_transcript_path(
 /// treated as a Codex/Grok rollout merely because a same-name stale row used
 /// a different harness.
 fn worker_status_uses_scanned_transcript(cli: cas_mux::SupervisorCli) -> bool {
-    matches!(cli, cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok)
+    matches!(
+        cli,
+        cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -5875,10 +6014,7 @@ fn worker_status_cached_transcript_resolution(
     let roots = default_transcript_roots(cli);
     WorkerStatusTranscriptResolution {
         resolution: worker_status_cached_transcript_resolution_in_roots(
-            &roots,
-            clone_path,
-            session_id,
-            cli,
+            &roots, clone_path, session_id, cli,
         ),
         base_dir_resolved: !roots.is_empty(),
     }
@@ -5924,8 +6060,10 @@ fn worker_status_cached_transcript_resolution_in(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> TranscriptResolution {
-    let roots: Vec<std::path::PathBuf> =
-        base_dir.map(std::path::Path::to_path_buf).into_iter().collect();
+    let roots: Vec<std::path::PathBuf> = base_dir
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
     worker_status_cached_transcript_resolution_in_roots(&roots, clone_path, session_id, cli)
 }
 
@@ -5977,9 +6115,7 @@ fn resolve_worker_transcript_path_in(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> Option<std::path::PathBuf> {
-    transcript_path_from_resolution(resolve_transcript(
-        base_dir, clone_path, session_id, cli,
-    ))
+    transcript_path_from_resolution(resolve_transcript(base_dir, clone_path, session_id, cli))
 }
 
 /// Render the transcript block for `worker_status` output. Always surfaces
@@ -6074,10 +6210,7 @@ pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
 /// Reconstructs the Claude-layout path from `clone_path` + `session_id` and
 /// checks it with one `stat(2)`. Grok cannot use this path because its
 /// transcript is `~/.grok/sessions/<encoded-cwd>/<session>/updates.jsonl`.
-fn transcript_path_fast(
-    clone_path: Option<&str>,
-    session_id: &str,
-) -> Option<std::path::PathBuf> {
+fn transcript_path_fast(clone_path: Option<&str>, session_id: &str) -> Option<std::path::PathBuf> {
     // cas-9e81: `synthesized_transcript_path` hardcodes `~/.claude/projects`,
     // so this stat missed every session written under a non-default
     // `CLAUDE_CONFIG_DIR`. Stat the same slug under each known projects root.
@@ -6277,7 +6410,8 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
     // Deliberately NOT `--short`: that returns git's dynamic abbreviation,
     // which varies by repo size and made stored SHAs unjoinable without a
     // variable-width prefix match. Display truncation happens at render.
-    let head_sha = run_git(worktree_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "?".to_string());
+    let head_sha =
+        run_git(worktree_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "?".to_string());
 
     // --- base branch for ahead/behind ----------------------------------------
     // Prefer origin/HEAD (most authoritative), then fall back to "main".
@@ -6741,8 +6875,11 @@ mod spawn_lifecycle_tests {
     /// what a worker is doing.
     #[test]
     fn in_progress_task_is_named_on_the_row() {
-        let out =
-            format_assigned_task_info(Some(("cas-8b84", "Worker lifecycle observability")), None, None);
+        let out = format_assigned_task_info(
+            Some(("cas-8b84", "Worker lifecycle observability")),
+            None,
+            None,
+        );
         assert!(out.contains("cas-8b84"), "{out}");
         assert!(out.contains("in progress"), "{out}");
         assert!(out.contains("Worker lifecycle observability"), "{out}");
@@ -6805,9 +6942,7 @@ mod tests {
         parent.factory_session = Some("factory-a".into());
         parent.registered_at = chrono::Utc::now() - chrono::Duration::minutes(2);
         parent.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(1);
-        parent
-            .metadata
-            .insert("worker_cli".into(), "codex".into());
+        parent.metadata.insert("worker_cli".into(), "codex".into());
 
         let mut nested = parent.clone();
         nested.id = "nested-knowledge-session".into();
@@ -6906,7 +7041,10 @@ mod tests {
         let live_workers = live_factory_workers_from_agents([agent]);
         let (orphans, skipped_live, _, unverifiable) =
             orphan_process_groups(temp.path(), 0, &live_workers);
-        assert!(orphans.is_empty(), "live owner must never enter the reap set");
+        assert!(
+            orphans.is_empty(),
+            "live owner must never enter the reap set"
+        );
         assert_eq!(skipped_live, vec![record.clone()]);
         assert!(unverifiable.is_empty());
         assert!(
@@ -6963,13 +7101,8 @@ mod tests {
             child,
             pgid: live_pgid,
         };
-        crate::ui::factory::process_groups::track(
-            &cas_root,
-            "worker-a",
-            "live-session",
-            live_pgid,
-        )
-        .unwrap();
+        crate::ui::factory::process_groups::track(&cas_root, "worker-a", "live-session", live_pgid)
+            .unwrap();
 
         // A genuine orphan in the same worktree: launcher exits, child adopted.
         let planted = std::process::Command::new("sh")
@@ -7192,11 +7325,20 @@ mod tests {
     #[test]
     fn model_slug_families_are_classified_conservatively() {
         use cas_mux::SupervisorCli;
-        assert_eq!(cli_for_model_slug("claude-opus-5"), Some(SupervisorCli::Claude));
+        assert_eq!(
+            cli_for_model_slug("claude-opus-5"),
+            Some(SupervisorCli::Claude)
+        );
         assert_eq!(cli_for_model_slug("opus"), Some(SupervisorCli::Claude));
         assert_eq!(cli_for_model_slug("SONNET"), Some(SupervisorCli::Claude));
-        assert_eq!(cli_for_model_slug("gpt-5.6-sol"), Some(SupervisorCli::Codex));
-        assert_eq!(cli_for_model_slug("gpt-5.6-terra"), Some(SupervisorCli::Codex));
+        assert_eq!(
+            cli_for_model_slug("gpt-5.6-sol"),
+            Some(SupervisorCli::Codex)
+        );
+        assert_eq!(
+            cli_for_model_slug("gpt-5.6-terra"),
+            Some(SupervisorCli::Codex)
+        );
         assert_eq!(cli_for_model_slug("grok-4.5"), Some(SupervisorCli::Grok));
         assert_eq!(
             cli_for_model_slug("mystery-model-9"),
@@ -7231,9 +7373,8 @@ mod tests {
         // Isolate HOME so no user or project-level worker override can mask
         // the stock fallback this regression is intended to guard.
         let _home = TestEnvGuard::temp_home();
-        let routing_doc = include_str!(
-            "../../../builtins/skills/cas-supervisor/references/model-selection.md"
-        );
+        let routing_doc =
+            include_str!("../../../builtins/skills/cas-supervisor/references/model-selection.md");
 
         for (cli, spec) in [
             (
@@ -7242,9 +7383,7 @@ mod tests {
             ),
             (
                 cas_mux::SupervisorCli::Claude,
-                decoded_spawn_spec(
-                    &build_spawn_spec_json(Some("claude"), None, None).unwrap(),
-                ),
+                decoded_spawn_spec(&build_spawn_spec_json(Some("claude"), None, None).unwrap()),
             ),
         ] {
             assert_eq!(spec.cli, cli);
@@ -7433,8 +7572,7 @@ effort = "high"
                 "precondition: stock default must resolve to codex"
             );
 
-            let claude_default_model =
-                default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
+            let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
             let notices = cas_factory::apply_codex_fallback(
                 std::slice::from_mut(&mut spec),
                 false,
@@ -7515,11 +7653,8 @@ effort = "high"
         let now = chrono::DateTime::parse_from_rfc3339("2026-07-31T20:01:05Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let rendered = format_harness_turn_observation_at(
-            cas_mux::SupervisorCli::Codex,
-            Some(&rollout),
-            now,
-        );
+        let rendered =
+            format_harness_turn_observation_at(cas_mux::SupervisorCli::Codex, Some(&rollout), now);
         assert!(rendered.contains("harness turn: started 3s ago"));
         assert!(rendered.contains("reaction observed"));
         assert!(rendered.contains("artifact-backed"));
@@ -8069,8 +8204,7 @@ effort = "high"
     /// silently widened.
     #[test]
     fn a_consumed_reminder_without_a_re_arm_cannot_alarm_once_the_task_is_done() {
-        let classified =
-            classify_worker_inbox(1, Some(900), &[reminder_row(-900)], None, at(0));
+        let classified = classify_worker_inbox(1, Some(900), &[reminder_row(-900)], None, at(0));
         assert_eq!(
             classified.unread, 1,
             "unproven by the re-arm rule, so it stays counted: {classified:?}"
@@ -8189,7 +8323,11 @@ effort = "high"
         let merge = format_assigned_task_info(
             None,
             None,
-            Some(("cas-1234", "Done work", cas_types::TaskStatus::AwaitingMerge)),
+            Some((
+                "cas-1234",
+                "Done work",
+                cas_types::TaskStatus::AwaitingMerge,
+            )),
         );
         assert!(merge.contains("cas-1234"), "{merge}");
         assert!(merge.contains("awaiting merge"), "{merge}");
@@ -8439,7 +8577,10 @@ effort = "high"
             Some(tmp.path()),
         )
         .expect("must resolve an age");
-        assert!(elapsed <= 7, "expected the fresh event's ~5s age: {elapsed}");
+        assert!(
+            elapsed <= 7,
+            "expected the fresh event's ~5s age: {elapsed}"
+        );
         assert_eq!(
             phase, "editing",
             "the richer event-derived phase label must survive, not be flattened to 'activity'"
@@ -8608,7 +8749,9 @@ effort = "high"
         let got = resolve_transcript(
             Some(&projects),
             Some("/home/alice/workspace/one"),
-            TEST_SESSION, cas_mux::SupervisorCli::Claude);
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
         let expected_path = projects
             .join("-home-alice-workspace-one")
             .join(format!("{TEST_SESSION}.jsonl"));
@@ -8623,7 +8766,9 @@ effort = "high"
         let got = resolve_transcript(
             Some(&projects),
             Some("/home/alice/workspace/one"),
-            TEST_SESSION, cas_mux::SupervisorCli::Claude);
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
         let expected = synthesized_transcript_path("/home/alice/workspace/one", TEST_SESSION);
         assert_eq!(got, TranscriptResolution::Synthesized(expected));
     }
@@ -8639,7 +8784,9 @@ effort = "high"
         let got = resolve_transcript(
             Some(&projects),
             Some("/home/alice/workspace/one"),
-            TEST_SESSION, cas_mux::SupervisorCli::Claude);
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
         match got {
             TranscriptResolution::Ambiguous {
                 mut matches,
@@ -8680,7 +8827,9 @@ effort = "high"
         let got = resolve_transcript(
             Some(&projects),
             Some("/home/usér/projet/café"),
-            TEST_SESSION, cas_mux::SupervisorCli::Claude);
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
         let expected_path = projects
             .join("-home-usér-projet-café")
             .join(format!("{TEST_SESSION}.jsonl"));
@@ -8691,7 +8840,12 @@ effort = "high"
     fn resolve_transcript_no_projects_dir_is_synthesized() {
         // If we can't resolve the home dir (shouldn't happen in practice),
         // the function still returns a usable Synthesized fallback.
-        let got = resolve_transcript(None, Some("/home/alice/x"), TEST_SESSION, cas_mux::SupervisorCli::Claude);
+        let got = resolve_transcript(
+            None,
+            Some("/home/alice/x"),
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
         let expected = synthesized_transcript_path("/home/alice/x", TEST_SESSION);
         assert_eq!(got, TranscriptResolution::Synthesized(expected));
     }
@@ -8702,7 +8856,12 @@ effort = "high"
         // the Synthesized arm carries the placeholder label instead of a
         // reconstructed path.
         let (_tmp, projects) = fake_projects_dir(&[]);
-        let got = resolve_transcript(Some(&projects), None, TEST_SESSION, cas_mux::SupervisorCli::Claude);
+        let got = resolve_transcript(
+            Some(&projects),
+            None,
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
         let expected = synthesized_unknown_clone_path(TEST_SESSION);
         assert_eq!(got, TranscriptResolution::Synthesized(expected));
     }
@@ -8716,9 +8875,7 @@ effort = "high"
     /// on disk (tests pin exact encoding separately); `sessions` is a list
     /// of session-uuid directories to create under it, each populated with
     /// all three Grok files (empty).
-    fn fake_grok_sessions_dir(
-        dirs: &[(&str, &[&str])],
-    ) -> (tempfile::TempDir, std::path::PathBuf) {
+    fn fake_grok_sessions_dir(dirs: &[(&str, &[&str])]) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let sessions = tmp.path().join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -8858,7 +9015,10 @@ effort = "high"
     /// Build `sessions/YYYY/MM/DD/rollout-...jsonl` with a `session_meta`
     /// first line carrying `cwd` — matches Codex CLI's on-disk layout.
     fn fake_codex_sessions_dir(
-        rollouts: &[(&str /* relative path under sessions */, &str /* cwd */)],
+        rollouts: &[(
+            &str, /* relative path under sessions */
+            &str, /* cwd */
+        )],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
         let rollouts = rollouts
             .iter()
@@ -9008,7 +9168,8 @@ effort = "high"
     #[test]
     fn resolve_codex_transcript_matches_by_cwd() {
         let clone = "/home/pippenz/Petrastella/ozer/.cas/worktrees/worker-android";
-        let rel = "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
+        let rel =
+            "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
         let (_tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
         // CAS session id is NOT the rollout UUID — resolution must use cwd.
         let cas_session = "codex-worker-android-2f828ac6-deadbeefcafe";
@@ -9030,7 +9191,8 @@ effort = "high"
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
         let _lock = crate::hooks::test_env_lock();
         let clone = "/home/pippenz/Petrastella/ozer/.cas/worktrees/worker-android";
-        let rel = "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
+        let rel =
+            "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
         let (tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
         let old = std::env::var("CODEX_HOME").ok();
         unsafe {
@@ -9089,11 +9251,7 @@ effort = "high"
         ]);
 
         assert_eq!(
-            resolve_codex_transcript(
-                Some(&sessions),
-                Some(clone),
-                "codex-worker-cas-session",
-            ),
+            resolve_codex_transcript(Some(&sessions), Some(clone), "codex-worker-cas-session",),
             TranscriptResolution::Resolved(sessions.join(worker_rel))
         );
     }
@@ -9125,11 +9283,7 @@ effort = "high"
         ]);
 
         assert_eq!(
-            resolve_codex_transcript(
-                Some(&sessions),
-                Some(clone),
-                "codex-worker-cas-session",
-            ),
+            resolve_codex_transcript(Some(&sessions), Some(clone), "codex-worker-cas-session",),
             TranscriptResolution::Resolved(sessions.join(worker_rel))
         );
     }
@@ -9154,11 +9308,7 @@ effort = "high"
         .unwrap();
 
         assert_eq!(
-            resolve_codex_transcript(
-                Some(&sessions),
-                Some(clone),
-                "codex-worker-cas-session",
-            ),
+            resolve_codex_transcript(Some(&sessions), Some(clone), "codex-worker-cas-session",),
             TranscriptResolution::Resolved(current_rollout),
             "worktree reuse leaves old CLI rollouts at the same cwd; the current worker is the freshest CLI session"
         );
@@ -9222,7 +9372,10 @@ effort = "high"
             Some(&path),
         )
         .expect("the worker rollout mtime is activity evidence");
-        assert!(age <= 5, "activity must track the live worker rollout: {age}");
+        assert!(
+            age <= 5,
+            "activity must track the live worker rollout: {age}"
+        );
         assert!(
             !is_worker_stalled(true, Some(age), 300, false),
             "a worker active seconds ago must not be labelled STALLED"
@@ -9375,7 +9528,10 @@ effort = "high"
             Some(&path),
         )
         .expect("rollout mtime is activity evidence");
-        assert!(age <= 5, "fresh rollout must beat the stale CAS event: {age}");
+        assert!(
+            age <= 5,
+            "fresh rollout must beat the stale CAS event: {age}"
+        );
 
         let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
             &path,
@@ -9408,10 +9564,8 @@ effort = "high"
 
     #[test]
     fn resolve_codex_transcript_synthesized_on_no_match() {
-        let (_tmp, sessions) = fake_codex_sessions_dir(&[(
-            "2026/07/21/rollout-other.jsonl",
-            "/tmp/other",
-        )]);
+        let (_tmp, sessions) =
+            fake_codex_sessions_dir(&[("2026/07/21/rollout-other.jsonl", "/tmp/other")]);
         let clone = "/tmp/missing-worker";
         let cas_session = "codex-worker-x-aaaa";
         let got = resolve_transcript(
@@ -9444,7 +9598,12 @@ effort = "high"
     fn resolve_codex_transcript_no_clone_path_falls_back_to_placeholder() {
         let (_tmp, sessions) = fake_codex_sessions_dir(&[]);
         let session = "codex-worker-x-aaaa";
-        let got = resolve_transcript(Some(&sessions), None, session, cas_mux::SupervisorCli::Codex);
+        let got = resolve_transcript(
+            Some(&sessions),
+            None,
+            session,
+            cas_mux::SupervisorCli::Codex,
+        );
         assert_eq!(
             got,
             TranscriptResolution::Synthesized(synthesized_unknown_codex_clone_path(session))
@@ -9462,9 +9621,7 @@ effort = "high"
             let path = day.join(format!("rollout-{index:04}.jsonl"));
             std::fs::write(
                 path,
-                format!(
-                    r#"{{"type":"session_meta","payload":{{"cwd":"/tmp/worker-{index}"}}}}"#
-                ),
+                format!(r#"{{"type":"session_meta","payload":{{"cwd":"/tmp/worker-{index}"}}}}"#),
             )
             .unwrap();
         }
@@ -10090,9 +10247,8 @@ effort = "high"
         )
         .unwrap();
 
-        let total =
-            read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
-                .expect("Codex token_count event should produce a context reading");
+        let total = read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+            .expect("Codex token_count event should produce a context reading");
         assert_eq!(total, 123_456);
         assert_eq!(context_band(total), "approaching");
     }
@@ -10122,9 +10278,8 @@ effort = "high"
             "fixture must make the old read_to_string path fail at a continuation byte"
         );
 
-        let total =
-            read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
-                .expect("a split UTF-8 code point at the seek boundary must not hide usage");
+        let total = read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+            .expect("a split UTF-8 code point at the seek boundary must not hide usage");
         assert_eq!(total, 123_456);
     }
 
@@ -10444,10 +10599,7 @@ effort = "high"
             "the callout must quantify the gap and name the base: {out}"
         );
 
-        let current = WorkerGitStatus {
-            behind: 0,
-            ..stale
-        };
+        let current = WorkerGitStatus { behind: 0, ..stale };
         assert!(
             !format_worker_git_status(&current).contains("STALE BASE"),
             "an up-to-date worktree must not be flagged"
@@ -10682,8 +10834,7 @@ effort = "high"
 
     #[test]
     fn resolve_worker_clone_path_prefers_existing_metadata_over_convention() {
-        let (_tmp, project) =
-            setup_factory_project_with_worker_worktrees(&["named-a", "named-b"]);
+        let (_tmp, project) = setup_factory_project_with_worker_worktrees(&["named-a", "named-b"]);
         let cas_root = project.join(".cas");
         let meta_path = cas_root.join("worktrees/named-b");
         let mut agent = cas_types::Agent::new_with_role(
@@ -10740,11 +10891,13 @@ effort = "high"
             !msg.contains("missing clone_path metadata"),
             "old skip text must not return: {msg}"
         );
-        assert!(sync_skip_reason_for_clone_resolve(
-            "w1",
-            &WorkerClonePathResolve::Ready(std::path::PathBuf::from("/x"))
-        )
-        .is_none());
+        assert!(
+            sync_skip_reason_for_clone_resolve(
+                "w1",
+                &WorkerClonePathResolve::Ready(std::path::PathBuf::from("/x"))
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -10905,7 +11058,8 @@ mod sync_safety_tests {
 
     #[test]
     fn worker_mid_task_is_skipped_without_force_and_named() {
-        let SyncGate::Refuse(reason) = sync_gate_for_worker("w1", 0, false, Some("cas-1234"), false)
+        let SyncGate::Refuse(reason) =
+            sync_gate_for_worker("w1", 0, false, Some("cas-1234"), false)
         else {
             panic!("rebasing under a working agent needs consent");
         };
@@ -11079,7 +11233,10 @@ mod sync_safety_tests {
             git(&repo, &["stash", "list"]).is_empty(),
             "nothing should have been stashed"
         );
-        assert!(repo.join("upstream.txt").exists(), "sync should have landed");
+        assert!(
+            repo.join("upstream.txt").exists(),
+            "sync should have landed"
+        );
     }
 
     #[test]

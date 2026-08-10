@@ -98,6 +98,12 @@ impl Default for OrchestrationConfig {
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
+    /// Durable, per-task proof/artifact directory. Factory workers may write
+    /// under this root in addition to their worktree. If unset, the hook
+    /// resolves a real-disk fallback under `~/.cas/artifacts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_root: Option<String>,
+
     /// Warn when assigning tasks to workers with stale worktrees
     #[serde(default = "default_true")]
     pub warn_stale_assignment: bool,
@@ -258,6 +264,7 @@ fn default_target_cache_retention_count() -> usize {
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
+            artifacts_root: None,
             warn_stale_assignment: true,
             block_stale_assignment: true,
             stale_threshold_commits: default_stale_threshold(),

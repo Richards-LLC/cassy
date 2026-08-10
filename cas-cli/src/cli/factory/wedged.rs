@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::mcp::tools::service::factory_ops::{
-    resolve_worker_transcript_path, worker_cli_from_agent,
+    resolve_worker_transcript_path, worker_cli_from_agent, worker_scope_paths,
 };
 
 /// Window in which a Claude transcript mtime counts as "recent" — used to
@@ -363,12 +363,14 @@ pub(crate) fn transcript_mtime_age(path: &Path) -> Option<Duration> {
     SystemTime::now().duration_since(mtime).ok()
 }
 
-/// Age since the most recently modified file that `git status --porcelain`
-/// reports as changed under `clone_path` — the "is this worktree actively
-/// being edited" signal (cas-f781 AC c, third corroborating signal
-/// alongside pid liveness and transcript mtime). Only files git considers
-/// dirty are checked, not the whole tree — `.git/objects` and `target/`
-/// churn constantly regardless of real edits and would swamp the signal.
+/// Age since the most recently modified path in the worker's scope — the "is
+/// this worktree actively being edited" signal (cas-f781 AC c, third
+/// corroborating signal alongside pid liveness and transcript mtime). Normal
+/// worktrees use `git status --porcelain`; while `MERGE_HEAD` exists the shared
+/// probe uses the branch's merge-base..HEAD contribution paths, so staged
+/// incoming merge files cannot masquerade as this worker's activity/drift.
+/// `.git/objects` and `target/` churn constantly regardless of real edits and
+/// are never considered.
 ///
 /// cas-c655: also considers the current branch tip (`git log -1 --format=%ct`)
 /// so a worker that just committed/pushed (clean tree, fresh HEAD) still
@@ -390,23 +392,8 @@ pub(crate) fn worktree_recent_edit_age(clone_path: &Path) -> Option<Duration> {
 }
 
 fn worktree_dirty_file_age(clone_path: &Path) -> Option<Duration> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(clone_path)
-        .arg("status")
-        .arg("--porcelain")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut newest: Option<Duration> = None;
-    for line in stdout.lines() {
-        // `git status --porcelain` format: two status columns + a space,
-        // then the path (renames use "old -> new"; take the new side).
-        let Some(rel) = line.get(3..) else { continue };
-        let rel = rel.rsplit(" -> ").next().unwrap_or(rel);
+    for rel in worker_scope_paths(clone_path).ok()? {
         if let Some(age) = transcript_mtime_age(&clone_path.join(rel)) {
             newest = Some(newest.map_or(age, |cur: Duration| cur.min(age)));
         }

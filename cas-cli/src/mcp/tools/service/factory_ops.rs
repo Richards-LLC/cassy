@@ -4507,6 +4507,63 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Paths that belong to the worker's own scope signal.
+///
+/// Ordinarily this is exactly the path list from `git status --porcelain`.
+/// During an unresolved merge, though, Git stages every cleanly merged
+/// incoming path in the index. Those paths belong to the branch being merged
+/// *into* the worker, not to the worker's contribution; treating that index
+/// residue as worker drift caused the cas-7a21 false merge block. In that
+/// state, use the worker branch's committed range from the common merge base
+/// to `HEAD` instead. The index is deliberately not consulted.
+///
+/// This is only a status/drift classifier. Operational safety checks that
+/// decide whether to stash, rebase, or remove a worktree intentionally keep
+/// reading the raw index, because an unfinished merge must never be treated as
+/// safe for those destructive actions.
+pub(crate) fn worker_scope_paths(
+    path: &std::path::Path,
+) -> std::result::Result<Vec<String>, String> {
+    let merge_head_present = run_git(path, &["rev-parse", "--verify", "-q", "MERGE_HEAD"]).is_ok();
+    if merge_head_present {
+        let merge_base = run_git(path, &["merge-base", "HEAD", "MERGE_HEAD"])?;
+        let range = format!("{merge_base}..HEAD");
+        let diff = run_git(path, &["diff", "--name-only", &range])?;
+        return Ok(diff
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect());
+    }
+
+    // `run_git` intentionally trims its text result for scalar Git replies.
+    // Porcelain's leading space is itself a status column, so retain raw stdout
+    // here rather than shifting an unstaged path one byte left.
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| format!("git status --porcelain failed to start: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let status = String::from_utf8_lossy(&output.stdout);
+    Ok(status
+        .lines()
+        .filter_map(|line| {
+            // `git status --porcelain` has two state columns, one separator,
+            // then the path. For a rename, retain the destination path.
+            line.get(3..)
+                .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim().to_owned())
+        })
+        .filter(|path| !path.is_empty())
+        .collect())
+}
+
 /// The integration branch a worker's task will actually be merged into
 /// (cas-5884).
 ///
@@ -6698,7 +6755,8 @@ pub(crate) struct WorkerGitStatus {
     pub behind: usize,
     /// Branch used as the ahead/behind baseline (e.g. "origin/main")
     pub base_branch: String,
-    /// `true` if the working tree has staged or unstaged changes
+    /// `true` if the worker scope has changes: porcelain index state normally,
+    /// or the committed contribution range while a merge is in progress.
     pub dirty: bool,
     /// `"origin/<branch>"` when the branch has been pushed, otherwise `"none"`
     pub pushed_ref: String,
@@ -6780,9 +6838,12 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
     })
     .unwrap_or((0, 0));
 
-    // --- dirty? ---------------------------------------------------------------
-    let dirty = run_git(worktree_path, &["status", "--porcelain"])
-        .map(|s| !s.is_empty())
+    // --- worker scope changes -------------------------------------------------
+    // `MERGE_HEAD` stages clean incoming paths. `worker_scope_paths` switches
+    // to merge-base..HEAD there so another lane's incoming files do not render
+    // as this worker's dirty/drift signal (cas-d04f / cas-7a21).
+    let dirty = worker_scope_paths(worktree_path)
+        .map(|paths| !paths.is_empty())
         .unwrap_or(false);
 
     // --- pushed ref -----------------------------------------------------------
@@ -10883,6 +10944,87 @@ effort = "high"
         assert_eq!(
             status.head_sha, expected_sha,
             "head_sha must match git rev-parse HEAD (full width, cas-ea51)"
+        );
+    }
+
+    fn setup_mid_merge_with_incoming_and_worker_contributions() -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        let path = repo.path();
+        run_git_ok(path, &["init", "-b", "main"]);
+        run_git_ok(path, &["config", "user.email", "test@cas"]);
+        run_git_ok(path, &["config", "user.name", "CAS Test"]);
+
+        std::fs::write(path.join("shared.txt"), "base\n").unwrap();
+        run_git_ok(path, &["add", "."]);
+        run_git_ok(path, &["commit", "-m", "base"]);
+
+        run_git_ok(path, &["checkout", "-b", "factory/m1"]);
+        std::fs::write(path.join("worker-only.rs"), "// m1 contribution\n").unwrap();
+        std::fs::write(path.join("shared.txt"), "m1 side\n").unwrap();
+        run_git_ok(path, &["add", "."]);
+        run_git_ok(path, &["commit", "-m", "m1 contribution"]);
+
+        run_git_ok(path, &["checkout", "main"]);
+        std::fs::write(path.join("incoming-m2.rs"), "// m2 incoming\n").unwrap();
+        std::fs::write(path.join("shared.txt"), "m2 side\n").unwrap();
+        run_git_ok(path, &["add", "."]);
+        run_git_ok(path, &["commit", "-m", "m2 contribution"]);
+
+        run_git_ok(path, &["checkout", "factory/m1"]);
+        let merge = std::process::Command::new("git")
+            .args(["merge", "main"])
+            .current_dir(path)
+            .output()
+            .expect("start conflicting merge");
+        assert!(!merge.status.success(), "fixture merge must conflict");
+        assert!(
+            run_git(path, &["rev-parse", "--verify", "-q", "MERGE_HEAD"]).is_ok(),
+            "fixture must retain MERGE_HEAD"
+        );
+        repo
+    }
+
+    /// cas-d04f: cleanly merged M2 paths are staged during a conflict, but are
+    /// not M1 drift. The status classifier must inspect M1's committed range.
+    #[test]
+    fn merge_head_scope_excludes_staged_incoming_paths() {
+        let repo = setup_mid_merge_with_incoming_and_worker_contributions();
+        let porcelain =
+            run_git(repo.path(), &["status", "--porcelain"]).expect("read fixture porcelain");
+        assert!(
+            porcelain.contains("incoming-m2.rs"),
+            "precondition: Git staged the clean incoming M2 file: {porcelain}"
+        );
+
+        let paths = worker_scope_paths(repo.path()).expect("scope paths");
+        assert!(
+            paths.iter().any(|path| path == "worker-only.rs"),
+            "{paths:?}"
+        );
+        assert!(paths.iter().any(|path| path == "shared.txt"), "{paths:?}");
+        assert!(
+            !paths.iter().any(|path| path == "incoming-m2.rs"),
+            "an incoming staged merge path is not a worker contribution: {paths:?}"
+        );
+    }
+
+    /// The MERGE_HEAD exception must not turn into an all-clear: a real worker
+    /// contribution remains visible to worker-status even while the index is
+    /// full of another lane's cleanly merged files.
+    #[test]
+    fn merge_head_scope_keeps_genuine_worker_contribution_flagged() {
+        let repo = setup_mid_merge_with_incoming_and_worker_contributions();
+        let status = collect_worker_git_status(repo.path());
+        assert!(
+            status.dirty,
+            "worker-only.rs is a real factory/m1 contribution and must remain flagged"
+        );
+        assert!(
+            worker_scope_paths(repo.path())
+                .expect("scope paths")
+                .iter()
+                .any(|path| path == "worker-only.rs"),
+            "the real worker contribution must remain in the contribution diff"
         );
     }
 

@@ -1403,12 +1403,23 @@ fn unsanctioned_factory_path(
         std::path::PathBuf::from(raw_path)
     };
     if !path.is_absolute()
+        || is_non_creation_stream_device(&path)
         || is_harness_session_scratchpad(&path, &input.session_id)
         || sanctioned.iter().any(|root| path.starts_with(root))
     {
         return None;
     }
     Some(path)
+}
+
+/// Shell redirection to these character devices is a stream operation, not
+/// file creation. Keep this exact allowlist narrow: other `/dev` paths remain
+/// subject to the workspace contract.
+fn is_non_creation_stream_device(path: &std::path::Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/dev/null" | "/dev/stdout" | "/dev/stderr" | "/dev/tty")
+    )
 }
 
 #[cfg(test)]

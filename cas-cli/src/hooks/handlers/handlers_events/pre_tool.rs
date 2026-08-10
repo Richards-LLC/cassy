@@ -1107,23 +1107,147 @@ fn factory_unsanctioned_write_path(
             .and_then(|value| value.as_str()),
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            if !(command.contains('>')
-                || command.contains(" tee ")
-                || command.contains("touch ")
-                || command.contains("mkdir ")
-                || command.contains("cp ")
-                || command.contains("mv "))
-            {
-                return None;
-            }
-            command
-                .split_whitespace()
-                .map(|token| token.trim_matches(|c| matches!(c, '\'' | '\"' | '(' | ')' | ';')))
-                .find(|token| token.starts_with('/') || token.starts_with("~/") || token.starts_with("$HOME/"))
+            return bash_write_targets(command)
+                .into_iter()
+                .find_map(|raw_path| {
+                    unsanctioned_factory_path(input, configured_artifacts_root, &raw_path)
+                });
         }
         _ => return None,
     }?;
 
+    unsanctioned_factory_path(input, configured_artifacts_root, raw_path)
+}
+
+/// Identify shell words that are actual output targets, without treating every
+/// path-shaped argument as a write. This deliberately handles only the small
+/// set of write forms guarded by the factory workspace contract; unrecognised
+/// shell syntax is left to the shell rather than guessed at.
+fn bash_write_targets(command: &str) -> Vec<String> {
+    let tokens = shell_tokens(command);
+    let mut targets = Vec::new();
+    let mut index = 0;
+    let mut command_position = true;
+
+    while index < tokens.len() {
+        if is_shell_boundary(&tokens[index]) {
+            command_position = true;
+            index += 1;
+            continue;
+        }
+        if command_position
+            && (tokens[index].starts_with('-')
+                || tokens[index].contains('=')
+                || matches!(tokens[index].as_str(), "command" | "env" | "sudo"))
+        {
+            index += 1;
+            continue;
+        }
+        match tokens[index].as_str() {
+            ">" | ">>" => {
+                if let Some(target) = tokens
+                    .get(index + 1)
+                    .filter(|token| !is_shell_boundary(token))
+                {
+                    targets.push(target.clone());
+                }
+            }
+            "tee" | "touch" | "mkdir" if command_position => {
+                for token in tokens.iter().skip(index + 1) {
+                    if is_shell_boundary(token) {
+                        break;
+                    }
+                    if !token.starts_with('-') {
+                        targets.push(token.clone());
+                    }
+                }
+            }
+            "cp" | "mv" if command_position => {
+                let operands: Vec<_> = tokens
+                    .iter()
+                    .skip(index + 1)
+                    .take_while(|token| !is_shell_boundary(token))
+                    .filter(|token| !token.starts_with('-'))
+                    .collect();
+                if let Some(destination) = operands.last() {
+                    targets.push((*destination).clone());
+                }
+            }
+            _ => {}
+        }
+        if command_position && !matches!(tokens[index].as_str(), ">" | ">>") {
+            command_position = false;
+        }
+        index += 1;
+    }
+
+    targets
+}
+
+/// Tokenize just enough POSIX shell syntax to distinguish operators from
+/// quoted content. In particular, `">"` is a word, never a redirect.
+fn shell_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    let mut chars = command.chars().peekable();
+
+    let flush = |tokens: &mut Vec<String>, current: &mut String| {
+        if !current.is_empty() {
+            tokens.push(std::mem::take(current));
+        }
+    };
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if !single_quoted => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            '\'' if !double_quoted => single_quoted = !single_quoted,
+            '\"' if !single_quoted => double_quoted = !double_quoted,
+            ch if ch.is_whitespace() && !single_quoted && !double_quoted => {
+                flush(&mut tokens, &mut current)
+            }
+            '>' if !single_quoted && !double_quoted => {
+                flush(&mut tokens, &mut current);
+                let redirect = if chars.next_if_eq(&'>').is_some() {
+                    ">>"
+                } else {
+                    ">"
+                };
+                tokens.push(redirect.to_string());
+            }
+            ';' | '|' if !single_quoted && !double_quoted => {
+                flush(&mut tokens, &mut current);
+                tokens.push(ch.to_string());
+            }
+            '&' if !single_quoted && !double_quoted => {
+                flush(&mut tokens, &mut current);
+                if chars.next_if_eq(&'&').is_some() {
+                    tokens.push("&&".to_string());
+                } else {
+                    tokens.push("&".to_string());
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    flush(&mut tokens, &mut current);
+    tokens
+}
+
+fn is_shell_boundary(token: &str) -> bool {
+    matches!(token, ";" | "|" | "&&" | "&")
+}
+
+fn unsanctioned_factory_path(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    raw_path: &str,
+) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
         home.as_ref()?.join(suffix)
@@ -1146,6 +1270,65 @@ fn factory_unsanctioned_write_path(
         }
     }
     (!sanctioned.iter().any(|root| path.starts_with(root))).then_some(path)
+}
+
+#[cfg(test)]
+mod workspace_contract_tests {
+    use super::*;
+    use crate::test_support::TestEnvGuard;
+
+    fn bash_input(command: &str, cwd: &Path) -> HookInput {
+        HookInput {
+            cwd: cwd.to_string_lossy().to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn home_paths_in_read_only_commands_are_not_write_targets() {
+        for command in [
+            r#"printenv CLAUDE_CONFIG_DIR || echo "unset - using default ~/.claude""#,
+            "grep -n claude ~/.zshrc | head",
+            "file ~/.local/bin/claude; head -c 400 ~/.local/bin/claude | strings | head",
+            "echo cp ~/.zshrc",
+        ] {
+            assert!(
+                bash_write_targets(command).is_empty(),
+                "read-only command must not identify a write target: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_redirect_character_is_not_a_redirect() {
+        assert!(bash_write_targets(r#"echo "a > ~/.claude""#).is_empty());
+    }
+
+    #[test]
+    fn actual_write_destinations_still_resolve_to_unsanctioned_paths() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("worktree");
+        let mut env = TestEnvGuard::with_optional_vars(&[("HOME", None)]);
+        env.set("HOME", home.path());
+
+        for (command, expected) in [
+            ("echo hi > ~/stray", "stray"),
+            ("cp source ~/copy", "copy"),
+            ("mv source ~/moved", "moved"),
+            ("tee ~/captured", "captured"),
+            ("touch ~/touched", "touched"),
+            ("mkdir ~/created", "created"),
+        ] {
+            let input = bash_input(command, cwd.path());
+            assert_eq!(
+                factory_unsanctioned_write_path(&input, &None),
+                Some(home.path().join(expected)),
+                "write must remain guarded: {command}"
+            );
+        }
+    }
 }
 
 /// Whether `tool_name`/`action` is one of the CODEMAP-freshness-gated calls

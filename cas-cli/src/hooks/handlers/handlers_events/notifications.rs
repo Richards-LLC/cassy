@@ -349,6 +349,16 @@ pub fn handle_pre_compact(
     // errors are swallowed inside flush_worker_findings_to_task; compaction is
     // never blocked regardless of flush outcome.
     flush_worker_findings_to_task(input, cas_root);
+    // Claude is the only harness that currently emits an imminent-compaction
+    // hook. Record the handoff before its context is replaced; Codex/Grok
+    // retain the explicit worker checkpoint protocol in their worker guidance.
+    match checkpoint_worker_before_compaction(input, cas_root) {
+        Ok(Some(checkpoint)) => context_parts.push(checkpoint),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("cas: PreCompact checkpoint: {error} (ignored, compaction proceeds)");
+        }
+    }
 
     if context_parts.is_empty() {
         return Ok(HookOutput::empty());
@@ -437,6 +447,85 @@ pub(crate) fn resolve_worker_active_task(
         .find(|t| t.status == TaskStatus::InProgress)
         .map(|t| t.id.clone());
     Ok(active_task_id)
+}
+
+/// Persist the minimal handoff that lets a factory worker resume after
+/// Claude's `PreCompact` hook, and queue the matching non-disruptive notice
+/// for its supervisor.  This intentionally uses the existing agent metadata
+/// and prompt queue rather than creating a compaction-specific store.
+///
+/// Other harnesses do not expose a mechanically detectable pre-compaction
+/// event, so this function is deliberately invoked only from `PreCompact`.
+pub(crate) fn checkpoint_worker_before_compaction(
+    input: &HookInput,
+    cas_root: &Path,
+) -> Result<Option<String>, MemError> {
+    use std::process::Command;
+
+    let agent_store = open_agent_store(cas_root)?;
+    let mut agent = match agent_store.get(&input.session_id) {
+        Ok(agent) if agent.role == crate::types::AgentRole::Worker => agent,
+        Ok(_) | Err(_) => return Ok(None),
+    };
+    let Some(task_id) = resolve_worker_active_task(&input.session_id, cas_root)? else {
+        return Ok(None);
+    };
+
+    let cwd = input.cwd.trim();
+    let branch = if cwd.is_empty() {
+        "unknown".to_string()
+    } else {
+        Command::new("git")
+            .args(["-C", cwd, "branch", "--show-current"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let intent = "resume active task after context compaction";
+    agent.metadata.insert(
+        "context_checkpoint_state".to_string(),
+        "compacting".to_string(),
+    );
+    agent
+        .metadata
+        .insert("context_checkpoint_task_id".to_string(), task_id.clone());
+    agent
+        .metadata
+        .insert("context_checkpoint_branch".to_string(), branch.clone());
+    agent
+        .metadata
+        .insert("context_checkpoint_cwd".to_string(), cwd.to_string());
+    agent
+        .metadata
+        .insert("context_checkpoint_intent".to_string(), intent.to_string());
+    agent.metadata.insert(
+        "context_checkpoint_at".to_string(),
+        chrono::Utc::now().to_rfc3339(),
+    );
+    agent_store.update(&agent)?;
+
+    let message = format!(
+        "compacting, will resume task {task_id} on branch {branch}. Checkpoint: cwd={}, intent={intent}.",
+        if cwd.is_empty() { "unknown" } else { cwd }
+    );
+    crate::store::open_prompt_queue_store(cas_root)?.enqueue_with_summary(
+        &agent.name,
+        "supervisor",
+        &message,
+        agent.factory_session.as_deref(),
+        Some("worker compacting"),
+    )?;
+    Ok(Some(format!(
+        "\n## Factory Compaction Checkpoint\n\
+         You are resuming task `{task_id}` on branch `{branch}`.\n\
+         Working directory: `{}`\n\
+         Intent: {intent}.\n\
+         Before starting any other task, continue this assigned task and read its CAS task record.",
+        if cwd.is_empty() { "unknown" } else { cwd }
+    )))
 }
 
 /// Maximum findings written per flush (bounds note size).
@@ -534,8 +623,8 @@ pub(crate) fn write_findings_note(
 #[cfg(test)]
 mod pre_compact_flush_tests {
     use super::*;
-    use crate::store::{init_cas_dir, open_task_store};
-    use crate::types::{Task, TaskStatus};
+    use crate::store::{init_cas_dir, open_agent_store, open_prompt_queue_store, open_task_store};
+    use crate::types::{Agent, AgentRole, Task, TaskStatus};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -559,6 +648,87 @@ mod pre_compact_flush_tests {
         let mut task = Task::new(task_id.to_string(), "B4 test task".to_string());
         task.status = TaskStatus::InProgress;
         store.add(&task).expect("task.add");
+    }
+
+    #[test]
+    fn pre_compact_checkpoint_notifies_supervisor_and_persists_resume_state() {
+        let cas = setup_cas();
+        let task_id = "cas-41c28-test";
+        add_inprogress_task(&cas.root, task_id);
+
+        let agent_store = open_agent_store(&cas.root).expect("agent store");
+        let mut worker = Agent::new("compact-session".to_string(), "compact-worker".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-compact-test".to_string());
+        agent_store.register(&worker).expect("register worker");
+        agent_store
+            .try_claim(task_id, &worker.id, 600, Some("test compaction"))
+            .expect("claim active task");
+
+        let input = HookInput {
+            session_id: worker.id.clone(),
+            cwd: "/tmp/compact-worktree".to_string(),
+            hook_event_name: "PreCompact".to_string(),
+            ..Default::default()
+        };
+
+        let output = handle_pre_compact(&input, Some(&cas.root))
+            .expect("pre-compaction hook must succeed");
+        let resume_context = output
+            .system_message
+            .expect("an active worker task needs resume context");
+        assert!(resume_context.contains("cas-41c28-test"));
+        assert!(resume_context.contains("resume active task"));
+
+        let persisted = agent_store.get(&worker.id).expect("read worker checkpoint");
+        assert_eq!(
+            persisted
+                .metadata
+                .get("context_checkpoint_state")
+                .map(String::as_str),
+            Some("compacting")
+        );
+        assert_eq!(
+            persisted
+                .metadata
+                .get("context_checkpoint_task_id")
+                .map(String::as_str),
+            Some(task_id)
+        );
+        assert_eq!(
+            persisted
+                .metadata
+                .get("context_checkpoint_cwd")
+                .map(String::as_str),
+            Some("/tmp/compact-worktree")
+        );
+        assert!(
+            persisted
+                .metadata
+                .get("context_checkpoint_branch")
+                .is_some_and(|branch| !branch.is_empty()),
+            "checkpoint must record a resume branch: {:?}",
+            persisted.metadata
+        );
+        assert_eq!(
+            persisted
+                .metadata
+                .get("context_checkpoint_intent")
+                .map(String::as_str),
+            Some("resume active task after context compaction")
+        );
+
+        let queue = open_prompt_queue_store(&cas.root).expect("prompt queue");
+        let messages = queue
+            .peek_for_targets(&["supervisor"], Some("factory-compact-test"), 10)
+            .expect("supervisor queue");
+        assert_eq!(messages.len(), 1, "one compaction notice must be queued");
+        assert!(
+            messages[0]
+                .prompt
+                .contains("compacting, will resume task cas-41c28-test")
+        );
+        assert!(messages[0].prompt.contains("on branch"));
     }
 
     // -------------------------------------------------------------------------

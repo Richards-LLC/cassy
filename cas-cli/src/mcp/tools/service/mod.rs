@@ -482,7 +482,10 @@ impl CasService {
                     Some(&["action", "id", "all", "orphans", "dry_run", "force"])
                 }
                 "worktree_merge" => {
-                    Some(&["action", "id", "force", "allow_trunk", "cleanup"])
+                    // `task_id` binds a delivery merge to its immutable task
+                    // receipt and is consumed by target resolution. It is not
+                    // an incidental task-domain field.
+                    Some(&["action", "id", "task_id", "force", "allow_trunk", "cleanup"])
                 }
                 _ => None,
             };

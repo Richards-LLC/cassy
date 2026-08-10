@@ -24,6 +24,13 @@ use crate::ui::factory::notification::Notifier;
 use crate::ui::theme::ActiveTheme;
 use crate::worktree::{WorktreeConfig, WorktreeManager};
 
+/// Session captured by the legacy daemon before [`FactoryApp::new`] spawns
+/// its initial PTYs.  The fork-first path supplies this directly, but the
+/// legacy subprocess establishes it through the daemon environment.
+fn factory_session_for_mux() -> Option<String> {
+    std::env::var("CAS_FACTORY_SESSION").ok()
+}
+
 impl FactoryApp {
     /// Create a new factory app with the given configuration.
     pub fn new(config: FactoryConfig) -> anyhow::Result<Self> {
@@ -164,7 +171,7 @@ impl FactoryApp {
         let mux_config = MuxConfig {
             cwd: config.cwd.clone(),
             cas_root: cas_root_for_mux,
-            factory_session: None,
+            factory_session: factory_session_for_mux(),
             worker_cwds,
             workers: worker_names.len(),
             worker_names: worker_names.clone(),
@@ -696,6 +703,55 @@ impl FactoryApp {
             mc_activity_area: Rect::default(),
             full_pane_hyperlinks: new_hyperlink_map(),
             compact_pane_hyperlinks: new_hyperlink_map(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cas_mux::SupervisorCli;
+
+    fn env_value<'a>(config: &'a cas_mux::PtyConfig, key: &str) -> Option<&'a str> {
+        config
+            .env
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn legacy_daemon_session_reaches_factory_app_mux_config_before_spawn() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "legacy-codex\"session\nwith-newline",
+        )]);
+        let config = MuxConfig {
+            cwd: PathBuf::from("/tmp/cas-legacy-session-test"),
+            workers: 1,
+            worker_names: vec!["legacy-codex-worker".to_string()],
+            supervisor_name: "legacy-codex-supervisor".to_string(),
+            factory_session: factory_session_for_mux(),
+            include_director: false,
+            supervisor_cli: SupervisorCli::Codex,
+            worker_cli: SupervisorCli::Codex,
+            ..MuxConfig::default()
+        };
+
+        for (name, pty_config) in Mux::factory_pane_configs(&config) {
+            assert_eq!(
+                env_value(&pty_config, "CAS_FACTORY_SESSION"),
+                Some("legacy-codex\"session\nwith-newline"),
+                "{name} PTY must inherit the legacy factory session"
+            );
+            assert!(
+                pty_config.args.contains(
+                    &"mcp_servers.cs.env.CAS_FACTORY_SESSION=\"legacy-codex_session_with-newline\""
+                        .to_string()
+                ),
+                "{name} Codex cs MCP env must receive the legacy factory session; args={:?}",
+                pty_config.args
+            );
         }
     }
 }

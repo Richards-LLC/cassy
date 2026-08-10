@@ -2,12 +2,18 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn cas_cmd(home: &std::path::Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let path = std::env::join_paths(std::iter::once(home.join("bin")).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
     cmd.env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".xdg"))
+        .env("PATH", path)
         .env_remove("CAS_ROOT")
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
@@ -18,8 +24,33 @@ fn home_with_profiles() -> TempDir {
     let home = TempDir::new().unwrap();
     let alt = home.path().join(".claude-alt");
     std::fs::create_dir_all(&alt).unwrap();
-    std::fs::write(alt.join(".credentials.json"), "{}").unwrap();
     std::fs::create_dir_all(home.path().join(".claude-work")).unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        r#"#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  case "$CLAUDE_SECURESTORAGE_CONFIG_DIR" in
+    *".claude-alt") printf '%s\n' '{"loggedIn":true}' ;;
+    *) printf '%s\n' '{"loggedIn":false}' ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "login" ]; then
+  printf 'LOGIN_CONFIG=%s\n' "$CLAUDE_CONFIG_DIR"
+  printf 'LOGIN_SECURE_STORAGE=%s\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
+  printf 'LOGIN_ARGS=%s\n' "$*"
+  exit 0
+fi
+exit 0
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&claude).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&claude, permissions).unwrap();
     home
 }
 
@@ -128,6 +159,39 @@ fn help_documents_profile_and_factory_passthrough() {
         .success()
         .stdout(predicate::str::contains("supervisor"))
         .stdout(predicate::str::contains("PROFILE"))
+        .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("--list-profiles"))
         .stdout(predicate::str::contains("--bare"));
+}
+
+#[test]
+fn login_subcommand_binds_auth_flow_to_named_profile() {
+    let home = home_with_profiles();
+
+    cas_cmd(home.path())
+        .args(["claude", "login", "alt", "--email", "alt@example.com"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("LOGIN_CONFIG=").and(predicate::str::contains(".claude-alt")),
+        )
+        .stdout(
+            predicate::str::contains("LOGIN_SECURE_STORAGE=")
+                .and(predicate::str::contains(".claude-alt")),
+        )
+        .stdout(predicate::str::contains(
+            "LOGIN_ARGS=auth login --email alt@example.com",
+        ));
+}
+
+#[test]
+fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
+    let home = home_with_profiles();
+
+    cas_cmd(home.path())
+        .args(["claude", "login", "main"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("LOGIN_CONFIG=\n"))
+        .stdout(predicate::str::contains("LOGIN_SECURE_STORAGE=\n"));
 }

@@ -224,6 +224,91 @@ async fn team_itemized_rejection_syncs_owned_row_and_names_scope_mismatch() {
     }));
 }
 
+/// Regression for the production 14/17 team response. The server's aggregate
+/// skip count includes stale/no-op writes that intentionally have no rejection
+/// detail; only the 14 named scope collisions should remain failed.
+#[tokio::test]
+async fn team_itemized_rejection_subset_settles_unrejected_rows_for_fourteen_of_seventeen() {
+    let server = MockServer::start().await;
+    let rejected_ids = [
+        "cas-bcf5", "cas-f21c", "cas-ff65", "cas-2327", "cas-058e", "cas-b4bb", "cas-607a",
+        "cas-1a4e", "cas-5793", "cas-545e", "cas-0f08", "cas-9f43", "cas-fa64", "cas-4fa4",
+    ];
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "tasks": {
+                    "inserted": 0,
+                    "updated": 0,
+                    "skipped": 17,
+                    "rejected": rejected_ids.map(|id| serde_json::json!({
+                        "id": id,
+                        "reason": "scope_mismatch",
+                        "existing_canonical_id": "cas-src",
+                    })),
+                }
+            },
+            "canonical_id": "cas-src",
+            "git_remote": "github.com/pippenz/cas"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    let all_ids = rejected_ids
+        .into_iter()
+        .map(str::to_string)
+        .chain((0..3).map(|index| format!("cas-team-owned-{index:02}")))
+        .collect::<Vec<_>>();
+    for id in &all_ids {
+        queue
+            .enqueue_for_team(
+                EntityType::Task,
+                id,
+                SyncOperation::Upsert,
+                Some(&serde_json::json!({"id": id, "title": id}).to_string()),
+                TEST_TEAM,
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig {
+            max_retries: 1,
+            ..Default::default()
+        },
+    );
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .expect("team push should return an itemized result");
+
+    assert_eq!(result.pushed_tasks, 3);
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| !error.contains("invalid itemized rejections")),
+        "valid subset itemization must not fail the whole team batch: {result:?}"
+    );
+    let remaining = queue.list_all(50).unwrap();
+    assert_eq!(remaining.len(), 14, "the three benign skips must settle");
+    assert_eq!(queue.stats(1).unwrap().failed, 14);
+    for item in remaining {
+        assert!(rejected_ids.contains(&item.entity_id.as_str()));
+        assert!(item.last_error.as_deref().is_some_and(|error| {
+            error.contains("scope_mismatch")
+                && error.contains("existing canonical project: cas-src")
+        }));
+    }
+}
+
 /// No team configured → early return, zero HTTP traffic, `Ok(())`.
 #[tokio::test]
 async fn team_push_no_op_when_no_team_configured() {

@@ -213,6 +213,85 @@ async fn itemized_rejection_syncs_owned_row_and_names_project_mismatch() {
     }));
 }
 
+/// Regression for the production 6/20 response: `skipped` includes benign
+/// stale/no-op rows while `rejected` only names genuine identity collisions.
+#[tokio::test]
+async fn itemized_rejection_subset_settles_unrejected_rows_for_six_of_twenty() {
+    let server = MockServer::start().await;
+    let rejected_ids = [
+        "cas-8284", "cas-03eb", "cas-3a9b", "cas-0a35", "cas-e225", "cas-b131",
+    ];
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {
+                "inserted": 0,
+                "updated": 0,
+                "skipped": 20,
+                "rejected": rejected_ids.map(|id| serde_json::json!({
+                    "id": id,
+                    "reason": "scope_mismatch",
+                    "existing_canonical_id": "cas-src",
+                })),
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = SyncQueue::open(tmp.path()).unwrap();
+    queue.init().unwrap();
+    let all_ids = rejected_ids
+        .into_iter()
+        .map(str::to_string)
+        .chain((0..14).map(|index| format!("cas-owned-{index:02}")))
+        .collect::<Vec<_>>();
+    for id in &all_ids {
+        queue
+            .enqueue(
+                EntityType::Task,
+                id,
+                SyncOperation::Upsert,
+                Some(&entry_payload(id)),
+            )
+            .unwrap();
+    }
+
+    let mut cfg = make_cloud_config(server.uri());
+    cfg.team_id = None;
+    let syncer = CloudSyncer::new(
+        Arc::new(queue),
+        cfg,
+        CloudSyncerConfig {
+            max_retries: 1,
+            ..Default::default()
+        },
+    );
+    let (result, syncer) = tokio::task::spawn_blocking(move || (syncer.push(), syncer))
+        .await
+        .unwrap();
+    let result = result.expect("push should return an itemized result");
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| !error.contains("invalid itemized rejections")),
+        "valid subset itemization must not fail the whole batch: {result:?}"
+    );
+    let remaining = syncer.queue().list_all(50).unwrap();
+    assert_eq!(remaining.len(), 6, "the 14 benign skips must settle");
+    assert_eq!(syncer.queue().stats(1).unwrap().failed, 6);
+    for item in remaining {
+        assert!(rejected_ids.contains(&item.entity_id.as_str()));
+        assert!(item.last_error.as_deref().is_some_and(|error| {
+            error.contains("scope_mismatch")
+                && error.contains("existing canonical project: cas-src")
+        }));
+    }
+}
+
 /// Backward-compatibility guard: an older cloud build that does not yet
 /// emit `skipped` must still trigger the legacy mark-synced path. This
 /// keeps existing happy-path pushes unchanged while the server-side

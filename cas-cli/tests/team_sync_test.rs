@@ -110,7 +110,7 @@ async fn team_push_drains_queue_when_team_configured() {
 }
 
 #[tokio::test]
-async fn team_push_nested_skip_response_leaves_queue_pending() {
+async fn team_push_nested_skip_response_becomes_visible_failed_queue_item() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
@@ -121,7 +121,7 @@ async fn team_push_nested_skip_response_leaves_queue_pending() {
             "canonical_id": "cas-src",
             "git_remote": "github.com/pippenz/cas"
         })))
-        .expect(1)
+        .expect(5)
         .mount(&server)
         .await;
 
@@ -130,10 +130,15 @@ async fn team_push_nested_skip_response_leaves_queue_pending() {
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     let syncer = CloudSyncer::new(queue.clone(), cfg, CloudSyncerConfig::default());
 
-    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
-        .await
-        .unwrap()
-        .expect("team push should return a retryable result");
+    let (results, queue) = tokio::task::spawn_blocking(move || {
+        let results = (0..5)
+            .map(|_| syncer.push_team(TEST_TEAM).expect("team push should return a result"))
+            .collect::<Vec<_>>();
+        (results, queue)
+    })
+    .await
+    .unwrap();
+    let result = &results[0];
 
     assert_eq!(result.pushed_entries, 0);
     assert!(
@@ -144,18 +149,24 @@ async fn team_push_nested_skip_response_leaves_queue_pending() {
         "skip must be surfaced: {:?}",
         result.errors
     );
-    assert_eq!(
-        queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().len(),
-        1,
-        "server-skipped team rows must remain pending"
-    );
-    let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
+    assert_eq!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().len(), 0);
+    assert_eq!(queue.stats(5).unwrap().failed, 1);
+    let items = queue.list_all(10).unwrap();
     assert!(
-        pending[0]
+        items[0]
             .last_error
             .as_deref()
             .is_some_and(|diagnostic| diagnostic.contains("cloud skipped 1 of 1 team entries")),
-        "queue output must expose why this retryable team row is retained: {pending:?}"
+        "queue output must expose why this team row failed: {items:?}"
+    );
+    assert!(
+        items[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| {
+                diagnostic.contains("server response:") && diagnostic.contains("\"synced\"")
+            }),
+        "queue output must preserve the raw team server response: {items:?}"
     );
 }
 

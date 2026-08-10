@@ -1221,7 +1221,11 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     tokens
 }
 
-fn factory_shell_write_targets(command: &str) -> Vec<String> {
+/// Identify shell words that are actual output targets, without treating every
+/// path-shaped argument as a write. This deliberately handles only the small
+/// set of write forms guarded by the factory workspace contract; unrecognised
+/// shell syntax is left to the shell rather than guessed at.
+fn bash_write_targets(command: &str) -> Vec<String> {
     let tokens = factory_shell_tokens(command);
     let mut targets = Vec::new();
 
@@ -1254,6 +1258,16 @@ fn factory_shell_write_targets(command: &str) -> Vec<String> {
             }
             ShellToken::Operator(_) => index += 1,
             ShellToken::Word(command) if command_position => {
+                // Shell prefixes do not occupy command position: `env X=1
+                // touch /tmp/x`, `sudo touch /tmp/x`, and `command touch
+                // /tmp/x` still execute the creation command that follows.
+                if command.starts_with('-')
+                    || command.contains('=')
+                    || matches!(command.as_str(), "command" | "env" | "sudo")
+                {
+                    index += 1;
+                    continue;
+                }
                 command_position = false;
                 let command = std::path::Path::new(command)
                     .file_name()
@@ -1355,11 +1369,21 @@ fn factory_unsanctioned_write_path(
             .unwrap_or_default(),
         "Bash" => {
             let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            factory_shell_write_targets(command)
+            bash_write_targets(command)
         }
         _ => return None,
     };
 
+    raw_paths
+        .into_iter()
+        .find_map(|raw_path| unsanctioned_factory_path(input, configured_artifacts_root, &raw_path))
+}
+
+fn unsanctioned_factory_path(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    raw_path: &str,
+) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut sanctioned = vec![std::path::PathBuf::from(&input.cwd)];
     sanctioned.push(resolved_factory_artifacts_root(
@@ -1371,22 +1395,92 @@ fn factory_unsanctioned_write_path(
         }
     }
 
-    raw_paths.into_iter().find_map(|raw_path| {
-        let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
-            home.as_ref()?.join(suffix)
-        } else if let Some(suffix) = raw_path.strip_prefix("$HOME/") {
-            home.as_ref()?.join(suffix)
-        } else {
-            std::path::PathBuf::from(raw_path)
-        };
-        if !path.is_absolute()
-            || is_harness_session_scratchpad(&path, &input.session_id)
-            || sanctioned.iter().any(|root| path.starts_with(root))
-        {
-            return None;
+    let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
+        home.as_ref()?.join(suffix)
+    } else if let Some(suffix) = raw_path.strip_prefix("$HOME/") {
+        home.as_ref()?.join(suffix)
+    } else {
+        std::path::PathBuf::from(raw_path)
+    };
+    if !path.is_absolute()
+        || is_harness_session_scratchpad(&path, &input.session_id)
+        || sanctioned.iter().any(|root| path.starts_with(root))
+    {
+        return None;
+    }
+    Some(path)
+}
+
+#[cfg(test)]
+mod workspace_contract_tests {
+    use super::*;
+    use crate::test_support::TestEnvGuard;
+
+    fn bash_input(command: &str, cwd: &Path) -> HookInput {
+        HookInput {
+            cwd: cwd.to_string_lossy().to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            ..Default::default()
         }
-        Some(path)
-    })
+    }
+
+    #[test]
+    fn home_paths_in_read_only_commands_are_not_write_targets() {
+        for command in [
+            r#"printenv CLAUDE_CONFIG_DIR || echo "unset - using default ~/.claude""#,
+            "grep -n claude ~/.zshrc | head",
+            "file ~/.local/bin/claude; head -c 400 ~/.local/bin/claude | strings | head",
+            "echo cp ~/.zshrc",
+        ] {
+            assert!(
+                bash_write_targets(command).is_empty(),
+                "read-only command must not identify a write target: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_redirect_character_is_not_a_redirect() {
+        assert!(bash_write_targets(r#"echo "a > ~/.claude""#).is_empty());
+    }
+
+    #[test]
+    fn merged_parser_keeps_both_sides_fail_closed_write_forms() {
+        let targets = bash_write_targets(
+            "env MODE=test touch /tmp/from-env && printf proof >> /tmp/append-log; (/usr/bin/mkdir /tmp/from-path)",
+        );
+        for target in ["/tmp/from-env", "/tmp/append-log", "/tmp/from-path"] {
+            assert!(
+                targets.iter().any(|actual| actual == target),
+                "merged parser must retain guarded target {target:?}: {targets:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_write_destinations_still_resolve_to_unsanctioned_paths() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("worktree");
+        let mut env = TestEnvGuard::with_optional_vars(&[("HOME", None)]);
+        env.set("HOME", home.path());
+
+        for (command, expected) in [
+            ("echo hi > ~/stray", "stray"),
+            ("cp source ~/copy", "copy"),
+            ("mv source ~/moved", "moved"),
+            ("tee ~/captured", "captured"),
+            ("touch ~/touched", "touched"),
+            ("mkdir ~/created", "created"),
+        ] {
+            let input = bash_input(command, cwd.path());
+            assert_eq!(
+                factory_unsanctioned_write_path(&input, &None),
+                Some(home.path().join(expected)),
+                "write must remain guarded: {command}"
+            );
+        }
+    }
 }
 
 /// Whether `tool_name`/`action` is one of the CODEMAP-freshness-gated calls

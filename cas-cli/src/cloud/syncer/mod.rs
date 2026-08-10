@@ -502,6 +502,8 @@ struct TeamPushResponse {
     /// adopt `canonical_id`, so a shared machine is never silently re-homed.
     #[serde(default)]
     git_remote: Option<String>,
+    #[serde(skip)]
+    raw_body: String,
 }
 
 /// Response shape from the personal push endpoint (`POST /api/sync/push`).
@@ -521,8 +523,9 @@ struct TeamPushResponse {
 /// excluded count per entity type and surfaces it here so the client can:
 ///
 /// 1. Emit a structured warning to ops/users.
-/// 2. Leave the affected local queue items un-marked-synced so they remain
-///    retryable instead of being silently dropped from the local sync queue.
+/// 2. Leave the affected local queue items un-marked-synced, record the raw
+///    response, and consume their bounded retry budget instead of silently
+///    dropping or retrying them forever.
 ///
 /// Both the proposed top-level map and the live per-entity result objects are
 /// accepted so the wire format can evolve without silently losing skips.
@@ -541,6 +544,8 @@ pub(crate) struct PushResponse {
     /// Flattening preserves that shape alongside the older top-level map.
     #[serde(flatten)]
     pub fields: HashMap<String, serde_json::Value>,
+    #[serde(skip)]
+    pub raw_body: String,
 }
 
 impl PushResponse {

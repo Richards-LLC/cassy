@@ -517,6 +517,38 @@ fn test_poison_head_doesnt_block_queue() {
     );
 }
 
+/// Terminal rows preserve their server diagnostic when an operator explicitly
+/// requeues them after the remote rejection has been repaired.
+#[test]
+fn test_retry_failed_requeues_without_erasing_diagnostic() {
+    let (_temp, queue) = create_test_queue();
+    const MAX_RETRIES: i32 = 5;
+    queue
+        .enqueue(
+            EntityType::Task,
+            "task-server-collision",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"task-server-collision"}"#),
+        )
+        .unwrap();
+    let id = queue.pending(10, MAX_RETRIES).unwrap()[0].id;
+    for _ in 0..MAX_RETRIES {
+        queue
+            .mark_failed(id, r#"server response: {"tasks":{"skipped":1}}"#)
+            .unwrap();
+    }
+
+    assert_eq!(queue.stats(MAX_RETRIES).unwrap().failed, 1);
+    assert_eq!(queue.retry_failed(MAX_RETRIES).unwrap(), 1);
+    let retried = queue.pending(10, MAX_RETRIES).unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].retry_count, 0);
+    assert_eq!(
+        retried[0].last_error.as_deref(),
+        Some(r#"server response: {"tasks":{"skipped":1}}"#)
+    );
+}
+
 /// AC4: A row with team_id=NULL (inserted by an older code path that did not
 /// normalise the personal-queue sentinel) must coalesce with a new personal-
 /// queue enqueue (team_id='') instead of creating a duplicate.

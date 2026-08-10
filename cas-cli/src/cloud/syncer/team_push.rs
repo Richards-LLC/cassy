@@ -213,14 +213,22 @@ impl CloudSyncer {
                         self.maybe_adopt_team_canonical_id(body);
                     }
 
+                    let raw_response = response
+                        .as_ref()
+                        .map_or("", |body| body.raw_body.as_str());
                     let (accepted, skipped) = match response.as_ref() {
                         Some(body) => match Self::team_counts_for(body, entity_key) {
                             Ok(Some(counts)) => counts,
                             Ok(None) => (sent_count, 0),
                             Err(error) => {
-                                errors.push(format!(
-                                    "{entity_key} push returned an unrecognized count/skip signal: {error}; leaving sub-batch un-synced for retry"
-                                ));
+                                let diagnostic = format!(
+                                    "{entity_key} push returned an unrecognized count/skip signal: {error}; marking {} team row(s) failed; server response: {}",
+                                    batch_items.len(), body.raw_body
+                                );
+                                for item in &batch_items {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
+                                errors.push(diagnostic);
                                 continue;
                             }
                         },
@@ -230,11 +238,11 @@ impl CloudSyncer {
 
                     if skipped > 0 {
                         let diagnostic = format!(
-                            "cloud skipped {skipped} of {} team {entity_key} row(s); leaving sub-batch un-synced for retry",
-                            batch_items.len()
+                            "cloud skipped {skipped} of {} team {entity_key} row(s); marking the indistinguishable sub-batch failed; server response: {}",
+                            batch_items.len(), raw_response
                         );
                         for item in &batch_items {
-                            let _ = self.queue.record_diagnostic(item.id, &diagnostic);
+                            let _ = self.queue.mark_failed(item.id, &diagnostic);
                         }
                         errors.push(diagnostic);
                         continue;
@@ -305,7 +313,11 @@ impl CloudSyncer {
                         if body.is_empty() {
                             return Ok(None);
                         }
-                        return Ok(serde_json::from_str::<TeamPushResponse>(&body).ok());
+                        let mut parsed = serde_json::from_str::<TeamPushResponse>(&body).ok();
+                        if let Some(response) = parsed.as_mut() {
+                            response.raw_body = body;
+                        }
+                        return Ok(parsed);
                     }
 
                     let status = resp.status();

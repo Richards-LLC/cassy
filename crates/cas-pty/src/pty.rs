@@ -300,7 +300,7 @@ fn push_factory_worker_metadata_env(
     }
 }
 
-/// Add an explicit Claude account directory to a factory worker environment.
+/// Add explicit Claude config and credential-store directories to a worker.
 ///
 /// This deliberately does nothing for omitted values so ordinary process
 /// inheritance remains untouched for existing spawns.
@@ -324,7 +324,20 @@ fn push_claude_config_dir_env(
                 .unwrap_or_else(|| config_dir.to_string())
         },
     );
+    let main_dir = dirs::home_dir().map(|home| home.join(".claude"));
+    let secure_storage_dir = if main_dir.as_deref() == Some(std::path::Path::new(&expanded)) {
+        // The default Claude profile historically owns the un-suffixed macOS
+        // Keychain item. Keep that identity stable while named profiles use
+        // their path-hashed secure-storage items.
+        String::new()
+    } else {
+        expanded.clone()
+    };
     env.push(("CLAUDE_CONFIG_DIR".to_string(), expanded));
+    env.push((
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string(),
+        secure_storage_dir,
+    ));
 }
 
 #[cfg(test)]
@@ -347,6 +360,21 @@ mod claude_config_dir_contract_tests {
             env_value(&env, "CLAUDE_CONFIG_DIR").as_deref(),
             Some(home.join(".claude-alt").to_string_lossy().as_ref())
         );
+        assert_eq!(
+            env_value(&env, "CLAUDE_SECURESTORAGE_CONFIG_DIR").as_deref(),
+            Some(home.join(".claude-alt").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn default_claude_config_dir_keeps_legacy_main_credential_store() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "worker", Some("~/.claude"));
+
+        assert_eq!(
+            env_value(&env, "CLAUDE_SECURESTORAGE_CONFIG_DIR").as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -355,6 +383,7 @@ mod claude_config_dir_contract_tests {
         push_claude_config_dir_env(&mut env, "worker", None);
 
         assert_eq!(env_value(&env, "CLAUDE_CONFIG_DIR"), None);
+        assert_eq!(env_value(&env, "CLAUDE_SECURESTORAGE_CONFIG_DIR"), None);
     }
 
     #[test]
@@ -363,6 +392,7 @@ mod claude_config_dir_contract_tests {
         push_claude_config_dir_env(&mut env, "supervisor", Some("~/.claude-alt"));
 
         assert_eq!(env_value(&env, "CLAUDE_CONFIG_DIR"), None);
+        assert_eq!(env_value(&env, "CLAUDE_SECURESTORAGE_CONFIG_DIR"), None);
     }
 }
 
@@ -414,9 +444,9 @@ impl Default for PtyConfig {
 impl PtyConfig {
     /// Apply the Claude-only account directory override to this worker config.
     ///
-    /// `Pty::spawn` detects the resulting environment entry and removes any
-    /// inherited `ANTHROPIC_API_KEY` from the child command, allowing the
-    /// selected Claude subscription account to take effect.
+    /// `Pty::spawn` detects the resulting environment entry and removes
+    /// inherited API-key and OAuth-token overrides from the child command,
+    /// allowing the selected Claude subscription account to take effect.
     pub fn apply_claude_config_dir(&mut self, config_dir: Option<&str>, source: Option<&str>) {
         push_claude_config_dir_env(&mut self.env, "worker", config_dir);
         if config_dir.is_some() {
@@ -1415,14 +1445,21 @@ impl Pty {
         // Strip CLAUDECODE to prevent nested-session detection in spawned Claude CLI
         cmd.env_remove("CLAUDECODE");
 
-        // An explicit CLAUDE_CONFIG_DIR selects a subscription account. An inherited
-        // ANTHROPIC_API_KEY would override that OAuth selection, so remove it only
-        // for the new explicit-config-dir path. Omitted config_dir remains pure
-        // inheritance, byte-for-byte with existing spawns.
-        if config.env.iter().any(|(key, value)| {
-            key == "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE" && value == "explicit"
-        }) {
+        // A resolved CLAUDE_CONFIG_DIR selects a subscription account, whether it
+        // came from an explicit worker parameter or the requesting supervisor.
+        // Inherited API keys or OAuth-token overrides would defeat that selection,
+        // so remove them whenever the account-source marker is present. Omitted
+        // config_dir remains pure inheritance, byte-for-byte with existing spawns.
+        if config
+            .env
+            .iter()
+            .any(|(key, _)| key == "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE")
+        {
             cmd.env_remove("ANTHROPIC_API_KEY");
+            cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+            cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+            cmd.env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
+            cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR");
         }
 
         if config

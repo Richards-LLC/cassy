@@ -36,6 +36,17 @@ fn input_for(tool: &str, file_path: Option<&str>) -> HookInput {
     }
 }
 
+fn bash_input(command: &str) -> HookInput {
+    HookInput {
+        session_id: "test-session".into(),
+        cwd: "/test".into(),
+        hook_event_name: "PreToolUse".into(),
+        tool_name: Some("Bash".into()),
+        tool_input: Some(serde_json::json!({"command": command})),
+        ..HookInput::default()
+    }
+}
+
 fn allow_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
     let specific = out.hook_specific_output.as_ref()?;
     let value = serde_json::to_value(specific).ok()?;
@@ -197,6 +208,73 @@ fn factory_write_under_declared_scratchpad_is_allowed() {
         allow_reason(&out).is_some(),
         "a write under the declared harness scratchpad must be allowed"
     );
+}
+
+#[test]
+fn factory_write_under_harness_session_scratchpad_is_allowed() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let path = "/tmp/claude-1000/-home-pippenz-Petrastella-cas-src/f54c4e08-831c-4cb6-ae05-5bd663ec1fed/scratchpad/issue-ambient-recall.md";
+    let mut input = input_for("Write", Some(path));
+    input.session_id = "f54c4e08-831c-4cb6-ae05-5bd663ec1fed".into();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(
+        allow_reason(&out).is_some(),
+        "the harness-advertised per-session scratchpad must be sanctioned"
+    );
+}
+
+#[test]
+fn factory_write_under_another_session_scratchpad_is_denied() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let path = "/tmp/claude-1000/-home-pippenz-Petrastella-cas-src/f54c4e08-831c-4cb6-ae05-5bd663ec1fed/scratchpad/issue-ambient-recall.md";
+    let input = input_for("Write", Some(path));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    let reason = deny_reason(&out).expect("another session's scratchpad is bare /tmp");
+    assert!(reason.contains(path), "{reason}");
+}
+
+#[test]
+fn factory_bash_commit_message_with_slash_leading_token_is_allowed() {
+    let _g = super::env_lock();
+    // The live false positive was a supervisor merge. Workers have a separate
+    // branch-protection gate which deliberately refuses merge commands before
+    // the workspace contract is reached.
+    let _role = set_role_env(Some("supervisor"));
+    let input = bash_input(
+        "git merge --no-ff factory/auth -m 'Merge auth redirects (> /api/me), without file creation'",
+    );
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(
+        allow_reason(&out).is_some(),
+        "path-shaped prose in a commit message is not a filesystem write target"
+    );
+}
+
+#[test]
+fn factory_bash_redirect_to_bare_tmp_is_denied() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let input = bash_input("printf '%s\\n' proof > /tmp/cas-b76f-proof.txt");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    let reason = deny_reason(&out).expect("bare /tmp redirect must remain denied");
+    assert!(reason.contains("/tmp/cas-b76f-proof.txt"), "{reason}");
+}
+
+#[test]
+fn factory_bash_touch_under_home_is_denied() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let input = bash_input("touch $HOME/cas-b76f-stray.txt");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    let reason = deny_reason(&out).expect("stray $HOME write must remain denied");
+    assert!(reason.contains("cas-b76f-stray.txt"), "{reason}");
 }
 
 struct EnvVarGuard {

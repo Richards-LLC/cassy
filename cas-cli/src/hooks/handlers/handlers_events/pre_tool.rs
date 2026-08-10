@@ -1168,29 +1168,57 @@ fn resolved_factory_artifacts_root(configured: Option<&str>) -> std::path::PathB
     }
 }
 
-fn factory_unsanctioned_write_path(
-    input: &HookInput,
-    configured_artifacts_root: &Option<String>,
-) -> Option<std::path::PathBuf> {
-    let tool = input.tool_name.as_deref()?;
-    let tool_input = input.tool_input.as_ref()?;
-    let raw_path = match tool {
-        "Write" | "Edit" | "NotebookEdit" => tool_input
-            .get("file_path")
-            .or_else(|| tool_input.get("path"))
-            .and_then(|value| value.as_str()),
-        "Bash" => {
-            let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            return bash_write_targets(command)
-                .into_iter()
-                .find_map(|raw_path| {
-                    unsanctioned_factory_path(input, configured_artifacts_root, &raw_path)
-                });
-        }
-        _ => return None,
-    }?;
+#[derive(Debug, PartialEq, Eq)]
+enum ShellToken {
+    Word(String),
+    Operator(char),
+}
 
-    unsanctioned_factory_path(input, configured_artifacts_root, raw_path)
+/// Split just enough shell syntax to distinguish command arguments from
+/// redirections. In particular, metacharacters inside a quoted commit message
+/// stay inside one word and can never be mistaken for file-creation syntax.
+fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    let push_word = |tokens: &mut Vec<ShellToken>, word: &mut String| {
+        if !word.is_empty() {
+            tokens.push(ShellToken::Word(std::mem::take(word)));
+        }
+    };
+
+    for ch in command.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(active) if ch == active => quote = None,
+            Some(_) => word.push(ch),
+            None => match ch {
+                '\\' => escaped = true,
+                '\'' | '"' => quote = Some(ch),
+                '>' | '<' | '|' | '&' | ';' | '(' | ')' => {
+                    push_word(&mut tokens, &mut word);
+                    tokens.push(ShellToken::Operator(ch));
+                }
+                '\n' | '\r' => {
+                    push_word(&mut tokens, &mut word);
+                    tokens.push(ShellToken::Operator(';'));
+                }
+                ch if ch.is_whitespace() => push_word(&mut tokens, &mut word),
+                _ => word.push(ch),
+            },
+        }
+    }
+    if escaped {
+        word.push('\\');
+    }
+    push_word(&mut tokens, &mut word);
+    tokens
 }
 
 /// Identify shell words that are actual output targets, without treating every
@@ -1198,123 +1226,157 @@ fn factory_unsanctioned_write_path(
 /// set of write forms guarded by the factory workspace contract; unrecognised
 /// shell syntax is left to the shell rather than guessed at.
 fn bash_write_targets(command: &str) -> Vec<String> {
-    let tokens = shell_tokens(command);
+    let tokens = factory_shell_tokens(command);
     let mut targets = Vec::new();
-    let mut index = 0;
-    let mut command_position = true;
 
-    while index < tokens.len() {
-        if is_shell_boundary(&tokens[index]) {
-            command_position = true;
-            index += 1;
-            continue;
-        }
-        if command_position
-            && (tokens[index].starts_with('-')
-                || tokens[index].contains('=')
-                || matches!(tokens[index].as_str(), "command" | "env" | "sudo"))
-        {
-            index += 1;
-            continue;
-        }
-        match tokens[index].as_str() {
-            ">" | ">>" => {
-                if let Some(target) = tokens
-                    .get(index + 1)
-                    .filter(|token| !is_shell_boundary(token))
-                {
-                    targets.push(target.clone());
-                }
+    // A `>` outside quotes always names its destination in the next shell
+    // word. Repeated `>` tokens cover append redirections, while the numeric
+    // descriptor in `2>/tmp/log` remains an unrelated word.
+    for (index, token) in tokens.iter().enumerate() {
+        if token == &ShellToken::Operator('>') {
+            if let Some(ShellToken::Word(target)) = tokens.get(index + 1) {
+                targets.push(target.clone());
             }
-            "tee" | "touch" | "mkdir" if command_position => {
-                for token in tokens.iter().skip(index + 1) {
-                    if is_shell_boundary(token) {
-                        break;
-                    }
-                    if !token.starts_with('-') {
-                        targets.push(token.clone());
-                    }
-                }
-            }
-            "cp" | "mv" if command_position => {
-                let operands: Vec<_> = tokens
-                    .iter()
-                    .skip(index + 1)
-                    .take_while(|token| !is_shell_boundary(token))
-                    .filter(|token| !token.starts_with('-'))
-                    .collect();
-                if let Some(destination) = operands.last() {
-                    targets.push((*destination).clone());
-                }
-            }
-            _ => {}
         }
-        if command_position && !matches!(tokens[index].as_str(), ">" | ">>") {
-            command_position = false;
-        }
-        index += 1;
     }
 
+    // Cover the explicit file-creation commands guarded by the original
+    // workspace contract. Only a command-position word is considered; prose
+    // passed to `git commit -m` or `git merge -m` is never reinterpreted as a
+    // command. This is intentionally a small recognizer, not a shell parser.
+    let mut index = 0;
+    let mut command_position = true;
+    while index < tokens.len() {
+        match &tokens[index] {
+            ShellToken::Operator(';')
+            | ShellToken::Operator('|')
+            | ShellToken::Operator('&')
+            | ShellToken::Operator('(')
+            | ShellToken::Operator(')') => {
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => index += 1,
+            ShellToken::Word(command) if command_position => {
+                // Shell prefixes do not occupy command position: `env X=1
+                // touch /tmp/x`, `sudo touch /tmp/x`, and `command touch
+                // /tmp/x` still execute the creation command that follows.
+                if command.starts_with('-')
+                    || command.contains('=')
+                    || matches!(command.as_str(), "command" | "env" | "sudo")
+                {
+                    index += 1;
+                    continue;
+                }
+                command_position = false;
+                let command = std::path::Path::new(command)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(command);
+                if !matches!(command, "touch" | "mkdir" | "tee" | "cp" | "mv") {
+                    index += 1;
+                    continue;
+                }
+
+                let mut operands = Vec::new();
+                let mut cursor = index + 1;
+                while cursor < tokens.len() {
+                    match &tokens[cursor] {
+                        ShellToken::Operator(';')
+                        | ShellToken::Operator('|')
+                        | ShellToken::Operator('&')
+                        | ShellToken::Operator('(')
+                        | ShellToken::Operator(')') => break,
+                        ShellToken::Operator(_) => {}
+                        ShellToken::Word(word) if !word.starts_with('-') => {
+                            operands.push(word.clone())
+                        }
+                        ShellToken::Word(_) => {}
+                    }
+                    cursor += 1;
+                }
+                if matches!(command, "cp" | "mv") {
+                    if let Some(destination) = operands.pop() {
+                        targets.push(destination);
+                    }
+                } else {
+                    targets.extend(operands);
+                }
+                index = cursor;
+            }
+            ShellToken::Word(_) => {
+                command_position = false;
+                index += 1;
+            }
+        }
+    }
     targets
 }
 
-/// Tokenize just enough POSIX shell syntax to distinguish operators from
-/// quoted content. In particular, `">"` is a word, never a redirect.
-fn shell_tokens(command: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut single_quoted = false;
-    let mut double_quoted = false;
-    let mut chars = command.chars().peekable();
+/// Claude Code advertises this exact per-session ephemeral root to agents:
+/// `/tmp/claude-<uid>/<project-slug>/<session-id>/scratchpad/...`.
+/// Bind the exemption to the hook's own session ID and reject traversal so it
+/// cannot become a general `/tmp` escape hatch.
+fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
+    use std::path::Component;
 
-    let flush = |tokens: &mut Vec<String>, current: &mut String| {
-        if !current.is_empty() {
-            tokens.push(std::mem::take(current));
-        }
-    };
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' if !single_quoted => {
-                if let Some(escaped) = chars.next() {
-                    current.push(escaped);
-                }
-            }
-            '\'' if !double_quoted => single_quoted = !single_quoted,
-            '\"' if !single_quoted => double_quoted = !double_quoted,
-            ch if ch.is_whitespace() && !single_quoted && !double_quoted => {
-                flush(&mut tokens, &mut current)
-            }
-            '>' if !single_quoted && !double_quoted => {
-                flush(&mut tokens, &mut current);
-                let redirect = if chars.next_if_eq(&'>').is_some() {
-                    ">>"
-                } else {
-                    ">"
-                };
-                tokens.push(redirect.to_string());
-            }
-            ';' | '|' if !single_quoted && !double_quoted => {
-                flush(&mut tokens, &mut current);
-                tokens.push(ch.to_string());
-            }
-            '&' if !single_quoted && !double_quoted => {
-                flush(&mut tokens, &mut current);
-                if chars.next_if_eq(&'&').is_some() {
-                    tokens.push("&&".to_string());
-                } else {
-                    tokens.push("&".to_string());
-                }
-            }
-            _ => current.push(ch),
-        }
+    let mut components = path.components();
+    if components.next() != Some(Component::RootDir)
+        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("tmp")))
+    {
+        return false;
     }
-    flush(&mut tokens, &mut current);
-    tokens
+    let Some(Component::Normal(claude_user)) = components.next() else {
+        return false;
+    };
+    let Some(uid) = claude_user
+        .to_str()
+        .and_then(|value| value.strip_prefix("claude-"))
+    else {
+        return false;
+    };
+    if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    if !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next() != Some(Component::Normal(std::ffi::OsStr::new(session_id)))
+        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("scratchpad")))
+    {
+        return false;
+    }
+
+    // The sanctioned root is for files below `scratchpad`, not the directory
+    // entry itself, and no `..` component may escape it.
+    let remaining: Vec<_> = components.collect();
+    !remaining.is_empty()
+        && remaining
+            .iter()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn is_shell_boundary(token: &str) -> bool {
-    matches!(token, ";" | "|" | "&&" | "&")
+fn factory_unsanctioned_write_path(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+) -> Option<std::path::PathBuf> {
+    let tool = input.tool_name.as_deref()?;
+    let tool_input = input.tool_input.as_ref()?;
+    let raw_paths = match tool {
+        "Write" | "Edit" | "NotebookEdit" => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("path"))
+            .and_then(|value| value.as_str())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        "Bash" => {
+            let command = tool_input.get("command").and_then(|value| value.as_str())?;
+            bash_write_targets(command)
+        }
+        _ => return None,
+    };
+
+    raw_paths
+        .into_iter()
+        .find_map(|raw_path| unsanctioned_factory_path(input, configured_artifacts_root, &raw_path))
 }
 
 fn unsanctioned_factory_path(
@@ -1323,17 +1385,6 @@ fn unsanctioned_factory_path(
     raw_path: &str,
 ) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
-        home.as_ref()?.join(suffix)
-    } else if let Some(suffix) = raw_path.strip_prefix("$HOME/") {
-        home.as_ref()?.join(suffix)
-    } else {
-        std::path::PathBuf::from(raw_path)
-    };
-    if !path.is_absolute() {
-        return None;
-    }
-
     let mut sanctioned = vec![std::path::PathBuf::from(&input.cwd)];
     sanctioned.push(resolved_factory_artifacts_root(
         configured_artifacts_root.as_deref(),
@@ -1343,7 +1394,21 @@ fn unsanctioned_factory_path(
             sanctioned.push(std::path::PathBuf::from(value));
         }
     }
-    (!sanctioned.iter().any(|root| path.starts_with(root))).then_some(path)
+
+    let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
+        home.as_ref()?.join(suffix)
+    } else if let Some(suffix) = raw_path.strip_prefix("$HOME/") {
+        home.as_ref()?.join(suffix)
+    } else {
+        std::path::PathBuf::from(raw_path)
+    };
+    if !path.is_absolute()
+        || is_harness_session_scratchpad(&path, &input.session_id)
+        || sanctioned.iter().any(|root| path.starts_with(root))
+    {
+        return None;
+    }
+    Some(path)
 }
 
 #[cfg(test)]
@@ -1378,6 +1443,19 @@ mod workspace_contract_tests {
     #[test]
     fn quoted_redirect_character_is_not_a_redirect() {
         assert!(bash_write_targets(r#"echo "a > ~/.claude""#).is_empty());
+    }
+
+    #[test]
+    fn merged_parser_keeps_both_sides_fail_closed_write_forms() {
+        let targets = bash_write_targets(
+            "env MODE=test touch /tmp/from-env && printf proof >> /tmp/append-log; (/usr/bin/mkdir /tmp/from-path)",
+        );
+        for target in ["/tmp/from-env", "/tmp/append-log", "/tmp/from-path"] {
+            assert!(
+                targets.iter().any(|actual| actual == target),
+                "merged parser must retain guarded target {target:?}: {targets:?}"
+            );
+        }
     }
 
     #[test]

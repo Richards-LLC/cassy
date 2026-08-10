@@ -2872,8 +2872,16 @@ This is the body content."#;
                     "{label} cas-worker SKILL.md missing hard-rule marker: {required:?}"
                 );
             }
-            // Scoped-test reminder lives with the test guidance (A-3).
-            for required in ["cargo test --lib", "cargo test --test <name>"] {
+            // Scoped-test discipline lives with the test guidance (A-3):
+            // compile continuously without linking test binaries, then use
+            // nextest only for the affected target. These are deliberately
+            // concrete commands rather than a generic "be scoped" reminder.
+            for required in [
+                "cargo check -p <crate> --lib --tests",
+                "cargo nextest run",
+                "--lib <module>",
+                "--test <name>",
+            ] {
                 assert!(
                     skill_content.contains(required),
                     "{label} cas-worker SKILL.md missing scoped-test marker: {required:?}"

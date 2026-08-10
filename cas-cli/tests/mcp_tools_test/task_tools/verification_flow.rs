@@ -30,6 +30,11 @@ fn proof_boundary_git(path: &std::path::Path, args: &[&str]) {
 
 async fn legacy_repository_proof_rejects_drift(isolated: bool) {
     let (temp, service) = setup_cas();
+    // `cas_task_close` resolves the acting factory context while it validates
+    // the proof root. Keep that process-global context stable for this whole
+    // Git-worktree fixture so sibling factory tests cannot invalidate a
+    // reviewed.txt proof between the deliberate drift and its restoration.
+    let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),

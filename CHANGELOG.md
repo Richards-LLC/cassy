@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.59.0] - 2026-08-10
+
+### Added
+- **Claude users can select and sign into separate accounts directly from CAS.** Bare launch now offers a profile picker, each profile keeps its credentials isolated, and `cas claude login <profile>` makes switching accounts explicit.
+- **Cloud queue recovery now has an explicit retry command.** `cas cloud queue --retry` lets operators re-attempt failed queued work without guessing at its state.
+
+### Changed
+- **Factory test gates use faster, more targeted defaults.** Scoped nextest runs and shared compiler cache use reduce routine feedback time while retaining the full release checks.
+
+### Fixed
+- **Pending cloud work and workspace checks now report and recover more reliably.** Silent pending work is surfaced, failed rows can be retried, and the workspace guard no longer rejects valid Bash write targets.
+- **CI fixtures are isolated consistently.** Test runs no longer inherit machine-specific state that can make a healthy change look broken.
+
 ## [2.58.0] - 2026-08-10
 
 ### Added

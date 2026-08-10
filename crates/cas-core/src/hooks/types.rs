@@ -919,18 +919,25 @@ mod tests {
         assert_eq!(blank.display_text(), None);
     }
 
-    /// `Notification` really does use `message`, so aliasing `delta` onto the
-    /// same field must not have broken it.
+    /// cas-5e46: raw interactive `idle_prompt` capture confirms that Notification
+    /// really does use `message`, so aliasing `delta` onto the same field must
+    /// not have broken it. `notification_type` is intentionally undeclared: no
+    /// current CAS handler consumes it.
     #[test]
-    fn notification_payload_still_uses_the_message_key() {
+    fn notification_idle_prompt_payload_uses_the_message_key() {
         let input: HookInput = serde_json::from_str(
-            r#"{"hook_event_name":"Notification","session_id":"s",
-                "message":"Claude needs your permission to use Bash"}"#,
+            r#"{"session_id":"d59d0086-c4cf-4a81-94ef-30ca97b8490e",
+                "transcript_path":"/tmp/wirecap/projects/-home-pippenz-Petrastella-cas-src--cas-worktrees-warm-newt-60/d59d0086-c4cf-4a81-94ef-30ca97b8490e.jsonl",
+                "cwd":"/home/pippenz/Petrastella/cas-src/.cas/worktrees/warm-newt-60",
+                "prompt_id":"3b983dd9-56b7-4672-b40a-161b8cad74f1",
+                "hook_event_name":"Notification",
+                "message":"Claude is waiting for your input",
+                "notification_type":"idle_prompt"}"#,
         )
-        .unwrap();
+        .expect("the real Notification payload must deserialize");
         assert_eq!(
             input.message.as_deref(),
-            Some("Claude needs your permission to use Bash")
+            Some("Claude is waiting for your input")
         );
     }
 

@@ -375,6 +375,30 @@ describe('cas-acf83 (GH #108): execution provenance', () => {
     assert.deepEqual(result.execution.personas_failed, [])
     assert.equal(result.status, 'complete')
   })
+
+  test('stringified args are parsed before Resolve and run like object args', async () => {
+    const objectRun = await runWorkflowDryRun(BASE_ARGS)
+    const stringRun = await runWorkflowDryRun(JSON.stringify(BASE_ARGS))
+
+    assert.deepEqual(stringRun.result, objectRun.result)
+    assert.deepEqual(stringRun.labels, objectRun.labels)
+    assert.ok(
+      stringRun.result.execution.personas_run > 0,
+      'string-form args must dispatch real review personas rather than the empty-diff bail-out',
+    )
+  })
+
+  test('malformed string args return an explicit invalid-args envelope', async () => {
+    const { result, labels, logs } = await runWorkflowDryRun('{not valid JSON')
+
+    assert.equal(result.status, 'invalid_args')
+    assert.equal(result.error, 'invalid_args')
+    assert.equal(result.skipped_reason, 'invalid args')
+    assert.equal(result.execution.personas_run, 0)
+    assert.deepEqual(result.execution.required_personas_missing, CANONICAL_ALWAYS_ON)
+    assert.deepEqual(labels, [], 'invalid args must not start setup or reviewer dispatch')
+    assert.ok(logs.some(message => message.includes('invalid JSON args')))
+  })
 })
 
 describe('WORKFLOW_META', () => {

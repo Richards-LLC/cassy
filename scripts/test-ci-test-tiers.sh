@@ -86,6 +86,7 @@ suite="$(job_block fast-validation-suite)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
 require_text "$suite" 'cargo nextest run -p cas --no-fail-fast' 'suite retains full nextest coverage'
+require_text "$suite" '--test-threads 4' 'suite uses measured I/O-friendly test concurrency'
 require_absent "$suite" '--partition' 'suite avoids duplicate test-graph compilation across runners'
 require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
 require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'

@@ -139,12 +139,14 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      # Keep --no-fail-fast so failures never mask later binaries. This runs
-      # every test binary; the doctest lane below covers what nextest cannot.
+      # Keep --no-fail-fast so failures never mask later binaries. Four test
+      # processes suit the I/O-heavy integration mix better than the hosted
+      # runner's CPU-default, while still running every test binary; the
+      # doctest lane below covers what nextest cannot.
       - name: Test full suite
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo nextest run -p cas --no-fail-fast
+        run: cargo nextest run -p cas --no-fail-fast --test-threads 4
 
   fast-validation-docs:
     name: Fast Validation — doctests

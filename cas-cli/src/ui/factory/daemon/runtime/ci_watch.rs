@@ -494,6 +494,31 @@ mod tests {
     }
 
     #[test]
+    fn red_run_receipt_survives_delivery_cleanup_and_reopened_watch_cycle() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let failure = CiFailure {
+            branch: "main".to_string(),
+            head_sha: "abc123".to_string(),
+            run_id: 1,
+            run_url: "https://github.test/runs/1".to_string(),
+            failing_job: "Fast Validation".to_string(),
+            failing_test: None,
+            suppressed_red_runs: Vec::new(),
+        };
+
+        assert!(emit_failure(&queue, "factory-session", &failure).unwrap());
+        assert_eq!(queue.poll_for_target("supervisor", 10).unwrap().len(), 1);
+        assert_eq!(queue.cleanup_old(0).unwrap(), 0);
+        drop(queue);
+
+        let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        reopened.init().unwrap();
+        assert!(!emit_failure(&reopened, "factory-session", &failure).unwrap());
+    }
+
+    #[test]
     fn green_runs_are_silent_without_expensive_job_lookup() {
         let transport = FakeTransport {
             runs: vec![run("main", Some("success"))],

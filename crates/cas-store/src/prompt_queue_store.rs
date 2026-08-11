@@ -3823,8 +3823,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let conn = self.conn.lock().unwrap();
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // CI red-run rows are durable receipts keyed by branch + SHA.  They
+            // must outlive ordinary delivered-prompt retention: removing one
+            // would also remove its unique dedupe key and let a later watcher
+            // cycle relay the already-dispositioned failure again.
             let rows = tx.execute(
-                "DELETE FROM prompt_queue WHERE processed_at IS NOT NULL AND processed_at < ?",
+                "DELETE FROM prompt_queue
+                 WHERE processed_at IS NOT NULL
+                   AND processed_at < ?
+                   AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'ci-red-run:%')",
                 params![cutoff],
             )?;
             tx.execute(

@@ -1,6 +1,6 @@
 ---
 name: design-spec
-description: Generate or update `DESIGN.md` — the project's UI/UX source of truth (normative token frontmatter + 8 prose sections: Overview, Colors, Typography, Layout, Elevation & Depth, Shapes, Components, Do's & Don'ts). Use when the user asks for a "design spec", "DESIGN.md", "/design-spec", "design system doc", "document our tokens", "the design doc is stale", or before generating/reviewing UI so workers use the real tokens instead of re-deriving them. This is the design counterpart to `codemap` (structure) and `project-overview` (domain).
+description: Use when the user asks to create or update a design spec, design-system documentation, or DESIGN.md, or before substantial UI work.
 managed_by: cas
 ---
 

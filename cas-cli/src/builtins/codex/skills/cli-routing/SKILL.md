@@ -1,6 +1,6 @@
 ---
 name: cli-routing
-description: Use when a bounded task needs a one-shot Codex or Claude CLI subprocess, especially when capacity may be exhausted or release notes must be posted. Probe availability at execution time; Claude is allowed only for the daniel@petrastella.io account.
+description: Use when a bounded task needs a one-shot Codex or Claude CLI subprocess, including capacity recovery or release-note posting; Claude is limited to the daniel@petrastella.io account.
 managed_by: cas
 ---
 

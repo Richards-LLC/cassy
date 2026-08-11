@@ -1,6 +1,6 @@
 ---
 name: cas-ideate
-description: Generate and critically filter grounded improvement ideas for the current project. Use when the user asks "what should I improve", "give me ideas", "ideate on this project", "surprise me with improvements", "what would you change", or any request for AI-generated project improvement suggestions rather than refining the user's own idea. Runs divergent generation across multiple thinking frames, then adversarially filters to 5-7 survivors with explicit rejection reasons. Precedes cas-brainstorm in the CAS pipeline.
+description: Use when the user asks for new grounded project-improvement ideas ("what should I improve?", "surprise me", or "what would you change?") rather than refinement of an existing idea.
 managed_by: cas
 disallowed-tools:
   - Write

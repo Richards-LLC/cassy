@@ -1,6 +1,6 @@
 ---
 name: cas-search
-description: Search across CAS content (memories, tasks, rules, skills, code). Use when needing to find information, understand codebase, or locate specific patterns. Supports hybrid BM25+semantic search, code symbol search, grep, context, and entity operations.
+description: Use when you need to find CAS context, code, a symbol, a file pattern, or a prior task, memory, rule, or skill.
 managed_by: cas
 ---
 

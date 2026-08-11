@@ -1,6 +1,6 @@
 ---
 name: cas-task-tracking
-description: How to track work using CAS tasks instead of built-in TodoWrite. Use for persistent task tracking with priorities, dependencies, structured notes, and cross-session continuity.
+description: Use when work needs persistent CAS task tracking, dependencies, progress notes, or cross-session continuity.
 managed_by: cas
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: cas-codex-supervisor-checklist
-description: Quick startup checklist for Codex-based factory supervisors. Use at the beginning of a factory session to load context, check EPICs, and confirm worker availability. Compensates for missing hooks in Codex.
+description: Use at the start of a Codex factory-supervisor session to load context, inspect EPICs, and confirm worker availability.
 managed_by: cas
 ---
 

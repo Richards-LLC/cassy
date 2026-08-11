@@ -1,6 +1,6 @@
 ---
 name: cas-codex-exec
-description: Use for token-heavy READ-ONLY investigation via one-shot `codex exec` shell-outs: log/session JSONL mining, large spec or vendored-doc digestion, bulk file sweeps, data summarization, and independent second-opinion analysis. Do not use for edits, task ownership, or worker replacement.
+description: Use when a read-only investigation needs a one-shot `codex exec` subprocess, such as log mining, bulk inspection, or an independent analysis; never use for edits or task ownership.
 managed_by: cas
 ---
 

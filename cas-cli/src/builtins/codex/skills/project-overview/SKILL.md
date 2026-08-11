@@ -1,6 +1,6 @@
 ---
 name: project-overview
-description: Generate or update `docs/PRODUCT_OVERVIEW.md` — a tight domain snapshot (pitch, personas, core concepts, journeys, authoritative sources). Use when the user asks for a "product overview", "what is this project", "generate PRODUCT_OVERVIEW.md", "project-overview", "create domain doc", or after significant domain-model drift. Triggers on vague onboarding-style asks ("explain this repo to me") once code structure is understood but product intent is not.
+description: Use when asked what a project is, to create or update PRODUCT_OVERVIEW.md, or when onboarding needs product intent after code structure is understood.
 managed_by: cas
 ---
 

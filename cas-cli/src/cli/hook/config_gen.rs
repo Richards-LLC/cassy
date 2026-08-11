@@ -826,7 +826,10 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks` is not an object"))?;
     for (event, command) in [
-        ("PreToolUse", "cas hook PreToolUse"),
+        (
+            "PreToolUse",
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+        ),
         ("PostToolUse", "cas hook PostToolUse"),
     ] {
         let groups = hooks
@@ -835,13 +838,20 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
             .as_array_mut()
             .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.{event}` is not an array"))?;
 
+        // CAS owns both the current harness-aware command and the pre-cas-a53c
+        // form. Remove either before adding the canonical entry so an upgrade
+        // never leaves two registrations for the same Codex event.
+        let legacy_command = format!("cas hook {event}");
         groups.retain(|group| {
             !group
                 .get("hooks")
                 .and_then(|handlers| handlers.as_array())
                 .is_some_and(|handlers| {
                     handlers.iter().any(|handler| {
-                        handler.get("command").and_then(|value| value.as_str()) == Some(command)
+                        matches!(
+                            handler.get("command").and_then(|value| value.as_str()),
+                            Some(existing) if existing == command || existing == legacy_command
+                        )
                     })
                 })
         });

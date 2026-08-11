@@ -4,75 +4,30 @@ A standing directive: **file every CAS-system bug you observe, by reflex.** Do n
 
 "CAS-system" means a defect in CAS itself: the verifier, hooks, factory/director orchestration, MCP dispatch, the task-verifier agent, worker/supervisor prompts, or builtin skills — regardless of which downstream project surfaced it.
 
-## Route by repository
+## Canonical routing
 
-- **If this repository is the CAS source:** create an in-repo task (`task action=create task_type=bug`) and let a worker fix it there.
-- **In any downstream project:** use the configured GitHub issue intake below. Other projects consume CAS; they do not modify it locally.
+- **CAS-system defect, from any repository:** file a public-safe GitHub issue in
+  the configured CAS issue repository. In cas-src, create the corresponding in-repo task; downstream
+  repositories consume CAS and must not patch it locally.
+- **Actionable request for a Richards-LLC-controlled team:** file directly on
+  that team's repository issue board (for example,
+  `Richards-LLC/petra-stella-cloud`). Never write, commit, or push in that
+  team's checkout from this repository.
+- **Receipt:** after every cross-team filing, save a CAS memory with the issue
+  URL, one-line ask, and date. Recent examples are cloud-to-CAS GH #215 and
+  CAS-to-cloud `Richards-LLC/petra-stella-cloud#44`.
 
-## Configure the upstream issue target
+Configure the target with `[issues] repo = "owner/repo"`; inspect it with
+`cas config get issues.repo` and set it with `cas config set issues.repo <owner/repo>`.
+Do not derive the target from a downstream git `origin`.
 
-The target is project-local configuration in `.cas/config.toml`:
+Before filing, check `command -v gh` and `gh auth status`. Use
+`gh issue create --repo <owner/repo>` with a complete public-safe body. If `gh`
+is not installed or not authenticated, preserve the report in the task or CAS
+memory, report the exact failure, and ask the operator for access or direction;
+do not silently substitute a new outbound request file.
 
-```toml
-[issues]
-repo = "owner/repo"
-```
-
-Set or inspect it with:
-
-```sh
-cas config set issues.repo owner/repo
-cas config get issues.repo
-```
-
-**Do not derive this value from the current repository's `origin` remote.** In a downstream project, `origin` normally identifies the consumer's repository, not its CAS upstream; inferring it would silently send a CAS-system bug to the wrong tracker. Never hardcode one installation's repository in a builtin skill.
-
-## File without risking report loss
-
-1. First write the complete, public-safe report to a new, uniquely named `docs/requests/BUG-<slug>.md` in the current repository. Create the directory if needed; never overwrite an existing report. Include a concise title, environment/version, reproduction steps, expected and actual behavior, and relevant evidence. Redact credentials, tokens, private URLs, customer names, and unrelated-product details before any upload.
-2. Read the target with `issues_repo="$(cas config get issues.repo 2>/dev/null || true)"`.
-3. If `issues_repo` is empty, **do not guess a target**. Keep the local report and follow the durable fallback below. Tell the user to run `cas config set issues.repo owner/repo`.
-4. If `command -v gh >/dev/null 2>&1` fails because `gh` is not installed, keep the report and use the durable fallback.
-5. If `gh auth status` fails because `gh` is not authenticated for the target host, keep the report and use the durable fallback.
-6. Only after those checks, file the staged body:
-
-   ```sh
-   gh issue create \
-     --repo "$issues_repo" \
-     --title "<concise CAS-system bug title>" \
-     --body-file "docs/requests/BUG-<slug>.md"
-   ```
-
-7. Capture and report the issue URL. Remove the local staging file only after `gh issue create` succeeds and the URL is known. If the command fails for any reason, preserve the file and use the fallback.
-
-## Detectors that surface a missed filing
-
-Two SessionStart banners make the two silent failure modes of this flow
-deterministic instead of recall-based, following the same detector pattern as
-the codemap and project-overview freshness gates:
-
-- **Unfiled staged reports** — any `BUG-*.md` / `FEATURE-*.md` sitting at the
-  `docs/requests/` root (the archive in `completed/` never counts) is reported
-  with its count and file names. A single report gets the direct
-  `gh issue create` command; several get the `cas-github-issues` sweep skill.
-  Clear it by filing the reports and removing the staged files.
-- **Unset issue target** — if `[issues] repo` is unset while `docs/requests/`
-  exists, the banner names `cas config set issues.repo owner/repo`. It never
-  proposes a value, because the correct target is the one the receiving team
-  gave you, not this repository's `origin`.
-
-Both go quiet the moment their condition clears. Seeing either one means the
-work below was started and never finished — not that a new report is needed.
-
-## Durable fallback
-
-Unset configuration, `gh` not installed, `gh` not authenticated, and GitHub command failures all take the same safe path: preserve `docs/requests/BUG-<slug>.md` in the current repository and make it visible to collaborators.
-
-If committing is within the current task's authorization:
-
-```sh
-git add "docs/requests/BUG-<slug>.md"
-git commit -m "docs: preserve CAS bug report"
-```
-
-If a commit is not authorized or cannot be created, stop and tell the user the exact uncommitted path and why GitHub filing failed. Do not claim the report was filed, delete it, or continue silently. A local fallback that is neither committed nor explicitly handed off is still a lost report.
+`docs/requests/` is deprecated for new outbound actionable work. Preserve its
+history and read inbound `RESPONSE-*.md` files as legacy material. It remains
+appropriate only for prose-heavy specifications or design documents until
+cross-project task proposals ship.

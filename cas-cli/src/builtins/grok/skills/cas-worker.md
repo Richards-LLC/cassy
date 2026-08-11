@@ -51,6 +51,8 @@ Null = use your judgment. No other posture keywords exist.
 
 Your scope is locked at assignment:
 
+- **Cross-team routing.** Report CAS defects to `pippenz/cas`; route actionable Richards-LLC team requests to that team's GitHub issue board, never by editing its checkout or creating a new outbound `docs/requests` file. Save a CAS memory receipt with issue URL, ask, and date. `docs/requests` is legacy-only for outbound actionable work.
+
 - **Never self-dispatch.** Start only a task assigned by `action=mine` or named explicitly by the supervisor. `ready`/`available` are backlog *visibility*, never authorization to `start` a task yourself. Idle means wait.
 - **One task at a time.** Complete the current task before taking another.
 - **Scope is frozen.** Build exactly the spec; note related improvements without implementing them.

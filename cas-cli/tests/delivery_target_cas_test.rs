@@ -212,9 +212,13 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let artifact_root = cas_root.join("durable-artifacts");
     std::fs::write(
         cas_root.join("config.toml"),
-        "[worktrees]\nenabled = false\n",
+        format!(
+            "[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            artifact_root.display().to_string()
+        ),
     )
     .expect("write config");
 
@@ -256,6 +260,9 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task");
+    let artifact = artifact_root.join(&task.id).join("proof.json");
+    std::fs::create_dir_all(artifact.parent().unwrap()).expect("create durable artifact directory");
+    std::fs::write(&artifact, "transactional delivery proof\n").expect("write durable artifact");
     assert!(matches!(
         open_agent_store(&cas_root)
             .expect("agent store")
@@ -283,6 +290,7 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         target_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
         proof_reference: format!("proof:{slug}"),
         scope_summary: "transactional delivery target CAS".to_string(),
+        artifact_path: Some(artifact.display().to_string()),
     };
 
     // Worker submits the immutable receipt, supervisor approves it.
@@ -385,6 +393,16 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
     let fixture = arm_delivery("taskidaccepted", "task-id-accepted").await;
+
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
+            .expect("delivery lookup")
+            .expect("persisted delivery")
+            .0
+            .artifact_path,
+        fixture.receipt.artifact_path,
+        "close must retain its configured durable artifact as queryable receipt metadata"
+    );
 
     env.set_current_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;

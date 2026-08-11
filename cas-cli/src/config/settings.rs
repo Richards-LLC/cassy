@@ -282,6 +282,23 @@ impl Default for FactoryConfig {
     }
 }
 
+/// Resolve the durable artifact parent shared by the factory workspace
+/// contract and completion-receipt boundary. `~/.cas/artifacts` is a
+/// real-disk fallback, never `/tmp`.
+pub fn resolved_factory_artifacts_root(configured: Option<&str>) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("~") => home.unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
+        Some(value) if value.starts_with("~/") => home
+            .map(|base| base.join(&value[2..]))
+            .unwrap_or_else(|| std::path::PathBuf::from(value)),
+        Some(value) => std::path::PathBuf::from(value),
+        None => home
+            .map(|base| base.join(".cas/artifacts"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
+    }
+}
+
 /// Code indexing configuration for background code indexing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeConfig {

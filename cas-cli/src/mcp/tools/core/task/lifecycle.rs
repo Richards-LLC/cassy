@@ -1116,6 +1116,7 @@ mod amendment_reassignment_tests {
                 target_sha: "c".repeat(40),
                 proof_reference: "cargo test --lib".into(),
                 scope_summary: "amendment regression".into(),
+                artifact_path: None,
             },
             "original-worker",
             Utc::now(),

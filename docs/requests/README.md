@@ -1,10 +1,13 @@
 # Request Intake and Archive
 
-GitHub Issues is the primary intake and system of record for cross-team requests. Use the repository's [bug](../../.github/ISSUE_TEMPLATE/bug.yml) or [feature](../../.github/ISSUE_TEMPLATE/feature.yml) template when filing in the browser.
+> **Deprecated for new outbound actionable requests.** File CAS defects in
+> [`pippenz/cas`](https://github.com/pippenz/cas/issues) and file requests for
+> a Richards-LLC-controlled team directly on that team's GitHub issue board
+> (for example, [`Richards-LLC/petra-stella-cloud`](https://github.com/Richards-LLC/petra-stella-cloud/issues)). Never write, commit, or push in another team's checkout. Save a CAS memory receipt with the issue URL, one-line ask, and date. Examples: cloud-to-CAS GH #215; CAS-to-cloud [#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44).
 
-This directory remains the durable staging area for reports written before GitHub filing and the historical archive for completed file-based requests.
+This directory is a historical archive and legacy inbound-response reader. It remains acceptable for prose-heavy specifications or design documents until cross-project task proposals ship.
 
-## Configure the Issue Target
+## Legacy staged files
 
 The destination is project-local configuration in `.cas/config.toml`:
 
@@ -20,9 +23,12 @@ cas config set issues.repo owner/repo
 cas config get issues.repo
 ```
 
-Use the issue tracker explicitly provided by the receiving team. Do not derive the target from the current repository's `origin`, and do not route requests through another machine's checkout or home-directory path.
+Do not create a new staged report for actionable work. This material only explains how to preserve and sweep a file that was already staged under the former workflow.
 
-## Durable Write-First Flow
+## Legacy write-first flow for existing staged files only
+
+This former workflow is retained solely to migrate a report that already
+exists; it is not authorization to create a new outbound request file.
 
 1. Write the complete, public-safe report to a new, uniquely named staging file in this directory:
 

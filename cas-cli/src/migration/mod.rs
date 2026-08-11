@@ -930,7 +930,7 @@ mod tests {
 
     fn assert_repaired_v225_knowledge_gap(cas_dir: &Path, expected_m226_ledger: &str) {
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [225, 226, 227, 228, 229, 230, 231] {
+        for id in [225, 226, 227, 228, 229, 230, 231, 232] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
@@ -997,7 +997,7 @@ mod tests {
         assert_eq!(pages[0].origin_project_id, None);
 
         let status = check_migrations(cas_dir).unwrap();
-        assert_eq!(status.current_version, 231);
+        assert_eq!(status.current_version, 232);
         assert!(status.pending.is_empty());
         let second = run_migrations(cas_dir, false).unwrap();
         assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
@@ -1019,7 +1019,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229, 230, 231],
+                vec![225, 226, 227, 228, 229, 230, 231, 232],
                 "recorded m225 and missing m226 must order all later work behind them"
             );
 
@@ -1106,7 +1106,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 230, 231]
+                vec![225, 226, 230, 231, 232]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
@@ -1148,7 +1148,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 227, 228, 229, 230, 231]
+                vec![225, 227, 228, 229, 230, 231, 232]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();

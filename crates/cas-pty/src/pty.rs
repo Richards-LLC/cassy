@@ -1727,6 +1727,7 @@ impl Pty {
                                     != Some(libc::ESRCH)
                         };
                         if !alive {
+                            let _ = self.child.wait();
                             return;
                         }
                         if tokio::time::Instant::now() >= deadline {
@@ -1742,12 +1743,14 @@ impl Pty {
                 // Force mode and graceful escalation both finish by touching
                 // the direct-child handle as a belt-and-suspenders fallback.
                 let _ = self.child.kill();
+                let _ = self.child.wait();
                 return;
             }
         }
         // Non-Unix/no-PID fallback: portable_pty only exposes an immediate
         // direct-child kill.
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     /// Immediate group-wide teardown for synchronous process-exit paths.
@@ -3892,6 +3895,16 @@ mod tests {
             exited,
             "Ctrl+C (0x03) from interrupt() must terminate cat (INTR signal)"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn kill_tree_force_reaps_the_direct_child_without_a_zombie() {
+        let config = PtyConfig { command: "sleep".to_string(), args: vec!["120".to_string()], cwd: None, env: vec![], rows: 24, cols: 80 };
+        let mut pty = match Pty::spawn("zombie-reap-probe", config) { Ok(pty) => pty, Err(_) => return };
+        let pid = pty.process_group_id().expect("PTY child pid");
+        pty.kill_tree(true).await;
+        assert!(std::fs::read_to_string(format!("/proc/{pid}/stat")).is_err(), "force teardown must wait the direct child");
     }
 
     // -------------------------------------------------------------------

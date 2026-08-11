@@ -90,6 +90,37 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
     }
 }
 
+/// Queue the factory daemon's proven teardown for a worker maintenance just declared dead.
+pub(crate) fn queue_stale_factory_worker_shutdown(
+    cas_root: &std::path::Path,
+    agent: &Agent,
+) -> Result<Option<i64>, String> {
+    if agent.role != AgentRole::Worker {
+        return Ok(None);
+    }
+    let Some(factory_session) = agent.factory_session.as_deref() else {
+        return Ok(None);
+    };
+    let queue = crate::store::open_spawn_queue_store(cas_root)
+        .map_err(|error| format!("open shutdown queue: {error}"))?;
+    let already_queued = queue
+        .peek(512)
+        .map_err(|error| format!("inspect shutdown queue: {error}"))?
+        .iter()
+        .any(|request| {
+            request.action == cas_store::SpawnAction::Shutdown
+                && request.factory_session.as_deref() == Some(factory_session)
+                && request.worker_names.iter().any(|name| name == &agent.name)
+        });
+    if already_queued {
+        return Ok(None);
+    }
+    queue
+        .enqueue_shutdown(None, std::slice::from_ref(&agent.name), true, Some(factory_session))
+        .map(Some)
+        .map_err(|error| format!("queue factory shutdown: {error}"))
+}
+
 /// Register the durable identity announced by a SessionStart hook.
 ///
 /// Factory workers can receive a second SessionStart while the Claude Code
@@ -1154,6 +1185,15 @@ impl EmbeddedDaemon {
                         eprintln!("[CAS] {msg}");
                         result.errors.push(msg);
                     } else {
+                        match queue_stale_factory_worker_shutdown(&cas_root, &agent) {
+                            Ok(Some(request_id)) => tracing::warn!(worker = %agent.name, agent_id = %agent.id, request_id, "heartbeat reap queued factory process-tree teardown"),
+                            Ok(None) => {}
+                            Err(error) => {
+                                let msg = format!("Failed to queue factory teardown for stale worker {}: {error}", agent.id);
+                                eprintln!("[CAS] {msg}");
+                                result.errors.push(msg);
+                            }
+                        }
                         let _ = crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
                             &cas_root,
                             agent_store.as_ref(),

@@ -4308,7 +4308,21 @@ fn scan_orphan_processes(
             })
             .map(|record| record.pgid)
             .collect();
-    crate::ui::factory::orphan_gc::scan(cas_root, &live_factory_sessions(), &protected_pgids)
+    crate::ui::factory::orphan_gc::scan(cas_root, &live_factory_sessions(), &protected_pgids, &deregistered_worker_worktrees(cas_root, live_workers))
+}
+
+fn deregistered_worker_worktrees(cas_root: &std::path::Path, live_workers: &LiveFactoryWorkers) -> std::collections::HashSet<std::path::PathBuf> {
+    let repo_root = cas_root.parent().unwrap_or(cas_root);
+    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let default_root = config.worktrees().resolve_base_path(repo_root);
+    crate::ui::factory::SessionManager::new().list_sessions().unwrap_or_default().into_iter().filter(|session| session.is_running).flat_map(|session| {
+        let session_name = session.name;
+        let worktree_root = default_root.clone();
+        session.metadata.workers.into_iter().filter_map(move |worker| {
+            let live = live_workers.contains(&(worker.name.clone(), Some(session_name.clone()))) || live_workers.contains(&(worker.name.clone(), None));
+            (!live).then(|| worker.worktree_path.map(std::path::PathBuf::from).unwrap_or_else(|| worktree_root.join(worker.name)))
+        })
+    }).filter(|path| path.is_dir()).collect()
 }
 
 fn orphan_process_groups(

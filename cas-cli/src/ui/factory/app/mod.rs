@@ -1223,14 +1223,14 @@ impl FactoryApp {
         Ok(events)
     }
 
-    /// Drop worker panes whose registry rows are all non-live (cas-e98e AC3).
+    /// Route worker panes whose registry rows are all non-live through the normal shutdown path.
     ///
     /// Uses the shared [`crate::mcp::tools::service::agent_liveness`] classifier
     /// so pane grid, worker_status, and agent_list cannot disagree about dead
     /// workers. Names with **no** registry row yet are kept (spawn race).
     fn reconcile_phantom_worker_panes(&mut self) {
         use crate::mcp::tools::service::agent_liveness::should_keep_worker_pane;
-        use crate::store::open_agent_store;
+        use crate::store::{open_agent_store, open_spawn_queue_store};
 
         let Ok(agent_store) = open_agent_store(&self.cas_dir) else {
             return;
@@ -1250,18 +1250,24 @@ impl FactoryApp {
             return;
         }
 
+        let Some(factory_session) = self.factory_session.as_deref() else {
+            tracing::warn!(workers = ?to_drop, "stale worker panes retained: no factory session to queue teardown");
+            return;
+        };
+        let Ok(queue) = open_spawn_queue_store(&self.cas_dir) else {
+            tracing::warn!(workers = ?to_drop, "stale worker panes retained: shutdown queue unavailable");
+            return;
+        };
+        let queued = queue.peek(512).unwrap_or_default();
         for name in &to_drop {
-            tracing::info!(
-                worker = %name,
-                "cas-e98e: dropping phantom worker pane (registry non-live)"
-            );
-            self.worker_names.retain(|n| n != name);
-            self.remove_worker_from_event_detector(name);
+            if queued.iter().any(|request| request.action == cas_store::SpawnAction::Shutdown && request.factory_session.as_deref() == Some(factory_session) && request.worker_names.iter().any(|target| target == name)) {
+                continue;
+            }
+            match queue.enqueue_shutdown(None, std::slice::from_ref(name), true, Some(factory_session)) {
+                Ok(request_id) => tracing::warn!(worker = %name, request_id, "cas-ca69: non-live worker pane retained until forced shutdown reaps its process tree"),
+                Err(error) => tracing::error!(worker = %name, %error, "stale worker pane retained because teardown request could not be queued"),
+            }
         }
-
-        self.pane_grid = PaneGrid::new(&self.worker_names, &self.supervisor_name, self.is_tabbed);
-        self.clamp_selected_worker_tab();
-        let _ = self.sync_pane_sizes();
     }
 
     fn set_active_epic(

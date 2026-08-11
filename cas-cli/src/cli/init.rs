@@ -24,7 +24,7 @@ use crate::store::detect::init_cas_dir;
 
 use crate::cli::Cli;
 use crate::cli::factory_tooling;
-use crate::cli::hook::{configure_claude_hooks, configure_codex_mcp_server, configure_mcp_server};
+use crate::cli::hook::{configure_claude_hooks, configure_mcp_server, provision_codex_project};
 use crate::cli::interactive;
 
 /// Overall timeout for `cas init`. If init is still running past this, the
@@ -348,7 +348,10 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     }
 
     if config.agents.codex {
-        codex_configured = configure_codex_mcp_server(cwd).unwrap_or(false);
+        // Codex will otherwise prompt on both project and command-hook trust
+        // before it invokes CAS. Unlike cosmetic init artifacts, treating this
+        // failure as success would leave the default install non-functional.
+        codex_configured = provision_codex_project(cwd)?;
 
         let codex_dir = cwd.join(".codex");
         let builtins_result =
@@ -829,8 +832,8 @@ fn apply_configuration(
 
     if config.agents.codex {
         execute_step("Configuring Codex MCP server", animate, || {
-            configure_codex_mcp_server(cwd)?;
-            Ok(".codex/config.toml + .codex/hooks.json; review with /hooks".to_string())
+            provision_codex_project(cwd)?;
+            Ok(".codex/config.toml + .codex/hooks.json; project and CAS hook trust registered".to_string())
         })?;
 
         execute_step("Syncing Codex built-in files", animate, || {

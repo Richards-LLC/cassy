@@ -1,5 +1,7 @@
 use crate::cli::hook::*;
-use crate::cli::hook::config_gen::{get_cas_hooks_config, has_cas_hook_entries};
+use crate::cli::hook::config_gen::{
+    configure_codex_mcp_server, get_cas_hooks_config, has_cas_hook_entries,
+};
 use crate::cli::hook::configure_claude_hooks_with_home;
 use crate::config::HookConfig;
 use tempfile::TempDir;

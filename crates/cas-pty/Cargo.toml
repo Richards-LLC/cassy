@@ -34,6 +34,9 @@ uuid = { version = "1", features = ["v4"] }
 # JSON parsing for RPC mode
 serde_json = "1"
 
+# Codex persists trusted hook-definition SHA-256 digests in config.toml.
+sha2 = "0.10"
+
 # TOML parsing for the Codex trust table (cas-28a49): a line-based matcher
 # cannot tell `[projects."x"]` from an inline/dotted spelling of the same key,
 # and a duplicate table would make the operator's whole config unparseable.

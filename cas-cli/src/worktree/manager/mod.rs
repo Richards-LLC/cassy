@@ -656,11 +656,12 @@ impl WorktreeManager {
     // Worker and epic operations are split into dedicated modules.
 }
 
-/// Symlink `.mcp.json` and `.claude/` from the main project into a worktree.
+/// Symlink harness configuration from the main project into a worktree.
 ///
 /// These files are typically gitignored (`.mcp.json` contains API keys, `.claude/`
-/// contains local settings), so `git worktree add` doesn't check them out.
-/// Without them, workers have no MCP server config and lose access to CAS tools.
+/// and `.codex/` contain local settings), so `git worktree add` doesn't check
+/// them out. Without them, workers have no MCP server config and lose access to
+/// CAS tools and Codex's native hook policy.
 ///
 /// Safe to call on worktrees where the files are already present (tracked in git):
 /// existing paths are silently skipped.
@@ -681,6 +682,16 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
         let claude_dst = worktree_path.join(".claude");
         if claude_src.is_dir() && !claude_dst.exists() {
             let _ = symlink(&claude_src, &claude_dst);
+        }
+
+        // .codex/ — project MCP config plus CAS-native hooks. This must be the
+        // same source path as the project copy: Codex records hook trust by the
+        // absolute hooks.json source path, so copying would create an untrusted
+        // second hook identity for every factory worktree.
+        let codex_src = repo_root.join(".codex");
+        let codex_dst = worktree_path.join(".codex");
+        if codex_src.is_dir() && !codex_dst.exists() {
+            let _ = symlink(&codex_src, &codex_dst);
         }
     }
 }

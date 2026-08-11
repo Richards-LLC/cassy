@@ -8,18 +8,18 @@
 
 ## 1. Headline finding
 
-The two-week corpus contains **24 observed failure events in 21 model/session-class episodes across 1,132 factory sessions**. Three classes carry 14 of the 24 events (58.3%): workspace-contract denials (6), missed surfaces (4), and crossed-message merge races (4). The broad lexical pass initially surfaced 586 candidates; structural evidence framing reduced that to 31, and manual adjudication accepted 21 episodes. In total, 565 broad candidates (96.4%) did not become incidents, which is why this report treats the final counts as a high-precision lower bound rather than turning prompt echoes into telemetry.
+The two-week corpus contains **24 observed failure events in 21 model/session-class episodes across 1,135 factory sessions**. Three classes carry 14 of the 24 events (58.3%): workspace-contract denials (6), missed surfaces (4), and crossed-message merge races (4). The broad lexical pass initially surfaced 586 candidates; structural evidence framing reduced that to 31, and manual adjudication accepted 21 episodes. In total, 565 broad candidates (96.4%) did not become incidents, which is why this report treats the final counts as a high-precision lower bound rather than turning prompt echoes into telemetry.
 
 ## 2. Overview
 
 | Metric | Current | Baseline | Delta | % delta | Sample |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Adjudicated observed events | 24 | 586 lexical candidates | -562 | -95.9% | 1,132 sessions |
+| Adjudicated observed events | 24 | 586 lexical candidates | -562 | -95.9% | 1,135 sessions |
 | Events in top three classes | 14 | 10 in the other six classes | +4 | +40.0% | 24 events |
-| Claude Fable 5 affected-episode rate | 6.98% | 1.86% corpus rate | +5.12 points | +275.3% | 86 sessions |
-| GPT-5.6 Terra affected-episode rate | 4.64% | 1.86% corpus rate | +2.78 points | +149.5% | 194 sessions |
-| Claude Opus 5 affected-episode rate | 1.45% | 1.86% corpus rate | -0.41 points | -21.8% | 275 sessions |
-| GPT-5.6 Sol affected-episode rate | 0.44% | 1.86% corpus rate | -1.42 points | -76.5% | 458 sessions |
+| Claude Fable 5 affected-episode rate | 6.98% | 1.85% corpus rate | +5.13 points | +277.1% | 86 sessions |
+| GPT-5.6 Terra affected-episode rate | 4.62% | 1.85% corpus rate | +2.77 points | +149.5% | 195 sessions |
+| Claude Opus 5 affected-episode rate | 1.45% | 1.85% corpus rate | -0.40 points | -21.4% | 275 sessions |
+| GPT-5.6 Sol affected-episode rate | 0.43% | 1.85% corpus rate | -1.42 points | -76.5% | 460 sessions |
 
 “Affected-episode rate” is model/session-class episodes divided by sessions for that model. It is not a model-quality score: assignments, repositories, supervisors, and guard exposure differ materially.
 
@@ -27,7 +27,7 @@ The two-week corpus contains **24 observed failure events in 21 model/session-cl
 
 ### 3.1 Corpus and window
 
-The inclusive start is `2026-07-28T04:00:00Z`; the exclusive end is `2026-08-11T17:55:35Z`, immediately before the audit worker spawned. The miner found **437 Claude factory sessions** and **695 Codex factory sessions** with an in-window record, for **1,132 total**. File discovery used the transcript record timestamp as the authority; mtime only skipped files that could not contain an in-window append.
+The inclusive start is `2026-07-28T04:00:00Z`; the exclusive end is `2026-08-11T17:55:35Z`, immediately before the audit worker spawned. The final extraction found **437 Claude factory sessions** and **698 Codex factory sessions** with an in-window record, for **1,135 total**. File discovery used the transcript record timestamp as the authority; mtime only skipped files that could not contain an in-window append. The frozen session summary records these denominators: a verification rerun found three previously dormant sessions after their append-only files resumed (2 Sol, 1 Terra), but no additional evidence candidate. Exact historical reproduction therefore uses the checked-in summary; a live-source rerun may discover another late append whose record timestamp falls inside the fixed window.
 
 Primary sources:
 
@@ -103,18 +103,18 @@ Cells are **episodes / raw events**. A dash is an observed zero inside the measu
 | Codex | `claude-opus-4-5` | 2 | — | — | — | — | — | — | — | — | — |
 | Codex | `gpt-5.5` | 39 | — | — | — | — | — | — | — | — | — |
 | Codex | `gpt-5.6-luna` | 2 | — | — | — | — | — | — | — | — | — |
-| Codex | `gpt-5.6-sol` | 458 | — | — | — | — | — | — | **2 / 2** | — | — |
-| Codex | `gpt-5.6-terra` | 194 | — | — | **1 / 1** | — | **2 / 2** | **4 / 4** | **2 / 2** | — | — |
-| **Total** | **all measured** | **1,132** | **1 / 3** | **6 / 6** | **1 / 1** | **1 / 1** | **2 / 2** | **4 / 4** | **4 / 4** | **1 / 1** | **1 / 2** |
+| Codex | `gpt-5.6-sol` | 460 | — | — | — | — | — | — | **2 / 2** | — | — |
+| Codex | `gpt-5.6-terra` | 195 | — | — | **1 / 1** | — | **2 / 2** | **4 / 4** | **2 / 2** | — | — |
+| **Total** | **all measured** | **1,135** | **1 / 3** | **6 / 6** | **1 / 1** | **1 / 1** | **2 / 2** | **4 / 4** | **4 / 4** | **1 / 1** | **1 / 2** |
 
 ### 4.2 Frequency by class
 
-| Rank | Failure class | Episodes | Raw events | Events / 1,132 sessions | Named evidence pointer |
+| Rank | Failure class | Episodes | Raw events | Events / 1,135 sessions | Named evidence pointer |
 | ---: | --- | ---: | ---: | ---: | --- |
 | 1 | Workspace-contract denial | 6 | 6 | 0.53% | `~/.claude/.../54bc7a03-….jsonl:29` (all six exact pointers are in the manifest) |
 | 2= | Missed surface | 4 | 4 | 0.35% | `task:cas-641f@description` → `cas-8921`, `cas-96f9`, `cas-2327`, `cas-bc13` |
 | 2= | Crossed-message merge race | 4 | 4 | 0.35% | `~/.codex/sessions/2026/08/11/rollout-…019ff0a6….jsonl:441`; `task:cas-1e7e@2026-08-11T14:58:05Z` |
-| 4 | Unscoped test guard | 1 | 3 | 0.27% | `~/.claude-alt/.../steady-falcon-66/1ebe3ceb-….jsonl:541` |
+| 4 | Unscoped test guard | 1 | 3 | 0.26% | `~/.claude-alt/.../steady-falcon-66/1ebe3ceb-….jsonl:541` |
 | 5= | Partial delivery | 2 | 2 | 0.18% | `task:cas-a487@2026-08-11T13:29:55Z`; `~/.codex/...019fede3….jsonl:624` |
 | 5= | Draft/format violation | 1 | 2 | 0.18% | `task:cas-a872@2026-08-07T00:54Z` |
 | 7= | Wrong process/environment | 1 | 1 | 0.09% | `~/.codex/...019fe7a0….jsonl:776`; `task:cas-4fa4@2026-08-09T19:02Z` |
@@ -123,15 +123,15 @@ Cells are **episodes / raw events**. A dash is an observed zero inside the measu
 
 ### 4.3 Segment variance
 
-The overall affected-episode rate is 1.86%. Relative to that baseline:
+The overall affected-episode rate is 1.85%. Relative to that baseline:
 
-| Harness / model | Sessions | Episodes | Rate | Delta vs 1.86% |
+| Harness / model | Sessions | Episodes | Rate | Delta vs 1.85% |
 | --- | ---: | ---: | ---: | ---: |
-| Claude / Fable 5 | 86 | 6 | 6.98% | +5.12 points |
-| Codex / GPT-5.6 Terra | 194 | 9 | 4.64% | +2.78 points |
-| Claude / Opus 5 | 275 | 4 | 1.45% | -0.41 points |
-| Codex / GPT-5.6 Sol | 458 | 2 | 0.44% | -1.42 points |
-| All zero-incident model rows | 119 | 0 | 0.00% | -1.86 points |
+| Claude / Fable 5 | 86 | 6 | 6.98% | +5.13 points |
+| Codex / GPT-5.6 Terra | 195 | 9 | 4.62% | +2.77 points |
+| Claude / Opus 5 | 275 | 4 | 1.45% | -0.40 points |
+| Codex / GPT-5.6 Sol | 460 | 2 | 0.43% | -1.42 points |
+| All zero-incident model rows | 119 | 0 | 0.00% | -1.85 points |
 
 This variance is descriptive. Fable’s six episodes are all one guard class over a two-day band; Terra’s nine span four classes and disproportionately include tasks assigned to repair known failures. The table does not establish that either model is intrinsically more failure-prone.
 
@@ -141,9 +141,9 @@ These are proposals for supervisor/operator approval. This task changes no rules
 
 1. **Add a workspace-path recovery pair to worker guidance.** Six denials affected 6 of 86 Claude Fable 5 sessions (6.98%; 0.53% of all measured sessions). Proposed wording: after a workspace banner, do not retry the same target; route source/build output to the worktree, durable proof to the task artifact root, ephemeral notes to the harness scratchpad, and treat `/dev/null` denial as a guard defect to report rather than inventing another host path. The `/dev/null` and harness-scratchpad rows also justify a runtime-policy follow-up; guidance alone cannot fix false-positive boundaries.
 
-2. **Make the surface checklist demand a pointer, not an assertion.** Four missed-surface episodes affected 4 of 194 GPT-5.6 Terra sessions (2.06%; 0.35% overall). Proposed addition after the existing cas-src checklist: for every applicable row, paste the proving file, command, or test; for every `N/A`, state why. A bare “synced all mirrors” or “migration covered” is not close evidence. This builds on the checklist added by `cas-641f`; it does not rewrite that change during this audit.
+2. **Make the surface checklist demand a pointer, not an assertion.** Four missed-surface episodes affected 4 of 195 GPT-5.6 Terra sessions (2.05%; 0.35% overall). Proposed addition after the existing cas-src checklist: for every applicable row, paste the proving file, command, or test; for every `N/A`, state why. A bare “synced all mirrors” or “migration covered” is not close evidence. This builds on the checklist added by `cas-641f`; it does not rewrite that change during this audit.
 
-3. **Add a crossed-message freshness handshake before corrective work.** Four races affected four Codex sessions (2 Sol, 2 Terra; 0.61% across those 652 sessions). Proposed wording: after a push, `MERGE REQUIRED`, or late amendment, drain the inbox and re-read the task; before producing a corrective commit, test whether the delivered tip is already an ancestor of the target and whether the task is already closed/merged. If yes, re-close or stop instead of editing.
+3. **Add a crossed-message freshness handshake before corrective work.** Four races affected four Codex sessions (2 Sol, 2 Terra; 0.61% across those 655 sessions). Proposed wording: after a push, `MERGE REQUIRED`, or late amendment, drain the inbox and re-read the task; before producing a corrective commit, test whether the delivered tip is already an ancestor of the target and whether the task is already closed/merged. If yes, re-close or stop instead of editing.
 
 The unscoped-test class produced three raw events in one Claude Opus 5 session. It does not displace the top three because the repository has since added the scoped-test wrapper and the worker guidance already names the passed-count proof. A repeat audit should evaluate the post-guard epoch separately.
 
@@ -155,6 +155,7 @@ The unscoped-test class produced three raw events in one Claude Opus 5 session. 
 - **Mixed episode carriers.** Transcript banners use a session ID; task-note incidents use the worker/task episode associated with the note. Both dedupe repeated prose, but a task handed between workers may undercount unless the note names the originating worker.
 - **Historical text inside current notes.** Embedded note timestamps, not `tasks.updated_at`, determine window membership.
 - **Model inheritance.** Tool-result rows inherit the session’s last observed model. `<synthetic>` and `unknown` stay explicit rather than being guessed.
+- **Append-only source discovery.** A resumed transcript can make an older in-window session visible after the first extraction. The checked-in summary freezes this report's denominator; later live-source reruns should disclose any denominator drift rather than silently rewriting the audit.
 - **Grok not measured.** V1 does not support a cross-harness zero claim for Grok.
 - **No causal claim.** The variance chart is a routing/observability result, not a benchmark.
 
@@ -166,9 +167,10 @@ What would change the conclusion: adjudicating a second high-recall sample that 
 - HTML review surface: `docs/analysis/2026-08-11-failure-mode-frequency-audit.html`
 - Adjudicated manifest: `docs/analysis/2026-08-11-failure-mode-incidents.csv`
 - Reproducible candidate miner: `docs/analysis/scripts/mine_failure_modes.py`
+- Frozen session summary: `docs/analysis/2026-08-11-failure-mode-session-summary.json`
 - Repository commit examined: `bd9c5103` at extraction start
 - DB snapshot: `/tmp/cas-935c.sy0M4V/snap.db`; `PRAGMA integrity_check = ok`
 - Exact data window: `[2026-07-28T04:00:00Z, 2026-08-11T17:55:35Z)`
 - Candidate result: 586 broad lexical candidates → 31 structurally evidence-framed candidates → 21 accepted episodes / 24 raw events
-- Session denominator: 437 Claude + 695 Codex = 1,132
+- Session denominator: 437 Claude + 698 Codex = 1,135
 - Linked charter: `cas-0cda` (operational intelligence v2); this audit is a one-off, read-only v1 bridge. Recurrence/cron is intentionally left to operator decision.

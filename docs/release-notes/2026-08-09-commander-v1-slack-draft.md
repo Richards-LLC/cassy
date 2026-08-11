@@ -1,19 +1,18 @@
-# Commander v1 runtime release — v2.61.1 NOT RELEASABLE, DO NOT POST
+# Commander v1 runtime release — v2.62.0 RELEASABLE, DO NOT POST WITHOUT APPROVAL
 
-> **DO NOT POST. Public `v2.61.1` failed the fresh assembled live-viewer restart gate.** Exact public
-> Linux bytes on soundwave and unicron reached real-Chrome pairing, fan-out, arbitration, and control,
-> then restart timed out after 10 seconds because the old hub PID or machine lock remained live. No
-> competing replacement started, but recovery did not complete. GH #217 / `cas-017a` owns the defect;
-> the required sequence is fix → next public release → fresh full H7 continuation. The bodies below are
-> retained as historical drafts only and are not postable.
+> **DO NOT POST WITHOUT EXPLICIT USER APPROVAL.** Public `v2.62.0` passed the fresh assembled gate on
+> soundwave and unicron with real Chrome 151 at `390×844`. The held-viewer restart that failed on
+> `v2.61.1` now starts one replacement, preserves the public URL, reconnects viewers, and drops the old
+> lease. Security, revocation, `SIGILL`, compatibility, no-multiplication, and zero-residue rows passed.
+> The bodies below are ready for review but remain unposted.
 
 Intended destination after a future green gate and explicit approval: `#cas-internal` (`C0B44GUKDK2`).
-Status: **DO NOT POST; currently unposted**. The narrower `cas-f382` stock macOS restart ran without
-live viewers and remains valid only in that scope; it cannot green the newly failed assembled row.
+Status: **DO NOT POST WITHOUT EXPLICIT USER APPROVAL; currently unposted**. The final paired report is
+green at exact public `v2.62.0`; historical `v2.61.1` failure evidence remains preserved.
 
 ## User-perspective top-level post
 
-**Live on production · User · v2.61.1**
+**Live on production · User · v2.62.0**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
@@ -23,7 +22,8 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
   visits instead of accepting a plaintext downgrade.
 - Start on a newly installed machine without manually creating Commander state directories first.
 - Watch the same session from more than one screen while one clearly identified controller holds input.
-- Restart a Commander hub without racing its still-exiting predecessor or launching a competing owner.
+- Restart a Commander hub while viewers are attached; they reconnect to one replacement and must
+  deliberately reacquire control.
 - Reconnect after hub or daemon restarts with an evidence-backed explanation when the operating system
   reports how a daemon stopped, while missing or stale evidence stays honestly unknown.
 - Revoke a device when needed; expired, replayed, cross-site, or over-scoped access is refused.
@@ -31,7 +31,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · v2.61.1**
+**Live on production · Dev · v2.62.0**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -49,9 +49,9 @@ daemon session, and bounded downstream fan-out.
   responses; the documented plaintext listener ignores spoofed proxy and identity headers.
 - One upstream daemon WebSocket serves multiple pane viewers; controller leases make concurrent input
   explicit, and slow viewers do not create another upstream or stall healthy viewers.
-- Hub restart propagates stop failures, waits for both the old PID and authoritative machine-lock
-  release, and acquires the lock before stale cleanup or replacement launch. A bounded timeout fails
-  without starting a competing hub, and concurrent start/restart attempts retain exactly one owner.
+- Hub restart gives live viewer connections a bounded drain window, force-closes only residual stale
+  sessions, waits for the old PID and machine lock, then starts exactly one replacement. Reconnecting
+  viewers do not regain a controller lease automatically.
 - Clean-home startup creates the missing hub hierarchy owner-only for ordinary and Tailscale Serve
   flows, preserves safe existing state, and fails closed on symlink, ownership, mode, or ancestor
   collisions without leaking filesystem paths.
@@ -73,8 +73,8 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Resolve GH #217 / `cas-017a`, publish the next immutable release, and complete a fresh full H7
-      continuation with live viewers and zero residue before treating any draft as postable.
+- [x] Publish immutable `v2.62.0` with the held-viewer drain fix and complete a fresh full H7
+      continuation with live viewers and zero residue.
 
 - [x] Publish immutable `v2.61.0` containing app-bundle discovery corrective `cas-a13a`; exact public
       asset, tag peel, installed binary, and selected absolute app CLI are recorded.
@@ -95,10 +95,10 @@ daemon session, and bounded downstream fan-out.
       generic denied exchange responses expose only the exact authorized origin.
 - [x] Confirm the documented paired-client Tailscale Serve restart reaches ready without a wrapper,
       preserves the stable machine identity and URL, reconnects clients, and does not restore a lease automatically.
-- [ ] Confirm the final acceptance verdict is green, not merely the source-only guards. Public
-      `v2.61.1` is currently **NOT RELEASABLE**.
+- [x] Confirm the final acceptance verdict is green, not merely the source-only guards. Public
+      `v2.62.0` is **RELEASABLE**.
 - [x] Re-read both posts for zero task IDs, zero agent/factory narration, impact-first Was → Now prose,
       and exactly two top-level posts.
-- [ ] After a future green release gate, refresh both bodies to the new public version and obtain
-      explicit user approval.
+- [x] Refresh both bodies to exact public `v2.62.0` after the green gate.
+- [ ] Obtain explicit user approval to post.
 - [ ] Only then post User first, then Dev; record Slack timestamps in the release receipt, not here.

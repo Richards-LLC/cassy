@@ -1,184 +1,78 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Commander v1 assembled acceptance gate — 2026-08-11</title>
-  <style>
-    :root { color-scheme:light dark; --bg:#f6f7f9; --panel:#fff; --text:#18212b; --muted:#52606d; --line:#c8d0d9; --bad:#8b1e2d; --bad-bg:#fff1f2; --good:#17663a; --good-bg:#edf9f1; --warn:#7a4d00; --warn-bg:#fff8e6; --code:#eef1f4; }
-    * { box-sizing:border-box; }
-    html { font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.55; background:var(--bg); color:var(--text); }
-    body { margin:0; }
-    .skip { position:absolute; left:-9999px; top:.5rem; padding:.5rem; background:var(--panel); border:2px solid var(--bad); z-index:2; }
-    .skip:focus { left:.5rem; }
-    :focus-visible { outline:3px solid var(--warn); outline-offset:2px; }
-    header, main, footer { width:min(76rem,calc(100% - 2rem)); margin-inline:auto; }
-    header { padding:2.4rem 0 1.25rem; }
-    main { padding-bottom:3rem; }
-    footer { border-top:1px solid var(--line); padding:1.25rem 0 2.5rem; color:var(--muted); font-size:.9rem; }
-    h1 { margin:0 0 .6rem; font-size:clamp(2rem,5vw,3.4rem); line-height:1.05; letter-spacing:-.035em; }
-    h2 { margin:2.2rem 0 .75rem; font-size:1.45rem; }
-    p, li { max-width:82ch; }
-    a { color:inherit; text-decoration-thickness:.1em; text-underline-offset:.18em; }
-    code { background:var(--code); border-radius:.25rem; padding:.08rem .28rem; overflow-wrap:anywhere; }
-    .eyebrow { color:var(--muted); font-weight:700; letter-spacing:.09em; text-transform:uppercase; font-size:.78rem; }
-    .verdict { border:2px solid var(--bad); border-left-width:.65rem; background:var(--bad-bg); border-radius:.65rem; padding:1.2rem 1.35rem; margin:1.25rem 0; }
-    .verdict strong { color:var(--bad); font-size:1.18rem; }
-    .lede { font-size:1.05rem; }
-    .proof-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.7rem; margin:1rem 0 1.4rem; }
-    .proof { background:var(--panel); border:1px solid var(--line); border-radius:.5rem; padding:.85rem; }
-    .proof b { display:block; font-size:1.15rem; }
-    .proof span { color:var(--muted); font-size:.85rem; }
-    .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:.55rem; background:var(--panel); }
-    table { width:100%; border-collapse:collapse; min-width:44rem; }
-    caption { text-align:left; font-weight:700; padding:.8rem 1rem; border-bottom:1px solid var(--line); }
-    th, td { padding:.68rem .85rem; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
-    thead th { background:var(--code); font-size:.85rem; position:sticky; top:0; }
-    tbody tr:last-child th, tbody tr:last-child td { border-bottom:0; }
-    th[scope="row"] { width:19%; }
-    .state { display:inline-block; border:1px solid currentColor; border-radius:999px; padding:.12rem .5rem; font-weight:800; font-size:.76rem; white-space:nowrap; }
-    .pass { color:var(--good); background:var(--good-bg); }
-    .fail { color:var(--bad); background:var(--bad-bg); }
-    .pending { color:var(--warn); background:var(--warn-bg); }
-    .callout { border:1px solid var(--warn); border-left-width:.45rem; background:var(--warn-bg); border-radius:.5rem; padding:.9rem 1rem; }
-    .small { font-size:.9rem; color:var(--muted); }
-    ol li { margin:.55rem 0; padding-left:.25rem; }
-    @media (prefers-color-scheme:dark) { :root { --bg:#10151b; --panel:#171e26; --text:#edf2f7; --muted:#b7c2ce; --line:#465463; --bad:#ffadb8; --bad-bg:#32171d; --good:#98e7b5; --good-bg:#153023; --warn:#ffda8d; --warn-bg:#332713; --code:#252e38; } }
-    @media (max-width:720px) { header,main,footer { width:min(100% - 1rem,76rem); } header { padding-top:1.4rem; } .proof-strip { grid-template-columns:1fr 1fr; } th,td { padding:.55rem .65rem; } }
-    @media (max-width:420px) { .proof-strip { grid-template-columns:1fr; } h1 { font-size:2rem; } }
-    @media print { :root { --bg:#fff; --panel:#fff; --text:#000; --muted:#333; --line:#777; --bad:#000; --bad-bg:#fff; --good:#000; --good-bg:#fff; --warn:#000; --warn-bg:#fff; --code:#eee; } @page { margin:.55in; } header,main,footer { width:100%; } header { padding-top:0; } a[href]::after { content:" (" attr(href) ")"; font-size:.75em; overflow-wrap:anywhere; } .table-wrap { overflow:visible; } table { min-width:0; font-size:8.3pt; } thead { display:table-header-group; } tr,.proof,.verdict,.callout { break-inside:avoid; } h2 { break-after:avoid; } }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Commander v1 assembled acceptance gate — 2026-08-11</title>
+<style>
+:root{color-scheme:light dark;--bg:#f5f7fa;--panel:#fff;--text:#17202a;--muted:#536171;--line:#c9d2dc;--accent:#075985;--good:#166534;--good-bg:#dcfce7;--warn:#92400e;--code:#eef2f6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}a{color:var(--accent)}a:focus{outline:3px solid var(--accent);outline-offset:2px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:var(--panel);padding:.5rem;z-index:2}header,main,footer{max-width:1120px;margin:auto;padding:1.25rem}h1{font-size:clamp(2rem,5vw,3.5rem);line-height:1.05;margin:.25rem 0 1rem}h2{margin-top:2.2rem;border-bottom:2px solid var(--line);padding-bottom:.3rem}.eyebrow{text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:700}.verdict{border:3px solid var(--good);border-radius:12px;background:var(--good-bg);color:#12351c;padding:1.1rem 1.25rem;margin:1rem 0}.verdict strong{display:block;font-size:1.45rem}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem;margin:1rem 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1rem}.card b{display:block;font-size:1.45rem;color:var(--good)}.card span{color:var(--muted)}section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1rem 1.25rem;margin:1rem 0}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.94rem}caption{text-align:left;font-weight:700;padding:.25rem 0 .65rem}th,td{border:1px solid var(--line);padding:.55rem .65rem;vertical-align:top;text-align:left}thead th{background:var(--code);position:sticky;top:0}tbody th{white-space:nowrap}.pass{font-weight:800;color:var(--good)}code{background:var(--code);padding:.08rem .28rem;border-radius:4px}ol,ul{padding-left:1.4rem}.note{border-left:4px solid var(--accent);padding-left:.8rem;color:var(--muted)}footer{color:var(--muted);font-size:.9rem}.source{font-size:.82rem;color:var(--muted);margin-top:.4rem}@media(prefers-color-scheme:dark){:root{--bg:#10151b;--panel:#17202a;--text:#e8edf2;--muted:#b7c1cc;--line:#43505d;--accent:#7dd3fc;--good:#86efac;--good-bg:#12351c;--code:#222d38}.verdict{color:#e8fff0}}@media(max-width:720px){header,main,footer{padding:.8rem}.cards{grid-template-columns:1fr 1fr}section{padding:.8rem}.table-wrap{margin-inline:-.8rem;padding-inline:.8rem}}@media(max-width:420px){.cards{grid-template-columns:1fr}h1{font-size:2rem}}@media print{:root{--bg:#fff;--panel:#fff;--text:#000;--muted:#333;--line:#777;--accent:#000;--good:#000;--good-bg:#fff;--code:#eee}body{font-size:10.5pt}header,main,footer{max-width:none;padding:.3in}section,.card,.verdict{break-inside:avoid;background:#fff}tr{break-inside:avoid}thead{display:table-header-group}a[href^="http"]::after{content:" (" attr(href) ")"}.cards{grid-template-columns:repeat(4,1fr)}}
+</style>
 </head>
 <body>
-<a class="skip" href="#content">Skip to report content</a>
+<a class="skip" href="#main">Skip to report</a>
 <header>
-  <div class="eyebrow">Engineering investigation · practitioner review · updated 2026-08-11</div>
+  <p class="eyebrow">Commander · public release acceptance · 2026-08-11</p>
   <h1>Commander v1 assembled acceptance gate</h1>
-  <div class="verdict"><strong>NOT RELEASABLE at public v2.61.1 · high confidence</strong><p class="lede">A fresh soundwave + unicron run used byte-identical public Linux bytes and real Chrome 151 at <code>390×844</code>. Pairing, fan-out, arbitration, control, and one-upstream behavior passed. With live viewers attached, hub restart timed out after 10 seconds because the old PID or machine lock remained live. No competing replacement started, but recovery did not complete, so the run stopped fail-closed.</p></div>
-  <p>The binding contract is the <a href="../specs/2026-08-08-commander-security-architecture.md">Commander security architecture ADR</a>, especially <code>H7-ADV-01</code>, <code>H7-FLEET-02</code>, <code>H7-INVARIANT-03</code>, and <code>H7-CRASH-04</code>.</p>
+  <div class="verdict"><strong>RELEASABLE at public v2.62.0 · high confidence</strong>Two real machines and Chrome 151 at a 390×844 phone viewport completed every binding security, fleet, invariant, crash, restart, and compatibility row. The live-viewer restart that failed on v2.61.1 now recovers with one replacement hub and no restored lease.</div>
+  <p>The binding contract is the <a href="../specs/2026-08-08-commander-security-architecture.md">Commander security architecture ADR</a>. The <a href="2026-08-09-commander-v1-acceptance-gate.md">Markdown source</a> is authoritative.</p>
+  <div class="cards" aria-label="Gate summary">
+    <div class="card"><b>8 / 8 pass</b><span>acceptance matrix rows</span></div>
+    <div class="card"><b>3 → 1</b><span>local viewers to daemon upstream</span></div>
+    <div class="card"><b>390 × 844</b><span>real Chrome phone viewport</span></div>
+    <div class="card"><b>0 residue</b><span>active devices, hubs, fixtures</span></div>
+  </div>
 </header>
-<main id="content">
-  <section aria-labelledby="overview"><h2 id="overview">Overview</h2>
-    <div class="proof-strip" aria-label="Key measured facts">
-      <div class="proof"><b>v2.61.1</b><span>byte-identical public Linux artifact on both hosts</span></div>
-      <div class="proof"><b>3 viewers → 1 upstream</b><span>measured before restart</span></div>
-      <div class="proof"><b>390×844</b><span>real Chrome 151 phone viewport</span></div>
-      <div class="proof"><b>Restart failed</b><span>10-second live-viewer handoff timeout</span></div>
-    </div>
-    <div class="table-wrap"><table><caption>Scope and verdict</caption><tbody>
-      <tr><th scope="row">Question</th><td>Does a fresh full two-machine phone-class rerun against exact public <code>v2.61.1</code> complete every binding H7 row?</td></tr>
-      <tr><th scope="row">Verdict</th><td><strong>No. Live-viewer restart timed out after 10 seconds with the old hub PID or machine lock still live; no replacement started.</strong></td></tr>
-      <tr><th scope="row">Confidence</th><td>High; public identity, installed bytes, real Chrome behavior, fixture ledger, exact restart stderr, aftermath, and cleanup were directly observed.</td></tr>
-      <tr><th scope="row">Executed source boundary</th><td>Public release peel <code>b5a37cb5675d4ae74b609d6479f824375f4c7efa</code>; annotated tag <code>496075b676b5c7d7a747433f063635eaa49ea5e5</code>; contains <code>cas-0c54</code> merge <code>997939d7</code> and <code>cas-a13a</code> corrective <code>42d0a69c</code>.</td></tr>
-      <tr><th scope="row">Public release</th><td><code>v2.61.1</code>; GitHub Release published 2026-08-10 23:01 UTC, neither draft nor prerelease.</td></tr>
-      <tr><th scope="row">Linux x86-64 asset</th><td>21,998,541 bytes; archive SHA-256 <code>d40a089b1af31a2ed083d57d6b1d53d0640194cad09988fff24043de5d370c27</code>; binary SHA-256 <code>fb0fc976fa738b50280043195adaadbcd765a900b47e4c649ce6c96a86c2f383</code>.</td></tr>
-      <tr><th scope="row">Binding topology</th><td><code>soundwave</code> controller hub + distinct <code>unicron</code> target hub, both on exact public bytes.</td></tr>
-      <tr><th scope="row">Browser</th><td>Real Google Chrome <code>151.0.7922.108</code>; <code>390×844</code>; controller origin soundwave. Physical Android is not claimed.</td></tr>
-      <tr><th scope="row">Evidence window</th><td>2026-08-11 13:04–13:21 UTC; earlier evidence below is historical.</td></tr>
-      <tr><th scope="row">Author</th><td>H7 assembled release gate (<code>cas-3d85</code>), closure rerun worker <code>proud-newt-50</code>.</td></tr>
-    </tbody></table></div>
-  </section>
+<main id="main">
+<section aria-labelledby="overview"><h2 id="overview">Overview</h2><div class="table-wrap"><table><caption>Executed release boundary</caption><thead><tr><th scope="col">Field</th><th scope="col">Result</th></tr></thead><tbody>
+<tr><th scope="row">Question</th><td>Does public <code>v2.62.0</code> complete the full two-machine phone-class H7 gate?</td></tr>
+<tr><th scope="row">Verdict</th><td><strong>Yes. Every binding row completed, including held-viewer restart.</strong></td></tr>
+<tr><th scope="row">Release identity</th><td>Tag object <code>6fdbe627…</code> peels <code>8e91de67…</code>; official run <code>31518292281</code> succeeded; release <code>368756555</code> is public and immutable.</td></tr>
+<tr><th scope="row">Linux bytes</th><td>Archive 22,075,487 bytes, SHA-256 <code>1af795fd…</code>; installed ELF SHA-256 <code>4ab8faca…</code> on soundwave and unicron.</td></tr>
+<tr><th scope="row">Topology</th><td>Soundwave controller hub, distinct unicron target hub, Chrome 151 at <code>390×844</code>. Physical Android offline and not claimed.</td></tr>
+<tr><th scope="row">Window</th><td>2026-08-11 18:11–18:20 UTC.</td></tr>
+</tbody></table></div></section>
 
-  <section aria-labelledby="current-evidence"><h2 id="current-evidence">2026-08-11 closure rerun evidence</h2>
-    <div class="table-wrap"><table><caption>Binding evidence and conclusion</caption><thead><tr><th scope="col">Observation</th><th scope="col">Redacted source</th><th scope="col">What it proves</th></tr></thead><tbody>
-      <tr><td>Annotated tag <code>496075b6…</code> peels <code>b5a37cb5…</code>; Release run <code>31439277281</code> succeeded. Both installed binaries match public Linux SHA <code>fb0fc976…</code>.</td><td>Release, archive, install, and backup receipts.</td><td>The run binds to released public bytes, not post-release main or a local build.</td></tr>
-      <tr><td>Supervisor-authorized cleanup removed exactly one dead soundwave HTTPS:443 mapping after proving the systemd hub inactive and no listener, process, runtime, or receipt.</td><td>Stale-Serve before/service/after receipts.</td><td>Known legacy residue was narrowly removed before the run.</td></tr>
-      <tr><td>Real Chrome paired three soundwave devices and one unicron device, exercised observer/controller arbitration, resize, targeted interrupt, and attributed messaging. The fixture recorded maximum concurrent upstreams <code>1</code>.</td><td>Checked browser result, fixture ledger, device inventories.</td><td>Two-machine fleet access, fan-out, and control reached the deterministic fixture.</td></tr>
-      <tr><td>With viewers attached, restart exited <code>1</code>: <code>cas hub pid 1244423 or its machine lock remained live after 10.0s; no replacement was started</code>.</td><td>Browser exit/stderr and hub/Serve aftermath.</td><td>Singleton safety is truthful, but required restart recovery fails. GH #217 / <code>cas-017a</code>.</td></tr>
-      <tr><td>Four devices revoked; both hubs and fixture stopped; both Serve states empty; temporary profiles, invitations, metadata, listeners, and receipts absent. Sessions returned <code>3→3</code> and <code>0→0</code>.</td><td>Final auth, process, session, Serve, listener, and registry receipts.</td><td>Zero live authority and runtime residue.</td></tr>
-    </tbody></table></div>
-    <p>The earlier <code>cas-f382</code> proof remains valid for its narrow stock macOS restart without live viewers. It cannot establish this assembled row; the new failure narrows that evidence and supersedes its overall RELEASABLE conclusion.</p>
-  </section>
+<section aria-labelledby="evidence"><h2 id="evidence">Evidence</h2><div class="table-wrap"><table><caption>Fresh executed observations and conclusions</caption><thead><tr><th scope="col">Observation</th><th scope="col">Source</th><th scope="col">What it proves</th></tr></thead><tbody>
+<tr><td>Fresh tag, workflow, release, archive, binary, and two-host hashes agree.</td><td>GitHub reads; public archive manifest; install receipts</td><td>Public bytes only; no source-build substitution.</td></tr>
+<tr><td>Two controllers and one read-only observer paired to soundwave; one controller also paired directly to unicron. Takeover changed the controller and kept observer controls disabled.</td><td><code>browser-result-v2620.json</code></td><td>Direct fleet access and explicit one-controller arbitration.</td></tr>
+<tr><td>Three viewers produced maximum one daemon upstream while resize, input, targeted interrupt, and attributed message reached two panes.</td><td><code>fixture-events-v2620.jsonl</code></td><td>Fan-out does not multiply daemon/session upstreams.</td></tr>
+<tr><td>Held-viewer restart replaced PID <code>513028</code> with <code>546134</code>, preserved URL/port, reconnected viewers, and dropped the lease.</td><td>Browser <code>hubRestart</code> result</td><td>The v2.61.1 blocker is fixed without weakening singleton or lease safety.</td></tr>
+<tr><td>DPoP, pairing, and ticket replay; copied key; method mismatch; scope escalation; malicious/missing Origin; cross-site WebSocket; and non-loopback plaintext were rejected. Revocation blocked A while B stayed connected.</td><td>Browser auth matrix; live HTTP matrix</td><td>H7 adversarial controls fail closed and revocation is scoped.</td></tr>
+<tr><td>Exact PID/starttime receipt recorded signal 4 and core dump; Chrome rendered actionable SIGILL guidance while other sessions and unicron remained healthy.</td><td><code>sigill-receipt-v2620.json</code>; browser crash result</td><td>Crash attribution is evidence-bound and isolated.</td></tr>
+<tr><td>A protocol-v1 daemon restarted; the v2.62.0 client reconnected and rendered both panes at phone size.</td><td><code>browser-compat-result-v2620.json</code></td><td>Daemon restart and old/new compatibility are additive.</td></tr>
+<tr><td>No agent/model endpoint appeared; real logical session records stayed 5→5 and 0→0. Exact public ELF, WASM pins, licenses, release jobs, and fresh guards passed.</td><td>Network summary; process/session receipts; release/ISA/vendor guards</td><td>No model/session multiplication; assembled release and attribution gates are green.</td></tr>
+<tr><td>All devices revoked; hubs, Serve, fixture, browser profiles, invitations, listeners, and temporary session removed from live state.</td><td>Final cleanup receipts</td><td>Zero surviving authority or runtime residue.</td></tr>
+</tbody></table></div></section>
 
-  <section aria-labelledby="evidence"><h2 id="evidence">Prior accepted evidence (historical)</h2>
-    <div class="table-wrap"><table><caption>Executed evidence and conclusion</caption><thead><tr><th scope="col">Observation</th><th scope="col">Redacted source</th><th scope="col">What it proves</th></tr></thead><tbody>
-      <tr><td>Public <code>v2.61.1</code> is an immutable annotated tag containing both corrections. A fresh macOS download matched GitHub's 19,381,860-byte size and SHA-256 <code>7e268a03…</code>; its arm64 binary reports <code>2.61.1</code>/<code>b5a37cb</code>. Prowl received an atomic install with exact <code>v2.61.0</code> SHA <code>6e9c3637…</code> backed up.</td><td><code>v2611-public-asset-receipt.txt</code>; <code>v2611-install-receipt.txt</code>; GitHub reads.</td><td>The focused row used independently verified public bytes and preserved rollback evidence. Soundwave remained untouched under the carry-forward contract.</td></tr>
-      <tr><td>TLS 1.3, minimal health, HSTS, non-loopback plaintext refusal, wrong Origin, preflight, CSRF, CSWSH, and hostile pairing exchange remained green.</td><td>Banked forced-TLS and redacted HTTP receipts under <code>artifacts/cas-3d85/</code>.</td><td>Remote control is TLS-only; hostile origins receive no state or CORS grant.</td></tr>
-      <tr><td>Three fresh soundwave devices paired from prowl: two full-scope controllers and one read-only observer. Each opened two panes at <code>390×844</code>.</td><td><code>ready-viper-55/browser.log</code>; phone screenshot.</td><td><code>H7-FLEET-02</code> used two real machines and a phone-class browser.</td></tr>
-      <tr><td>A acquired control; B observed A, then force-took control; A observed B. Observer C's lease, interrupt, and message controls remained disabled.</td><td>Browser DOM assertions and attributed audit records.</td><td>One explicit controller lease and admin takeover match the ADR.</td></tr>
-      <tr><td>Input, targeted interrupt, attributed message, and resize reached the fixture. Phase 1 recorded exactly one daemon connection for three viewers.</td><td><code>remote-phase1/fixture-events.jsonl</code>.</td><td>Pane viewers fan out through one daemon/session upstream; mutations are attributed.</td></tr>
-      <tr><td>DPoP first use returned <code>200</code>; replay, copied key, method mismatch, and observer escalation were browser-rejected. Consumed pairing replay was <code>401</code>; ticket replay was exactly one open and one rejection.</td><td>Browser auth matrix; <code>audit-h7.jsonl</code>.</td><td><code>H7-ADV-01</code> rejects replay, copied state, and over-scope access without exposing protected bodies.</td></tr>
-      <tr><td>Revoking A produced <code>auth-blocked</code> while B remained connected. All three devices were then revoked; active count is zero.</td><td>Browser state; guarded CLI revocations; <code>auth-after.json</code>.</td><td>Revocation is immediate and isolated.</td></tr>
-      <tr><td>PID <code>2289931</code>, starttime <code>2571583</code>, was killed by <code>SIGILL</code>. Receipt: signal <code>4</code>, <code>core_dumped=true</code>. B and C rendered actionable SIGILL guidance while sessions and prowl health stayed <code>200</code>.</td><td><code>remote-phase1/daemon-exit.sigill.json</code>; browser assertions.</td><td><code>H7-CRASH-04</code> is identity-bound and does not invent a generic cause.</td></tr>
-      <tr><td>A protocol-v1 fixture restarted after SIGILL. B and C reattached and each rendered two panes; phase 2 again recorded exactly one upstream.</td><td><code>remote-phase2/fixture-state.json</code> and <code>fixture-events.jsonl</code>.</td><td>Daemon restart recovers and the current client accepts the legacy protocol shape.</td></tr>
-      <tr><td>The 5.6-second trace contains event streams and event-triggered/action requests only; no model/agent endpoint and no idle polling interval.</td><td>Timestamped <code>networkTrace</code> in <code>browser.log</code>.</td><td>Commander does not poll an agent or create model traffic.</td></tr>
-      <tr><td>Prowl stayed Claude/Codex/Grok <code>1/1/0</code> + <code>1</code> session. Soundwave changed <code>1/0/0</code> + <code>6</code> → <code>1/1/0</code> + <code>6</code>; PID <code>2299566</code> was independently spawned at 15:56:20 by <code>crisp-spider-66</code> under unrelated daemon <code>2144744</code>.</td><td><code>baseline.json</code>, <code>after.json</code>, process parent/command and session names.</td><td>Commander created no model process or logical session; the ambient Codex delta is externally attributed.</td></tr>
-      <tr><td>Stock proof used an explicit system PATH with no <code>tailscale</code>, no <code>/opt/homebrew/bin/tailscale</code>, and no scratch wrapper; Tailscale.app was running. Public <code>v2.61.0</code> stopped PID <code>59538</code> truthfully and started PID <code>12234</code>, recording <code>/Applications/Tailscale.app/Contents/MacOS/Tailscale</code>.</td><td><code>stock-path.txt</code>; <code>prowl-v2610-restart.log</code>; process record.</td><td><code>cas-a13a</code> works under the exact stock condition that blocked <code>v2.60.0</code>.</td></tr>
-      <tr><td>The same restart reported <code>invalid CAS Tailscale receipt</code>, preserved the stale <code>v2.60.0</code> mapping, and started loopback-only because port 443 remained owned by that mapping. The URL returned <code>502</code>; machine-id SHA/mtime and both factory daemon PIDs were unchanged.</td><td>Old schema-version-1 receipt; <code>prowl-v2610-restart.log</code>; <code>failed-restart-state.log</code>; <code>cas-cli/src/hub/tailscale.rs</code>.</td><td>The newly required receipt <code>executable</code> field lacks a deserialization default, so public upgrade cannot teardown and republish its prior mapping.</td></tr>
-      <tr><td>After a manual reset of only the exact CAS-owned stale mapping, another stock-PATH restart started PID <code>12867</code>, wrote the new receipt with the app CLI, preserved machine identity and URL, and returned HTTPS <code>200</code>. <code>cas hub service status</code> ran without installing supervision.</td><td><code>manual-recovery-reset.log</code>; second restart log; <code>recovered-state.log</code>.</td><td>This diagnostic recovery did not green <code>v2.61.0</code>; it safely restored prowl for the later public <code>v2.61.1</code> row. No factory daemon restarted.</td></tr>
-      <tr><td>With public <code>v2.61.1</code> installed, stock-PATH restart stopped PID <code>12867</code> with <code>tailscale_serve_removed=true</code> and no warning, then started PID <code>62771</code>. The teardown receipt records the old mapping and empty post-state; the new receipt selects the app CLI and owns the new mapping. Identity/URL stayed stable and HTTPS is <code>200</code>.</td><td><code>v2611-stock-prestate.log</code>; restart/post-state logs; <code>v2611-row-assertions.txt</code>.</td><td>The final row passes without wrapper, symlink, or manual reset. Stop/start and Serve receipts are truthful.</td></tr>
-      <tr><td>Canonical Linux CI run <code>31425559709</code> completed successfully at exact source SHA <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>. Local Commander hub/H1–H5, protocol, and session suites were green; soundwave's installed public ELF independently passed the strict no-EVEX/AVX-512 audit at SHA <code>8ec9dea6…</code>.</td><td>Exact-commit CI receipt; local scoped-suite output; <code>public-linux-isa.log</code>.</td><td>The assembled workspace, release, vendor, and ISA guard is green. Separate macOS full-suite findings are not a Commander seam.</td></tr>
-    </tbody></table></div>
-    <p class="small">Sources were extracted during the stated window. Values are measured, not estimated.</p>
-  </section>
+<section aria-labelledby="reasoning"><h2 id="reasoning">Reasoning chain</h2><ol>
+<li>Immutable release and installed-byte checks bind the observations to public v2.62.0.</li>
+<li>The real browser topology proved direct pairing, fan-out, arbitration, control, and one upstream before restart.</li>
+<li>The previously failing held-viewer restart completed with one replacement, stable address, reconnection, and no lease restoration.</li>
+<li>The same fresh run continued through adversarial auth, revocation, SIGILL, failure isolation, and protocol-v1 recovery.</li>
+<li>Network/process/session and cleanup receipts rule out model multiplication and residue-based false positives.</li>
+</ol></section>
 
-  <section aria-labelledby="reasoning"><h2 id="reasoning">Reasoning chain</h2><ol>
-    <li>Tag, workflow, asset, and installed-byte checks bind both machines to public <code>v2.61.1</code>.</li>
-    <li>After two harness-only navigation retries that banked no product rows, the checked final harness proved pairing, fan-out, arbitration, control, attribution, and one upstream.</li>
-    <li>The assembled live-viewer restart failed at singleton handoff: the old PID or lock remained live for 10 seconds, so no competing replacement started.</li>
-    <li>That truthful refusal still fails recovery. Fail-closed sequencing stopped before adversarial, crash, and compatibility continuation rows.</li>
-    <li>Cleanup revoked four devices and restored both hosts to zero Commander residue and original session counts; the process delta is unrelated factory activity.</li>
-    <li><code>cas-f382</code> proved only a stock macOS restart without live viewers. This new result preserves that narrow fact but supersedes the broader release verdict.</li>
-  </ol></section>
+<section aria-labelledby="matrix"><h2 id="matrix">Acceptance matrix</h2><div class="table-wrap"><table><caption>Binding H7 decision table</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Conclusion</th></tr></thead><tbody>
+<tr><th scope="row">Public artifact</th><td class="pass">✓ PASS</td><td>Immutable release and byte-identical two-host installs.</td></tr>
+<tr><th scope="row">H7-ADV-01</th><td class="pass">✓ PASS</td><td>Origin, proof, replay, scope, ticket, and revocation attacks rejected.</td></tr>
+<tr><th scope="row">H7-FLEET-02</th><td class="pass">✓ PASS</td><td>Two machines, phone Chrome, direct view/control, TLS, arbitration, attribution.</td></tr>
+<tr><th scope="row">H7-INVARIANT-03</th><td class="pass">✓ PASS</td><td>Three viewers, one upstream, no agent/model/session multiplication.</td></tr>
+<tr><th scope="row">H7-CRASH-04</th><td class="pass">✓ PASS</td><td>Exact SIGILL diagnosis with other sessions and target hub healthy.</td></tr>
+<tr><th scope="row">Restart + compatibility</th><td class="pass">✓ PASS</td><td>Held-viewer hub recovery and protocol-v1 daemon reattach.</td></tr>
+<tr><th scope="row">Release/vendor/ISA</th><td class="pass">✓ PASS</td><td>Official jobs, guards, WASM pins/notices, strict public ELF audit.</td></tr>
+<tr><th scope="row">Cleanup</th><td class="pass">✓ PASS</td><td>Zero active authority, runtime, listener, profile, or temporary session.</td></tr>
+</tbody></table></div><p class="source">Source: fresh H7 artifacts under <code>.cas/artifacts/cas-3d85/sharp-falcon-63/</code>, observed 2026-08-11 18:11–18:20 UTC.</p></section>
 
-  <section aria-labelledby="matrix"><h2 id="matrix">Acceptance matrix</h2>
-    <div class="table-wrap"><table><caption>Binding gate state after the fresh public v2.61.1 rerun</caption><thead><tr><th scope="col">Gate</th><th scope="col">State</th><th scope="col">Executed conclusion</th></tr></thead><tbody>
-      <tr><th scope="row">Public artifact</th><td><span class="state pass">PASS</span></td><td>Exact public Linux bytes installed byte-identically on soundwave and unicron; macOS archive re-verified.</td></tr>
-      <tr><th scope="row">Clean-home / TLS / hostile Origin / plaintext</th><td><span class="state pending">NOT REEXECUTED</span></td><td>Historical receipts remain evidence; the full binding matrix stopped earlier.</td></tr>
-      <tr><th scope="row"><code>H7-ADV-01</code></th><td><span class="state pending">NOT REEXECUTED</span></td><td>Fail-closed stop prevented the adversarial continuation.</td></tr>
-      <tr><th scope="row"><code>H7-FLEET-02</code></th><td><span class="state pending">PARTIAL</span></td><td>Two hosts, phone Chrome, pairing, observation/control, arbitration, and attribution passed before restart.</td></tr>
-      <tr><th scope="row"><code>H7-INVARIANT-03</code></th><td><span class="state pending">PARTIAL</span></td><td>Three soundwave viewers and one unicron viewer used one upstream; post-restart continuation was not reached.</td></tr>
-      <tr><th scope="row"><code>H7-CRASH-04</code></th><td><span class="state pending">NOT REEXECUTED</span></td><td>The run stopped before SIGILL.</td></tr>
-      <tr><th scope="row">Daemon restart / compatibility</th><td><span class="state pending">NOT REEXECUTED</span></td><td>The run stopped before protocol-v1 continuation.</td></tr>
-      <tr><th scope="row">Live-viewer hub restart / Serve</th><td><span class="state fail">FAIL</span></td><td>Restart timed out after 10 seconds; no replacement started. GH #217 / <code>cas-017a</code>.</td></tr>
-      <tr><th scope="row">Assembled workspace / release / vendor / ISA</th><td><span class="state pending">CARRIED</span></td><td>Prior canonical evidence remains valid but was not the binding row under test.</td></tr>
-      <tr><th scope="row">Cleanup / authority</th><td><span class="state pass">PASS</span></td><td>Four devices revoked; both hosts have empty Serve, no hub/fixture/listener/temp metadata, and restored session counts.</td></tr>
-    </tbody></table></div>
-  </section>
+<section aria-labelledby="falsify"><h2 id="falsify">What would falsify this</h2><p>A reproducible public-v2.62.0 run that starts a second upstream, restores a lease after restart, accepts a denied security case, misattributes an exact crash, multiplies model/session state, or leaves active authority after cleanup would overturn the verdict.</p></section>
 
-  <section aria-labelledby="environment"><h2 id="environment">Additional environment finding — outside the Commander verdict</h2>
-    <p>Prowl's macOS full-workspace runner exposed three test-infrastructure findings, now tracked by P2 bug <code>cas-d20f</code>: the default soft descriptor limit of 256 caused an <code>EMFILE</code> cascade; after raising only the proof subprocess limit, one socket-election race failed once and passed twice in isolation; and <code>retrieval_parity_test::excluded_rows_do_not_shift_the_ranks_of_real_rows</code> reproduced a deterministic macOS list-rank mismatch even in isolation. Failed receipts are preserved as <code>assembled-emfile.*</code> and <code>assembled-flake.*</code> in the durable task artifacts.</p>
-    <p>Canonical Linux CI run <code>31425559709</code> passes the full suite at the exact same <code>69c3a1c6</code> commit. The retrieval test has no Commander seam, so this finding does not explain or weaken the new live-viewer restart failure.</p>
-  </section>
+<section aria-labelledby="actions"><h2 id="actions">Next actions</h2><div class="table-wrap"><table><caption>Release handoff</caption><thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Proof</th></tr></thead><tbody>
+<tr><td>Review the paired report and release draft.</td><td>Commander release owner</td><td>Markdown/HTML fidelity and redaction checks pass.</td></tr>
+<tr><td>Keep Slack unposted until explicit user approval.</td><td>Release owner</td><td>Approval receipt, then User and Dev posts in rubric order.</td></tr>
+<tr><td>Preserve v2.61.1 as failed-gate history.</td><td>Maintainers</td><td>No tag rewrite; exact v2.62.0 contrast remains.</td></tr>
+</tbody></table></div></section>
 
-  <section aria-labelledby="falsify"><h2 id="falsify">What would falsify this</h2>
-    <div class="callout"><strong>Corrective threshold:</strong> a later public release must pass a fresh full H7 continuation with live viewers: restart exits successfully, exactly one replacement hub and Serve mapping recover, viewers reconnect without manual action, all remaining rows pass, and cleanup leaves zero residue.</div>
-  </section>
-
-  <section aria-labelledby="actions"><h2 id="actions">Next actions</h2>
-    <div class="table-wrap"><table><caption>Exact re-verification handoff</caption><thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Completion proof</th></tr></thead><tbody>
-      <tr><td>Fix live-viewer restart handoff.</td><td>GH #217 / <code>cas-017a</code> owner</td><td>Corrective source and focused regression proof.</td></tr>
-      <tr><td>Cut the next immutable public release.</td><td>Runtime/release owners</td><td>Tag peel, workflow, assets, sizes, and SHA-256 receipts.</td></tr>
-      <tr><td>Run a fresh full H7 continuation against only that release.</td><td>H7 verifier</td><td>Every binding row green in one fail-closed sequence with zero residue. Slack remains unposted until then.</td></tr>
-    </tbody></table></div>
-  </section>
-
-  <section aria-labelledby="cleanup"><h2 id="cleanup">Cleanup and redaction</h2>
-    <ul>
-      <li>No pairing capability, credential, proof, private key, ticket, Authorization value, tailnet IP, terminal content, prompt content, or raw secret is retained in the report or repository.</li>
-      <li>Exactly four H7 devices are revoked. Profiles, invitations, harness scratch, and temporary fixture metadata were moved to recoverable Trash.</li>
-      <li>Both hubs and fixture are stopped; both Serve states are empty; no Commander hub, listener, temporary session, or exit receipt remains live.</li>
-      <li>Sessions returned <code>3→3</code> on soundwave and <code>0→0</code> on unicron. The soundwave Codex delta belongs to unrelated factory worktrees.</li>
-      <li>Pre-run binaries were preserved under SHA-addressed backups before both hosts received public <code>v2.61.1</code>.</li>
-      <li>Physical Android remains unclaimed. Slack remains explicitly unposted.</li>
-    </ul>
-  </section>
-
-  <section aria-labelledby="provenance"><h2 id="provenance">Provenance</h2>
-    <ul>
-      <li>Markdown source: <a href="2026-08-09-commander-v1-acceptance-gate.md"><code>2026-08-09-commander-v1-acceptance-gate.md</code></a>.</li>
-      <li>Unposted draft: <code>docs/release-notes/2026-08-09-commander-v1-slack-draft.md</code>.</li>
-      <li>Closure artifacts: <code>.cas/artifacts/cas-3d85/proud-newt-50/</code>, observed 2026-08-11 13:04–13:21 UTC.</li>
-      <li>Focused source boundary: public peel <code>b5a37cb5675d4ae74b609d6479f824375f4c7efa</code>, annotated tag <code>496075b676b5c7d7a747433f063635eaa49ea5e5</code>, containing <code>997939d7</code> and <code>42d0a69c</code>.</li>
-      <li>Public macOS asset: 19,381,860 bytes; archive SHA-256 <code>7e268a030834bd7372ad6bcef2d69ed5b6f3bb1a7e43c4102ea3d630c92b53ba</code>; extracted SHA-256 <code>97ed6e4c0a3e879a0fe600659833c3de61dfd3ae500037784c8ee21116e67893</code>.</li>
-      <li>Public Linux asset: 21,998,541 bytes; archive SHA-256 <code>d40a089b1af31a2ed083d57d6b1d53d0640194cad09988fff24043de5d370c27</code>; extracted SHA-256 <code>fb0fc976fa738b50280043195adaadbcd765a900b47e4c649ce6c96a86c2f383</code>.</li>
-      <li>Canonical assembled receipt: Linux CI run <code>31425559709</code>, completed successfully at exact source SHA <code>69c3a1c6a24c1107865e3666e1cfa33ef9797615</code>; macOS infrastructure follow-up <code>cas-d20f</code>.</li>
-      <li>Redacted artifacts: <code>.cas/artifacts/cas-3d85/ready-viper-55/</code>, observed 2026-08-10 19:51–19:58 UTC.</li>
-      <li>Focused artifacts: <code>.cas/artifacts/cas-f382/fast-panda-84/</code>, observed 2026-08-10 22:03–23:02 UTC.</li>
-      <li>Current commands: release and installed-byte reads; batch SSH probes; public hub start/restart/stop; Serve before/after reads; protocol-v2 fixture; checked Chrome CDP harness at <code>390×844</code>; guarded revocation and metadata restoration. Prior commands remain historical evidence only.</li>
-    </ul>
-  </section>
+<section aria-labelledby="cleanup"><h2 id="cleanup">Cleanup and redaction</h2><ul><li>No pairing capability, long-lived credential, private key, ticket, Authorization value, terminal content, prompt content, tailnet IP, or raw secret is retained here.</li><li>All task devices were revoked; both hubs and Serve mappings stopped; no fixture, browser, listener, or temporary session remains.</li><li>Credential-bearing profiles, consumed invitations, and the task-local hub home moved to recoverable Trash after the non-secret crash receipt was preserved.</li><li>Pre-run binaries remain as SHA-addressed backups. Physical Android is unclaimed. Slack is explicitly unposted.</li></ul></section>
 </main>
-<footer>Practitioner acceptance investigation · adjacent Markdown is the source of truth · self-contained, no scripts or external assets.</footer>
+<footer><p><strong>Provenance.</strong> Markdown source: <a href="2026-08-09-commander-v1-acceptance-gate.md">2026-08-09-commander-v1-acceptance-gate.md</a>. Public source peel <code>8e91de67c6071de03c8ff7b685e766a888b0629f</code>. Evidence window 2026-08-11 18:11–18:20 UTC. Commands: Git/GitHub identity reads, archive and installed-byte hashing, batch SSH, public hub lifecycle, Chrome CDP, hostile-origin HTTP matrix, guarded revocation, ISA/vendor/migration/scoped hub/web guards.</p></footer>
 </body>
 </html>

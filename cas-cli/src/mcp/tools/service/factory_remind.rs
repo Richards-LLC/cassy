@@ -95,6 +95,7 @@ impl CasService {
         };
 
         let ttl_secs = req.remind_ttl_secs.unwrap_or(3600);
+        let cross_session = req.cross_session.unwrap_or(false);
 
         // cas-fcd4: bind event-based (and all) reminds to the registering factory
         // session so concurrent factories sharing cas.db do not cross-fire.
@@ -102,6 +103,14 @@ impl CasService {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        // `session_id` above is the factory daemon scope. The creator session
+        // is deliberately separate: SessionEnd uses this value to cancel the
+        // default one-shot reminder before a later session can receive it.
+        let origin_session_id = std::env::var("CAS_SESSION_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| owner_id.clone());
 
         if has_delay {
             let delay_secs = req.remind_delay_secs.unwrap();
@@ -115,7 +124,7 @@ impl CasService {
             let trigger_at = chrono::Utc::now() + chrono::Duration::seconds(delay_secs);
 
             let id = store
-                .create(
+                .create_with_scope(
                     &owner_id,
                     target_id.as_deref(),
                     &message,
@@ -125,6 +134,8 @@ impl CasService {
                     None,
                     ttl_secs,
                     session_id.as_deref(),
+                    Some(&origin_session_id),
+                    cross_session,
                 )
                 .map_err(|e| {
                     Self::error(
@@ -148,8 +159,13 @@ impl CasService {
                 None => String::new(),
             };
 
+            let scope_desc = if cross_session {
+                format!(", cross-session opt-in; origin session: {origin_session_id}")
+            } else {
+                ", session-scoped; cancelled when this session ends".to_string()
+            };
             Ok(Self::success(format!(
-                "Reminder #{id} set (time-based, fires in {time_desc}{target_desc})\nMessage: {message}"
+                "Reminder #{id} set (time-based, fires in {time_desc}{target_desc}{scope_desc})\nMessage: {message}"
             )))
         } else {
             let event_type = req.remind_event.unwrap();
@@ -194,7 +210,7 @@ impl CasService {
             };
 
             let id = store
-                .create(
+                .create_with_scope(
                     &owner_id,
                     target_id.as_deref(),
                     &message,
@@ -204,6 +220,8 @@ impl CasService {
                     filter.as_ref(),
                     ttl_secs,
                     session_id.as_deref(),
+                    Some(&origin_session_id),
+                    cross_session,
                 )
                 .map_err(|e| {
                     Self::error(
@@ -223,9 +241,17 @@ impl CasService {
                 None => String::new(),
             };
 
-            let session_desc = match &session_id {
-                Some(s) => format!(", session: {s}"),
-                None => String::new(),
+            let session_desc = match (&session_id, cross_session) {
+                (Some(s), true) => format!(
+                    ", factory session: {s}, cross-session opt-in; origin session: {origin_session_id}"
+                ),
+                (Some(s), false) => format!(
+                    ", factory session: {s}, session-scoped; cancelled when this session ends"
+                ),
+                (None, true) => {
+                    format!(", cross-session opt-in; origin session: {origin_session_id}")
+                }
+                (None, false) => ", session-scoped; cancelled when this session ends".to_string(),
             };
 
             Ok(Self::success(format!(
@@ -286,13 +312,34 @@ impl CasService {
             return Ok(Self::success("No pending reminders.".to_string()));
         }
 
-        // Build agent ID → name map for display
-        let id_to_name: std::collections::HashMap<String, String> =
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|s| s.list(None).ok())
-                .map(|agents| agents.into_iter().map(|a| (a.id, a.name)).collect())
-                .unwrap_or_default();
+        // Build agent ID → name map plus a session-liveness set. A reminder's
+        // creator session is the authoritative lifecycle owner; an absent or
+        // shut-down origin is displayed as orphaned rather than silently live.
+        let (id_to_name, live_sessions): (
+            std::collections::HashMap<String, String>,
+            std::collections::HashSet<String>,
+        ) = open_agent_store(&self.inner.cas_root)
+            .ok()
+            .and_then(|s| s.list(None).ok())
+            .map(|agents| {
+                agents.into_iter().fold(
+                    (
+                        std::collections::HashMap::new(),
+                        std::collections::HashSet::new(),
+                    ),
+                    |(mut names, mut live), agent| {
+                        if matches!(
+                            agent.status,
+                            cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+                        ) {
+                            live.insert(agent.id.clone());
+                        }
+                        names.insert(agent.id, agent.name);
+                        (names, live)
+                    },
+                )
+            })
+            .unwrap_or_default();
 
         let resolve = |id: &str| -> String {
             id_to_name
@@ -344,9 +391,30 @@ impl CasService {
                 String::new()
             };
 
+            let origin = r
+                .origin_session_id
+                .as_deref()
+                .unwrap_or("unknown legacy session");
+            let origin_is_live = r
+                .origin_session_id
+                .as_ref()
+                .is_some_and(|session| live_sessions.contains(session));
+            let scope_desc = if r.cross_session {
+                format!(
+                    " [cross-session; origin {}: {}; created: {}]",
+                    if origin_is_live { "live" } else { "orphaned" },
+                    origin,
+                    r.created_at.to_rfc3339()
+                )
+            } else if origin_is_live {
+                format!(" [live-session: {origin}]")
+            } else {
+                format!(" [orphaned session: {origin}]")
+            };
+
             lines.push(format!(
-                "  #{}: [{}] {}{}",
-                r.id, trigger_desc, r.message, target_desc
+                "  #{}: [{}] {}{}{}",
+                r.id, trigger_desc, r.message, target_desc, scope_desc
             ));
         }
 

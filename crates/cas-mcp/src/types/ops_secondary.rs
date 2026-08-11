@@ -627,6 +627,14 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
 
+    /// Allow a reminder to survive its creator's session end. Cross-session
+    /// reminders always identify their origin and creation time on delivery.
+    #[schemars(
+        description = "Opt in to a reminder surviving its creator session (default false). Cross-session deliveries include origin-session and created-at context."
+    )]
+    #[serde(default)]
+    pub cross_session: Option<bool>,
+
     // ========== Spawn-time worker spec overrides (cas-2992) ==========
     /// Worker CLI override for spawn_workers ('claude' or 'codex').
     /// Applies to every spawned worker in this request.
@@ -965,6 +973,14 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
 
+    /// Allow a reminder to survive its creator's session end. This is an
+    /// explicit opt-in; delivery includes origin and creation-time context.
+    #[schemars(
+        description = "Opt in to a reminder surviving its creator session (default false). Cross-session deliveries include origin-session and created-at context."
+    )]
+    #[serde(default)]
+    pub cross_session: Option<bool>,
+
     // ========== Worktree Fields ==========
     /// Show all worktrees including removed/merged (for worktree_list)
     #[schemars(description = "Show all worktrees including removed/merged")]
@@ -1092,6 +1108,7 @@ impl CoordinationRequest {
             remind_filter: self.remind_filter.clone(),
             remind_id: self.remind_id,
             remind_ttl_secs: self.remind_ttl_secs,
+            cross_session: self.cross_session,
             cli: self.cli.clone(),
             model: self.model.clone(),
             effort: self.effort.clone(),

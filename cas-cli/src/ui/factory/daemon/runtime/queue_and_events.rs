@@ -4948,6 +4948,13 @@ impl FactoryDaemon {
         let agent_id_to_name = &self.app.director_data().agent_id_to_name;
 
         for reminder in &due_reminders {
+            if !reminder_matches_factory_session(
+                reminder.session_id.as_deref(),
+                reminder.cross_session,
+                &self.session_name,
+            ) {
+                continue;
+            }
             fire_reminder(
                 reminder,
                 &reminder_store,
@@ -4972,6 +4979,7 @@ impl FactoryDaemon {
                 // (shared cas.db otherwise cross-fires concurrent sessions).
                 if !reminder_matches_factory_session(
                     reminder.session_id.as_deref(),
+                    reminder.cross_session,
                     &self.session_name,
                 ) {
                     continue;
@@ -5171,11 +5179,16 @@ fn fire_reminder(
         // `worker_status`, which must tell a reminder delivery apart from real
         // mail to avoid accusing a healthy waiting worker of being wedged,
         // parses exactly what is written here.
-        let prompt = cas_store::format_reminder_delivery(
-            reminder.id,
-            &reminder.message,
-            triggering_event.map(|event| event.description()).as_deref(),
-        );
+        let event_context = triggering_event.map(|event| event.description());
+        let prompt = if reminder.cross_session {
+            cas_store::format_cross_session_reminder_delivery(reminder, event_context.as_deref())
+        } else {
+            cas_store::format_reminder_delivery(
+                reminder.id,
+                &reminder.message,
+                event_context.as_deref(),
+            )
+        };
 
         if let Err(e) =
             queue.enqueue_with_session(&reminder.owner_id, target, &prompt, session_name)
@@ -5201,8 +5214,12 @@ fn fire_reminder(
 /// is unchanged.
 pub(crate) fn reminder_matches_factory_session(
     reminder_session_id: Option<&str>,
+    cross_session: bool,
     current_session: &str,
 ) -> bool {
+    if cross_session {
+        return true;
+    }
     match reminder_session_id.map(str::trim).filter(|s| !s.is_empty()) {
         None => true,
         Some(sid) => sid == current_session,
@@ -8084,11 +8101,11 @@ mod tests {
     #[test]
     fn reminder_session_scope_blocks_foreign_factory_session() {
         assert!(
-            !reminder_matches_factory_session(Some("session-a"), "session-b"),
+            !reminder_matches_factory_session(Some("session-a"), false, "session-b"),
             "session A remind must not fire in session B"
         );
         assert!(
-            reminder_matches_factory_session(Some("session-a"), "session-a"),
+            reminder_matches_factory_session(Some("session-a"), false, "session-a"),
             "same-session must match"
         );
     }
@@ -8096,10 +8113,27 @@ mod tests {
     #[test]
     fn reminder_session_scope_legacy_none_matches_any_session() {
         // Single-session / pre-cas-fcd4 rows keep working.
-        assert!(reminder_matches_factory_session(None, "session-a"));
-        assert!(reminder_matches_factory_session(None, "session-b"));
-        assert!(reminder_matches_factory_session(Some(""), "session-a"));
-        assert!(reminder_matches_factory_session(Some("  "), "session-b"));
+        assert!(reminder_matches_factory_session(None, false, "session-a"));
+        assert!(reminder_matches_factory_session(None, false, "session-b"));
+        assert!(reminder_matches_factory_session(
+            Some(""),
+            false,
+            "session-a"
+        ));
+        assert!(reminder_matches_factory_session(
+            Some("  "),
+            false,
+            "session-b"
+        ));
+    }
+
+    #[test]
+    fn cross_session_reminder_bypasses_the_factory_session_gate() {
+        assert!(reminder_matches_factory_session(
+            Some("factory-session-a"),
+            true,
+            "factory-session-b"
+        ));
     }
 
     #[test]
@@ -8120,6 +8154,8 @@ mod tests {
             cancelled_at: None,
             fired_event: None,
             session_id: Some("session-a".into()),
+            origin_session_id: Some("creator-session".into()),
+            cross_session: false,
         };
         let match_event = DirectorEvent::TaskCompleted {
             task_id: "cas-keep".into(),
@@ -8136,10 +8172,12 @@ mod tests {
         // Session gate is separate: filter alone still matches; session blocks foreign.
         assert!(reminder_matches_factory_session(
             reminder.session_id.as_deref(),
+            reminder.cross_session,
             "session-a"
         ));
         assert!(!reminder_matches_factory_session(
             reminder.session_id.as_deref(),
+            reminder.cross_session,
             "session-b"
         ));
     }

@@ -315,6 +315,19 @@ fn test_factory_remind_fields_as_string() {
     assert_eq!(req.remind_delay_secs, Some(120));
     assert_eq!(req.remind_ttl_secs, Some(3600));
     assert_eq!(req.remind_id, Some(7));
+    assert_eq!(
+        req.cross_session, None,
+        "reminders default to session-scoped"
+    );
+}
+
+#[test]
+fn cross_session_reminder_opt_in_survives_coordination_mapping() {
+    let req: CoordinationRequest =
+        serde_json::from_str(r#"{"action":"remind","remind_delay_secs":120,"cross_session":true}"#)
+            .unwrap();
+    assert_eq!(req.cross_session, Some(true));
+    assert_eq!(req.to_factory_request().cross_session, Some(true));
 }
 
 // ===== option_u32 tests =====

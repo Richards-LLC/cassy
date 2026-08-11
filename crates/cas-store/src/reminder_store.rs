@@ -132,6 +132,14 @@ pub struct Reminder {
     /// `None` = legacy / non-factory registration (any session may fire).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Session that created this reminder (`CAS_SESSION_ID`). Session-scoped
+    /// reminders are cancelled when this session ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session_id: Option<String>,
+    /// Explicit opt-in for a reminder to survive its creator's SessionEnd.
+    /// Such deliveries carry origin and age context for stale-context triage.
+    #[serde(default)]
+    pub cross_session: bool,
 }
 
 /// Wire prefix that marks a prompt-queue row as a fired-reminder delivery.
@@ -156,6 +164,24 @@ pub fn format_reminder_delivery(id: i64, message: &str, event_context: Option<&s
         Some(event) => format!("{REMINDER_DELIVERY_PREFIX}{id}: {message} (triggered by: {event})"),
         None => format!("{REMINDER_DELIVERY_PREFIX}{id}: {message}"),
     }
+}
+
+/// Render an explicitly cross-session delivery without losing the durable
+/// `Reminder #<id>:` prefix that downstream status logic parses.
+pub fn format_cross_session_reminder_delivery(
+    reminder: &Reminder,
+    event_context: Option<&str>,
+) -> String {
+    let mut delivery = format_reminder_delivery(reminder.id, &reminder.message, event_context);
+    let origin = reminder
+        .origin_session_id
+        .as_deref()
+        .unwrap_or("unknown legacy session");
+    delivery.push_str(&format!(
+        "\n\n⚠ Cross-session reminder\nOrigin session: {origin}\nCreated at: {}",
+        reminder.created_at.to_rfc3339()
+    ));
+    delivery
 }
 
 /// The reminder ID behind a delivery produced by [`format_reminder_delivery`],
@@ -204,6 +230,10 @@ const MIGRATION_FIRED_EVENT: &str = "ALTER TABLE reminders ADD COLUMN fired_even
 
 /// Migration: factory session scope for event-based multi-session isolation (cas-fcd4)
 const MIGRATION_SESSION_ID: &str = "ALTER TABLE reminders ADD COLUMN session_id TEXT";
+/// Migration: creator-session lifecycle and explicit cross-session opt-in.
+const MIGRATION_ORIGIN_SESSION_ID: &str = "ALTER TABLE reminders ADD COLUMN origin_session_id TEXT";
+const MIGRATION_CROSS_SESSION: &str =
+    "ALTER TABLE reminders ADD COLUMN cross_session INTEGER NOT NULL DEFAULT 0";
 
 /// Trait for reminder storage operations
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +257,24 @@ pub trait ReminderStore: Send + Sync {
         trigger_filter: Option<&serde_json::Value>,
         ttl_secs: i64,
         session_id: Option<&str>,
+    ) -> Result<i64>;
+
+    /// Create a reminder with creator-session lifecycle metadata. Callers that
+    /// omit this method retain legacy creation semantics through [`Self::create`].
+    #[allow(clippy::too_many_arguments)]
+    fn create_with_scope(
+        &self,
+        owner_id: &str,
+        target_id: Option<&str>,
+        message: &str,
+        trigger_type: ReminderTriggerType,
+        trigger_at: Option<DateTime<Utc>>,
+        trigger_event: Option<&str>,
+        trigger_filter: Option<&serde_json::Value>,
+        ttl_secs: i64,
+        session_id: Option<&str>,
+        origin_session_id: Option<&str>,
+        cross_session: bool,
     ) -> Result<i64>;
 
     /// List pending reminders owned by a specific agent
@@ -259,6 +307,10 @@ pub trait ReminderStore: Send + Sync {
     /// so pre-armed one-shot wakeups must not fire through it or revive later
     /// with stale context after release.
     fn cancel_pending_for_target(&self, target_id: &str) -> Result<usize>;
+
+    /// Cancel pending default-scoped reminders created by a completed session.
+    /// Explicit cross-session reminders are deliberately retained.
+    fn cancel_pending_for_origin_session(&self, origin_session_id: &str) -> Result<usize>;
 
     /// Expire reminders past their TTL, returns count expired
     fn expire_stale(&self) -> Result<usize>;
@@ -336,6 +388,17 @@ impl SqliteReminderStore {
             }
         });
 
+        let origin_session_id: Option<String> = row.get(15)?;
+        let origin_session_id = origin_session_id.and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        });
+        let cross_session: bool = row.get::<_, i64>(16)? != 0;
+
         Ok(Reminder {
             id: row.get(0)?,
             target_id: target_id.unwrap_or_else(|| owner_id.clone()),
@@ -352,6 +415,8 @@ impl SqliteReminderStore {
             cancelled_at,
             fired_event,
             session_id,
+            origin_session_id,
+            cross_session,
         })
     }
 
@@ -378,10 +443,24 @@ impl SqliteReminderStore {
             conn.execute_batch(MIGRATION_SESSION_ID)?;
         }
 
+        if conn
+            .prepare_cached("SELECT origin_session_id FROM reminders LIMIT 0")
+            .is_err()
+        {
+            conn.execute_batch(MIGRATION_ORIGIN_SESSION_ID)?;
+        }
+
+        if conn
+            .prepare_cached("SELECT cross_session FROM reminders LIMIT 0")
+            .is_err()
+        {
+            conn.execute_batch(MIGRATION_CROSS_SESSION)?;
+        }
+
         Ok(())
     }
 
-    const SELECT_COLUMNS: &str = "id, supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, status, ttl_secs, created_at, fired_at, cancelled_at, target_id, fired_event, session_id";
+    const SELECT_COLUMNS: &str = "id, supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, status, ttl_secs, created_at, fired_at, cancelled_at, target_id, fired_event, session_id, origin_session_id, cross_session";
 }
 
 fn expire_stale_with_conn(conn: &Connection) -> Result<usize> {
@@ -449,6 +528,35 @@ impl ReminderStore for SqliteReminderStore {
         ttl_secs: i64,
         session_id: Option<&str>,
     ) -> Result<i64> {
+        self.create_with_scope(
+            owner_id,
+            target_id,
+            message,
+            trigger_type,
+            trigger_at,
+            trigger_event,
+            trigger_filter,
+            ttl_secs,
+            session_id,
+            None,
+            false,
+        )
+    }
+
+    fn create_with_scope(
+        &self,
+        owner_id: &str,
+        target_id: Option<&str>,
+        message: &str,
+        trigger_type: ReminderTriggerType,
+        trigger_at: Option<DateTime<Utc>>,
+        trigger_event: Option<&str>,
+        trigger_filter: Option<&serde_json::Value>,
+        ttl_secs: i64,
+        session_id: Option<&str>,
+        origin_session_id: Option<&str>,
+        cross_session: bool,
+    ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let trigger_at_str = trigger_at.map(|dt| dt.to_rfc3339());
@@ -458,10 +566,14 @@ impl ReminderStore for SqliteReminderStore {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let origin_session_id = origin_session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
         conn.execute(
-            "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 owner_id,
                 message,
@@ -473,6 +585,8 @@ impl ReminderStore for SqliteReminderStore {
                 now,
                 resolved_target,
                 session_id,
+                origin_session_id,
+                cross_session,
             ],
         )?;
 
@@ -619,6 +733,18 @@ impl ReminderStore for SqliteReminderStore {
         Ok(rows)
     }
 
+    fn cancel_pending_for_origin_session(&self, origin_session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
+             WHERE status = 'pending' AND origin_session_id = ?2 \
+             AND COALESCE(cross_session, 0) = 0",
+            params![now, origin_session_id],
+        )?;
+        Ok(rows)
+    }
+
     fn expire_stale(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         expire_stale_with_conn(&conn)
@@ -700,6 +826,69 @@ mod tests {
             "Reminder #7: review the merge (triggered by: task cas-1 completed)"
         );
         assert_eq!(parse_reminder_delivery_id(&evented), Some(7));
+    }
+
+    #[test]
+    fn cross_session_delivery_includes_origin_and_created_at() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .create_with_scope(
+                "supervisor-1",
+                None,
+                "check the landing train",
+                ReminderTriggerType::Time,
+                Some(Utc::now() + chrono::Duration::minutes(5)),
+                None,
+                None,
+                3600,
+                Some("factory-a"),
+                Some("origin-session"),
+                true,
+            )
+            .unwrap();
+        let reminder = store.list_pending("supervisor-1").unwrap().pop().unwrap();
+        assert_eq!(reminder.id, id);
+        let delivery = format_cross_session_reminder_delivery(&reminder, None);
+        assert!(delivery.contains("Cross-session reminder"));
+        assert!(delivery.contains("Origin session: origin-session"));
+        assert!(delivery.contains("Created at:"));
+        assert_eq!(parse_reminder_delivery_id(&delivery), Some(id));
+    }
+
+    #[test]
+    fn cancelling_creator_session_keeps_only_cross_session_opt_in() {
+        let (_temp, store) = create_test_store();
+        for cross_session in [false, true] {
+            store
+                .create_with_scope(
+                    "supervisor-1",
+                    None,
+                    "session boundary test",
+                    ReminderTriggerType::Time,
+                    Some(Utc::now() + chrono::Duration::minutes(5)),
+                    None,
+                    None,
+                    3600,
+                    Some("factory-a"),
+                    Some("origin-session"),
+                    cross_session,
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            store
+                .cancel_pending_for_origin_session("origin-session")
+                .unwrap(),
+            1
+        );
+        let pending = store.list_pending("supervisor-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].cross_session);
+        assert_eq!(
+            pending[0].origin_session_id.as_deref(),
+            Some("origin-session")
+        );
     }
 
     /// Ordinary mail must never parse as a delivery: mistaking a supervisor's
@@ -957,7 +1146,7 @@ mod tests {
                 Some(future),
                 None,
                 None,
-                1, // 1 second TTL
+                1,    // 1 second TTL
                 None, // session_id cas-fcd4
             )
             .unwrap();
@@ -1107,10 +1296,7 @@ mod tests {
         assert!(id > 0);
         let pending = store.list_pending("sup-a").unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending[0].session_id.as_deref(),
-            Some("factory-session-a")
-        );
+        assert_eq!(pending[0].session_id.as_deref(), Some("factory-session-a"));
     }
 
     #[test]

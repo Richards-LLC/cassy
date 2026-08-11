@@ -25,7 +25,7 @@
 //! absence of forbidden fields so that either direction of regression fails
 //! the test.
 
-use cas_core::hooks::types::HookOutput;
+use cas_core::hooks::types::{HookOutput, PreToolUseHarness};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -177,19 +177,94 @@ fn pretooluse_permission_with_context_emits_additional_context() {
 }
 
 #[test]
-fn pretooluse_permission_decision_valid_enum() {
-    // The schema constrains permissionDecision to allow | deny | ask. Every
-    // value we emit must round-trip as one of those — catch regressions that
-    // introduce a misspelled / new variant.
+fn pretooluse_claude_code_2_1_227_captured_decision_contract() {
+    // Captured with real Claude Code 2.1.227 PreToolUse invocations on
+    // 2026-08-11. `allow` executed the tool, `deny` blocked it, and `ask`
+    // reached the harness permission path. The accepted shape is nested and
+    // event-tagged; the legacy top-level `decision: "approve"` is inert and
+    // must not become CAS's auto-approval fallback.
+    //
+    // Durable raw transcripts: artifacts/cas-a53c/live-contract/.
     for decision in ["allow", "deny", "ask"] {
-        let output = HookOutput::with_pre_tool_permission(decision, "reason");
+        let output = HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::ClaudeCode,
+            decision,
+            "captured-contract",
+            None,
+        );
         let value = to_value(&output);
-        let hso = hook_specific(&value, "PreToolUse.enum");
         assert_eq!(
-            hso.get("permissionDecision").and_then(Value::as_str),
-            Some(decision)
+            value,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": decision,
+                    "permissionDecisionReason": "captured-contract",
+                }
+            }),
+            "Claude Code 2.1.227 captured PreToolUse contract regressed for {decision}"
+        );
+        assert!(
+            value.get("decision").is_none(),
+            "legacy top-level decision must remain absent for {decision}: {value}"
         );
     }
+
+    // The SendMessage receipt path formerly constructed this separately. Its
+    // additionalContext is accepted by the same 2.1.227 live contract, while
+    // the decision envelope must remain byte-for-byte identical to the normal
+    // allow path above.
+    assert_eq!(
+        to_value(&HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::ClaudeCode,
+            "allow",
+            "captured-contract",
+            Some("CAS receipt"),
+        )),
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "captured-contract",
+                "additionalContext": "CAS receipt",
+            }
+        }),
+        "Claude Code 2.1.227 captured context-bearing allow contract regressed"
+    );
+}
+
+#[test]
+fn pretooluse_codex_0_147_captured_decision_contract() {
+    // Captured from the Codex 0.147 runner on 2026-08-11. It rejects the
+    // Claude-only `permissionDecision:"allow"` response, but accepts the
+    // nested deny response used by workspace and formatter safety gates. An
+    // empty object is its accepted allow/no-op response.
+    assert_eq!(
+        to_value(&HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::Codex,
+            "allow",
+            "captured-contract",
+            None,
+        )),
+        serde_json::json!({}),
+        "Codex allow must be a no-op rather than Claude's rejected allow vocabulary"
+    );
+    assert_eq!(
+        to_value(&HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::Codex,
+            "deny",
+            "captured-contract",
+            None,
+        )),
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "captured-contract",
+            }
+        }),
+        "Codex deny must preserve the accepted protection-gate response"
+    );
 }
 
 #[test]

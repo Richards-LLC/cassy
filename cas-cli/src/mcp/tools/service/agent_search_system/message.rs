@@ -1231,6 +1231,19 @@ impl CasService {
             )
         })?;
 
+        // Historical terminal relays carry only their `lifecycle-wake:<id>`
+        // marker; that ID is neither a durable notification nor a prompt row.
+        if let Some(prompt_id) = queue.ack_lifecycle_wake(notification_id).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to acknowledge lifecycle relay: {error}"),
+            )
+        })? {
+            return Ok(Self::success(format!(
+                "Lifecycle relay {notification_id} acknowledged (prompt message_id: {prompt_id}); it will no longer replay in worker_status."
+            )));
+        }
+
         queue.ack(notification_id).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,

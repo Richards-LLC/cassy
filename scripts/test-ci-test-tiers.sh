@@ -38,10 +38,14 @@ require_text "$ci_text" '- "v*"' 'release tags trigger CI'
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'
 require_text "$scoped" "github.event_name == 'pull_request'" 'pull requests use scoped tier'
+require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier skips protected-default PRs'
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
 require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one test binary'
 
 full_jobs=(
+    fast-validation-preflight
+    fast-validation-suite
+    fast-validation-docs
     fast-validation
     clippy
     macos-check
@@ -53,7 +57,6 @@ full_jobs=(
 for job in "${full_jobs[@]}"; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"
-    require_text "$block" "refs/heads/epic/" "$job runs on epic merges"
     require_text "$block" "refs/tags/" "$job runs on release tags"
     if grep -qF 'refs/heads/factory/' <<<"$block"; then
         printf 'FAIL %s leaks into factory pushes\n' "$job"
@@ -71,6 +74,36 @@ for job in "${required_pr_jobs[@]}"; do
     require_text "$block" 'github.base_ref == github.event.repository.default_branch' "$job targets the default PR base"
     require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job deduplicates push/PR runs by head SHA"
     require_text "$block" 'cancel-in-progress: false' "$job queues duplicate required-check runs without cancellation"
+done
+
+preflight="$(job_block fast-validation-preflight)"
+suite="$(job_block fast-validation-suite)"
+docs="$(job_block fast-validation-docs)"
+fan_in="$(job_block fast-validation)"
+require_text "$suite" 'shard: [1, 2]' 'suite uses two parallel shards'
+require_text "$suite" '--partition count:${{ matrix.shard }}/2' 'suite shards are exhaustive count partitions'
+require_text "$suite" 'cargo nextest run -p cas --no-fail-fast' 'suite retains full nextest coverage'
+require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
+require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'
+require_text "$fan_in" 'fast-validation-suite' 'required Fast Validation waits for both suite shards'
+require_text "$fan_in" 'fast-validation-docs' 'required Fast Validation waits for doctests'
+require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required Fast Validation rejects a failed preflight'
+require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed suite shard'
+require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation rejects failed doctests'
+
+# Main PRs schedule only the required Fast Validation lanes and macOS Check.
+# The scoped subset is deliberately excluded, and advisory/release jobs remain
+# push/schedule-only, so a non-required job cannot consume a PR runner first.
+require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane skips main PRs'
+for job in clippy test-compile-guard panic-isolation-release panic-isolation-release-fast build-benchmark; do
+    block="$(job_block "$job")"
+    if grep -qF "github.event_name == 'pull_request'" <<<"$block"; then
+        printf 'FAIL %s can run on a main PR\n' "$job"
+        fail=$((fail + 1))
+    else
+        printf 'ok   %s cannot run on a main PR\n' "$job"
+        pass=$((pass + 1))
+    fi
 done
 
 all_actions="$(<"$setup")$(<"$ci")$(<"$release")"

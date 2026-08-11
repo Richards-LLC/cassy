@@ -414,7 +414,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
     ) -> Result<Self> {
-        Self::pre_trust_codex_workdir(cli, &cwd);
+        Self::pre_trust_codex_workdir(cli, &cwd)?;
         let mut config = Self::build_worker_config(
             name,
             cwd,
@@ -519,7 +519,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
-        Self::pre_trust_codex_workdir(cli, &cwd);
+        Self::pre_trust_codex_workdir(cli, &cwd)?;
         let mut config = Self::build_supervisor_config(
             name,
             cwd,
@@ -553,13 +553,22 @@ impl Pane {
     /// `cas_pty::codex_trust` for the measurements and for why the `-c`
     /// config-override flag cannot be used instead.
     ///
-    /// Best effort by design: a failure here is logged with the manual fix and
-    /// the spawn proceeds, which is exactly the pre-fix behaviour.
-    fn pre_trust_codex_workdir(cli: SupervisorCli, cwd: &std::path::Path) {
+    /// This is a launch precondition rather than best effort: Codex reads this
+    /// config once at startup, so launching before the locked write's read-back
+    /// verification completes can park the worker permanently at its trust
+    /// prompt.
+    fn pre_trust_codex_workdir(cli: SupervisorCli, cwd: &std::path::Path) -> Result<()> {
         if cli != SupervisorCli::Codex {
-            return;
+            return Ok(());
         }
-        let _ = cas_pty::ensure_project_trusted(cwd);
+        match cas_pty::ensure_project_trusted(cwd)? {
+            cas_pty::CodexTrustOutcome::Added(_) | cas_pty::CodexTrustOutcome::AlreadyPresent => {
+                Ok(())
+            }
+            cas_pty::CodexTrustOutcome::Skipped(reason) => Err(Error::pty(format!(
+                "refusing to launch Codex before its project trust is verified: {reason}"
+            ))),
+        }
     }
 
     fn push_supervisor_env(

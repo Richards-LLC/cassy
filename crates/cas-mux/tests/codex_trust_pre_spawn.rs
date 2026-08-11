@@ -18,6 +18,7 @@
 
 use cas_mux::{Pane, SupervisorCli};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 
 /// Self-cleaning scratch dir — these tests would otherwise leave a handful of
 /// `/tmp` directories behind on every run.
@@ -39,6 +40,10 @@ impl Scratch {
 
     fn path(&self) -> &Path {
         &self.0
+    }
+
+    fn join(&self, name: impl AsRef<Path>) -> PathBuf {
+        self.0.join(name)
     }
 }
 
@@ -108,6 +113,10 @@ async fn codex_panes_pre_trust_workdir_and_other_harnesses_do_not() {
     codex_worker_pane_pre_trusts_workdir_before_launch().await;
     codex_supervisor_pane_pre_trusts_workdir_before_launch().await;
     claude_worker_pane_does_not_touch_codex_config().await;
+    #[cfg(unix)]
+    codex_does_not_launch_when_trust_read_back_cannot_verify().await;
+    #[cfg(unix)]
+    concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back().await;
 }
 
 async fn codex_worker_pane_pre_trusts_workdir_before_launch() {
@@ -202,4 +211,159 @@ async fn claude_worker_pane_does_not_touch_codex_config() {
         !config.exists(),
         "a non-Codex worker must never create or modify the Codex config"
     );
+}
+
+/// A failed trust transaction must prevent `Pty::spawn`: Codex only reads this
+/// config at process start, so executing it after an unparseable/read-back
+/// failure would reintroduce the permanent interactive-prompt park.
+#[cfg(unix)]
+async fn codex_does_not_launch_when_trust_read_back_cannot_verify() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_home, bin, config) = isolate_codex_env("unverified");
+    let workdir = Scratch::new("unverified-cwd");
+    std::fs::write(&config, "this is [not valid TOML\n").unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        "#!/bin/sh\n: > \"$PWD/.mock-codex-should-not-launch\"\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cas = bin.join("cas");
+    std::fs::write(&cas, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = Pane::worker(
+        "unverified",
+        workdir.path().to_path_buf(),
+        None,
+        "supervisor",
+        SupervisorCli::Codex,
+        SupervisorCli::Codex,
+        None,
+        None,
+        None,
+        None,
+        24,
+        80,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_err(), "unverified trust must refuse the spawn");
+    assert!(
+        !workdir.join(".mock-codex-should-not-launch").exists(),
+        "Codex executable must not run before trust read-back verification"
+    );
+}
+
+/// cas-3603 (GH #237): every concurrent Codex spawn must see its own durable
+/// trust entry before its executable begins. The mock `codex` checks its config
+/// at process start and drops a per-cwd receipt, so this asserts the actual
+/// `Pane::worker` happens-before boundary rather than only the write helper.
+#[cfg(unix)]
+async fn concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const WORKERS: usize = 8;
+    let (_home, bin, config) = isolate_codex_env("concurrent");
+    let workdirs: Vec<Scratch> = (0..WORKERS)
+        .map(|index| Scratch::new(&format!("concurrent-cwd-{index}")))
+        .collect();
+
+    // Keep PATH private to this test. `cas` only satisfies the PTY preflight;
+    // the mock Codex never invokes it. The Codex mock itself verifies the
+    // project table before emitting its launch receipt.
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        r#"#!/bin/sh
+expected="[projects.\"$(pwd)\"]"
+found=0
+while IFS= read -r line; do
+    if [ "$line" = "$expected" ]; then
+        found=1
+    elif [ "$found" = 1 ] && [ "$line" = 'trust_level = "trusted"' ]; then
+        : > "$PWD/.mock-codex-launched-after-trust"
+        exit 0
+    fi
+done < "$CODEX_HOME/config.toml"
+: > "$PWD/.mock-codex-launched-before-trust"
+exit 23
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cas = bin.join("cas");
+    std::fs::write(&cas, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let nice = bin.join("nice");
+    std::fs::write(
+        &nice,
+        "#!/bin/sh\nwhile [ \"$1\" != \"codex\" ]; do shift; done\nexec \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&nice, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let start = Arc::new(Barrier::new(WORKERS));
+    std::thread::scope(|scope| {
+        let mut spawns = Vec::with_capacity(WORKERS);
+        for (index, scratch) in workdirs.iter().enumerate() {
+            let start = Arc::clone(&start);
+            let cwd = scratch.path().to_path_buf();
+            spawns.push(scope.spawn(move || {
+                start.wait();
+                let pane = Pane::worker(
+                    &format!("concurrent-{index}"),
+                    cwd.clone(),
+                    None,
+                    "supervisor",
+                    SupervisorCli::Codex,
+                    SupervisorCli::Codex,
+                    None,
+                    None,
+                    None,
+                    None,
+                    24,
+                    80,
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+
+                let success = cwd.join(".mock-codex-launched-after-trust");
+                let failure = cwd.join(".mock-codex-launched-before-trust");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !success.exists() && !failure.exists() && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                drop(pane);
+                if failure.exists() {
+                    return Err(format!(
+                        "mock Codex launched before trust was present for {}",
+                        cwd.display()
+                    ));
+                }
+                if !success.exists() {
+                    return Err(format!("mock Codex did not launch for {}", cwd.display()));
+                }
+                Ok::<_, String>(())
+            }));
+        }
+        for spawn in spawns {
+            spawn.join().unwrap().unwrap();
+        }
+    });
+
+    let contents = std::fs::read_to_string(&config).unwrap();
+    for scratch in &workdirs {
+        assert!(
+            trust_entry_present(&config, scratch.path()),
+            "config lost concurrent trust entry for {}; contents: {contents}",
+            scratch.path().display(),
+        );
+    }
 }

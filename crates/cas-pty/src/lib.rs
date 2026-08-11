@@ -49,6 +49,7 @@ mod pty;
 
 pub use codex_trust::{
     CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, ensure_project_trusted,
+    update_codex_config_locked,
 };
 
 pub use conformance::{

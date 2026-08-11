@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factory failure-mode frequency audit v1 — 2026-08-11</title>
+<style>
+:root{color-scheme:light dark;--bg:#f7f8fa;--panel:#fff;--ink:#17202a;--muted:#536170;--line:#c9d1d9;--accent:#175ea8;--accent2:#7b3fb2;--good:#08783e;--warn:#9a5b00;--bad:#b42318;--soft:#eaf2fb;--zero:#677482}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}a{color:var(--accent)}a:focus,summary:focus{outline:3px solid var(--warn);outline-offset:3px}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:var(--panel);padding:.6rem;z-index:10}.wrap{max-width:1180px;margin:auto;padding:0 1.25rem}header{background:var(--ink);color:#fff;padding:3.5rem 0 2.5rem}.eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:.78rem;font-weight:700;color:#bdd7f1}h1{font-size:clamp(2rem,5vw,4.3rem);line-height:1.02;max-width:18ch;margin:.55rem 0 1rem}.lede{font-size:1.22rem;max-width:72ch;margin:0;color:#eef4fb}.meta{display:flex;flex-wrap:wrap;gap:.55rem;margin-top:1.4rem}.pill{border:1px solid #718296;border-radius:999px;padding:.25rem .65rem;font-size:.84rem}main{padding:2rem 0 4rem}section{margin:0 0 2.4rem}.hero-grid,.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}.hero-card,.card,figure,details{background:var(--panel);border:1px solid var(--line);border-radius:10px}.hero-card,.card{padding:1.15rem}.hero-card .value{font-size:2.4rem;font-weight:780;line-height:1;color:var(--accent)}.hero-card .label{margin:.5rem 0 0;font-weight:650}.hero-card .base{font-size:.85rem;color:var(--muted)}h2{font-size:1.75rem;margin:2.2rem 0 .8rem;border-bottom:2px solid var(--line);padding-bottom:.35rem}h3{font-size:1.25rem;margin:1.5rem 0 .55rem}.callout{border-left:5px solid var(--accent);padding:1rem 1.2rem;background:var(--soft);color:#17202a;border-radius:0 8px 8px 0}.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel)}table{border-collapse:collapse;width:100%;min-width:680px;font-variant-numeric:tabular-nums}caption{text-align:left;font-weight:700;padding:.8rem 1rem;background:var(--soft);color:#17202a}th,td{padding:.62rem .75rem;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}thead th{position:sticky;top:0;background:var(--panel);z-index:1}td.num,th.num{text-align:right}.total th,.total td{font-weight:800;border-top:2px solid var(--ink)}.hit{font-weight:800;color:var(--accent)}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}code{font-size:.91em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#111820;color:#f4f7fa;border-radius:8px;padding:1rem;overflow:auto}details{padding:.8rem 1rem;margin:.7rem 0}summary{font-weight:750;cursor:pointer}figure{margin:1rem 0;padding:1rem}figure svg{width:100%;height:auto;display:block}.fig-note,figcaption,.source-note{font-size:.86rem;color:var(--muted)}.legend{display:flex;gap:1rem;flex-wrap:wrap;font-size:.88rem}.swatch{display:inline-block;width:1.1rem;height:.7rem;margin-right:.3rem;border:1px solid currentColor;vertical-align:middle}.pos{background:var(--accent)}.neg{background:repeating-linear-gradient(135deg,var(--accent2),var(--accent2) 3px,transparent 3px,transparent 6px)}ol.proposals li{padding:.5rem 0 .85rem}footer{border-top:1px solid var(--line);padding:2rem 0;color:var(--muted)}
+@media (prefers-color-scheme:dark){:root{--bg:#0f141a;--panel:#171e26;--ink:#edf2f7;--muted:#aab6c2;--line:#3a4652;--accent:#70b7ff;--accent2:#c294ef;--soft:#dcecff}.callout,caption{color:#17202a}header{background:#090d12}}
+@media (max-width:760px){.hero-grid,.cards{grid-template-columns:1fr}header{padding-top:2.5rem}.wrap{padding:0 .8rem}h1{font-size:2.35rem}.hero-card .value{font-size:2rem}}
+@media print{:root{--bg:#fff;--panel:#fff;--ink:#000;--muted:#333;--line:#888;--accent:#174b78;--soft:#eee}body{font-size:10.5pt;background:#fff;color:#000}.wrap{max-width:none;padding:0}header{background:#fff;color:#000;padding:0 0 1rem;border-bottom:2px solid #000}.eyebrow,.lede{color:#000}.pill{border-color:#000}main{padding-top:.5rem}details{display:block}details>summary{list-style:none}details>summary::-webkit-details-marker{display:none}.table-wrap{overflow:visible}table{min-width:0;font-size:8.5pt}thead{display:table-header-group}tr,figure,.card,.hero-card,details{break-inside:avoid}a[href^="http"]::after{content:" (" attr(href) ")"}figure svg{max-height:7.5in}.skip{display:none}}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to report</a>
+<header>
+  <div class="wrap">
+    <div class="eyebrow">Metrics / mining analysis · practitioner audience</div>
+    <h1>Three failure classes carry most observed events.</h1>
+    <p class="lede">Twenty-four observed events survived high-precision adjudication across 1,132 factory sessions. Workspace denials, missed surfaces, and crossed-message races account for 14 events—58.3% of the measured total.</p>
+    <div class="meta"><span class="pill">2026-08-11</span><span class="pill">14-day window</span><span class="pill">Claude + Codex</span><span class="pill">High evidence confidence</span></div>
+  </div>
+</header>
+<main id="content" class="wrap">
+  <section aria-labelledby="headline">
+    <h2 id="headline">1. Headline finding</h2>
+    <div class="hero-grid">
+      <div class="hero-card"><div class="value">24</div><p class="label">observed failure events</p><p class="base">21 model/session-class episodes</p></div>
+      <div class="hero-card"><div class="value">1,132</div><p class="label">factory sessions</p><p class="base">437 Claude + 695 Codex</p></div>
+      <div class="hero-card"><div class="value">58.3%</div><p class="label">events in the top three</p><p class="base">14 of 24 measured events</p></div>
+    </div>
+    <p class="callout"><strong>The lexical tally was not the result.</strong> The broad pass surfaced 586 candidates; structural evidence framing reduced that to 31, and manual adjudication accepted 21 episodes. In total, 565 broad candidates (96.4%) did not become incidents, mainly prompt echoes, preventive guidance, task descriptions, fixtures, and ordinary scope instructions. The final counts are a high-precision lower bound.</p>
+  </section>
+
+  <section aria-labelledby="overview">
+    <h2 id="overview">2. Overview</h2>
+    <div class="table-wrap"><table>
+      <caption>Overview metrics and named comparison bases</caption>
+      <thead><tr><th scope="col">Metric</th><th scope="col" class="num">Current</th><th scope="col" class="num">Baseline</th><th scope="col" class="num">Delta</th><th scope="col" class="num">% delta</th><th scope="col" class="num">Sample</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Adjudicated observed events</th><td class="num">24</td><td class="num">586 lexical candidates</td><td class="num">-562</td><td class="num">-95.9%</td><td class="num">1,132</td></tr>
+        <tr><th scope="row">Events in top three classes</th><td class="num">14</td><td class="num">10 in other classes</td><td class="num">+4</td><td class="num">+40.0%</td><td class="num">24</td></tr>
+        <tr><th scope="row">Claude Fable 5 affected rate</th><td class="num">6.98%</td><td class="num">1.86%</td><td class="num">+5.12 points</td><td class="num">+275.3%</td><td class="num">86</td></tr>
+        <tr><th scope="row">GPT-5.6 Terra affected rate</th><td class="num">4.64%</td><td class="num">1.86%</td><td class="num">+2.78 points</td><td class="num">+149.5%</td><td class="num">194</td></tr>
+        <tr><th scope="row">Claude Opus 5 affected rate</th><td class="num">1.45%</td><td class="num">1.86%</td><td class="num">-0.41 points</td><td class="num">-21.8%</td><td class="num">275</td></tr>
+        <tr><th scope="row">GPT-5.6 Sol affected rate</th><td class="num">0.44%</td><td class="num">1.86%</td><td class="num">-1.42 points</td><td class="num">-76.5%</td><td class="num">458</td></tr>
+      </tbody>
+    </table></div>
+    <p class="source-note">Affected-episode rate = model/session-class episodes ÷ sessions for that model. It is not a model-quality score: assignments, repositories, supervisors, and guard exposure differ.</p>
+  </section>
+
+  <section aria-labelledby="method">
+    <h2 id="method">3. Method</h2>
+    <h3>3.1 Corpus and window</h3>
+    <p>The window is <code>[2026-07-28T04:00:00Z, 2026-08-11T17:55:35Z)</code>—midnight EDT through the instant before the audit worker spawned. Transcript timestamps are authoritative; mtime only skips files incapable of containing an in-window append.</p>
+    <div class="cards">
+      <div class="card"><strong>Claude</strong><br>437 factory sessions<br><span class="source-note">2,628 source files / 1.25 GB before factory filtering</span></div>
+      <div class="card"><strong>Codex</strong><br>695 factory sessions<br><span class="source-note">1,123 source files / 2.32 GB before factory filtering</span></div>
+      <div class="card"><strong>Factory notes</strong><br>read-only DB snapshot<br><span class="source-note"><code>PRAGMA integrity_check = ok</code></span></div>
+    </div>
+    <p>Sources were <code>~/.claude/projects/**/*.jsonl</code>, <code>~/.claude-alt/projects/**/*.jsonl</code>, <code>~/.codex/sessions/**/*.jsonl</code>, and a copied <code>cas.db</code> + WAL/SHM. Grok had 90 files / 14.7 MB, but v1 excludes it because the assigned source contract named Claude JSONL, Codex JSONL, and factory notes; its schema and coverage are not comparable. Missing Grok rows mean <strong>not measured</strong>, not zero.</p>
+
+    <h3>3.2 Unit, extraction, and adjudication</h3>
+    <p>The unit is one unique <strong>model × harness × session/work-episode × failure class</strong>. Repeated evidence in one class/session is one episode; raw occurrences remain separate. Thus three zero-test invocations in one Claude Opus 5 session are <code>1 episode / 3 events</code>.</p>
+    <p>The read-only miner inherits model from Claude assistant metadata or Codex turn context; excludes system/developer rows and CAS task-show/sibling-note dumps; and emits one candidate pointer per source/session/class. Accepted evidence is either a unique live guard banner or a concrete supervisor correction, close rejection, blocker/discovery note, or task note naming the actual damage/missing action. Assistant discussion, task descriptions, fixtures, preventive prose, and release-note summaries are rejected. The CSV manifest is the adjudicated source of every number below.</p>
+    <details open><summary>Exact reproduction command</summary><pre><code>tmpdir=$(mktemp -d)
+cp /home/pippenz/Petrastella/cas-src/.cas/cas.db "$tmpdir/snap.db"
+cp /home/pippenz/Petrastella/cas-src/.cas/cas.db-wal "$tmpdir/snap.db-wal"
+cp /home/pippenz/Petrastella/cas-src/.cas/cas.db-shm "$tmpdir/snap.db-shm"
+sqlite3 "$tmpdir/snap.db" 'PRAGMA integrity_check;'
+
+python3 docs/analysis/scripts/mine_failure_modes.py \
+  --since 2026-07-28T04:00:00Z \
+  --until 2026-08-11T17:55:35Z \
+  --claude-root ~/.claude/projects \
+  --claude-root ~/.claude-alt/projects \
+  --codex-root ~/.codex/sessions \
+  --task-db "$tmpdir/snap.db" \
+  --output "$tmpdir/candidates.csv" \
+  --summary "$tmpdir/summary.json"</code></pre></details>
+    <p>Human rerun step: inspect each candidate against the evidence-frame rule, aggregate repeats in the same session/class, and write accepted rows to the manifest. V1 intentionally does not ask a model to auto-label its own failures.</p>
+
+    <h3>3.3 Category definitions</h3>
+    <div class="table-wrap"><table>
+      <caption>Count and exclusion rules</caption>
+      <thead><tr><th scope="col">Class</th><th scope="col">Count when…</th><th scope="col">Exclude when…</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Unscoped test</th><td>Unscoped, unresolved, or zero-test work is treated as green.</td><td>A fixture/guidance quotes the guard.</td></tr>
+        <tr><th scope="row">Workspace denial</th><td>The live hook banner rejects a write.</td><td>Source/tests only contain the banner.</td></tr>
+        <tr><th scope="row">Wrong process/environment</th><td>The worker disconnects/damages its task environment or targets the wrong process/store.</td><td>It correctly preserves unrelated processes.</td></tr>
+        <tr><th scope="row">Scope drift</th><td>Work leaves the body, or a false drift signal blocks correct work.</td><td>“Keep X out of scope” is obeyed.</td></tr>
+        <tr><th scope="row">Partial delivery</th><td>A named acceptance slice is absent at close/merge.</td><td>Intentional phased work remains open.</td></tr>
+        <tr><th scope="row">Missed surface</th><td>A mirror, migration pin, generated config, sibling contract, or reverse state is omitted.</td><td>Applicable surfaces carry evidence.</td></tr>
+        <tr><th scope="row">Crossed race</th><td>Merge/amendment and worker action cross, forcing redundant wait/close/correction.</td><td>Normal MERGE REQUIRED completes in order.</td></tr>
+        <tr><th scope="row">Premature done</th><td>Done is claimed before surfaced amendments/proof are incorporated.</td><td>Preventive verify-before-close prose.</td></tr>
+        <tr><th scope="row">Draft/format</th><td>Required message/document structure needs reinterpretation or rework.</td><td>An ordinary formatter task is assigned.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section aria-labelledby="results">
+    <h2 id="results">4. Results</h2>
+    <h3>4.1 Model × harness × failure class</h3>
+    <p>Cells are <strong>episodes / raw events</strong>. A dash is an observed zero in the measured corpus; <code>n</code> is the session denominator.</p>
+    <div class="table-wrap"><table>
+      <caption>Failure frequency by harness and exact model metadata</caption>
+      <thead><tr><th scope="col">Harness</th><th scope="col">Model</th><th scope="col" class="num">n</th><th scope="col" class="num">Unscoped</th><th scope="col" class="num">Workspace</th><th scope="col" class="num">Wrong env</th><th scope="col" class="num">Scope</th><th scope="col" class="num">Partial</th><th scope="col" class="num">Surface</th><th scope="col" class="num">Crossed</th><th scope="col" class="num">Premature</th><th scope="col" class="num">Format</th></tr></thead>
+      <tbody>
+        <tr><td>Claude</td><th scope="row"><code>&lt;synthetic&gt;</code></th><td class="num">19</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>claude-fable-5</code></th><td class="num">86</td><td class="num">—</td><td class="num hit">6 / 6</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>claude-haiku-4-5-20251001</code></th><td class="num">14</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>claude-opus-4-5-20251101</code></th><td class="num">8</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>claude-opus-4-8</code></th><td class="num">1</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>claude-opus-5</code></th><td class="num">275</td><td class="num hit">1 / 3</td><td class="num">—</td><td class="num">—</td><td class="num hit">1 / 1</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num hit">1 / 1</td><td class="num hit">1 / 2</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>claude-sonnet-5</code></th><td class="num">24</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude</td><th scope="row"><code>unknown</code></th><td class="num">10</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Codex</td><th scope="row"><code>claude-opus-4-5</code></th><td class="num">2</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Codex</td><th scope="row"><code>gpt-5.5</code></th><td class="num">39</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Codex</td><th scope="row"><code>gpt-5.6-luna</code></th><td class="num">2</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Codex</td><th scope="row"><code>gpt-5.6-sol</code></th><td class="num">458</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num hit">2 / 2</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Codex</td><th scope="row"><code>gpt-5.6-terra</code></th><td class="num">194</td><td class="num">—</td><td class="num">—</td><td class="num hit">1 / 1</td><td class="num">—</td><td class="num hit">2 / 2</td><td class="num hit">4 / 4</td><td class="num hit">2 / 2</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr class="total"><th scope="row" colspan="2">Total / all measured</th><td class="num">1,132</td><td class="num">1 / 3</td><td class="num">6 / 6</td><td class="num">1 / 1</td><td class="num">1 / 1</td><td class="num">2 / 2</td><td class="num">4 / 4</td><td class="num">4 / 4</td><td class="num">1 / 1</td><td class="num">1 / 2</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>4.2 Frequency by class and named evidence</h3>
+    <div class="table-wrap"><table>
+      <caption>Ranked classes; every accepted pointer is preserved in the CSV manifest</caption>
+      <thead><tr><th scope="col" class="num">Rank</th><th scope="col">Class</th><th scope="col" class="num">Episodes</th><th scope="col" class="num">Events</th><th scope="col" class="num">Events / sessions</th><th scope="col">Named pointer</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><th scope="row">Workspace denial</th><td class="num">6</td><td class="num">6</td><td class="num">0.53%</td><td><code>~/.claude/.../54bc7a03-….jsonl:29</code></td></tr>
+        <tr><td class="num">2=</td><th scope="row">Missed surface</th><td class="num">4</td><td class="num">4</td><td class="num">0.35%</td><td><code>task:cas-641f@description</code> → cas-8921 / cas-96f9 / cas-2327 / cas-bc13</td></tr>
+        <tr><td class="num">2=</td><th scope="row">Crossed race</th><td class="num">4</td><td class="num">4</td><td class="num">0.35%</td><td><code>~/.codex/...019ff0a6….jsonl:441</code>; <code>task:cas-1e7e@14:58:05Z</code></td></tr>
+        <tr><td class="num">4</td><th scope="row">Unscoped test</th><td class="num">1</td><td class="num">3</td><td class="num">0.27%</td><td><code>~/.claude-alt/.../steady-falcon-66/1ebe3ceb-….jsonl:541</code></td></tr>
+        <tr><td class="num">5=</td><th scope="row">Partial delivery</th><td class="num">2</td><td class="num">2</td><td class="num">0.18%</td><td><code>task:cas-a487@13:29:55Z</code>; <code>~/.codex/...019fede3….jsonl:624</code></td></tr>
+        <tr><td class="num">5=</td><th scope="row">Draft/format</th><td class="num">1</td><td class="num">2</td><td class="num">0.18%</td><td><code>task:cas-a872@00:54Z</code></td></tr>
+        <tr><td class="num">7=</td><th scope="row">Wrong environment</th><td class="num">1</td><td class="num">1</td><td class="num">0.09%</td><td><code>~/.codex/...019fe7a0….jsonl:776</code>; <code>task:cas-4fa4@19:02Z</code></td></tr>
+        <tr><td class="num">7=</td><th scope="row">Scope drift</th><td class="num">1</td><td class="num">1</td><td class="num">0.09%</td><td><code>task:cas-058e@02:45Z</code> (cas-7a21)</td></tr>
+        <tr><td class="num">7=</td><th scope="row">Premature done</th><td class="num">1</td><td class="num">1</td><td class="num">0.09%</td><td><code>task:cas-9d92@21:13:44Z</code></td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>4.3 Segment variance</h3>
+    <figure aria-labelledby="variance-caption">
+      <svg viewBox="0 0 820 300" role="img" aria-labelledby="variance-title variance-desc" preserveAspectRatio="xMidYMid meet">
+        <title id="variance-title">Affected episode rate variance versus the 1.86 percent corpus rate</title>
+        <desc id="variance-desc">Claude Fable 5 is 5.12 percentage points above the corpus rate; GPT-5.6 Terra is 2.78 points above; Claude Opus 5 is 0.41 points below; GPT-5.6 Sol is 1.42 points below. Positive bars are solid and negative bars are hatched.</desc>
+        <defs><pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="7" fill="none"/><line x1="0" y1="0" x2="0" y2="7" stroke="currentColor" stroke-width="3"/></pattern></defs>
+        <line x1="330" y1="28" x2="330" y2="252" stroke="currentColor" stroke-width="2"/><text x="330" y="275" text-anchor="middle" fill="currentColor">0-point variance</text>
+        <g fill="currentColor" font-size="17"><text x="10" y="65">Claude / Fable 5</text><text x="10" y="120">Codex / Terra</text><text x="10" y="175">Claude / Opus 5</text><text x="10" y="230">Codex / Sol</text></g>
+        <rect x="330" y="43" width="307" height="28" rx="3" fill="var(--accent)"/><text x="647" y="63" fill="currentColor">+5.12 pp</text>
+        <rect x="330" y="98" width="167" height="28" rx="3" fill="var(--accent)"/><text x="507" y="118" fill="currentColor">+2.78 pp</text>
+        <rect x="305" y="153" width="25" height="28" rx="3" fill="url(#hatch)" stroke="currentColor"/><text x="293" y="173" text-anchor="end" fill="currentColor">-0.41 pp</text>
+        <rect x="245" y="208" width="85" height="28" rx="3" fill="url(#hatch)" stroke="currentColor"/><text x="233" y="228" text-anchor="end" fill="currentColor">-1.42 pp</text>
+      </svg>
+      <figcaption id="variance-caption"><strong>Routing and observability variance, not a model benchmark.</strong> Baseline is the measured corpus rate of 1.86%. Source: adjudicated manifest and session summary, extracted 2026-08-11.</figcaption>
+      <p class="legend"><span><span class="swatch pos"></span>Above baseline</span><span><span class="swatch neg"></span>Below baseline</span></p>
+    </figure>
+    <div class="table-wrap"><table>
+      <caption>Underlying data for the variance chart</caption>
+      <thead><tr><th scope="col">Harness / model</th><th scope="col" class="num">Sessions</th><th scope="col" class="num">Episodes</th><th scope="col" class="num">Rate</th><th scope="col" class="num">Delta vs 1.86%</th></tr></thead>
+      <tbody><tr><th scope="row">Claude / Fable 5</th><td class="num">86</td><td class="num">6</td><td class="num">6.98%</td><td class="num">+5.12 points</td></tr><tr><th scope="row">Codex / GPT-5.6 Terra</th><td class="num">194</td><td class="num">9</td><td class="num">4.64%</td><td class="num">+2.78 points</td></tr><tr><th scope="row">Claude / Opus 5</th><td class="num">275</td><td class="num">4</td><td class="num">1.45%</td><td class="num">-0.41 points</td></tr><tr><th scope="row">Codex / GPT-5.6 Sol</th><td class="num">458</td><td class="num">2</td><td class="num">0.44%</td><td class="num">-1.42 points</td></tr><tr><th scope="row">All zero-incident rows</th><td class="num">119</td><td class="num">0</td><td class="num">0.00%</td><td class="num">-1.86 points</td></tr></tbody>
+    </table></div>
+    <p>Fable’s six episodes are one guard class over a two-day band. Terra’s nine span four classes and include tasks deliberately assigned to repair known failures. No intrinsic model-quality conclusion follows.</p>
+  </section>
+
+  <section aria-labelledby="proposals">
+    <h2 id="proposals">5. Proposed guidance edits — not applied</h2>
+    <p class="callout"><strong>Approval boundary:</strong> this audit changes no rule, skill, or runtime policy. These three edits are proposals for supervisor/operator review.</p>
+    <ol class="proposals">
+      <li><strong>Add a workspace-path recovery pair.</strong> Six denials affected 6 of 86 Claude Fable 5 sessions (6.98%; 0.53% overall). Proposed wording: after a banner, do not retry the same target; route source/build output to the worktree, durable proof to the task artifact root, and ephemeral notes to the harness scratchpad. Treat <code>/dev/null</code> denial as a guard defect to report rather than inventing another host path. The <code>/dev/null</code> and harness-scratchpad rows also justify a runtime-policy follow-up; guidance cannot repair a false boundary.</li>
+      <li><strong>Make the surface checklist demand a pointer, not an assertion.</strong> Four episodes affected 4 of 194 GPT-5.6 Terra sessions (2.06%; 0.35% overall). For every applicable surface, paste the proving file, command, or test; for every <code>N/A</code>, state why. A bare “synced all mirrors” is not close evidence. This builds on <code>cas-641f</code>; it does not rewrite it here.</li>
+      <li><strong>Add a crossed-message freshness handshake.</strong> Four races affected four Codex sessions—2 Sol, 2 Terra; 0.61% across those 652 sessions. After push, <code>MERGE REQUIRED</code>, or a late amendment: drain inbox, re-read the task, test whether the delivered tip is already an ancestor of the target, and check whether the task is already merged/closed. Re-close or stop instead of editing when freshness is already satisfied.</li>
+    </ol>
+    <p>The unscoped-test class had three events in one Opus 5 session. It does not displace the top three because the scoped-test wrapper and passed-count guidance landed afterward. A repeat audit should isolate the post-guard epoch.</p>
+  </section>
+
+  <section aria-labelledby="threats">
+    <h2 id="threats">6. Threats to validity</h2>
+    <ul>
+      <li><strong>Lower bound:</strong> high precision sacrifices euphemistic or unreported failures.</li>
+      <li><strong>Task-mix confounding:</strong> models were routed by depth/cost; some sessions existed to repair incidents.</li>
+      <li><strong>Reporting bias:</strong> task-noted failures are visible; silent abandonment is not. Guard denials are mechanically loud.</li>
+      <li><strong>Mixed episode carriers:</strong> banners carry session IDs; task-note incidents carry the worker/task episode. Handoffs may undercount unless origin is named.</li>
+      <li><strong>Historical note text:</strong> embedded note time, not <code>tasks.updated_at</code>, controls inclusion.</li>
+      <li><strong>Model inheritance:</strong> tool results inherit the session’s last model. <code>&lt;synthetic&gt;</code> and <code>unknown</code> are not guessed.</li>
+      <li><strong>Grok absent:</strong> v1 makes no cross-harness zero claim for Grok.</li>
+      <li><strong>No causality:</strong> the chart is routing/observability evidence, not a benchmark.</li>
+    </ul>
+    <p><strong>Falsifier:</strong> a second high-recall adjudication that adds at least seven observed events outside the current top three would overturn the majority finding. Only a post-guidance audit with stable routing can show whether an edit reduced failures.</p>
+  </section>
+
+  <section aria-labelledby="provenance">
+    <h2 id="provenance">7. Provenance</h2>
+    <div class="table-wrap"><table>
+      <caption>Reproduction and source-of-truth receipt</caption>
+      <tbody>
+        <tr><th scope="row">Markdown source</th><td><a href="2026-08-11-failure-mode-frequency-audit.md">2026-08-11-failure-mode-frequency-audit.md</a></td></tr>
+        <tr><th scope="row">Adjudicated manifest</th><td><code>docs/analysis/2026-08-11-failure-mode-incidents.csv</code></td></tr>
+        <tr><th scope="row">Candidate miner</th><td><code>docs/analysis/scripts/mine_failure_modes.py</code></td></tr>
+        <tr><th scope="row">Repository commit</th><td><code>bd9c5103</code> at extraction start</td></tr>
+        <tr><th scope="row">DB snapshot</th><td><code>/tmp/cas-935c.sy0M4V/snap.db</code>; integrity <code>ok</code></td></tr>
+        <tr><th scope="row">Window</th><td><code>[2026-07-28T04:00:00Z, 2026-08-11T17:55:35Z)</code></td></tr>
+        <tr><th scope="row">Candidate → accepted</th><td>586 broad → 31 evidence-framed → 21 episodes / 24 events</td></tr>
+        <tr><th scope="row">Denominator</th><td>437 Claude + 695 Codex = 1,132 sessions</td></tr>
+        <tr><th scope="row">Charter linkage</th><td><code>cas-0cda</code>, operational intelligence v2; one-off read-only bridge. Recurrence remains an operator decision.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+</main>
+<footer><div class="wrap">Factory failure-mode frequency audit v1 · Markdown is the source of truth · HTML is self-contained and requires no network or JavaScript.</div></footer>
+</body>
+</html>

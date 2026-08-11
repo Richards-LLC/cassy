@@ -274,7 +274,19 @@ jobs:
           ./.context/zig/zig env
 
       - name: Setup sccache
+        id: setup-sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        shell: bash
+        run: |
+          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+            echo "::warning::sccache backend unavailable — building uncached"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

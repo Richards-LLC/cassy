@@ -347,6 +347,7 @@ fn seed_direct_close_delivery(
         target_sha: commit_sha.to_string(),
         proof_reference: "proof:direct-close-state".to_string(),
         scope_summary: "direct close delivery-state fixture".to_string(),
+        artifact_path: None,
     };
     let receipt = cas_store::build_worker_completion_receipt(
         &input,
@@ -2914,6 +2915,7 @@ fn delivery_receipt(
         target_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
         proof_reference: "proof:serialized-workspace-1".to_string(),
         scope_summary: "transactional delivery integration".to_string(),
+        artifact_path: None,
     }
 }
 
@@ -3951,6 +3953,7 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
         target_sha: "c".repeat(40),
         proof_reference: "proof:scope-lock".to_string(),
         scope_summary: "immutable review boundary".to_string(),
+        artifact_path: None,
     };
     let receipt = cas_store::build_worker_completion_receipt(&input, "alice", chrono::Utc::now());
     let (transaction, dispatch) = cas_store::create_worker_delivery_with_dispatch(
@@ -4727,6 +4730,7 @@ async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
         target_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
         proof_reference: "proof:terminal-replay".to_string(),
         scope_summary: "stale post-close receipt".to_string(),
+        artifact_path: None,
     };
     let receipt_id =
         cas_store::build_worker_completion_receipt(&receipt, "alice", chrono::Utc::now()).id;

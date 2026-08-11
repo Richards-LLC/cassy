@@ -291,8 +291,10 @@ pub struct TaskRequest {
     #[schemars(
         description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates \
                        the registered worker, task, repository, branch, commit/base/target \
-                       tips and proof reference before persisting an immutable delivery \
-                       transaction. Omit to use the legacy close path unchanged."
+                       tips, proof reference, and optional artifact_path before persisting an \
+                       immutable delivery transaction. artifact_path must be an existing file \
+                       or directory under configured [factory] artifacts_root/<task-id>/. \
+                       Omit to use the legacy close path unchanged."
     )]
     #[serde(default)]
     pub completion_receipt: Option<String>,

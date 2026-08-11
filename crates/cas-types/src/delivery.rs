@@ -20,6 +20,11 @@ pub struct WorkerCompletionReceiptInput {
     pub target_sha: String,
     pub proof_reference: String,
     pub scope_summary: String,
+    /// Optional durable proof artifact stored under the configured factory
+    /// artifacts root. The close boundary validates its location before this
+    /// immutable receipt is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +41,8 @@ pub struct WorkerCompletionReceipt {
     pub target_sha: String,
     pub proof_reference: String,
     pub scope_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

@@ -3310,7 +3310,9 @@ impl CasService {
             .map(|task| task.id)
             .collect();
         let artifact_report = factory_artifact_inventory(
-            factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+            crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            ),
             &closed_task_ids,
         );
         let target_cache_report = {
@@ -3901,7 +3903,9 @@ impl CasService {
             .into_iter()
             .map(|task| task.id)
             .collect();
-        let artifact_root = factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let artifact_root = crate::config::resolved_factory_artifacts_root(
+            config.factory().artifacts_root.as_deref(),
+        );
         // Durable receipts are deleted only after their task is closed, and
         // only through the same explicit destructive gate as cache reclamation.
         // Unknown directories are inventory-only: an operator must review them.
@@ -4080,20 +4084,6 @@ impl FactoryArtifactInventory {
             ));
         }
         out
-    }
-}
-
-fn factory_artifacts_root(configured: Option<&str>) -> std::path::PathBuf {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    match configured.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("~") => home.unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
-        Some(value) if value.starts_with("~/") => home
-            .map(|base| base.join(&value[2..]))
-            .unwrap_or_else(|| std::path::PathBuf::from(value)),
-        Some(value) => std::path::PathBuf::from(value),
-        None => home
-            .map(|base| base.join(".cas/artifacts"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
     }
 }
 

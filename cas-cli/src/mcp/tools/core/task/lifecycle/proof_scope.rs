@@ -410,6 +410,7 @@ mod tests {
             target_sha: "c".repeat(40),
             proof_reference: "proof:scope".into(),
             scope_summary: "locked delivery scope".into(),
+            artifact_path: None,
         }
     }
 

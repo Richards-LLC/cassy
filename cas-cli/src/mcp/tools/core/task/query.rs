@@ -60,6 +60,9 @@ impl CasCore {
                     "\nTransactional delivery: {}\n  Receipt: {}\n  Commit: {}\n  Next action: {}",
                     transaction.state, receipt.id, receipt.commit_sha, next_action
                 ));
+                if let Some(artifact_path) = receipt.artifact_path {
+                    output.push_str(&format!("\n  Durable artifact: {artifact_path}"));
+                }
                 if let Some(detail) = transaction.last_error_detail {
                     output.push_str(&format!("\n  Recovery detail: {detail}"));
                 }

@@ -1386,11 +1386,21 @@ pub struct Pty {
     is_codex: bool,
 }
 
+/// Whether a configured command ultimately launches the Codex harness.
+///
+/// Factory workers may be started through `nice -n … codex` to keep a busy
+/// compile from starving the supervisor.  This classification feeds prompt
+/// submission timing as well as the spawn preflight, so it must describe the
+/// executable behind the wrapper rather than only the outer command.
+fn command_launches_codex(command: &str, args: &[String]) -> bool {
+    command == "codex" || (command == "nice" && args.iter().any(|arg| arg == "codex"))
+}
+
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, config: PtyConfig) -> Result<Self> {
         let id = id.into();
-        let is_codex = config.command == "codex";
+        let is_codex = command_launches_codex(&config.command, &config.args);
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
         // `mcp_servers.cs.command=cas`, but Codex can only launch it if the `cas`
@@ -1398,8 +1408,7 @@ impl Pty {
         // niced wrapper form (cas-0bf4) so the preflight covers both. Refuse loudly
         // with remediation rather than spawning a worker that comes up with zero
         // CAS tools and flails.
-        let codex_spawn =
-            is_codex || (config.command == "nice" && config.args.iter().any(|a| a == "codex"));
+        let codex_spawn = is_codex;
         if codex_spawn && !cas_binary_on_path() {
             return Err(Error::pty(
                 "Codex agent cannot start: the `cas` MCP server binary is not on PATH. \
@@ -3755,6 +3764,31 @@ mod tests {
             assert_eq!(config.command, "nice");
             assert_eq!(config.args[0], "-n");
             assert_eq!(config.args[2], "codex");
+        }
+
+        #[test]
+        fn nice_wrapped_codex_keeps_codex_submit_classification_cas_6e76() {
+            let _e = ScopedEnv::new();
+            unsafe {
+                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
+            }
+            let config = PtyConfig::codex(
+                "w1",
+                "worker",
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None, // effort
+                None,
+            );
+
+            assert!(command_launches_codex(&config.command, &config.args));
+            assert!(
+                !command_launches_codex("nice", &["-n".into(), "10".into(), "claude".into()]),
+                "the wrapper test must not classify every niced harness as Codex"
+            );
         }
 
         #[test]

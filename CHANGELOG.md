@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.63.0] - 2026-08-11
+
+### Added
+- **Every Codex install now carries the CAS safety hooks pre-trusted.** Provisioning registers hook trust and project trust through a single locked configuration transaction, verified before any agent launches, so agents start working immediately without interactive trust prompts.
+
+### Changed
+- **Session startup is leaner and more complete.** The always-injected skill descriptions shrank by two-thirds, team-spawned sessions now receive the same project-memory bundle as direct launches, and retrieval outcomes feed back into recall scoring.
+- **Generated hook configuration is byte-stable.** Regenerating `hooks.json` over an unchanged setup produces a byte-identical file, ending spurious git churn.
+
+### Fixed
+- **Messages to idle Codex agents now reliably surface a turn.** Prompt delivery is classified and watched end-to-end; an unsurfaced delivery wakes the agent instead of sitting unread indefinitely.
+- **Agent cleanup fully tears down what it removes.** Stale-agent maintenance routes through forced shutdown and waits on the terminal process, ending ghost panes and zombie processes after reaps.
+- **Concurrent Codex launches no longer race trust registration.** The pre-launch trust write is a verified happens-before of the agent process start; launch refuses rather than parking on an interactive prompt.
+- **CI survives build-cache outages.** Cache-service failures at setup or teardown downgrade to an uncached build with a loud warning instead of failing the run.
+
 ## [2.62.0] - 2026-08-11
 
 ### Added

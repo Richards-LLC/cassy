@@ -72,10 +72,18 @@ jobs:
     name: Fast Validation
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/heads/epic/')
       || startsWith(github.ref, 'refs/tags/')))
+    # An epic head can emit both push and pull_request events for one SHA.
+    # Deduplicate this required check by head SHA without coupling it to the
+    # independent macOS required check below.
+    concurrency:
+      group: fast-validation-${{ github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,10 +172,15 @@ jobs:
     name: macOS Check
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/heads/epic/')
       || startsWith(github.ref, 'refs/tags/')))
+    concurrency:
+      group: macos-check-${{ github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: true
     # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
     # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
     # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.

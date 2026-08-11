@@ -43,6 +43,7 @@ pub(crate) mod hook;
 mod init;
 pub mod integrate;
 pub mod interactive;
+mod limits;
 mod list;
 mod mcp_cmd;
 pub mod memory;
@@ -72,6 +73,7 @@ pub use factory::{AttachArgs, FactoryArgs, KillAllArgs, KillArgs};
 pub use hook::HookArgs;
 pub use hub::HubArgs;
 pub use init::InitArgs;
+pub use limits::LimitsArgs;
 pub use list::ListArgs;
 pub use mcp_cmd::McpCommands;
 pub use provider_default::DefaultArgs;
@@ -192,6 +194,9 @@ pub enum Commands {
 
     /// Show session status
     Status(StatusArgs),
+
+    /// Show local provider rate-limit and credit availability
+    Limits(LimitsArgs),
 
     /// Output status line for Claude Code integration
     #[command(alias = "statusline")]
@@ -336,6 +341,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Hub(_)
         | Commands::Config(_)
         | Commands::Status(_)
+        | Commands::Limits(_)
         | Commands::StatusLine(_)
         | Commands::Mcp(_)
         | Commands::Queue(_)
@@ -512,6 +518,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Doctor(_) => "doctor".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
+        Commands::Limits(_) => "limits".to_string(),
         Commands::StatusLine(_) => "statusline".to_string(),
         Commands::Hook(_) => "hook".to_string(),
         Commands::Auth(_) => "auth".to_string(),
@@ -589,6 +596,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Config(cmd) => config::execute_subcommand(cmd, cli, require_cas_root(cas_root)?),
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
+        Commands::Limits(args) => limits::execute(args, cli),
         Commands::StatusLine(args) => statusline::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Hook(args) => hook::execute(args, cli),
         Commands::Auth(cmd) => auth::execute(cmd, cli),

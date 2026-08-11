@@ -2,6 +2,12 @@
 
 Channel: #cas-internal (C0B44GUKDK2)
 
+**Status:** POSTED 2026-08-11 15:47 EDT to `#cas-internal` (`C0B44GUKDK2`). Verified against the live channel 2026-08-11 (cas-47aa): both top-levels present, each with exactly one threaded reply, text matching this draft.
+- User top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786477633310999
+- User reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786477640969989
+- Dev top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786477646260229
+- Dev reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786477656552669
+
 ## User thread
 
 **Top-level:**

@@ -3383,11 +3383,13 @@ This is the body content."#;
             for marker in [
                 "message, not the chart", "claim-title", "annotate the decisive", "Show uncertainty",
                 "small multiples", "table", "@media print", "cas-html-reports", "color last",
+                "becoming text-dense", "30 seconds", "Visually verify the rendered artifact",
+                "390×844", "Grepping HTML", "H7 acceptance-report precedent",
             ] {
                 assert!(skill.contains(marker), "{label} cas-dataviz missing {marker:?}");
             }
             let review = get(FILES[1]);
-            for marker in ["Preserve", "Missing", "Misfit", "color-last procedure", "computable palette validator", "one-axis rule", "message-first", "annotation practice", "print/PDF"] {
+            for marker in ["Preserve", "Missing", "Deliberate default inversions", "color-last procedure", "computable palette validator", "one-axis rule", "message-first", "annotation practice", "print/PDF"] {
                 assert!(review.contains(marker), "{label} design review missing {marker:?}");
             }
             assert!(get(FILES[3]).contains("export function validate"), "{label} missing runnable validator");

@@ -1,6 +1,6 @@
 ---
 name: cas-dataviz
-description: Use when work involves a chart, graph, plot, dashboard, visualization, heatmap, sparkline, palette, or “visualize data”, or when a report is about to include quantitative comparisons.
+description: Use when work involves a chart, graph, plot, dashboard, visualization, heatmap, sparkline, palette, or “visualize data”; when a report is about to include quantitative comparisons; or when a document/report is becoming text-dense.
 managed_by: cas
 ---
 
@@ -13,6 +13,10 @@ Claude sessions may also carry a bundled `dataviz` skill; this CAS skill is the 
 Write one sentence that says what the reader should learn and make it the chart title. “Failures by class” only names an axis; “Merge commits were the largest class today, twice the next largest” makes a claim the graphic must prove. If no useful sentence emerges, use a table or continue investigating.
 
 Put the evidence *on the chart*: annotate the decisive point, bar, interval, or threshold with a brief callout and a connector when necessary. Do not make a reader infer the conclusion from a paragraph beside an unmarked plot.
+
+## Give dense documents visual rhythm
+
+When quantitative or enumerable prose becomes a wall of text, convert the part readers must compare into a stat tile, table, chart, or timeline. Give long reports a hero number or key-finding tile near the top, pace sections with figures/tables, and use callout blocks for load-bearing facts. **Acceptance test:** a reader can get the argument from the visuals and claim-titles alone in 30 seconds.
 
 ## Choose the least-ink form
 
@@ -38,11 +42,13 @@ Use small multiples when the comparison is among several similarly shaped series
 6. Assign color last. Use one hue, light-to-dark, for magnitude; fixed categorical colors for identity; a warm/cool pair with neutral midpoint for polarity; and reserve status colors for status. Color follows an entity, never its rank after filtering.
 7. Validate any categorical palette with `node scripts/validate_palette.js "#hex,#hex" --surface "#ffffff"`; do not eyeball contrast or separability. The validator is bundled in every harness mirror.
 8. Add a text alternative and an adjacent data table. In a report, chart sections follow `cas-dataviz`; the report’s own contract remains in `cas-html-reports`.
-9. Render, inspect at its intended width, then print-preview. Correct collisions, clipped labels, inaccessible contrast, and page breaks before shipping.
+9. **Visually verify the rendered artifact — mandatory.** Use headless Chrome to screenshot at a desktop width and a phone-class `390×844` viewport; for a report, also render print/PDF. Look at those renders for label collisions, overflow/clipping, contrast in situ, broken layout, and the 30-second visual-argument test. Grepping HTML for expected strings or tags is **not** visual verification and never satisfies this check: it proves markup exists, not that a human can read it. Follow the H7 acceptance-report precedent: headless Chrome at `390×844` plus PDF render.
 
 ## CAS output contexts
 
-For durable CAS reports, use static inline SVG and CSS inside one self-contained HTML file: no charting library, CDN, build step, or external asset. The graphic must still communicate when JavaScript is disabled; tooltips are enhancement, never the only way to obtain a value. Use real `<table>` markup for the evidence twin, explicit provenance beneath the figure, and `@media print` rules that retain title, annotation, legend, and table without clipping.
+For durable CAS reports, use static inline SVG and CSS inside one self-contained HTML file: no charting library, CDN, build step, or external asset. This deliberately inverts the bundled skill’s interaction-first default: hover is an optional enhancement (CSS-only tooltips are fine), while static legibility leads because a chart must survive GitHub embeds, PDF, and print. Use real `<table>` markup for the evidence twin, explicit provenance beneath the figure, and `@media print` rules that retain title, annotation, legend, and table without clipping.
+
+This also deliberately inverts two dashboard defaults: use the bundled validator plus a minimal local palette rather than a full reference theme, and document filters when useful but do not make them a default for committed evidence artifacts.
 
 GitHub issues and PRs need a compact static SVG or table with the same claim-title and provenance. Terminal-adjacent Markdown should usually use a small aligned table or Unicode sparkline; do not simulate a dense dashboard in text.
 

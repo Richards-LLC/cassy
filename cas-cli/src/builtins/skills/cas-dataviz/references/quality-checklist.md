@@ -11,3 +11,4 @@ Before shipping, verify each answer is yes.
 7. Is color applied by meaning and validated where categorical colors identify series?
 8. Can a reader obtain every value through labels, the table, or text without hover or color perception?
 9. Does the static HTML use inline SVG/CSS, avoid external dependencies, state figure provenance, and print without clipping?
+10. Did you actually render and inspect desktop and `390×844` headless-browser screenshots, plus print/PDF for a report, for collisions, clipping, contrast in situ, layout, and the 30-second argument? HTML/tag greps do not count as visual verification.

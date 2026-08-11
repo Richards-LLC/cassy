@@ -21,10 +21,10 @@ Review basis: the complete Claude Code bundled skill captured at `/home/pippenz/
 - **Missing — data-density judgment.** CAS reports are evidence documents, yet the source treats a table largely as accessibility fallback rather than a primary, often superior, audit surface.
 - **Missing — print/PDF behavior.** The interactive-by-default posture omits page-break, clipping, grayscale, and annotation retention checks required for report artifacts.
 
-## Misfit for CAS
+## Deliberate default inversions for CAS
 
-- **Misfit — interaction default.** Mandatory hover layers are unnecessary or impossible for static SVG in self-contained report HTML, GitHub embeds, and terminal-adjacent documentation; static labels, tables, and accessible text must lead.
-- **Misfit — design-system reference palette.** A comprehensive branded palette instance is valuable for product dashboards but too prescriptive for repository evidence artifacts, which should inherit local report tokens and validate the colors they actually use.
-- **Misfit — dashboard-oriented filters.** Filter-row and refetch behavior is a product UI concern, not a default requirement for committed evidence documents.
+- **Deliberate inversion — interaction default.** Hover remains available as an optional layer, but static labels, tables, and accessible text lead because self-contained report HTML must survive GitHub embeds, PDF, print, and JavaScript-disabled reading.
+- **Deliberate inversion — design-system reference palette.** CAS keeps the validator and a minimal local palette instead of prescribing a comprehensive branded theme, so evidence artifacts can inherit local report tokens while validating the colors they actually use.
+- **Deliberate inversion — dashboard-oriented filters.** Filters remain documented when a live surface needs them, but are not a default for committed evidence documents.
 
 The CAS skill therefore retains the disciplined form/color/accessibility core, adds claim-title and annotation requirements, and treats static SVG + table + print behavior as first-class output.

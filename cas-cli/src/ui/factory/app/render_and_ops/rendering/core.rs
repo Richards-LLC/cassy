@@ -1034,6 +1034,7 @@ impl FactoryApp {
                 let focused_epic_branch_status = self
                     .focused_epic_branch_status()
                     .map(|status| (status.branch.clone(), status.ahead, status.behind));
+                let activity_backend_tags = self.activity_backend_tags();
                 let mut state = SidecarState {
                     focus: self.sidecar_focus,
                     tasks_state: &mut self.panels.tasks.list_state,
@@ -1059,7 +1060,6 @@ impl FactoryApp {
                     collapsed_dirs: &self.collapsed_dirs,
                     changes_item_types: &mut self.changes_item_types,
                 };
-                let activity_backend_tags = self.activity_backend_tags();
                 let areas = render_with_state(
                     frame,
                     layout.sidecar_area,
@@ -1087,7 +1087,7 @@ impl FactoryApp {
         }
     }
 
-    fn activity_backend_tags(&self) -> HashMap<String, &'static str> {
+    pub(crate) fn activity_backend_tags(&self) -> HashMap<String, &'static str> {
         self.director_data
             .agent_id_to_name
             .iter()

@@ -1,23 +1,22 @@
+<!-- Auto-generated from CLAUDE.md by `cas sync agents-md`. Do not edit directly. -->
 <!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->
 # IMPORTANT: USE CAS FOR TASK AND MEMORY MANAGEMENT
 
 **DO NOT USE BUILT-IN TOOLS (TodoWrite, EnterPlanMode) FOR TASK TRACKING.**
 
 Use CAS MCP tools instead:
-First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search"). ToolSearch only loads the schema — it does not call the tool. Once it succeeds, call `mcp__cas__task` etc. directly; never re-run ToolSearch for a tool already resolved.
-- `mcp__cas__task` with action: create - Create tasks (NOT TodoWrite)
-- `mcp__cas__task` with action: start/close - Manage task status
-- `mcp__cas__task` with action: ready - See ready tasks
-- `mcp__cas__memory` with action: remember - Store memories and learnings
-- `mcp__cas__search` with action: search - Search all context
+First use each session — load MCP schemas: ToolSearch(query="select:mcp__cs__task,mcp__cs__memory,mcp__cs__search"). ToolSearch only loads the schema — it does not call the tool. Once it succeeds, call `mcp__cs__task` etc. directly; never re-run ToolSearch for a tool already resolved.
+- `mcp__cs__task` with action: create - Create tasks (NOT TodoWrite)
+- `mcp__cs__task` with action: start/close - Manage task status
+- `mcp__cs__task` with action: ready - See ready tasks
+- `mcp__cs__memory` with action: remember - Store memories and learnings
+- `mcp__cs__search` with action: search - Search all context
 
 CAS provides persistent context across sessions. Built-in tools are ephemeral.
 
 Release notes: every PR merged to `staging` or `main` must be announced in Slack per `docs/release-notes/RUBRIC.md` (run the `release-notes` skill; it installs the rubric if missing).
 <!-- CAS:END -->
 
-<!-- codex-only:start -->
-<!--
 ## Codex-specific notes
 
 - Use the `mcp__cs__` CAS MCP tools. Codex sessions do not run the Claude hook
@@ -25,8 +24,6 @@ Release notes: every PR merged to `staging` or `main` must be announced in Slack
   directly.
 - Codex does not support Claude hooks. Follow the factory worker lifecycle and
   let the supervisor own verification and review flow.
--->
-<!-- codex-only:end -->
 
 # CLAUDE.md
 
@@ -94,17 +91,6 @@ Adding CLI commands, MCP tools, migrations, testing setup, skill/rule sync:
 Codebase navigation map (breadcrumb index of all modules):
 -> See [.claude/CODEMAP.md](.claude/CODEMAP.md)
 
-<!-- claude-only:start -->
-## Output hygiene — avoid Claude Code Ink crash
-
-Claude Code's React-Ink UI throws `<Box> can't be nested inside <Text>` when streamed markdown produces a Box-in-Text layout. The process stays alive (Bun keeps the event loop) but the pane is dead — tool calls after that point never complete. Until Claude Code ships a fix (cas-97ba tracks), avoid these output shapes when responding in chat:
-
-- **Do not echo the contents of a markdown file back in your response** after writing it with `Write` — confirm with a short prose summary instead. Streaming long generated markdown (CODEMAP.md, PRODUCT_OVERVIEW.md, skill bodies, etc.) is a common trigger.
-- **Avoid nested fenced code blocks** (a ` ```markdown ` block whose contents include headings, blockquotes, bullets, or a second fence). This is the most reproducible tripwire today. Describe the inner shape in prose or use backticks for inline samples.
-- **Keep fenced blocks minimal in chat output** — use them for plain shell commands or short snippets, not for richly-structured markdown previews.
-
-Writing to disk is always safe; the risk is only when the content streams back through the Ink renderer.
-<!-- claude-only:end -->
 
 ## Don't assume — always verify
 

@@ -81,8 +81,7 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,8 +124,7 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     strategy:
       fail-fast: false
       matrix:
@@ -158,8 +156,7 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,8 +185,7 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      && github.ref == 'refs/heads/main'))
     needs:
       - fast-validation-preflight
       - fast-validation-suite
@@ -245,8 +241,7 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     concurrency:
       group: macos-check-${{ github.event.pull_request.head.sha || github.sha }}
       cancel-in-progress: false
@@ -352,9 +347,7 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/heads/epic/')
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -378,9 +371,7 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/heads/epic/')
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -412,9 +403,7 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
-      && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/heads/epic/')
-      || startsWith(github.ref, 'refs/tags/')))
+      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     # This job measures a genuinely cold compiler. Letting the repaired remote
     # sccache serve objects after `cargo clean` would turn the benchmark into a

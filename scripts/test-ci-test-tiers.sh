@@ -42,7 +42,7 @@ require_text "$scoped" 'github.base_ref != github.event.repository.default_branc
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
 require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one test binary'
 
-full_jobs=(
+all_non_scoped_jobs=(
     fast-validation-preflight
     fast-validation-suite
     fast-validation-docs
@@ -54,10 +54,9 @@ full_jobs=(
     panic-isolation-release-fast
     build-benchmark
 )
-for job in "${full_jobs[@]}"; do
+for job in "${all_non_scoped_jobs[@]}"; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"
-    require_text "$block" "refs/tags/" "$job runs on release tags"
     if grep -qF 'refs/heads/factory/' <<<"$block"; then
         printf 'FAIL %s leaks into factory pushes\n' "$job"
         fail=$((fail + 1))
@@ -67,11 +66,15 @@ for job in "${full_jobs[@]}"; do
     fi
 done
 
-required_pr_jobs=(fast-validation macos-check)
-for job in "${required_pr_jobs[@]}"; do
+required_pr_lanes=(fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check)
+for job in "${required_pr_lanes[@]}"; do
     block="$(job_block "$job")"
     require_text "$block" "github.event_name == 'pull_request'" "$job runs for pull requests"
     require_text "$block" 'github.base_ref == github.event.repository.default_branch' "$job targets the default PR base"
+done
+
+for job in fast-validation macos-check; do
+    block="$(job_block "$job")"
     require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job deduplicates push/PR runs by head SHA"
     require_text "$block" 'cancel-in-progress: false' "$job queues duplicate required-check runs without cancellation"
 done
@@ -91,6 +94,19 @@ require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required Fast Validation r
 require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed suite shard'
 require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation rejects failed doctests'
 
+# PR is the canonical non-main required gate. No non-main push can launch one
+# of its lanes, so the same SHA never duplicates a costly required check.
+for job in fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check; do
+    block="$(job_block "$job")"
+    if grep -qF 'refs/heads/epic/' <<<"$block" || grep -qF 'refs/tags/' <<<"$block"; then
+        printf 'FAIL %s can run required work on a non-main push\n' "$job"
+        fail=$((fail + 1))
+    else
+        printf 'ok   %s is PR/main/schedule/manual only\n' "$job"
+        pass=$((pass + 1))
+    fi
+done
+
 # Main PRs schedule only the required Fast Validation lanes and macOS Check.
 # The scoped subset is deliberately excluded, and advisory/release jobs remain
 # push/schedule-only, so a non-required job cannot consume a PR runner first.
@@ -102,6 +118,19 @@ for job in clippy test-compile-guard panic-isolation-release panic-isolation-rel
         fail=$((fail + 1))
     else
         printf 'ok   %s cannot run on a main PR\n' "$job"
+        pass=$((pass + 1))
+    fi
+done
+
+# Benchmark and release-profile panic work is a main/scheduled/manual verdict,
+# never a worker or epic/tag-push cost.
+for job in panic-isolation-release panic-isolation-release-fast build-benchmark; do
+    block="$(job_block "$job")"
+    if grep -qF 'refs/heads/epic/' <<<"$block" || grep -qF 'refs/tags/' <<<"$block"; then
+        printf 'FAIL %s leaks into an epic or tag push\n' "$job"
+        fail=$((fail + 1))
+    else
+        printf 'ok   %s is main/schedule/manual only\n' "$job"
         pass=$((pass + 1))
     fi
 done

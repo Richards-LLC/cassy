@@ -39,5 +39,9 @@ serde_json = "1"
 # and a duplicate table would make the operator's whole config unparseable.
 toml = "0.9"
 
+# Cross-process advisory lock for Codex's user-scoped config. The lock guards
+# the whole read-modify-write/read-back transaction, not just the rename.
+fs2 = "0.4"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

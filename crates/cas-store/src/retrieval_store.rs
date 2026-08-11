@@ -1,7 +1,8 @@
 //! Durable retrieval query identity and explicit outcome feedback.
 //!
-//! This store is intentionally observational. Nothing in this module updates
-//! entry/rule helpful counters, search weights, or any other ranking input.
+//! Writers are intentionally observational: this module never mutates
+//! entry/rule counters or global search weights. Recall consumers may derive
+//! bounded, fail-open adjustments from the durable outcome history.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -401,8 +402,10 @@ impl RetrievalStore for SqliteRetrievalStore {
             )));
         }
 
+        // Automatic hook capture uses a deterministic event ID so a retry is
+        // idempotent. Explicit MCP events remain unique UUIDs.
         conn.execute(
-            "INSERT INTO retrieval_outcomes
+            "INSERT OR IGNORE INTO retrieval_outcomes
              (id, query_id, result_id, outcome, actor_hash, session_hash, correction_ref, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -604,6 +607,19 @@ mod tests {
                 .record_outcome(id, "qry-1", result, outcome, "actor", "session", correction)
                 .unwrap();
         }
+        // Hook retries reuse a deterministic event ID. Replaying the same
+        // identity must be idempotent rather than double-counting or failing.
+        store
+            .record_outcome(
+                "out-1",
+                "qry-1",
+                "entry-1",
+                RetrievalOutcome::Harmful,
+                "actor",
+                "session",
+                None,
+            )
+            .unwrap();
 
         let aggregates = store.aggregate().unwrap();
         assert_eq!(aggregates.len(), 1);

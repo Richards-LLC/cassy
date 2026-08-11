@@ -266,6 +266,18 @@ fn test_configure_codex_creates_config() {
     let hooks: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(hooks_path).unwrap()).unwrap();
     assert_eq!(
+        hooks.pointer("/hooks/PreToolUse/0/matcher"),
+        Some(&serde_json::json!("^Bash$"))
+    );
+    assert_eq!(
+        hooks.pointer("/hooks/PreToolUse/0/hooks/0/command"),
+        Some(&serde_json::json!("cas hook PreToolUse"))
+    );
+    assert_eq!(
+        hooks.pointer("/hooks/PreToolUse/0/hooks/0/timeout"),
+        Some(&serde_json::json!(3))
+    );
+    assert_eq!(
         hooks.pointer("/hooks/PostToolUse/0/matcher"),
         Some(&serde_json::json!("^Bash$"))
     );
@@ -343,6 +355,15 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
     let existing = serde_json::json!({
         "description": "Keep this metadata",
         "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "^apply_patch$",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "custom pre-tool hook"
+                    }]
+                }
+            ],
             "PostToolUse": [
                 {
                     "matcher": "^apply_patch$",
@@ -401,6 +422,27 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
     );
     assert_eq!(
         post_tool[1].pointer("/hooks/0/timeout"),
+        Some(&serde_json::json!(3))
+    );
+    let pre_tool = hooks
+        .pointer("/hooks/PreToolUse")
+        .and_then(|value| value.as_array())
+        .expect("PreToolUse array missing");
+    assert_eq!(pre_tool.len(), 2, "custom hook plus one CAS hook");
+    assert_eq!(
+        pre_tool[0].pointer("/hooks/0/command"),
+        Some(&serde_json::json!("custom pre-tool hook"))
+    );
+    assert_eq!(
+        pre_tool[1].get("matcher"),
+        Some(&serde_json::json!("^Bash$"))
+    );
+    assert_eq!(
+        pre_tool[1].pointer("/hooks/0/command"),
+        Some(&serde_json::json!("cas hook PreToolUse"))
+    );
+    assert_eq!(
+        pre_tool[1].pointer("/hooks/0/timeout"),
         Some(&serde_json::json!(3))
     );
 

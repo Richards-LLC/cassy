@@ -23,12 +23,15 @@ pub fn handle_pre_tool_use(
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================
-    // WORKER TEST-SCOPE GUARD (cas-eb39)
+    // WORKER COMMAND-SCOPE GUARDS (cas-eb39, cas-852a0)
     //
-    // A full test invocation links dozens of binaries. Multiplied by every
-    // isolated worktree, that is the dominant local test-gate tax. Workers
-    // iterate with cargo check and run a test target (`--lib`, `--test`, etc.);
-    // the supervisor integration merge and release gate own full-suite runs.
+    // A mutating `cargo fmt` selects Cargo targets rather than source paths,
+    // and direct rustfmt follows child modules unless skip_children is set.
+    // In a workspace that is not fmt-clean, either shape spills unrelated
+    // changes. A full test invocation similarly links dozens of binaries.
+    // Workers use non-mutating/scoped format commands, iterate with cargo check,
+    // and run a test target (`--lib`, `--test`, etc.); the supervisor integration
+    // merge and release gate own full-suite runs.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -38,6 +41,18 @@ pub fn handle_pre_tool_use(
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str());
+        if command.is_some_and(worker_command_runs_dangerous_formatter) {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "🚫 UNSCOPED WORKER FORMAT RUN: this repository is not workspace-rustfmt-clean, and rustfmt follows child modules by default. Either command can rewrite hundreds of unrelated files.\n\n\
+                 Use a non-mutating check:\n  \
+                 `cargo fmt --all -- --check`\n  \
+                 `rustfmt --edition 2024 --check --config skip_children=true <task-files>`\n\n\
+                 To format task files, make recursion explicit:\n  \
+                 `rustfmt --edition 2024 --config skip_children=true <task-files>`\n\n\
+                 A workspace normalization requires separate operator approval and must not be run from a worker.",
+            ));
+        }
         if command.is_some_and(worker_command_runs_unscoped_tests) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -901,6 +916,62 @@ fn worker_command_runs_unscoped_tests(command: &str) -> bool {
     super::attribution::split_shell_statements(command)
         .iter()
         .any(|words| test_invocation_without_target_scope(words))
+}
+
+/// Detect formatter invocations that can mutate files outside a worker's scope.
+///
+/// `cargo fmt` always selects Cargo targets rather than individual source files,
+/// while direct `rustfmt` follows `mod` declarations unless `skip_children` is
+/// enabled. Checks and stdout-only runs are non-mutating and remain available.
+fn worker_command_runs_dangerous_formatter(command: &str) -> bool {
+    super::attribution::split_shell_statements(command)
+        .iter()
+        .any(|words| formatter_invocation_can_spill(words))
+}
+
+fn formatter_invocation_can_spill(words: &[String]) -> bool {
+    if let Some(cargo_index) = words
+        .iter()
+        .position(|word| word == "cargo" || word.ends_with("/cargo"))
+    {
+        let mut cargo_args = &words[cargo_index + 1..];
+        if cargo_args.first().is_some_and(|arg| arg.starts_with('+')) {
+            cargo_args = &cargo_args[1..];
+        }
+        if cargo_args.first().is_some_and(|arg| arg == "fmt") {
+            let is_read_only = cargo_args.iter().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--check" | "--help" | "-h" | "--version" | "-V"
+                )
+            });
+            return !is_read_only;
+        }
+    }
+
+    let Some(rustfmt_index) = words
+        .iter()
+        .position(|word| word == "rustfmt" || word.ends_with("/rustfmt"))
+    else {
+        return false;
+    };
+    let rustfmt_args = &words[rustfmt_index + 1..];
+    let is_read_only = rustfmt_args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--check" | "--help" | "-h" | "--version" | "-V" | "--print-config"
+        ) || arg == "--emit=stdout"
+    }) || rustfmt_args
+        .windows(2)
+        .any(|pair| pair[0] == "--emit" && pair[1] == "stdout");
+    if is_read_only {
+        return false;
+    }
+
+    let skips_children = rustfmt_args
+        .iter()
+        .any(|arg| arg == "--config=skip_children=true" || arg.contains("skip_children=true"));
+    !skips_children
 }
 
 fn test_invocation_without_target_scope(words: &[String]) -> bool {

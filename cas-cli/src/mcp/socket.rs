@@ -7,6 +7,7 @@
 //! Events are sent as newline-delimited JSON over Unix socket.
 //! The daemon listens at `.cas/daemon.sock`.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,14 +81,81 @@ pub fn socket_path(cas_root: &Path) -> PathBuf {
     cas_root.join("daemon.sock")
 }
 
+/// The advisory lock which serializes all daemon-socket ownership changes.
+///
+/// A Unix-socket pathname is only a directory entry.  Once a listener has
+/// bound it, another process can still unlink that entry while the original
+/// listener continues accepting connections.  Therefore the stale check,
+/// unlink, bind, and eventual cleanup must all happen while the same lease is
+/// held; otherwise two daemons can each retain a live (but differently named)
+/// socket inode.
+fn socket_lock_path(cas_root: &Path) -> PathBuf {
+    cas_root.join("daemon.sock.lock")
+}
+
+/// The exclusive daemon-socket election lease.
+///
+/// The lock stays held for the listener's full lifetime.  It is deliberately
+/// not dropped after `UnixListener::bind`: doing so would reopen the precise
+/// check/unlink/bind race this lease closes.
+#[derive(Debug)]
+struct SocketLease {
+    listener: UnixListener,
+    lock: File,
+    cas_root: PathBuf,
+}
+
+impl SocketLease {
+    /// Remove this owner's pathname before releasing the election lease.
+    ///
+    /// No contender can bind between this unlink and `Drop`, because it must
+    /// first acquire `lock`.  The listener is dropped immediately afterwards,
+    /// so there is no interval where a live daemon is unreachable.
+    fn cleanup(&self) {
+        let _ = std::fs::remove_file(socket_path(&self.cas_root));
+    }
+}
+
+impl Drop for SocketLease {
+    fn drop(&mut self) {
+        // Closing the descriptor would also release flock, but make the
+        // happens-before boundary explicit.  The descriptor close remains the
+        // fallback should unlocking fail.
+        let _ = fs2::FileExt::unlock(&self.lock);
+    }
+}
+
 /// Create and bind the Unix socket listener
 ///
-/// Checks if an existing socket is live before removing it.
-/// Returns an error if another daemon is already listening.
-pub fn create_listener(cas_root: &Path) -> std::io::Result<UnixListener> {
+/// The returned lease holds an exclusive advisory lock through the listener's
+/// lifetime.  This serializes stale-socket recovery with bind and cleanup, so
+/// no contender can unlink a pathname another contender has just bound.
+fn create_listener(cas_root: &Path) -> std::io::Result<SocketLease> {
     use std::os::unix::net::UnixStream as StdUnixStream;
 
     let path = socket_path(cas_root);
+    let lock_path = socket_lock_path(cas_root);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+
+    match fs2::FileExt::try_lock_exclusive(&lock) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ResourceBusy
+            ) =>
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "Another daemon is already electing or listening on this socket",
+            ));
+        }
+        Err(e) => return Err(e),
+    }
 
     // Check if socket exists and has an active listener
     if path.exists() {
@@ -115,7 +183,12 @@ pub fn create_listener(cas_root: &Path) -> std::io::Result<UnixListener> {
         }
     }
 
-    UnixListener::bind(&path)
+    let listener = UnixListener::bind(&path)?;
+    Ok(SocketLease {
+        listener,
+        lock,
+        cas_root: cas_root.to_path_buf(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -292,8 +365,8 @@ impl ElectionConfig {
 /// Runs until the shutdown flag is set. While another process holds the socket
 /// this loop retries the bind every [`ElectionConfig::election_interval`], so
 /// the death of the owner is repaired by a *surviving* process rather than
-/// requiring a new one. The bind itself still goes through [`create_listener`],
-/// which refuses to steal a live socket — so concurrent contenders resolve to
+/// requiring a new one. The listener's election lease serializes the stale
+/// check, unlink, bind, and cleanup — so concurrent contenders resolve to
 /// exactly one owner.
 pub async fn run_socket_election<H, F>(config: ElectionConfig, handler: H)
 where
@@ -310,7 +383,7 @@ where
         // A binary that is already stale should not claim the role at all while
         // a healthy process might; wait out the grace first.
         match create_listener(&config.cas_root) {
-            Ok(listener) => {
+            Ok(lease) => {
                 deferral_logged = false;
                 config.owns_socket.store(true, Ordering::SeqCst);
                 eprintln!(
@@ -318,11 +391,14 @@ where
                     socket_path(&config.cas_root)
                 );
 
-                let reason = serve_socket(&config, listener, handler.clone()).await;
+                let reason = serve_socket(&config, &lease.listener, handler.clone()).await;
 
+                // Cleanup precedes lease release.  A successor cannot bind
+                // until after the prior owner has unlinked its pathname and
+                // dropped the listener, which closes the split-brain window.
+                lease.cleanup();
                 config.owns_socket.store(false, Ordering::SeqCst);
-                // Only the owner removes the socket file — see `cleanup_socket`.
-                cleanup_socket(&config.cas_root);
+                drop(lease);
 
                 match reason {
                     Relinquish::Shutdown => return,
@@ -363,7 +439,7 @@ where
 /// Accept hook connections until shutdown or until our own binary goes stale.
 async fn serve_socket<H, F>(
     config: &ElectionConfig,
-    listener: UnixListener,
+    listener: &UnixListener,
     handler: H,
 ) -> Relinquish
 where
@@ -414,16 +490,6 @@ async fn sleep_until_shutdown(shutdown: &Arc<AtomicBool>, total: Duration) {
         tokio::time::sleep(step).await;
         slept += step;
     }
-}
-
-/// Cleanup the socket file on shutdown
-///
-/// Only the process that owns the socket may call this: a non-owner removing
-/// the file would unlink the live owner's socket and make the daemon
-/// unreachable while it keeps happily listening.
-pub fn cleanup_socket(cas_root: &Path) {
-    let path = socket_path(cas_root);
-    let _ = std::fs::remove_file(path);
 }
 
 /// Send an event to the daemon (called by hooks)
@@ -696,36 +762,64 @@ mod tests {
     async fn concurrent_election_resolves_to_exactly_one_owner() {
         use tokio::sync::Barrier;
 
-        let dir = tempfile::tempdir().unwrap();
-        let mut flags = Vec::new();
-        let mut shutdowns = Vec::new();
-        // Do not measure whether Tokio happened to schedule every task inside
-        // an arbitrary wall-clock window. Releasing all contenders together
-        // makes this an actual election test, even on an oversubscribed CI
-        // runner where a fixed 600ms sleep can observe zero owners.
-        let start = Arc::new(Barrier::new(6));
+        // The default is one deterministic election round for the normal
+        // suite.  The same test can be stressed in CI/triage without a retry
+        // loop by setting `CAS_SOCKET_ELECTION_STRESS_ITERATIONS`; each round
+        // still releases five contenders on the same barrier.
+        let rounds = std::env::var("CAS_SOCKET_ELECTION_STRESS_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|rounds| *rounds > 0)
+            .unwrap_or(1);
 
-        for _ in 0..5 {
-            let config = test_config(dir.path());
-            flags.push(Arc::clone(&config.owns_socket));
-            shutdowns.push(Arc::clone(&config.shutdown));
-            let start = Arc::clone(&start);
-            tokio::spawn(async move {
-                start.wait().await;
-                run_socket_election(config, pong_handler()).await;
-            });
-        }
+        for round in 0..rounds {
+            let dir = tempfile::tempdir().unwrap();
+            let mut flags = Vec::new();
+            let mut shutdowns = Vec::new();
+            let mut contenders = Vec::new();
+            // Do not measure whether Tokio happened to schedule every task inside
+            // an arbitrary wall-clock window. Releasing all contenders together
+            // makes this an actual election test, even on an oversubscribed CI
+            // runner where a fixed 600ms sleep can observe zero owners.
+            let start = Arc::new(Barrier::new(6));
 
-        start.wait().await;
-        assert!(
-            wait_for_any_owner(&flags, Duration::from_secs(5)).await,
-            "one concurrent contender must claim daemon.sock"
-        );
-        let owners = flags.iter().filter(|f| f.load(Ordering::SeqCst)).count();
-        assert_eq!(owners, 1, "exactly one contender may own daemon.sock");
+            for _ in 0..5 {
+                let config = test_config(dir.path());
+                flags.push(Arc::clone(&config.owns_socket));
+                shutdowns.push(Arc::clone(&config.shutdown));
+                let start = Arc::clone(&start);
+                contenders.push(tokio::spawn(async move {
+                    start.wait().await;
+                    run_socket_election(config, pong_handler()).await;
+                }));
+            }
 
-        for s in shutdowns {
-            s.store(true, Ordering::SeqCst);
+            start.wait().await;
+            assert!(
+                wait_for_any_owner(&flags, Duration::from_secs(5)).await,
+                "one concurrent contender must claim daemon.sock"
+            );
+            // Observe a full scheduling turn after the winner publishes
+            // ownership.  The assertion remains exactly-one and now catches a
+            // contender that unlinks and rebinds after the first observation.
+            for _ in 0..10 {
+                let owners = flags.iter().filter(|f| f.load(Ordering::SeqCst)).count();
+                assert_eq!(
+                    owners, 1,
+                    "exactly one contender may own daemon.sock (round {round})"
+                );
+                tokio::task::yield_now().await;
+            }
+
+            for shutdown in shutdowns {
+                shutdown.store(true, Ordering::SeqCst);
+            }
+            for contender in contenders {
+                tokio::time::timeout(Duration::from_secs(2), contender)
+                    .await
+                    .expect("contender must stop after shutdown")
+                    .expect("contender task must not panic");
+            }
         }
     }
 

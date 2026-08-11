@@ -558,7 +558,6 @@ impl EmbeddedDaemon {
         // accept loop is never blocked by maintenance/sync/indexing below.
         let election =
             socket::ElectionConfig::new(self.config.cas_root.clone(), Arc::clone(&self.shutdown));
-        let owns_socket = Arc::clone(&election.owns_socket);
         let socket_task = {
             let daemon = Arc::clone(&self);
             tokio::spawn(socket::run_socket_election(election, move |mut stream| {
@@ -886,12 +885,10 @@ impl EmbeddedDaemon {
             let _ = store.unregister_daemon(&daemon_id);
         }
 
-        // Cleanup socket — ONLY if we are the owner. A deferring serve that
-        // removed this file would unlink the live owner's socket and leave the
-        // daemon listening but unreachable (cas-eabe).
-        if owns_socket.load(Ordering::SeqCst) {
-            socket::cleanup_socket(&self.config.cas_root);
-        }
+        // Socket cleanup belongs exclusively to the election lease.  If the
+        // task had to be aborted, its listener and lease are dropped together;
+        // a stale pathname is safe for the next lease to reclaim, whereas an
+        // out-of-band unlink here could remove a successor's live socket.
 
         Ok(())
     }

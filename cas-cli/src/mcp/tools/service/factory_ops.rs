@@ -592,8 +592,19 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
             .summary
             .as_deref()
             .unwrap_or("task lifecycle transition");
+        let acknowledge = row
+            .source
+            .rsplit(':')
+            .next()
+            .and_then(|id| id.parse::<i64>().ok())
+            .map(|id| {
+                format!(
+                    "; after reconciling: `coordination action=message_ack notification_id={id}`"
+                )
+            })
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  • {what} (queued {}, source {})\n",
+            "  • {what} (queued {}, source {}{acknowledge})\n",
             row.created_at.to_rfc3339(),
             row.source
         ));
@@ -603,6 +614,35 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
          (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
     );
     out
+}
+
+/// A lifecycle relay is only actionable while its named task remains open.
+/// Keep the terminal prompt row for doctor/forensics, but do not inject an
+/// already-closed lane into every supervisor `worker_status` response.
+fn unresolved_lifecycle_relays(
+    rows: Vec<cas_store::UndeliveredLifecycleRelay>,
+    closed_task_ids: &[String],
+) -> Vec<cas_store::UndeliveredLifecycleRelay> {
+    rows.into_iter()
+        .filter(|row| {
+            let Some(summary) = row.summary.as_deref() else {
+                return true;
+            };
+            !closed_task_ids.iter().any(|id| summary.contains(id))
+        })
+        .collect()
+}
+
+/// Task lifecycle summaries always carry one `cas-…` task ID. Keep extraction
+/// deliberately conservative: a row we cannot parse stays visible rather than
+/// letting a formatting drift hide a real undelivered relay.
+fn lifecycle_relay_task_id(row: &cas_store::UndeliveredLifecycleRelay) -> Option<&str> {
+    row.summary.as_deref().and_then(|summary| {
+        summary
+            .split_whitespace()
+            .find(|word| word.starts_with("cas-"))
+            .map(|word| word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+    })
 }
 
 fn format_spawn_lifecycle_section(
@@ -1769,12 +1809,30 @@ impl CasService {
         // rendered even when no agents are registered — the whole failure mode
         // being fixed is that a lost relay left no trace anywhere, so the
         // fleet read silence as "nothing is waiting on me".
-        let undelivered_section = format_undelivered_relay_section(
-            &crate::store::open_prompt_queue_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|queue| queue.list_undelivered_lifecycle_relays(10).ok())
-                .unwrap_or_default(),
-        );
+        let undelivered_relays = crate::store::open_prompt_queue_store(&self.inner.cas_root)
+            .ok()
+            .and_then(|queue| queue.list_undelivered_lifecycle_relays(10).ok())
+            .unwrap_or_default();
+        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
+            .ok()
+            .map(|tasks| {
+                undelivered_relays
+                    .iter()
+                    .filter_map(lifecycle_relay_task_id)
+                    .filter(|task_id| {
+                        tasks
+                            .get(task_id)
+                            .ok()
+                            .is_some_and(|task| task.status == cas_types::TaskStatus::Closed)
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let undelivered_section = format_undelivered_relay_section(&unresolved_lifecycle_relays(
+            undelivered_relays,
+            &closed_task_ids,
+        ));
 
         if agents.is_empty() {
             let mut msg = String::from(
@@ -7072,6 +7130,10 @@ mod spawn_lifecycle_tests {
         );
         assert!(out.contains("cas-fe23"), "must name the task: {out}");
         assert!(
+            out.contains("message_ack notification_id=3386"),
+            "the exact acknowledge action must be visible rather than making a reconciled relay replay forever: {out}"
+        );
+        assert!(
             out.contains("still be waiting on you"),
             "must say the lane may still need the supervisor: {out}"
         );
@@ -7087,6 +7149,26 @@ mod spawn_lifecycle_tests {
     #[test]
     fn no_undelivered_relays_renders_nothing() {
         assert!(format_undelivered_relay_section(&[]).is_empty());
+    }
+
+    #[test]
+    fn reconciled_closed_task_relays_do_not_replay_in_worker_status() {
+        let closed = lost_relay("task_awaiting_merge: cas-reconciled (2026-08-09T15:56:36Z)");
+        let still_actionable = lost_relay("task_blocked: cas-open (2026-08-09T15:57:00Z)");
+        let remaining = unresolved_lifecycle_relays(
+            vec![closed, still_actionable],
+            &["cas-reconciled".to_string()],
+        );
+
+        let rendered = format_undelivered_relay_section(&remaining);
+        assert!(
+            !rendered.contains("cas-reconciled"),
+            "closed lane must not replay: {rendered}"
+        );
+        assert!(
+            rendered.contains("cas-open"),
+            "open lane remains a real signal: {rendered}"
+        );
     }
 
     /// No spawn history → no section. `worker_status` must not grow a stub

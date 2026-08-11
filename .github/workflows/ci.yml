@@ -36,13 +36,14 @@ env:
   SCCACHE_GHA_VERSION: "cas-v2"
 
 jobs:
-  # Factory pushes and pull requests get one cheap target-scoped lane. The
-  # integration/full tier below starts only after a merge reaches epic/*,
-  # main, a release tag, or an explicit/scheduled gate.
+  # Factory pushes and PRs that do not target the protected default branch get
+  # one cheap target-scoped lane. Main PRs use the full required lanes below;
+  # do not spend an additional runner on this redundant subset there.
   scoped-validation:
     name: Scoped Validation (factory/PR)
     if: >-
-      github.event_name == 'pull_request'
+      (github.event_name == 'pull_request'
+      && github.base_ref != github.event.repository.default_branch)
       || (github.event_name == 'push'
       && startsWith(github.ref, 'refs/heads/factory/'))
     runs-on: ubuntu-latest
@@ -68,22 +69,20 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
 
-  fast-validation:
-    name: Fast Validation
+  # The required check is a fan-in over three independent lanes. The old
+  # single job took 8–9 minutes: its full-suite step spent most of its time
+  # compiling test binaries, not executing tests. Two nextest partitions
+  # compile/run concurrently while preflight and doctests are also independent.
+  # Together they still execute every test that the old full suite did.
+  fast-validation-preflight:
+    name: Fast Validation — preflight (no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/heads/epic/')
       || startsWith(github.ref, 'refs/tags/')))
-    # An epic head can emit both push and pull_request events for one SHA.
-    # Deduplicate this required check by head SHA without coupling it to the
-    # independent macOS required check below.
-    concurrency:
-      group: fast-validation-${{ github.event.pull_request.head.sha || github.sha }}
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,25 +118,96 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
 
-      # These two steps together execute exactly what bare `cargo test -p cas`
-      # executed before: nextest runs the lib + every integration test binary,
-      # and `--doc` runs the doctests, which nextest does not support. Dropping
-      # the doctest step would silently shrink executed coverage.
-      - name: Test (full suite — the only job that executes it)
+  fast-validation-suite:
+    name: Fast Validation — suite (shard ${{ matrix.shard }}/2)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')))
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation-suite-${{ matrix.shard }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      # count:1/2 and count:2/2 are disjoint and exhaustive. Keep
+      # --no-fail-fast on each partition so failures never mask later binaries.
+      - name: Test full suite partition ${{ matrix.shard }}/2
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo nextest run -p cas --no-fail-fast
+        run: cargo nextest run -p cas --no-fail-fast --partition count:${{ matrix.shard }}/2
 
-      # `!cancelled()` so a failure in the step above cannot hide this one's
-      # result. Letting it skip would re-create, one step later, exactly the
-      # under-reporting this job was changed to fix: `cargo test` used to abort
-      # after the first failing test BINARY, so main went red having executed
-      # 4401 of 4594 tests and never said so (GH #142).
-      - name: Test (doctests — the part nextest cannot run)
-        if: ${{ !cancelled() }}
+  fast-validation-docs:
+    name: Fast Validation — doctests
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation-docs
+
+      # nextest does not run doctests; keep this separate so it never waits
+      # behind the partitioned suite.
+      - name: Test doctests
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --doc
+
+  # The repository ruleset requires this exact check name. It reports success
+  # only after preflight, both exhaustive nextest partitions, and doctests pass.
+  # Queue (rather than cancel) matching head-SHA checks per cas-9eaf; because
+  # this fan-in does no compilation, a duplicate cannot inflate the PR path.
+  fast-validation:
+    name: Fast Validation
+    if: >-
+      always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs:
+      - fast-validation-preflight
+      - fast-validation-suite
+      - fast-validation-docs
+    concurrency:
+      group: fast-validation-${{ github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Fast Validation lane to pass
+        env:
+          PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
+          SUITE: ${{ needs.fast-validation-suite.result }}
+          DOCS: ${{ needs.fast-validation-docs.result }}
+        run: |
+          test "$PREFLIGHT" = success
+          test "$SUITE" = success
+          test "$DOCS" = success
 
   # Advisory lint, split out of Fast Validation so a lint pass never sits on the
   # critical path of the job that answers "do the tests pass?" (GH #142).
@@ -176,7 +246,6 @@ jobs:
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/heads/epic/')
       || startsWith(github.ref, 'refs/tags/')))
     concurrency:
       group: macos-check-${{ github.event.pull_request.head.sha || github.sha }}

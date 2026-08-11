@@ -1,7 +1,8 @@
 use std::time::Instant;
 
 use crate::cloud::syncer::{
-    CloudSyncer, GroupedQueuedItems, SyncResult, TeamPushResponse, itemized_rejections_for,
+    CloudSyncer, GroupedQueuedItems, PushItemizedFailure, SyncResult, TeamPushResponse,
+    itemized_failures_for,
 };
 use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_id};
 use crate::error::CasError;
@@ -236,7 +237,7 @@ impl CloudSyncer {
                         None => (sent_count, 0),
                     };
                     if skipped > 0 {
-                        let itemized = Self::team_itemized_rejections_for(
+                        let itemized = Self::team_itemized_failures_for(
                             response
                                 .as_ref()
                                 .expect("skipped counts require a team response body"),
@@ -260,7 +261,7 @@ impl CloudSyncer {
                             }
                             Err(error) => {
                                 let diagnostic = format!(
-                                    "team {entity_key} push returned invalid itemized rejections: {error}; marking {} row(s) failed; server response: {}",
+                                    "team {entity_key} push returned invalid itemized failures: {error}; marking {} row(s) failed; server response: {}",
                                     batch_items.len(),
                                     raw_response
                                 );
@@ -273,14 +274,23 @@ impl CloudSyncer {
                         };
 
                         for item in &batch_items {
-                            if let Some(rejection) = itemized.get(&item.entity_id) {
-                                let diagnostic = format!(
-                                    "cloud rejected team {entity_key} {}: {} (existing canonical project: {}); server response: {}",
-                                    rejection.id,
-                                    rejection.reason.as_str(),
-                                    rejection.existing_canonical_id,
-                                    raw_response
-                                );
+                            if let Some(failure) = itemized.get(&item.entity_id) {
+                                let diagnostic = match failure {
+                                    PushItemizedFailure::Rejection(rejection) => format!(
+                                        "cloud rejected team {entity_key} {}: {} (existing canonical project: {}); server response: {}",
+                                        rejection.id,
+                                        rejection.reason.as_str(),
+                                        rejection.existing_canonical_id,
+                                        raw_response
+                                    ),
+                                    PushItemizedFailure::Invalid(invalid) => format!(
+                                        "cloud invalid team {entity_key} {}: {} ({}); server response: {}",
+                                        invalid.id,
+                                        invalid.reason.as_str(),
+                                        invalid.detail,
+                                        raw_response
+                                    ),
+                                };
                                 let _ = self.queue.mark_failed(item.id, &diagnostic);
                                 errors.push(diagnostic);
                             } else {
@@ -449,13 +459,13 @@ impl CloudSyncer {
         Ok(Some((inserted.saturating_add(updated), skipped)))
     }
 
-    fn team_itemized_rejections_for(
+    fn team_itemized_failures_for(
         response: &TeamPushResponse,
         entity_key: &str,
         skipped: usize,
         queued_ids: impl Iterator<Item = String>,
     ) -> Result<
-        Option<std::collections::HashMap<String, crate::cloud::syncer::PushRejection>>,
+        Option<std::collections::HashMap<String, crate::cloud::syncer::PushItemizedFailure>>,
         String,
     > {
         let synced = response
@@ -465,7 +475,7 @@ impl CloudSyncer {
         let entity = synced
             .get(entity_key)
             .ok_or_else(|| format!("synced.{entity_key} missing despite skipped count"))?;
-        itemized_rejections_for(entity, &format!("synced.{entity_key}"), skipped, queued_ids)
+        itemized_failures_for(entity, &format!("synced.{entity_key}"), skipped, queued_ids)
     }
 
     fn add_team_count(result: &mut SyncResult, entity_key: &str, count: usize) {

@@ -5,7 +5,9 @@ use std::io::Write;
 use std::time::Instant;
 use tracing::warn;
 
-use crate::cloud::syncer::{CloudSyncer, PushPlan, PushResponse, PushScope, SyncResult};
+use crate::cloud::syncer::{
+    CloudSyncer, PushItemizedFailure, PushPlan, PushResponse, PushScope, SyncResult,
+};
 use crate::cloud::{QueuedSync, SyncOperation};
 use crate::error::CasError;
 use crate::types::Session;
@@ -320,11 +322,10 @@ impl CloudSyncer {
         }
 
         let mut synced_count = 0;
-        // A 2xx response that explicitly reports skipped rows is not a
-        // successful push. The server does not identify the rejected rows,
-        // so conservatively count each item in the sub-batch as a failed
-        // attempt. Repeated explicit refusals then reach the queue's visible
-        // failed state instead of remaining pending forever.
+        // A 2xx response that explicitly reports skipped rows is not a fully
+        // successful push. Aggregate-only responses leave every row
+        // indistinguishable, while itemized rejected/invalid rows identify
+        // exactly which queue records must remain visible for retry.
         let mut skip_errors = Vec::new();
 
         // Split upserts into size-limited sub-batches (consuming values to avoid cloning)
@@ -339,16 +340,13 @@ impl CloudSyncer {
                     Ok(response) => {
                         // Defensive cross-check against the server-side
                         // `ON CONFLICT DO UPDATE ... WHERE false` silent-skip
-                        // path (cas-0bdc / cas-d656): if the server reports
-                        // any rows skipped for this entity type, we cannot
-                        // know *which* items in `batch_items` were dropped
-                        // (the server returns a count, not IDs). Conservative
-                        // policy: do not mark the entire sub-batch synced.
-                        // Each explicitly rejected row consumes one bounded
-                        // retry and preserves the raw response in its queue
-                        // diagnostic. Persistent collisions consequently
-                        // become visible failed rows rather than silently
-                        // pending forever.
+                        // path (cas-0bdc / cas-d656): an aggregate skipped
+                        // count alone cannot identify which `batch_items`
+                        // were dropped, so it conservatively retains the
+                        // whole sub-batch. Newer responses may additionally
+                        // identify rejected ownership collisions or malformed
+                        // revisions; only those named queue rows consume a
+                        // bounded retry while neighbors settle normally.
                         //
                         // Backward-compat: older cloud builds omit `skipped`
                         // entirely, in which case `skipped_count` is 0 and
@@ -374,15 +372,15 @@ impl CloudSyncer {
                         let skipped_count = skipped_count.unwrap_or_default();
                         if skipped_count > 0 {
                             let batch_size = batch_items.len();
-                            let itemized = response.itemized_rejections_for(
+                            let itemized = response.itemized_failures_for(
                                 entity_type,
                                 skipped_count,
                                 batch_items.iter().map(|item| item.entity_id.clone()),
                             );
                             let itemized = match itemized {
-                                Ok(Some(rejections)) => rejections,
+                                Ok(Some(failures)) => failures,
                                 Ok(None) => {
-                                    // Aggregate-only servers cannot identify the rejected rows.
+                                    // Aggregate-only servers cannot identify individual rows.
                                     // Preserve cas-607a's conservative whole-batch retry path.
                                     let diagnostic = format!(
                                         "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); marking the indistinguishable sub-batch failed; server response: {}",
@@ -396,7 +394,7 @@ impl CloudSyncer {
                                 }
                                 Err(error) => {
                                     let diagnostic = format!(
-                                        "cloud returned invalid itemized rejections for {entity_type}: {error}; marking {batch_size} row(s) failed; server response: {}",
+                                        "cloud returned invalid itemized failures for {entity_type}: {error}; marking {batch_size} row(s) failed; server response: {}",
                                         response.raw_body
                                     );
                                     for item in &batch_items {
@@ -411,14 +409,23 @@ impl CloudSyncer {
                             // rows are terminal failures; owned neighbors in the same request
                             // are safely removed from the local queue.
                             for item in &batch_items {
-                                if let Some(rejection) = itemized.get(&item.entity_id) {
-                                    let diagnostic = format!(
-                                        "cloud rejected {entity_type} {}: {} (existing canonical project: {}); server response: {}",
-                                        rejection.id,
-                                        rejection.reason.as_str(),
-                                        rejection.existing_canonical_id,
-                                        response.raw_body
-                                    );
+                                if let Some(failure) = itemized.get(&item.entity_id) {
+                                    let diagnostic = match failure {
+                                        PushItemizedFailure::Rejection(rejection) => format!(
+                                            "cloud rejected {entity_type} {}: {} (existing canonical project: {}); server response: {}",
+                                            rejection.id,
+                                            rejection.reason.as_str(),
+                                            rejection.existing_canonical_id,
+                                            response.raw_body
+                                        ),
+                                        PushItemizedFailure::Invalid(invalid) => format!(
+                                            "cloud invalid {entity_type} {}: {} ({}); server response: {}",
+                                            invalid.id,
+                                            invalid.reason.as_str(),
+                                            invalid.detail,
+                                            response.raw_body
+                                        ),
+                                    };
                                     let _ = self.queue.mark_failed(item.id, &diagnostic);
                                     skip_errors.push(diagnostic);
                                 } else {

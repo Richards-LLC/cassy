@@ -271,7 +271,9 @@ fn test_configure_codex_creates_config() {
     );
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/command"),
-        Some(&serde_json::json!("cas hook PreToolUse"))
+        Some(&serde_json::json!(
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse"
+        ))
     );
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/timeout"),
@@ -362,6 +364,14 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
                         "type": "command",
                         "command": "custom pre-tool hook"
                     }]
+                },
+                {
+                    "matcher": ".*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "cas hook PreToolUse",
+                        "timeout": 999
+                    }]
                 }
             ],
             "PostToolUse": [
@@ -439,7 +449,9 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
     );
     assert_eq!(
         pre_tool[1].pointer("/hooks/0/command"),
-        Some(&serde_json::json!("cas hook PreToolUse"))
+        Some(&serde_json::json!(
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse"
+        ))
     );
     assert_eq!(
         pre_tool[1].pointer("/hooks/0/timeout"),

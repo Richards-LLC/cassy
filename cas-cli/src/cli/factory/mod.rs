@@ -7,6 +7,7 @@
 
 mod cloud_attach;
 mod daemon;
+mod doctor;
 mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
@@ -357,6 +358,9 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone)]
 pub enum FactoryCommands {
+    /// Report local Claude/Codex/CAS-MCP readiness without spawning workers.
+    Doctor,
+
     /// Run the bounded unified factory readiness report without spawning workers
     Preflight {
         /// Explicit CAS root (.cas directory)
@@ -706,6 +710,7 @@ pub enum FactoryCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),

@@ -7,7 +7,7 @@ A standing directive: **file every CAS-system bug you observe, by reflex.** Do n
 ## Canonical routing
 
 - **CAS-system defect, from any repository:** file a public-safe GitHub issue in
-  `pippenz/cas`. In cas-src, create the corresponding in-repo task; downstream
+  the configured CAS issue repository. In cas-src, create the corresponding in-repo task; downstream
   repositories consume CAS and must not patch it locally.
 - **Actionable request for a Richards-LLC-controlled team:** file directly on
   that team's repository issue board (for example,
@@ -17,9 +17,15 @@ A standing directive: **file every CAS-system bug you observe, by reflex.** Do n
   URL, one-line ask, and date. Recent examples are cloud-to-CAS GH #215 and
   CAS-to-cloud `Richards-LLC/petra-stella-cloud#44`.
 
-Use `gh issue create --repo <owner/repo>` with a complete public-safe body.
-If filing cannot complete, report the exact failure and ask the operator for
-access or direction; do not silently substitute a new outbound request file.
+Configure the target with `[issues] repo = "owner/repo"`; inspect it with
+`cas config get issues.repo` and set it with `cas config set issues.repo <owner/repo>`.
+Do not derive the target from a downstream git `origin`.
+
+Before filing, check `command -v gh` and `gh auth status`. Use
+`gh issue create --repo <owner/repo>` with a complete public-safe body. If `gh`
+is not installed or not authenticated, preserve the report in the task or CAS
+memory, report the exact failure, and ask the operator for access or direction;
+do not silently substitute a new outbound request file.
 
 `docs/requests/` is deprecated for new outbound actionable work. Preserve its
 history and read inbound `RESPONSE-*.md` files as legacy material. It remains

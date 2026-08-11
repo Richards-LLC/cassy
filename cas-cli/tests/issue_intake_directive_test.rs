@@ -22,10 +22,6 @@ fn assert_config_driven_issue_intake(harness: SupervisorCli, content: &str) {
         "gh auth status",
         "gh issue create",
         "--repo",
-        "--body-file",
-        "docs/requests/BUG-<slug>.md",
-        "git add",
-        "git commit",
     ] {
         assert!(
             content.contains(required),

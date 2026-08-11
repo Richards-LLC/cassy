@@ -1,6 +1,6 @@
 ---
 name: verify-before-claim
-description: Pre-close discipline — run the proof command FRESH, capture its exit code + tail output, then claim done. Use right before `mcp__cs__task action=close` to kill the "narrate done before proving it" failure mode. Trigger whenever you are about to assert tests pass, the build is clean, the script works, the bug is fixed, or the AC is satisfied. If you cannot name a proof command, you cannot claim done.
+description: Use immediately before claiming a task, test, build, script, fix, or acceptance criterion is complete.
 managed_by: cas
 ---
 

@@ -1,10 +1,10 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "PostToolUse": [
       {
         "hooks": [
           {
-            "command": "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+            "command": "cas hook PostToolUse",
             "timeout": 3,
             "type": "command"
           }
@@ -12,11 +12,11 @@
         "matcher": "^Bash$"
       }
     ],
-    "PostToolUse": [
+    "PreToolUse": [
       {
         "hooks": [
           {
-            "command": "cas hook PostToolUse",
+            "command": "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
             "timeout": 3,
             "type": "command"
           }

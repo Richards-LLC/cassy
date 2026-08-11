@@ -1,6 +1,6 @@
 ---
 name: session-learn
-description: Classify the just-ended session into 7 knowledge signals (concept / entity / correction / pattern / idea / decision / gap) and emit structured memory entries via `mcp__cas__memory remember`. Used either via auto-trigger (Stop hook when `[memory] session_learn_auto = true` in `.cas/config.toml`) or manual invocation ("extract this session", "save what we learned"). Skips trivial sessions (<5 tool calls) and routes findings through the existing overlap-detection gate so duplicates never reach the store.
+description: Use when asked to save or extract session learnings, or when ending a substantive session with durable concepts, corrections, decisions, gaps, or patterns.
 managed_by: cas
 ---
 

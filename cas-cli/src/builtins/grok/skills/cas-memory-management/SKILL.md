@@ -1,6 +1,6 @@
 ---
 name: cas-memory-management
-description: How to store and retrieve persistent memories using CAS. Use for facts, preferences, learnings, and context that should persist across sessions. Trigger when discovering patterns, fixing bugs, resolving config issues, or learning how unfamiliar code works.
+description: Use when facts, preferences, learnings, decisions, or context should persist beyond the current session.
 managed_by: cas
 ---
 

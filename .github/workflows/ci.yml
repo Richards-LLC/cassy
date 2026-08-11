@@ -135,6 +135,7 @@ jobs:
       - uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite
+          cache-workspace-crates: "true"
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

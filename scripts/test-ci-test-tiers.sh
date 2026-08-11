@@ -111,6 +111,10 @@ preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
+require_text "$(<"$setup")" 'cache-workspace-crates:' 'shared setup exposes workspace-crate caching explicitly'
+require_text "$(<"$setup")" 'default: "false"' 'workspace-crate caching defaults off'
+require_text "$suite" 'cache-workspace-crates: "true"' 'full suite alone preserves workspace artifacts'
+require_count "$ci_text" 'cache-workspace-crates: "true"' '1' 'only one CI lane enables workspace-crate caching'
 require_text "$suite" 'actions/cache/restore@v4' 'suite restores exact-revision test binaries'
 require_text "$suite" 'actions/cache/save@v4' 'suite saves passing exact-revision test binaries'
 require_text "$suite" '${{ github.sha }}' 'test-binary cache key includes the exact source revision'

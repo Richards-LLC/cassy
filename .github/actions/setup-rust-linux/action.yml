@@ -18,6 +18,12 @@ inputs:
       build (see the Build Benchmark job).
     required: false
     default: "true"
+  cache-workspace-crates:
+    description: >-
+      Preserve workspace crate artifacts for incremental reuse. Keep disabled
+      unless a measured lane benefits enough to justify the larger cache.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -63,4 +69,5 @@ runs:
       with:
         key: ${{ inputs.cache-key }}
         cache-on-failure: true
+        cache-workspace-crates: ${{ inputs.cache-workspace-crates == 'true' }}
         save-if: ${{ inputs.save-cache == 'true' }}

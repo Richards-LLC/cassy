@@ -10,6 +10,7 @@ mod claude_md;
 mod codemap_cmd;
 mod history_cmd;
 mod hub;
+mod hub_reverse_pairing;
 mod hub_service;
 mod index_cmd;
 mod knowledge_cmd;

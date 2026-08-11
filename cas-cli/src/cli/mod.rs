@@ -51,6 +51,7 @@ mod queue;
 pub mod retrieval_parity;
 mod status;
 mod statusline;
+mod sync;
 mod update;
 pub mod update_transaction;
 
@@ -76,6 +77,7 @@ pub use mcp_cmd::McpCommands;
 pub use provider_default::DefaultArgs;
 pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
+pub use sync::SyncCommands;
 pub use open::OpenArgs;
 pub use update::UpdateArgs;
 
@@ -233,6 +235,10 @@ pub enum Commands {
     #[command(subcommand)]
     Device(device::DeviceCommands),
 
+    /// Synchronize generated project files
+    #[command(subcommand)]
+    Sync(SyncCommands),
+
     /// Evaluate and optimize CLAUDE.md files for token efficiency
     #[command(name = "claude-md")]
     ClaudeMd(ClaudeMdArgs),
@@ -346,6 +352,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::KnownRepos(_)
         | Commands::Worktree(_)
         | Commands::SweepAll(_)
+        | Commands::Sync(_)
         | Commands::RetrievalParity(_) => AuthRequirement::NotRequired,
 
         Commands::Serve => AuthRequirement::NotRequired,
@@ -517,6 +524,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Queue(_) => "queue".to_string(),
         Commands::Cloud(_) => "cloud".to_string(),
         Commands::Device(_) => "device".to_string(),
+        Commands::Sync(_) => "sync".to_string(),
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::History(_) => "history".to_string(),
@@ -593,6 +601,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Queue(cmd) => queue::execute(cmd, cli),
         Commands::Cloud(cmd) => cloud::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Device(cmd) => device::execute(cmd, cli),
+        Commands::Sync(cmd) => sync::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

@@ -11,7 +11,9 @@ use toml::map::Map;
 pub(crate) fn canonical_json_pretty(value: &serde_json::Value) -> serde_json::Result<String> {
     let mut canonical = value.clone();
     canonicalize_json_objects(&mut canonical);
-    serde_json::to_string_pretty(&canonical)
+    let mut formatted = serde_json::to_string_pretty(&canonical)?;
+    formatted.push('\n');
+    Ok(formatted)
 }
 
 fn canonicalize_json_objects(value: &mut serde_json::Value) {

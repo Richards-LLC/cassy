@@ -511,6 +511,35 @@ fn codex_hooks_regeneration_converges_hand_reordered_json() {
     );
 }
 
+#[test]
+fn committed_codex_hooks_file_regenerates_without_byte_changes() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let hooks_path = codex_dir.join("hooks.json");
+    std::fs::write(&hooks_path, include_str!("../../../../.codex/hooks.json")).unwrap();
+
+    let committed_bytes = std::fs::read_to_string(&hooks_path).unwrap();
+    assert!(
+        configure_codex_mcp_server(temp.path()).unwrap(),
+        "the first pass creates .codex/config.toml"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        committed_bytes,
+        "the committed hooks fixture must already be canonical"
+    );
+    assert!(
+        !configure_codex_mcp_server(temp.path()).unwrap(),
+        "a second configuration pass should be a no-op"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        committed_bytes,
+        "an unchanged committed hooks fixture must remain byte-identical"
+    );
+}
+
 // Note: configure_mcp_server tests removed because they require the claude CLI
 // which isn't available in test environments. The function now uses `claude mcp add`.
 

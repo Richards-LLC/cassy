@@ -143,6 +143,9 @@ pub(crate) enum OrphanDisposition {
     RecordOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrphanProcessClass { DeadParent, DeregisteredWorkerPane }
+
 impl OrphanDisposition {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -253,6 +256,8 @@ pub(crate) struct OrphanProcess {
     /// recomputed at render.
     pub build_tool: bool,
     pub disposition: OrphanDisposition,
+    pub class: OrphanProcessClass,
+    pub process_group: Option<u32>,
 }
 
 /// A registry entry whose owning session is gone (or whose process is).
@@ -351,6 +356,9 @@ impl OrphanReport {
                     parent,
                     p.disposition.label(),
                 ));
+                if p.class == OrphanProcessClass::DeregisteredWorkerPane {
+                    out.push_str("    class: deregistered worker with surviving pane (process-group reap)\n");
+                }
             }
         }
         if !self.servers.is_empty() {
@@ -432,6 +440,7 @@ pub(crate) fn scan(
     cas_root: &Path,
     live_sessions: &HashSet<String>,
     protected_pgids: &HashSet<u32>,
+    deregistered_worker_worktrees: &HashSet<PathBuf>,
 ) -> OrphanReport {
     let servers = scan_registry(cas_root, live_sessions);
     // A registry pid is never also a dead-parent candidate: registered servers
@@ -439,7 +448,7 @@ pub(crate) fn scan(
     // they would all look adopted. They are governed by the registry's own
     // rules — including the `shared` flag — not by this class.
     let registry_pids: HashSet<u32> = servers.iter().map(|s| s.record.pid).collect();
-    let processes = scan_worktree_processes(cas_root, protected_pgids, &registry_pids);
+    let processes = scan_worktree_processes(cas_root, protected_pgids, &registry_pids, deregistered_worker_worktrees);
     OrphanReport { processes, servers }
 }
 
@@ -486,6 +495,7 @@ fn scan_worktree_processes(
     cas_root: &Path,
     protected_pgids: &HashSet<u32>,
     registry_pids: &HashSet<u32>,
+    deregistered_worker_worktrees: &HashSet<PathBuf>,
 ) -> Vec<OrphanProcess> {
     let worktrees = cas_root.join("worktrees");
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -521,18 +531,16 @@ fn scan_worktree_processes(
             // does nothing.
             continue;
         }
-        let owned_by_live_factory = protected_pgids.contains(&stat.pgid);
         let parent = parent_state(stat.ppid);
         let starttime = crate::mcp::daemon::read_pid_starttime(pid);
         let build_tool = looks_like_build_tool(&stat.comm);
-        let Some(disposition) = worktree_process_disposition(
-            parent,
-            starttime.is_some(),
-            owned_by_live_factory,
-            build_tool,
-        ) else {
-            continue;
-        };
+        let survivor = deregistered_worker_worktrees.iter().any(|worktree| cwd.starts_with(worktree));
+        let (class, disposition, process_group) = if parent.is_adopted() {
+            let Some(disposition) = worktree_process_disposition(parent, starttime.is_some(), protected_pgids.contains(&stat.pgid), build_tool) else { continue; };
+            (OrphanProcessClass::DeadParent, disposition, None)
+        } else if survivor && pid == stat.pgid {
+            (OrphanProcessClass::DeregisteredWorkerPane, if starttime.is_some() { OrphanDisposition::Reapable } else { OrphanDisposition::RefusedUnverifiable }, Some(stat.pgid))
+        } else { continue };
         let command = read_proc_cmdline(pid).unwrap_or_else(|| stat.comm.clone());
         found.push(OrphanProcess {
             pid,
@@ -545,6 +553,8 @@ fn scan_worktree_processes(
             dev_server: looks_like_dev_server(&command),
             build_tool,
             disposition,
+            class,
+            process_group,
         });
     }
     found.sort_by_key(|p| p.pid);
@@ -556,6 +566,7 @@ fn scan_worktree_processes(
     _cas_root: &Path,
     _protected_pgids: &HashSet<u32>,
     _registry_pids: &HashSet<u32>,
+    _deregistered_worker_worktrees: &HashSet<PathBuf>,
 ) -> Vec<OrphanProcess> {
     // No portable `/proc` equivalent; the registry class still works.
     Vec::new()
@@ -654,7 +665,11 @@ pub(crate) fn cleanup(cas_root: &Path, report: &OrphanReport, authorized: bool) 
             summary.would_kill += 1;
             continue;
         }
-        match kill_pid_fingerprinted(process.pid, process.starttime) {
+        let killed = match process.process_group {
+            Some(pgid) => kill_process_group_fingerprinted(pgid, process.starttime),
+            None => kill_pid_fingerprinted(process.pid, process.starttime),
+        };
+        match killed {
             Ok(true) => summary.killed.push(process.pid),
             Ok(false) => summary.skipped += 1,
             Err(error) => summary.errors.push(format!("pid {}: {error}", process.pid)),
@@ -707,6 +722,16 @@ pub(crate) fn cleanup(cas_root: &Path, report: &OrphanReport, authorized: bool) 
     }
 
     summary
+}
+
+fn kill_process_group_fingerprinted(pgid: u32, expected_starttime: Option<u64>) -> io::Result<bool> {
+    let Some(expected) = expected_starttime else { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refusing to signal a process group with no start-time fingerprint")); };
+    if crate::mcp::daemon::read_pid_starttime(pgid) != Some(expected) { return Ok(false); }
+    #[cfg(unix)] {
+        let rc = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+        if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) { return Err(std::io::Error::last_os_error()); }
+    }
+    Ok(true)
 }
 
 /// SIGKILL a pid only if its `/proc` start time still matches the fingerprint
@@ -1056,7 +1081,7 @@ mod tests {
         let live_sessions = HashSet::new();
         let protected = HashSet::new();
 
-        let report = scan(&cas_root, &live_sessions, &protected);
+        let report = scan(&cas_root, &live_sessions, &protected, &HashSet::new());
         let found = report.processes.iter().find(|p| p.pid == pid);
         assert!(
             found.is_some(),
@@ -1107,7 +1132,7 @@ mod tests {
         let pgid = read_proc_stat(pid).expect("stat").pgid;
         let protected: HashSet<u32> = [pgid].into_iter().collect();
 
-        let report = scan(&cas_root, &HashSet::new(), &protected);
+        let report = scan(&cas_root, &HashSet::new(), &protected, &HashSet::new());
         let found = report
             .processes
             .iter()
@@ -1119,6 +1144,32 @@ mod tests {
         assert!(done.killed.is_empty(), "a live-owned process must survive");
         assert!(crate::mcp::daemon::pid_alive(pid));
         kill_if_alive(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deregistered_worker_pane_in_its_worktree_is_reported_and_group_reaped() {
+        use std::os::unix::process::CommandExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join(".cas");
+        let worktree = cas_root.join("worktrees/worker-a");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 120"]).current_dir(&worktree).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        unsafe { command.pre_exec(|| { if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) } }); }
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && read_proc_stat(pid).is_none_or(|stat| stat.pgid != pid) { std::thread::sleep(Duration::from_millis(10)); }
+        let roots: HashSet<PathBuf> = [worktree].into_iter().collect();
+        let report = scan(&cas_root, &HashSet::new(), &HashSet::new(), &roots);
+        let pane = report.processes.iter().find(|process| process.pid == pid).expect("synthetic pane reported");
+        assert_eq!(pane.class, OrphanProcessClass::DeregisteredWorkerPane);
+        assert_eq!(pane.disposition, OrphanDisposition::Reapable);
+        let done = cleanup(&cas_root, &report, true);
+        assert_eq!(done.killed, vec![pid]);
+        child.wait().unwrap();
+        assert!(read_proc_stat(pid).is_none(), "reaped direct child must not remain Z");
     }
 
     /// cas-4614 (GH #107) end-to-end, and the counterpart to
@@ -1213,7 +1264,7 @@ mod tests {
             // that used to spare it.
             let protected: HashSet<u32> = [stat.pgid].into_iter().collect();
 
-            let report = scan(&cas_root, &HashSet::new(), &protected);
+            let report = scan(&cas_root, &HashSet::new(), &protected, &HashSet::new());
             let Some(found) = report.processes.iter().find(|p| p.pid == pid) else {
                 // Absent from the report *and* still running is the real bug
                 // this test exists to catch. Absent because it exited during
@@ -1292,7 +1343,7 @@ mod tests {
         record.pid_starttime = None;
         super::super::server_registry::write_record(&cas_root, &record).unwrap();
 
-        let report = scan(&cas_root, &HashSet::new(), &HashSet::new());
+        let report = scan(&cas_root, &HashSet::new(), &HashSet::new(), &HashSet::new());
         let found = report
             .servers
             .iter()
@@ -1334,7 +1385,7 @@ mod tests {
         record.pid_starttime = crate::mcp::daemon::read_pid_starttime(self_pid);
         super::super::server_registry::write_record(&cas_root, &record).unwrap();
 
-        let report = scan(&cas_root, &HashSet::new(), &HashSet::new());
+        let report = scan(&cas_root, &HashSet::new(), &HashSet::new(), &HashSet::new());
         let found = report
             .servers
             .iter()
@@ -1364,7 +1415,7 @@ mod tests {
         super::super::server_registry::write_record(&cas_root, &record).unwrap();
 
         let live: HashSet<String> = ["live-session".to_string()].into_iter().collect();
-        let report = scan(&cas_root, &live, &HashSet::new());
+        let report = scan(&cas_root, &live, &HashSet::new(), &HashSet::new());
         assert!(
             report.servers.is_empty(),
             "a live session's servers are not GC candidates at all"

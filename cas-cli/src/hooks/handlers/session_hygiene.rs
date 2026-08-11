@@ -665,6 +665,7 @@ pub fn build_session_start_orphan_banner_sized(cas_root: &Path) -> Option<Sessio
         cas_root,
         &live_factory_session_names(),
         &live_worker_pgids(cas_root),
+        &std::collections::HashSet::new(),
     );
     if report.is_empty() {
         return None;

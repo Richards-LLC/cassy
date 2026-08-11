@@ -1,5 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Barrier};
@@ -492,6 +494,81 @@ esac
     assert!(paths.acquire_instance_lock().is_ok());
     assert!(!home.path().join(".cas/hub/process.json").exists());
     assert!(!home.path().join("mock-serve").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_force_closes_a_held_client_and_starts_the_replacement() {
+    let home = private_home();
+    let path = system_path();
+    let initial = start_hub(home.path(), &path, false);
+    let old_pid = initial["pid"].as_u64().unwrap();
+    let port = initial["port"].as_u64().unwrap() as u16;
+    let machine_id = fs::read_to_string(home.path().join(".cas/hub/machine-id")).unwrap();
+
+    // Keep a real accepted HTTP request active by declaring a body and withholding
+    // most of it. This has the same server-lifecycle shape as an upgraded viewer:
+    // graceful shutdown cannot finish until the client goes away.
+    let mut held = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    held.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    write!(
+        held,
+        "POST /v1/auth/pairing/exchange HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{{"
+    )
+    .unwrap();
+    held.flush().unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let started = Instant::now();
+    let restart = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "hub",
+            "restart",
+            "--port",
+            &port.to_string(),
+        ])
+        .output()
+        .expect("restart hub with held client");
+    let elapsed = started.elapsed();
+
+    if !restart.status.success() {
+        let stderr = String::from_utf8_lossy(&restart.stderr).into_owned();
+        drop(held);
+        let _ = cas_command(home.path(), &path)
+            .args(["--json", "hub", "stop"])
+            .output();
+        panic!("held client blocked restart for {elapsed:?}: {stderr}");
+    }
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "restart exceeded its bounded drain window: {elapsed:?}"
+    );
+
+    let mut closed = [0_u8; 1];
+    assert!(
+        matches!(held.read(&mut closed), Ok(0) | Err(_)),
+        "old hub left the held connection silently live"
+    );
+    let status = cas_command(home.path(), &path)
+        .args(["--json", "hub", "status"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_ne!(status["record"]["pid"].as_u64().unwrap(), old_pid);
+    assert_eq!(status["record"]["port"].as_u64().unwrap(), u64::from(port));
+    assert_eq!(
+        fs::read_to_string(home.path().join(".cas/hub/machine-id")).unwrap(),
+        machine_id,
+        "restart must preserve the stable machine identity"
+    );
+
+    let stop = cas_command(home.path(), &path)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .unwrap();
+    assert!(stop.status.success());
 }
 
 #[cfg(unix)]

@@ -220,6 +220,35 @@ pub struct TaskRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub bypass_code_review: Option<bool>,
 
+    /// Supervisor-authorized close for a measured negative result whose
+    /// experimental branch is deliberately not merged.
+    ///
+    /// This is distinct from `bypass_code_review`: it is accepted only from
+    /// a registered supervisor and requires both structured evidence fields
+    /// below plus a non-empty close `reason`. Ordinary closes that omit this
+    /// flag retain the merge-state gate unchanged.
+    #[schemars(
+        description = "Set true only when a registered supervisor is closing a measured negative result whose experimental delivery was deliberately left unmerged. Requires negative_result_artifact_path, negative_result_reference, and a non-empty reason; CAS logs the supervisor decision. Ordinary delivery closes must omit this flag and still require merge evidence."
+    )]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub negative_result: Option<bool>,
+
+    /// Existing durable evidence beneath the task's configured artifacts
+    /// directory, required when `negative_result=true`.
+    #[schemars(
+        description = "Absolute path to existing durable measurement evidence under configured [factory] artifacts_root/<task-id>/. Required with negative_result=true."
+    )]
+    #[serde(default)]
+    pub negative_result_artifact_path: Option<String>,
+
+    /// Audit reference to the closed-unmerged PR or experimental branch,
+    /// required when `negative_result=true`.
+    #[schemars(
+        description = "Portable audit reference to the deliberately closed-unmerged PR or experimental branch (for example a PR URL or branch:factory/name). Required with negative_result=true."
+    )]
+    #[serde(default)]
+    pub negative_result_reference: Option<String>,
+
     /// Serialized ReviewOutcome JSON envelope from the worker's
     /// cas-code-review skill run (cas-b39f option (a)). Forwarded to
     /// the close handler, where it is parsed and validated before the
@@ -969,6 +998,9 @@ mod worker_delivery_request_tests {
         assert_eq!(request.id.as_deref(), Some("cas-legacy"));
         assert_eq!(request.reason.as_deref(), Some("done"));
         assert!(request.completion_receipt.is_none());
+        assert_eq!(request.negative_result, None);
+        assert!(request.negative_result_artifact_path.is_none());
+        assert!(request.negative_result_reference.is_none());
     }
 
     #[test]
@@ -980,6 +1012,23 @@ mod worker_delivery_request_tests {
         assert_eq!(
             request.completion_receipt.as_deref(),
             Some(r#"{"task_id":"cas-new"}"#)
+        );
+    }
+
+    #[test]
+    fn negative_result_receipts_are_additive_at_the_mcp_boundary() {
+        let request: TaskRequest = serde_json::from_str(
+            r#"{"action":"close","id":"cas-negative","reason":"experiment regressed","negative_result":true,"negative_result_artifact_path":"/durable/cas-negative/proof.json","negative_result_reference":"https://github.com/pippenz/cas/pull/242"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.negative_result, Some(true));
+        assert_eq!(
+            request.negative_result_artifact_path.as_deref(),
+            Some("/durable/cas-negative/proof.json")
+        );
+        assert_eq!(
+            request.negative_result_reference.as_deref(),
+            Some("https://github.com/pippenz/cas/pull/242")
         );
     }
 }

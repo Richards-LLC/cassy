@@ -244,6 +244,12 @@ pub struct TaskCloseRequest {
     pub commit_receipt: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct NegativeResultCloseRequest {
+    pub artifact_path: Option<String>,
+    pub reference: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskReopenRequest {
     /// Task ID

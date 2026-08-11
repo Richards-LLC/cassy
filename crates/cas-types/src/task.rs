@@ -243,6 +243,21 @@ pub struct PreCloseHookEvidence {
     pub task_tip: Option<String>,
 }
 
+/// Durable receipt for a supervisor-authorized measured negative result.
+///
+/// The referenced experimental delivery was deliberately not merged. This
+/// receipt therefore tells parent-epic merge accounting that the child has no
+/// delivery to integrate while preserving the evidence needed to audit that
+/// exceptional decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NegativeResultEvidence {
+    pub artifact_path: String,
+    pub reference: String,
+    pub rationale: String,
+    pub supervisor_id: String,
+    pub supervisor_name: String,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskDeliverables {
@@ -255,6 +270,12 @@ pub struct TaskDeliverables {
     /// evidence, not an authoritative host-local path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_close_hook: Option<PreCloseHookEvidence>,
+
+    /// Supervisor-authorized measured negative result. Legacy task JSON
+    /// defaults to no negative-result receipt; the field is cleared whenever
+    /// a closed task is reopened into a fresh work cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_result: Option<NegativeResultEvidence>,
 
     /// Files changed (excluding deletions)
     #[serde(default)]
@@ -318,6 +339,7 @@ impl TaskDeliverables {
     pub fn is_empty(&self) -> bool {
         self.work_target.is_none()
             && self.pre_close_hook.is_none()
+            && self.negative_result.is_none()
             && self.files_changed.is_empty()
             && self.commit_hash.is_none()
             && self.merge_commit.is_none()

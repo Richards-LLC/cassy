@@ -172,6 +172,75 @@ fn validate_completion_artifact_path(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NegativeResultCloseReceipt {
+    artifact_path: String,
+    reference: String,
+    rationale: String,
+    supervisor_id: String,
+    supervisor_name: String,
+}
+
+fn negative_result_missing_receipts(
+    req: &TaskCloseRequest,
+    negative_result: &NegativeResultCloseRequest,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if negative_result
+        .artifact_path
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        missing.push("negative_result_artifact_path");
+    }
+    if negative_result
+        .reference
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        missing.push("negative_result_reference");
+    }
+    if req
+        .reason
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        missing.push("reason (the supervisor decision rationale)");
+    }
+    missing
+}
+
+fn validate_negative_result_reference(reference: &str) -> Result<(), String> {
+    let reference = reference.trim();
+    if reference.is_empty() || reference.len() > 512 {
+        return Err(
+            "negative_result_reference must be a non-empty PR/branch reference no longer than 512 bytes."
+                .to_string(),
+        );
+    }
+    if !delivery_audit_text_is_portable(reference) {
+        return Err(
+            "negative_result_reference must be portable audit text without local absolute paths, control characters, or secret-shaped values."
+                .to_string(),
+        );
+    }
+    let branch = reference.strip_prefix("branch:").unwrap_or(reference);
+    let looks_like_pr = (reference.starts_with("https://") || reference.starts_with("http://"))
+        && reference.contains("/pull/");
+    let looks_like_branch = is_safe_git_refname(branch)
+        && std::process::Command::new("git")
+            .args(["check-ref-format", "--branch", branch])
+            .output()
+            .is_ok_and(|output| output.status.success());
+    if !looks_like_pr && !looks_like_branch {
+        return Err(
+            "negative_result_reference must identify a closed-unmerged PR URL or a valid branch name (optionally prefixed with `branch:`)."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
@@ -185,8 +254,9 @@ fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), S
 #[cfg(test)]
 mod delivery_audit_text_tests {
     use super::{
-        delivery_audit_text_is_portable, request_changes_role_gate,
-        tmpfs_receipt_path_in_close_reason, validate_completion_artifact_path,
+        delivery_audit_text_is_portable, negative_result_missing_receipts,
+        request_changes_role_gate, tmpfs_receipt_path_in_close_reason,
+        validate_completion_artifact_path, validate_negative_result_reference,
     };
 
     #[test]
@@ -251,30 +321,62 @@ mod delivery_audit_text_tests {
         )
         .unwrap();
 
-        validate_completion_artifact_path(
-            cas_root.path(),
-            task_id,
-            artifact.to_str().unwrap(),
-        )
+        validate_completion_artifact_path(cas_root.path(), task_id, artifact.to_str().unwrap())
         .expect("an existing task-owned artifact is durable receipt metadata");
 
         let wrong_task = artifacts_root.join("cas-other");
-        assert!(validate_completion_artifact_path(
+        assert!(
+            validate_completion_artifact_path(
             cas_root.path(),
             task_id,
             wrong_task.to_str().unwrap(),
         )
         .expect_err("another task's artifact must not become this receipt's proof")
-        .contains("<task-id>"));
+            .contains("<task-id>")
+        );
 
         let tmpfs_artifact = tempfile::NamedTempFile::new().unwrap();
-        assert!(validate_completion_artifact_path(
+        assert!(
+            validate_completion_artifact_path(
             cas_root.path(),
             task_id,
             tmpfs_artifact.path().to_str().unwrap(),
         )
         .expect_err("an existing tmpfs file is not durable task receipt metadata")
-        .contains("resolve beneath"));
+            .contains("resolve beneath")
+        );
+    }
+
+    #[test]
+    fn negative_result_receipts_name_every_missing_field() {
+        let req = crate::mcp::tools::TaskCloseRequest {
+            id: "cas-negative".to_string(),
+            reason: None,
+            bypass_code_review: None,
+            code_review_findings: None,
+            search_manifest: None,
+            commit_receipt: None,
+        };
+        let negative_result = crate::mcp::tools::NegativeResultCloseRequest {
+            artifact_path: None,
+            reference: None,
+        };
+        assert_eq!(
+            negative_result_missing_receipts(&req, &negative_result),
+            vec![
+                "negative_result_artifact_path",
+                "negative_result_reference",
+                "reason (the supervisor decision rationale)",
+            ]
+        );
+    }
+
+    #[test]
+    fn negative_result_reference_accepts_pr_or_branch_but_not_arbitrary_text() {
+        validate_negative_result_reference("https://github.com/pippenz/cas/pull/242").unwrap();
+        validate_negative_result_reference("branch:factory/test-agent").unwrap();
+        validate_negative_result_reference("factory/test-agent").unwrap();
+        assert!(validate_negative_result_reference("not a delivery reference").is_err());
     }
 }
 
@@ -331,6 +433,10 @@ pub(crate) enum VerificationSkipReason {
     /// `bypass_code_review=true`. Separate from `AssigneeInactive` so
     /// the audit note reflects supervisor intent, not worker state.
     SupervisorBypass,
+    /// A live registered supervisor accepted a measured negative result with
+    /// durable evidence and a closed-unmerged PR/branch receipt. No delivery
+    /// is being approved, so delivery review/verification gates do not apply.
+    SupervisorNegativeResult,
     /// cas-1932 (GH #62, minor): an assignee-lookup failure would have
     /// reported "verification skipped", but a current-cycle APPROVED
     /// verification for this task already exists. The close is authorized
@@ -378,6 +484,10 @@ impl VerificationSkipReason {
                 " (verification skipped — supervisor bypass via bypass_code_review=true)"
                     .to_string()
             }
+            VerificationSkipReason::SupervisorNegativeResult => {
+                " (measured negative result — supervisor-authorized, delivery intentionally unmerged)"
+                    .to_string()
+            }
             VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
                 format!(" (verified — approved verification {verification_id} on record)")
             }
@@ -414,6 +524,12 @@ impl VerificationSkipReason {
             VerificationSkipReason::SupervisorBypass => {
                 "Closed via supervisor bypass — bypass_code_review=true explicitly set by \
                  supervisor while assignee was still active."
+                    .to_string()
+            }
+            VerificationSkipReason::SupervisorNegativeResult => {
+                "Closed as a measured negative result by a registered supervisor after durable \
+                 evidence and a closed-unmerged PR/branch receipt were validated; no delivery \
+                 was approved or merged."
                     .to_string()
             }
             VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
@@ -526,6 +642,84 @@ pub(crate) fn shared_checkout_has_reviewable_changes(scope: SharedCheckoutReview
 }
 
 impl CasCore {
+    fn validate_negative_result_close(
+        &self,
+        task_id: &str,
+        req: &TaskCloseRequest,
+        negative_result: Option<&NegativeResultCloseRequest>,
+    ) -> Result<Option<NegativeResultCloseReceipt>, String> {
+        let Some(negative_result) = negative_result else {
+            return Ok(None);
+        };
+
+        let caller_id = self.get_registered_agent_id_read_only().map_err(|error| {
+            format!(
+                "NEGATIVE RESULT CLOSE REJECTED: negative_result=true requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
+            )
+        })?;
+        let caller = self
+            .open_agent_store()
+            .map_err(|error| {
+                format!(
+                    "NEGATIVE RESULT CLOSE REJECTED: supervisor authority could not be checked ({error})."
+                )
+            })?
+            .get(&caller_id)
+            .map_err(|error| {
+                format!(
+                    "NEGATIVE RESULT CLOSE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+                )
+            })?;
+        if caller.role != cas_types::AgentRole::Supervisor || !caller.is_alive() {
+            return Err(format!(
+                "NEGATIVE RESULT CLOSE REJECTED: only a live registered supervisor may use negative_result=true. Caller `{}` has role {}. The normal MERGE REQUIRED delivery gate remains in force.",
+                caller.name, caller.role
+            ));
+        }
+
+        let missing = negative_result_missing_receipts(req, negative_result);
+        if !missing.is_empty() {
+            return Err(format!(
+                "NEGATIVE RESULT CLOSE REJECTED: negative_result=true is missing required receipt field(s): {}. Supply durable evidence under configured [factory] artifacts_root/<task-id>/, a closed-unmerged PR/branch reference, and a non-empty supervisor decision rationale.",
+                missing.join(", ")
+            ));
+        }
+
+        let artifact_path = negative_result
+            .artifact_path
+            .as_deref()
+            .expect("missing receipt list checked artifact path")
+            .trim();
+        validate_completion_artifact_path(&self.cas_root, task_id, artifact_path).map_err(
+            |error| {
+                format!(
+                    "NEGATIVE RESULT CLOSE REJECTED: invalid negative_result_artifact_path: {error}"
+                )
+            },
+        )?;
+
+        let reference = negative_result
+            .reference
+            .as_deref()
+            .expect("missing receipt list checked reference")
+            .trim();
+        validate_negative_result_reference(reference)
+            .map_err(|error| format!("NEGATIVE RESULT CLOSE REJECTED: {error}"))?;
+
+        Ok(Some(NegativeResultCloseReceipt {
+            artifact_path: artifact_path.to_string(),
+            reference: reference.to_string(),
+            rationale: req
+                .reason
+                .as_deref()
+                .expect("missing receipt list checked rationale")
+                .trim()
+                .to_string(),
+            supervisor_id: caller.id,
+            supervisor_name: caller.name,
+        }))
+    }
+
     async fn submit_worker_completion_receipt(
         &self,
         raw_receipt: &str,
@@ -1270,13 +1464,15 @@ impl CasCore {
         &self,
         params: Parameters<TaskCloseRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_close_with_completion(params, None).await
+        self.cas_task_close_with_completion(params, None, None)
+            .await
     }
 
     pub async fn cas_task_close_with_completion(
         &self,
         Parameters(req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
+        negative_result: Option<NegativeResultCloseRequest>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -1285,6 +1481,18 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        // cas-6c50 / GH #243: a measured negative result is a completed
+        // outcome, not a delivery waiting to merge and not a changes request.
+        // Validate its supervisor authority and all three receipts before any
+        // close projection. Ordinary requests take the `None` path and retain
+        // the existing gate sequence and response text unchanged.
+        let negative_result_receipt =
+            match self.validate_negative_result_close(&req.id, &req, negative_result.as_ref()) {
+                Ok(receipt) => receipt,
+                Err(message) => return Ok(Self::tool_error(message)),
+            };
+        let negative_result_close = negative_result_receipt.is_some();
 
         if let Some(raw_receipt) = completion_receipt.as_deref() {
             if let Err(message) = super::proof_scope::guard_task_proof_scope(
@@ -1750,7 +1958,7 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
-        if task.task_type != TaskType::Epic && task.assignee.is_some() {
+        if !negative_result_close && task.task_type != TaskType::Epic && task.assignee.is_some() {
             match run_factory_branch_merge_gate_with_attribution(
                 &task,
                 &req,
@@ -1901,7 +2109,9 @@ impl CasCore {
         // close without verification. cas-3bd4: compute the reason as a typed
         // enum so the response message cites the actual state instead of
         // defaulting to "assignee inactive" for every lookup failure.
-        let skip_reason = if verification_enabled && is_supervisor_from_env() {
+        let skip_reason = if negative_result_close {
+            VerificationSkipReason::SupervisorNegativeResult
+        } else if verification_enabled && is_supervisor_from_env() {
             if task.task_type == TaskType::Epic && task.epic_verification_owner.is_some() {
                 // The ownership gate above already proved that this caller is
                 // the configured epic verification owner. Epics normally have
@@ -2717,7 +2927,7 @@ impl CasCore {
 
         // Check for worktree that needs merging (only for epics or tasks with worktrees)
         // This check happens AFTER verification passes
-        if let Some(worktree_id) = &task.worktree_id {
+        if !negative_result_close && let Some(worktree_id) = &task.worktree_id {
             let config = self.load_config();
 
             // Only trigger jail if worktrees are enabled and require_merge_on_epic_close is true
@@ -2791,8 +3001,8 @@ impl CasCore {
         // (task-verifier) as the quality bar — those gates operate on
         // commits / review envelopes, not on working-tree state, so
         // they're safe to run in a shared worktree.
-        let bypass_close_gates =
-            req.bypass_code_review.unwrap_or(false) && is_supervisor_from_env();
+        let bypass_close_gates = negative_result_close
+            || (req.bypass_code_review.unwrap_or(false) && is_supervisor_from_env());
         let worker_worktree_path =
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
                 Ok(path) => path,
@@ -2802,7 +3012,9 @@ impl CasCore {
         // every close path, independent of review owner/depth/bypass. This
         // keeps normal close aligned with direct update-to-closed: neither
         // may select a process-cwd or merely most-recent worker checkout.
-        let declared_hook_evidence = if let Some(context) = declared_repo_context.as_ref() {
+        let declared_hook_evidence = if negative_result_close {
+            None
+        } else if let Some(context) = declared_repo_context.as_ref() {
             match run_declared_pre_close_hook(
                 &task,
                 context,
@@ -3003,7 +3215,7 @@ impl CasCore {
         // to a legacy `git diff HEAD` path on the main worktree — that
         // path has been deleted in this commit because it reintroduced
         // the exact wrong-worktree-scope bug cas-bc1b was filed to fix.
-        if task.execution_note.as_deref() == Some("additive-only") {
+        if !negative_result_close && task.execution_note.as_deref() == Some("additive-only") {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 // cas-7efe: use the single close-time resolver instead of
                 // an independent worktree-only lookup that fell back to a
@@ -3360,7 +3572,9 @@ impl CasCore {
         //
         // Cases 1/3/4 are handled here: docs-only, ambiguous zero-commit,
         // and deliberate no-code respectively.
-        let gate_outcome = if depth_light {
+        let gate_outcome = if negative_result_close {
+            CodeReviewGateOutcome::Proceed
+        } else if depth_light {
             // cas-6538: light tasks treat the P0 code-review gate as satisfied.
             // This is the non-factory / solo close path (the factory worker
             // supervisor-review hop is already skipped above for light); a
@@ -3461,6 +3675,16 @@ impl CasCore {
         task.closed_at = Some(now);
         task.updated_at = now;
         task.deliverables.pre_close_hook = declared_hook_evidence;
+        task.deliverables.negative_result =
+            negative_result_receipt
+                .as_ref()
+                .map(|receipt| cas_types::NegativeResultEvidence {
+                    artifact_path: receipt.artifact_path.clone(),
+                    reference: receipt.reference.clone(),
+                    rationale: receipt.rationale.clone(),
+                    supervisor_id: receipt.supervisor_id.clone(),
+                    supervisor_name: receipt.supervisor_name.clone(),
+                });
         // cas-eaf8: preserve the task-specific factory anchor after close.
         // The epic close guard needs this durable receipt to distinguish
         // this task's merged work from later, unrelated commits added when
@@ -3551,6 +3775,27 @@ impl CasCore {
         if depth_light {
             let timestamp = now.format("%Y-%m-%d %H:%M");
             let decision_note = format!("[{timestamp}] {}", light_skip_decision_note());
+            if task.notes.is_empty() {
+                task.notes = decision_note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
+        // cas-6c50: persist the supervisor decision on the same in-memory
+        // task as the final close write. The structured deliverables receipt
+        // above supports machine checks; this note keeps the exceptional
+        // no-merge decision human-readable in the ordinary task timeline.
+        if let Some(receipt) = negative_result_receipt.as_ref() {
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let decision_note = format!(
+                "[{timestamp}] DECISION: supervisor {} ({}) accepted a measured negative result; the experimental delivery is intentionally not merged. Durable evidence: {}. Closed-unmerged PR/branch: {}. Rationale: {}",
+                receipt.supervisor_name,
+                receipt.supervisor_id,
+                receipt.artifact_path,
+                receipt.reference,
+                receipt.rationale,
+            );
             if task.notes.is_empty() {
                 task.notes = decision_note;
             } else {
@@ -5852,12 +6097,16 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              merge into {parent_branch} if still needed\"`). \
              They merge with \
              `git merge --no-ff {factory_branch}` on the epic branch.\n\
-             5. Once merged, retry mcp__cas__task action=close. If the supervisor \
-             declines the unmerged delivery instead, the supervisor runs \
+             5. Once merged, retry mcp__cas__task action=close. If this is a \
+             completed measured negative result whose experimental delivery \
+             must not land, a registered supervisor may instead close with \
+             `negative_result=true negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
+             negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
+             CAS validates all three receipts and logs the decision. If the supervisor \
+             declines an actual delivery for rework instead, the supervisor runs \
              `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
-            task.id,
-            task.id,
+            task.id, task.id,
         )
     } else {
         format!(
@@ -5877,8 +6126,13 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              {parent_branch} ref cannot be the cause (fetch never moves a local \
              branch ref). If you believe the work is merged, check it directly: \
              `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
-             5. Retry mcp__cas__task action=close. If the supervisor declines \
-             the unmerged delivery instead, the supervisor runs \
+             5. Retry mcp__cas__task action=close. If this is a completed measured \
+             negative result whose experimental delivery must not land, a registered \
+             supervisor may instead close with `negative_result=true \
+             negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
+             negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
+             CAS validates all three receipts and logs the decision. If the supervisor \
+             declines an actual delivery for rework instead, the supervisor runs \
              `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
             task.id,
@@ -8298,12 +8552,25 @@ pub(crate) fn collect_epic_branch_statuses(
     subtasks
         .iter()
         .map(|t| {
-            let parked_branch = t.deliverables.parked_branch.clone();
-            let live_factory_branch = t
-                .assignee
+            // cas-6c50: a measured negative result deliberately has no
+            // delivery to integrate. Its structured supervisor receipt is
+            // durable close evidence, so neither the historical parked branch
+            // nor the assignee's reusable live lane belongs in parent-epic
+            // delivery accounting for this child.
+            let negative_result = t.deliverables.negative_result.is_some();
+            let parked_branch = (!negative_result)
+                .then(|| t.deliverables.parked_branch.clone())
+                .flatten();
+            let live_factory_branch = (!negative_result)
+                .then(|| {
+                    t.assignee
                 .as_ref()
-                .map(|assignee| format!("factory/{assignee}"));
-            let recorded_anchor = t.deliverables.factory_branch_anchor.as_deref();
+                        .map(|assignee| format!("factory/{assignee}"))
+                })
+                .flatten();
+            let recorded_anchor = (!negative_result)
+                .then_some(t.deliverables.factory_branch_anchor.as_deref())
+                .flatten();
             let resolved_anchor =
                 recorded_anchor.filter(|anchor| git_ref_exists(repo_path, anchor));
 
@@ -13790,9 +14057,14 @@ mod merge_state_gate_tests {
                          remediation unchanged: {msg}"
                     );
                     assert!(
-                        msg.contains("task action=request_changes")
-                            && msg.contains("reason="),
+                        msg.contains("task action=request_changes") && msg.contains("reason="),
                         "declined-review remediation must name the supervisor verdict path: {msg}"
+                    );
+                    assert!(
+                        msg.contains("negative_result=true")
+                            && msg.contains("negative_result_artifact_path")
+                            && msg.contains("negative_result_reference"),
+                        "remediation must name the measured-negative-result receipt path: {msg}"
                     );
                     assert!(
                         msg.contains(&format!("`{coord} action=inbox_poll`"))
@@ -16602,6 +16874,37 @@ mod epic_status_gate_tests {
             report.contains("2 child task(s) carry stranded factory commits"),
             "report must summarize stranded count = 2 (bravo + charlie): {report}"
         );
+    }
+
+    #[test]
+    fn measured_negative_result_has_no_delivery_for_epic_merge_accounting_cas_6c50() {
+        let dir = init_epic_repo(&[("experimenter", 1)]);
+        let mut negative = child("cas-negative", TaskStatus::Closed, Some("experimenter"));
+        negative.deliverables.factory_branch_anchor =
+            resolve_branch_sha(dir.path(), "factory/experimenter");
+        negative.deliverables.negative_result = Some(cas_types::NegativeResultEvidence {
+            artifact_path: "/durable/cas-negative/measurement.json".to_string(),
+            reference: "https://github.com/pippenz/cas/pull/242".to_string(),
+            rationale: "experiment regressed; do not ship".to_string(),
+            supervisor_id: "supervisor-1".to_string(),
+            supervisor_name: "watchful-leopard".to_string(),
+        });
+
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&negative), "main", dir.path());
+        assert_eq!(statuses[0].unmerged_count, 0);
+        assert!(statuses[0].factory_branch.is_none());
+        assert!(statuses[0].recorded_anchor.is_none());
+        assert!(matches!(
+            run_epic_close_merge_gate(
+                &epic("cas-epic"),
+                &base_req("cas-epic"),
+                "main",
+                dir.path(),
+                &[negative],
+            ),
+            EpicCloseGateOutcome::Proceed
+        ));
     }
 
     // --- cas-2a99 (GH #131): dual-ref reads + spawn-base-aware anchor proof --

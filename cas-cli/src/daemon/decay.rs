@@ -37,6 +37,14 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
             continue;
         }
 
+        // In-context residency protects a currently relevant memory from
+        // ordinary feedback and age-based decay. Expiry is handled above as
+        // an absolute validity boundary, so an expired in-context entry has
+        // already been demoted before reaching this skip.
+        if updated.memory_tier == MemoryTier::InContext {
+            continue;
+        }
+
         if updated.entry_type == EntryType::Observation
             && updated.memory_tier == MemoryTier::Working
             && updated.feedback_score() <= 0

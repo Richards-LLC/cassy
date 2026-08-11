@@ -4,6 +4,22 @@ use std::sync::Arc;
 
 const IDENTITY_HEADER_MIN_HEIGHT: u16 = 20;
 
+/// Compact backend label shown beside a pane role.
+///
+/// Keep Claude's established shorthand (`cc`) so role tags stay narrow in
+/// split-pane layouts while still making heterogeneous sessions legible.
+pub(crate) fn backend_tag(cli: cas_mux::SupervisorCli) -> &'static str {
+    match cli {
+        cas_mux::SupervisorCli::Claude => "cc",
+        cas_mux::SupervisorCli::Codex => "codex",
+        cas_mux::SupervisorCli::Grok => "grok",
+    }
+}
+
+pub(crate) fn role_tag(role: &str, cli: cas_mux::SupervisorCli) -> String {
+    format!("[{role}:{}]", backend_tag(cli))
+}
+
 /// Content rect for a full-mode pane with `Borders::ALL` (1-cell border inset).
 ///
 /// Matches `ratatui::widgets::Block::inner` for a default all-sides border so
@@ -213,7 +229,6 @@ impl FactoryApp {
                     styles.text_muted,
                 ));
             }
-
         }
 
         // Session elapsed time is identity info, independent of epic focus.
@@ -306,6 +321,7 @@ impl FactoryApp {
         );
 
         // ACTIVITY column — reuse the director activity renderer
+        let activity_backend_tags = self.activity_backend_tags();
         crate::ui::factory::director::activity::render_with_focus(
             frame,
             mc.activity_area,
@@ -314,6 +330,7 @@ impl FactoryApp {
             focus == MissionControlFocus::Activity,
             None,
             false,
+            &activity_backend_tags,
         );
 
         // Status bar
@@ -537,7 +554,10 @@ impl FactoryApp {
 
             // Get status indicator
             let status_icon = self.get_worker_status_icon(name);
-            let title = format!(" {name}{status_icon} [worker] ");
+            let title = format!(
+                " {name}{status_icon} {} ",
+                role_tag("worker", self.harness_for(name))
+            );
 
             // Determine border style based on mode
             let (border_color, border_type) = if is_pane_select {
@@ -649,7 +669,10 @@ impl FactoryApp {
                 self.get_worker_status_icon(name).to_string()
             };
 
-            let label = format!(" {number} {name}{status_icon} ");
+            let label = format!(
+                " {number} {name}{status_icon} {} ",
+                role_tag("worker", self.harness_for(name))
+            );
 
             if is_selected {
                 // Active tab: elevated bg, agent-colored text, bold
@@ -728,7 +751,13 @@ impl FactoryApp {
                 } else {
                     self.get_worker_status_icon(name).to_string()
                 };
-                let tab_label = format!(" {} {}{} ", i + 1, name, status_icon);
+                let tab_label = format!(
+                    " {} {}{} {} ",
+                    i + 1,
+                    name,
+                    status_icon,
+                    role_tag("worker", self.harness_for(name))
+                );
                 let tab_width = tab_label.chars().count();
 
                 if is_selected {
@@ -951,7 +980,11 @@ impl FactoryApp {
                 (palette.border_muted, BorderType::Rounded)
             };
 
-            let title = format!(" {} [supervisor] ", self.supervisor_name);
+            let title = format!(
+                " {} {} ",
+                self.supervisor_name,
+                role_tag("supervisor", self.supervisor_cli)
+            );
             let block = Block::default()
                 .title(title)
                 .title_style(
@@ -1001,6 +1034,7 @@ impl FactoryApp {
                 let focused_epic_branch_status = self
                     .focused_epic_branch_status()
                     .map(|status| (status.branch.clone(), status.ahead, status.behind));
+                let activity_backend_tags = self.activity_backend_tags();
                 let mut state = SidecarState {
                     focus: self.sidecar_focus,
                     tasks_state: &mut self.panels.tasks.list_state,
@@ -1033,6 +1067,7 @@ impl FactoryApp {
                     &self.theme,
                     self.current_epic_id.as_deref(),
                     &self.supervisor_name,
+                    &activity_backend_tags,
                     Some(&mut state),
                 );
                 // Store panel areas for click detection
@@ -1050,6 +1085,14 @@ impl FactoryApp {
                 self.render_file_diff(frame, layout.sidecar_area, &file_path);
             }
         }
+    }
+
+    pub(crate) fn activity_backend_tags(&self) -> HashMap<String, &'static str> {
+        self.director_data
+            .agent_id_to_name
+            .iter()
+            .map(|(agent_id, name)| (agent_id.clone(), backend_tag(self.harness_for(name))))
+            .collect()
     }
 }
 
@@ -1234,8 +1277,8 @@ mod tests {
     use super::*;
     use cas_factory::TaskSummary;
     use cas_types::{Priority, TaskStatus, TaskType};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn epic_task(id: &str, title: &str, branch: &str) -> TaskSummary {
         TaskSummary {
@@ -1248,9 +1291,9 @@ mod tests {
             epic: None,
             branch: Some(branch.to_string()),
             updated_at: None,
-        epic_verification_owner: None,
+            epic_verification_owner: None,
         }
-        }
+    }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         terminal
@@ -1342,7 +1385,11 @@ mod tests {
     fn truncate_chars_below_and_at_threshold_returns_unchanged() {
         assert_eq!(truncate_chars("short", 28), "short");
         let exact = "exactly28characterslong!!!!!";
-        assert_eq!(exact.chars().count(), 28, "fixture must be exactly 28 chars");
+        assert_eq!(
+            exact.chars().count(),
+            28,
+            "fixture must be exactly 28 chars"
+        );
         assert_eq!(truncate_chars(exact, 28), exact);
     }
 
@@ -1395,5 +1442,20 @@ mod tests {
         let t0 = truncate_chars(long, 0);
         assert_eq!(t0.chars().count(), 0, "max_chars=0 result: {t0:?}");
         assert_eq!(t0, "");
+    }
+
+    #[test]
+    fn role_tags_identify_every_supported_backend() {
+        for (cli, backend) in [
+            (cas_mux::SupervisorCli::Claude, "cc"),
+            (cas_mux::SupervisorCli::Codex, "codex"),
+            (cas_mux::SupervisorCli::Grok, "grok"),
+        ] {
+            assert_eq!(role_tag("worker", cli), format!("[worker:{backend}]"));
+            assert_eq!(
+                role_tag("supervisor", cli),
+                format!("[supervisor:{backend}]")
+            );
+        }
     }
 }

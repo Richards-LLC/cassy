@@ -123,12 +123,14 @@ impl FactoryApp {
 
     /// Render activity log view
     pub(crate) fn render_activity_log(&self, frame: &mut Frame, area: Rect) {
+        use crate::ui::widgets::format_activity_summary;
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
         let palette = &self.theme().palette;
         let styles = &self.theme().styles;
+        let activity_backend_tags = self.activity_backend_tags();
         let mut lines = Vec::new();
         lines.push(Line::from(""));
 
@@ -141,7 +143,10 @@ impl FactoryApp {
                 Span::styled(event_type, Style::default().fg(palette.status_warning)),
             ]));
             if !event.summary.is_empty() {
-                lines.push(Line::from(format!("   {}", event.summary)));
+                lines.push(Line::from(format!(
+                    "   {}",
+                    format_activity_summary(event, &activity_backend_tags)
+                )));
             }
         }
 

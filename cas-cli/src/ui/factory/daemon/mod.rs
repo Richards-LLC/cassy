@@ -283,6 +283,11 @@ pub struct FactoryDaemon {
     /// records the pane's output byte count at inject time; a later poll
     /// resolves it against the pane's current count.
     urgent_wake_probes: HashMap<i64, crate::ui::factory::daemon::runtime::UrgentWakeProbe>,
+    /// cas-6e76 (GH #224): normal PTY writes are transport receipts, not proof
+    /// that an idle harness surfaced a turn.  Keep a bounded probe until pane
+    /// output corroborates it, then retry once and make residual silence loud.
+    normal_delivery_probes:
+        HashMap<i64, crate::ui::factory::daemon::runtime::NormalDeliveryProbe>,
     /// cas-f02b (GH #101): last observed PTY output byte count per pane, sampled
     /// when a supervisor wake is evaluated. Equality across two evaluations is
     /// the evidence that the pane is not mid-render and is safe to type into.

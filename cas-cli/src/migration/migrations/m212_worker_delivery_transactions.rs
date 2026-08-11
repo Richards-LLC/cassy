@@ -21,6 +21,7 @@ pub const MIGRATION: Migration = Migration {
             target_sha TEXT NOT NULL,
             proof_reference TEXT NOT NULL,
             scope_summary TEXT NOT NULL,
+            artifact_path TEXT,
             created_at TEXT NOT NULL
         )",
         "CREATE INDEX idx_worker_completion_receipts_task

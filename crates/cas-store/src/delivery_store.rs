@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS worker_completion_receipts (
     target_sha TEXT NOT NULL,
     proof_reference TEXT NOT NULL,
     scope_summary TEXT NOT NULL,
+    artifact_path TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_worker_completion_receipts_task
@@ -94,7 +95,7 @@ pub fn build_worker_completion_receipt(
     worker_name: &str,
     created_at: DateTime<Utc>,
 ) -> WorkerCompletionReceipt {
-    let hash = digest(&[
+    let mut parts = vec![
         &input.task_id,
         &input.worker_agent_id,
         worker_name,
@@ -106,7 +107,14 @@ pub fn build_worker_completion_receipt(
         &input.target_sha,
         &input.proof_reference,
         &input.scope_summary,
-    ]);
+    ];
+    // Preserve legacy receipt IDs when no artifact was supplied. That keeps
+    // old retried completion JSON idempotent while binding a new path into the
+    // immutable proof identity whenever it is present.
+    if let Some(path) = input.artifact_path.as_deref() {
+        parts.push(path);
+    }
+    let hash = digest(&parts);
     WorkerCompletionReceipt {
         id: format!("wcr-{}", &hash[..24]),
         task_id: input.task_id.clone(),
@@ -120,6 +128,7 @@ pub fn build_worker_completion_receipt(
         target_sha: input.target_sha.clone(),
         proof_reference: input.proof_reference.clone(),
         scope_summary: input.scope_summary.clone(),
+        artifact_path: input.artifact_path.clone(),
         created_at,
     }
 }
@@ -156,7 +165,8 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerCompletio
         target_sha: row.get(9)?,
         proof_reference: row.get(10)?,
         scope_summary: row.get(11)?,
-        created_at: parse_time(row.get(12)?)?,
+        artifact_path: row.get(12)?,
+        created_at: parse_time(row.get(13)?)?,
     })
 }
 
@@ -224,8 +234,8 @@ fn create_worker_delivery_with_conn(
         "INSERT OR IGNORE INTO worker_completion_receipts
          (id, task_id, worker_agent_id, worker_name, repo_selector, source_branch,
           commit_sha, merge_base_sha, target_branch, target_sha, proof_reference,
-          scope_summary, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+          scope_summary, artifact_path, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             receipt.id,
             receipt.task_id,
@@ -239,13 +249,14 @@ fn create_worker_delivery_with_conn(
             receipt.target_sha,
             receipt.proof_reference,
             receipt.scope_summary,
+            receipt.artifact_path,
             receipt.created_at.to_rfc3339(),
         ],
     )?;
     let persisted = conn.query_row(
         "SELECT id, task_id, worker_agent_id, worker_name, repo_selector, source_branch,
                 commit_sha, merge_base_sha, target_branch, target_sha, proof_reference,
-                scope_summary, created_at
+                scope_summary, artifact_path, created_at
          FROM worker_completion_receipts WHERE id = ?1",
         params![receipt.id],
         receipt_from_row,
@@ -261,7 +272,8 @@ fn create_worker_delivery_with_conn(
         && persisted.target_branch == receipt.target_branch
         && persisted.target_sha == receipt.target_sha
         && persisted.proof_reference == receipt.proof_reference
-        && persisted.scope_summary == receipt.scope_summary;
+        && persisted.scope_summary == receipt.scope_summary
+        && persisted.artifact_path == receipt.artifact_path;
     if !same_immutable_payload {
         return Err(StoreError::Parse(
             "immutable worker completion receipt mismatch".to_string(),
@@ -411,7 +423,7 @@ pub fn get_worker_delivery_by_receipt(
     conn.query_row(
         "SELECT r.id, r.task_id, r.worker_agent_id, r.worker_name, r.repo_selector,
                 r.source_branch, r.commit_sha, r.merge_base_sha, r.target_branch,
-                r.target_sha, r.proof_reference, r.scope_summary, r.created_at,
+                r.target_sha, r.proof_reference, r.scope_summary, r.artifact_path, r.created_at,
                 t.id, t.receipt_id, t.task_id, t.state, t.supervisor_agent_id,
                 t.verification_id, t.merge_commit_sha, t.last_error_code,
                 t.last_error_detail, t.created_at, t.updated_at
@@ -422,17 +434,17 @@ pub fn get_worker_delivery_by_receipt(
         |row| {
             let receipt = receipt_from_row(row)?;
             let transaction = WorkerDeliveryTransaction {
-                id: row.get(13)?,
-                receipt_id: row.get(14)?,
-                task_id: row.get(15)?,
-                state: parse_state(row.get(16)?)?,
-                supervisor_agent_id: row.get(17)?,
-                verification_id: row.get(18)?,
-                merge_commit_sha: row.get(19)?,
-                last_error_code: row.get(20)?,
-                last_error_detail: row.get(21)?,
-                created_at: parse_time(row.get(22)?)?,
-                updated_at: parse_time(row.get(23)?)?,
+                id: row.get(14)?,
+                receipt_id: row.get(15)?,
+                task_id: row.get(16)?,
+                state: parse_state(row.get(17)?)?,
+                supervisor_agent_id: row.get(18)?,
+                verification_id: row.get(19)?,
+                merge_commit_sha: row.get(20)?,
+                last_error_code: row.get(21)?,
+                last_error_detail: row.get(22)?,
+                created_at: parse_time(row.get(23)?)?,
+                updated_at: parse_time(row.get(24)?)?,
             };
             Ok((receipt, transaction))
         },
@@ -449,7 +461,7 @@ pub fn get_latest_worker_delivery(
     conn.query_row(
         "SELECT r.id, r.task_id, r.worker_agent_id, r.worker_name, r.repo_selector,
                 r.source_branch, r.commit_sha, r.merge_base_sha, r.target_branch,
-                r.target_sha, r.proof_reference, r.scope_summary, r.created_at,
+                r.target_sha, r.proof_reference, r.scope_summary, r.artifact_path, r.created_at,
                 t.id, t.receipt_id, t.task_id, t.state, t.supervisor_agent_id,
                 t.verification_id, t.merge_commit_sha, t.last_error_code,
                 t.last_error_detail, t.created_at, t.updated_at
@@ -460,17 +472,17 @@ pub fn get_latest_worker_delivery(
         |row| {
             let receipt = receipt_from_row(row)?;
             let transaction = WorkerDeliveryTransaction {
-                id: row.get(13)?,
-                receipt_id: row.get(14)?,
-                task_id: row.get(15)?,
-                state: parse_state(row.get(16)?)?,
-                supervisor_agent_id: row.get(17)?,
-                verification_id: row.get(18)?,
-                merge_commit_sha: row.get(19)?,
-                last_error_code: row.get(20)?,
-                last_error_detail: row.get(21)?,
-                created_at: parse_time(row.get(22)?)?,
-                updated_at: parse_time(row.get(23)?)?,
+                id: row.get(14)?,
+                receipt_id: row.get(15)?,
+                task_id: row.get(16)?,
+                state: parse_state(row.get(17)?)?,
+                supervisor_agent_id: row.get(18)?,
+                verification_id: row.get(19)?,
+                merge_commit_sha: row.get(20)?,
+                last_error_code: row.get(21)?,
+                last_error_detail: row.get(22)?,
+                created_at: parse_time(row.get(23)?)?,
+                updated_at: parse_time(row.get(24)?)?,
             };
             Ok((receipt, transaction))
         },
@@ -709,6 +721,7 @@ mod tests {
             target_sha: "c".repeat(40),
             proof_reference: "proof:workspace-1".into(),
             scope_summary: "bounded delivery change".into(),
+            artifact_path: None,
         }
     }
 
@@ -1174,6 +1187,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn durable_artifact_path_is_persisted_and_part_of_the_receipt_identity() {
+        let root = TempDir::new().unwrap();
+        let legacy = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let mut with_artifact = input();
+        with_artifact.artifact_path = Some("/durable/cas-delivery/proof.json".into());
+        let receipt = build_worker_completion_receipt(&with_artifact, "worker", Utc::now());
+        assert_ne!(receipt.id, legacy.id, "a durable artifact binds the proof identity");
+
+        create_worker_delivery(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+        )
+        .unwrap();
+        let (persisted, _) = get_worker_delivery_by_receipt(root.path(), &receipt.id)
+            .unwrap()
+            .expect("persisted receipt");
+        assert_eq!(persisted.artifact_path, with_artifact.artifact_path);
     }
 
     #[test]

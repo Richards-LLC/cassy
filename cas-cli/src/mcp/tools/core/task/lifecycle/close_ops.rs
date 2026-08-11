@@ -115,6 +115,63 @@ fn tmpfs_receipt_path_in_close_reason(reason: &str) -> Option<String> {
     })
 }
 
+/// Validate the optional durable artifact selected for a completion receipt.
+///
+/// This is deliberately performed before new receipt persistence:
+/// receipt metadata is immutable, so accepting an out-of-contract path would
+/// make the durable audit record itself misleading. Canonical paths prevent a
+/// `..` component or symlink from escaping either the configured root or this
+/// task's dedicated directory.
+fn validate_completion_artifact_path(
+    cas_root: &std::path::Path,
+    task_id: &str,
+    artifact_path: &str,
+) -> Result<(), String> {
+    if artifact_path.trim().is_empty() || artifact_path.len() > 4096 {
+        return Err(
+            "artifact_path must be a non-empty path no longer than 4096 bytes.".to_string(),
+        );
+    }
+    let artifact_path = std::path::Path::new(artifact_path);
+    if !artifact_path.is_absolute() {
+        return Err(
+            "artifact_path must be an absolute path under the configured [factory] artifacts_root/<task-id>/."
+                .to_string(),
+        );
+    }
+
+    let config = crate::config::Config::load(cas_root)
+        .map_err(|error| format!("could not load [factory] artifacts_root: {error}"))?;
+    let configured_root = crate::config::resolved_factory_artifacts_root(
+        config.factory().artifacts_root.as_deref(),
+    );
+    let canonical_root = configured_root.canonicalize().map_err(|_| {
+        "configured [factory] artifacts_root must exist before a completion artifact can be recorded."
+            .to_string()
+    })?;
+    let canonical_task_root = canonical_root.join(task_id).canonicalize().map_err(|_| {
+        "artifact_path requires an existing per-task directory at configured [factory] artifacts_root/<task-id>/."
+            .to_string()
+    })?;
+    if !canonical_task_root.is_dir() || !canonical_task_root.starts_with(&canonical_root) {
+        return Err(
+            "artifact_path task directory must be a real directory directly beneath the configured [factory] artifacts_root."
+                .to_string(),
+        );
+    }
+    let canonical_artifact = artifact_path.canonicalize().map_err(|_| {
+        "artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<task-id>/."
+            .to_string()
+    })?;
+    if !canonical_artifact.starts_with(&canonical_task_root) {
+        return Err(
+            "artifact_path must resolve beneath configured [factory] artifacts_root/<task-id>/."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
@@ -129,7 +186,7 @@ fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), S
 mod delivery_audit_text_tests {
     use super::{
         delivery_audit_text_is_portable, request_changes_role_gate,
-        tmpfs_receipt_path_in_close_reason,
+        tmpfs_receipt_path_in_close_reason, validate_completion_artifact_path,
     };
 
     #[test]
@@ -174,6 +231,50 @@ mod delivery_audit_text_tests {
             tmpfs_receipt_path_in_close_reason("This task discusses /tmp storage policy"),
             None
         );
+    }
+
+    #[test]
+    fn completion_artifact_path_is_scoped_to_the_configured_task_directory() {
+        let cas_root = tempfile::tempdir().unwrap();
+        let artifacts_root = cas_root.path().join("artifacts");
+        let task_id = "cas-artifact";
+        let artifact = artifacts_root.join(task_id).join("proof.json");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, "durable proof").unwrap();
+        std::fs::create_dir_all(artifacts_root.join("cas-other")).unwrap();
+        std::fs::write(
+            cas_root.path().join("config.toml"),
+            format!(
+                "[factory]\nartifacts_root = {:?}\n",
+                artifacts_root.display().to_string()
+            ),
+        )
+        .unwrap();
+
+        validate_completion_artifact_path(
+            cas_root.path(),
+            task_id,
+            artifact.to_str().unwrap(),
+        )
+        .expect("an existing task-owned artifact is durable receipt metadata");
+
+        let wrong_task = artifacts_root.join("cas-other");
+        assert!(validate_completion_artifact_path(
+            cas_root.path(),
+            task_id,
+            wrong_task.to_str().unwrap(),
+        )
+        .expect_err("another task's artifact must not become this receipt's proof")
+        .contains("<task-id>"));
+
+        let tmpfs_artifact = tempfile::NamedTempFile::new().unwrap();
+        assert!(validate_completion_artifact_path(
+            cas_root.path(),
+            task_id,
+            tmpfs_artifact.path().to_str().unwrap(),
+        )
+        .expect_err("an existing tmpfs file is not durable task receipt metadata")
+        .contains("resolve beneath"));
     }
 }
 
@@ -577,6 +678,21 @@ impl CasCore {
                     data: None,
                 },
             )?;
+        // Exact retries re-use an immutable receipt, so do not make their
+        // recovery dependent on the current config or a later artifact-GC
+        // outcome. New receipts still validate before any state is written.
+        if existing_delivery.is_none()
+            && let Some(artifact_path) = input.artifact_path.as_deref()
+            && let Err(message) = validate_completion_artifact_path(
+                &self.cas_root,
+                &task.id,
+                artifact_path,
+            )
+        {
+            return Ok(Self::tool_error(format!(
+                "DELIVERY RECEIPT REJECTED: invalid artifact_path: {message}"
+            )));
+        }
         if existing_delivery
             .as_ref()
             .is_some_and(|(_, transaction)| {

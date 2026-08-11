@@ -286,7 +286,9 @@ pub fn handle_pre_tool_use(
             &factory.artifacts_root,
             crate::harness_policy::is_supervisor(input),
         ) {
-            let artifacts = resolved_factory_artifacts_root(factory.artifacts_root.as_deref());
+            let artifacts = crate::config::resolved_factory_artifacts_root(
+                factory.artifacts_root.as_deref(),
+            );
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
@@ -1158,22 +1160,6 @@ pub(crate) const FACTORY_AUTO_APPROVE_TOOLS: &[&str] = &[
     "NotebookEdit",
 ];
 
-/// Resolve the durable artifact parent used by the factory workspace contract.
-/// `~/.cas/artifacts` is deliberately a real-disk fallback, not `/tmp`.
-fn resolved_factory_artifacts_root(configured: Option<&str>) -> std::path::PathBuf {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    match configured.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("~") => home.unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
-        Some(value) if value.starts_with("~/") => home
-            .map(|base| base.join(&value[2..]))
-            .unwrap_or_else(|| std::path::PathBuf::from(value)),
-        Some(value) => std::path::PathBuf::from(value),
-        None => home
-            .map(|base| base.join(".cas/artifacts"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum ShellToken {
     Word(String),
@@ -1394,7 +1380,7 @@ fn unsanctioned_factory_path(
 ) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut sanctioned = vec![std::path::PathBuf::from(&input.cwd)];
-    sanctioned.push(resolved_factory_artifacts_root(
+    sanctioned.push(crate::config::resolved_factory_artifacts_root(
         configured_artifacts_root.as_deref(),
     ));
     for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {

@@ -1,16 +1,15 @@
-# Commander v1 runtime release — v2.61.1 releasable, postable-if-asked Slack drafts
+# Commander v1 runtime release — v2.61.1 NOT RELEASABLE, DO NOT POST
 
-> **READY TO POST ONLY WITH EXPLICIT USER APPROVAL. Public `v2.61.1` is RELEASABLE as Commander v1.** The binding prowl + soundwave
-> real-Chrome matrix passed pairing, observation/control, fan-out, controller arbitration,
-> replay/copied-key/scope/revocation, typed `SIGILL`, protocol-v1 daemon restart, no-polling, and count
-> rows. The final stock macOS upgrade row is green on exact public `v2.61.1`: the hub removed its prior
-> Serve mapping, selected the signed app-bundle CLI, republished the stable URL, preserved machine
-> identity, and returned HTTPS `200` with no wrapper, symlink, or manual reset. These are the final two
-> post bodies, but they remain unposted until the user explicitly asks to publish them.
+> **DO NOT POST. Public `v2.61.1` failed the fresh assembled live-viewer restart gate.** Exact public
+> Linux bytes on soundwave and unicron reached real-Chrome pairing, fan-out, arbitration, and control,
+> then restart timed out after 10 seconds because the old hub PID or machine lock remained live. No
+> competing replacement started, but recovery did not complete. GH #217 / `cas-017a` owns the defect;
+> the required sequence is fix → next public release → fresh full H7 continuation. The bodies below are
+> retained as historical drafts only and are not postable.
 
-Destination after explicit user approval: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
-top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
-replies. Status: **postable if asked; currently unposted**.
+Intended destination after a future green gate and explicit approval: `#cas-internal` (`C0B44GUKDK2`).
+Status: **DO NOT POST; currently unposted**. The narrower `cas-f382` stock macOS restart ran without
+live viewers and remains valid only in that scope; it cannot green the newly failed assembled row.
 
 ## User-perspective top-level post
 
@@ -74,6 +73,9 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
+- [ ] Resolve GH #217 / `cas-017a`, publish the next immutable release, and complete a fresh full H7
+      continuation with live viewers and zero residue before treating any draft as postable.
+
 - [x] Publish immutable `v2.61.0` containing app-bundle discovery corrective `cas-a13a`; exact public
       asset, tag peel, installed binary, and selected absolute app CLI are recorded.
 - [x] On stock prowl with no wrapper or stray PATH entry, rerun only macOS hub restart plus the Serve
@@ -93,8 +95,10 @@ daemon session, and bounded downstream fan-out.
       generic denied exchange responses expose only the exact authorized origin.
 - [x] Confirm the documented paired-client Tailscale Serve restart reaches ready without a wrapper,
       preserves the stable machine identity and URL, reconnects clients, and does not restore a lease automatically.
-- [x] Confirm the final acceptance verdict is green, not merely the source-only guards.
+- [ ] Confirm the final acceptance verdict is green, not merely the source-only guards. Public
+      `v2.61.1` is currently **NOT RELEASABLE**.
 - [x] Re-read both posts for zero task IDs, zero agent/factory narration, impact-first Was → Now prose,
       and exactly two top-level posts.
-- [ ] Obtain explicit user approval to publish these postable drafts.
-- [ ] After approval, post User first, then Dev; record their Slack timestamps in the release receipt, not in this draft.
+- [ ] After a future green release gate, refresh both bodies to the new public version and obtain
+      explicit user approval.
+- [ ] Only then post User first, then Dev; record Slack timestamps in the release receipt, not here.

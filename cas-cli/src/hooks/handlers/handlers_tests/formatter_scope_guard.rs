@@ -107,7 +107,9 @@ fn codex_routes_unified_exec_through_the_pre_tool_hook() {
             && entry["hooks"].as_array().is_some_and(|handlers| {
                 handlers
                     .iter()
-                    .any(|handler| handler["command"] == "cas hook PreToolUse")
+                    .any(|handler| {
+                        handler["command"] == "CAS_HOOK_HARNESS=codex cas hook PreToolUse"
+                    })
             })
     }));
 }

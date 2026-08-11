@@ -163,8 +163,28 @@ jobs:
           key: >-
             cas-nextest-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ hashFiles('Cargo.lock') }}-${{ steps.nextest-inputs.outputs.build-date }}-${{ steps.nextest-inputs.outputs.rust }}-${{ steps.nextest-inputs.outputs.nextest }}
 
-      - name: Compile test binaries on cache miss
+      # A fresh SHA is the dominant PR path. Run its tests directly so archive
+      # creation cannot delay the answer; packaging happens only after success
+      # and reuses the binaries Cargo just built.
+      - name: Test full suite from source on cache miss
         if: steps.nextest-binaries.outputs.cache-hit != 'true'
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo nextest run -p cas --no-fail-fast
+
+      # Keep --no-fail-fast so failures never mask later binaries. This runs
+      # every archived test binary; the doctest lane below covers what nextest
+      # cannot.
+      - name: Test full suite from exact-revision cache
+        if: steps.nextest-binaries.outputs.cache-hit == 'true'
+        run: >-
+          cargo nextest run
+          --archive-file .nextest-cache/cas-tests.tar.zst
+          --no-fail-fast
+
+      - name: Archive passing test binaries
+        if: success() && steps.nextest-binaries.outputs.cache-hit != 'true'
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -172,17 +192,9 @@ jobs:
           mkdir -p .nextest-cache
           cargo nextest archive -p cas --archive-file .nextest-cache/cas-tests.tar.zst
 
-      # Keep --no-fail-fast so failures never mask later binaries. This runs
-      # every archived test binary; the doctest lane below covers what nextest
-      # cannot.
-      - name: Test full suite
-        run: >-
-          cargo nextest run
-          --archive-file .nextest-cache/cas-tests.tar.zst
-          --no-fail-fast
-
-      # Never bless a compile-only archive whose tests failed. PR caches are
-      # scoped by Actions, and the exact key above is immutable for a rerun.
+      # Never archive or cache binaries until their full suite passes. PR
+      # caches are scoped by Actions, and the exact key above is immutable for
+      # an identical-SHA retry.
       - name: Save passing exact-revision test binaries
         if: success() && steps.nextest-binaries.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

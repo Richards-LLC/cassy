@@ -33,6 +33,19 @@ require_absent() {
     fi
 }
 
+require_count() {
+    local haystack="$1" needle="$2" expected="$3" label="$4"
+    local actual
+    actual="$(grep -oF -- "$needle" <<<"$haystack" | wc -l | tr -d '[:space:]')"
+    if [[ "$actual" == "$expected" ]]; then
+        printf 'ok   %s\n' "$label"
+        pass=$((pass + 1))
+    else
+        printf 'FAIL %s (expected %s occurrences of %s; found %s)\n' "$label" "$expected" "$needle" "$actual"
+        fail=$((fail + 1))
+    fi
+}
+
 job_block() {
     local job="$1"
     awk -v header="  ${job}:" '
@@ -147,6 +160,20 @@ else
 fi
 require_text "$ci_text" 'SCCACHE_GHA_ENABLED: "true"' 'CI enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables GitHub cache-v2 backend'
+
+# The cache is an optimization, never a CI availability dependency. The shared
+# Linux setup must survive both a failed action download and a failed backend
+# startup by clearing the globally configured compiler wrapper before Cargo.
+require_text "$(<"$setup")" 'id: setup-sccache' 'sccache setup step has a probe handle'
+require_text "$(<"$setup")" 'continue-on-error: true' 'sccache action download may fail open'
+require_text "$(<"$setup")" 'if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then' 'sccache download and backend startup both select fallback'
+require_text "$(<"$setup")" 'sccache backend unavailable — building uncached' 'sccache outage emits an uncached-build warning'
+require_text "$(<"$setup")" 'echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"' 'sccache outage clears compiler wrapper'
+require_text "$(<"$setup")" 'echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"' 'sccache outage disables its backend'
+require_count "$all_actions" 'mozilla-actions/sccache-action@v0.0.11' '5' 'every sccache setup is accounted for'
+require_count "$all_actions" 'continue-on-error: true' '5' 'every sccache setup action and post-step fails open'
+require_count "$all_actions" 'sccache --start-server' '5' 'every sccache setup probes backend availability'
+require_count "$all_actions" 'sccache backend unavailable — building uncached' '5' 'every sccache outage logs its uncached fallback'
 
 printf '\ntest result: %s passed; %s failed\n' "$pass" "$fail"
 if [[ "$fail" -ne 0 ]]; then

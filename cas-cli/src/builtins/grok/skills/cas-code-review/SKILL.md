@@ -1,6 +1,6 @@
 ---
 name: cas-code-review
-description: Multi-persona code review orchestrator (Workflow-backed, Phase C — cas-b667). Thin wrapper around the `cas-code-review` Workflow: pre-fetches diff, calls Workflow (which handles Steps 1-4 internally: intent extraction, persona selection, size-gated parallel dispatch, deterministic merge), then routes results via Step 5 (mode dispatch + CAS integration). Use `mode=interactive` for the standard supervisor-driven path, `mode=report-only` for read-only scans, `mode=headless` for skill-to-skill calls. Factory workers MUST NOT invoke this skill pre-close — the supervisor owns review timing under the default `[code_review] owner = "supervisor"` configuration.
+description: Use when the supervisor requests code review, or when an approved workflow needs interactive, report-only, or headless review. Factory workers do not invoke it pre-close.
 managed_by: cas
 ---
 

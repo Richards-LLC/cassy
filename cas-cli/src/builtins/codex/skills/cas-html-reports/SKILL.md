@@ -1,6 +1,6 @@
 ---
 name: cas-html-reports
-description: Ship every report deliverable as a self-contained single-file HTML artifact committed beside its markdown source, following a per-report-type presentation contract. Use whenever you are about to write an investigation or diagnostic write-up, a metrics/mining analysis, an audit, a decision brief, a comparison or benchmark, an incident post-mortem, a status or release summary, a financial report, an executive or board update, a client-facing deliverable, or a research/market analysis — in any domain, engineering or business. Trigger PROACTIVELY the moment a deliverable is going to outlive the conversation and be read by a human who was not in it.
+description: Use when producing a human-readable report or analysis that must outlive the conversation, including investigations, audits, decision briefs, benchmarks, post-mortems, or executive updates.
 managed_by: cas
 ---
 

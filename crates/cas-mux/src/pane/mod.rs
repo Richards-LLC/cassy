@@ -1328,45 +1328,33 @@ impl Pane {
                 let text = prompt.trim();
                 let framed = crate::harness::injection_payload_bytes(self.harness, text);
                 pty.write(&framed).await?;
-                // Send carriage return after a settle delay in a background task
-                // so we don't block the daemon event loop for 150-500ms.
-                let writer = pty.writer_handle();
+                // Send the submit CR only after Codex has settled the framed
+                // paste.  This is deliberately awaited: `tokio::sleep` yields
+                // the daemon executor, while a detached write made the caller
+                // report Delivered before the byte which actually starts a
+                // turn had even been attempted.
                 let settle_ms = if pty.is_codex() { 500 } else { 150 };
-                // cas-ae6d (GH #100): the submit CR is what turns injected text
-                // into an actual turn. It is written from a detached task, so
-                // its failure cannot be returned to the caller — which already
-                // recorded the inject as Delivered and marked the pane
-                // turn-in-flight. Swallowing the error silently leaves the
-                // payload sitting in the harness composer as an unsubmitted
-                // draft while every observer believes the agent was woken (the
-                // "assignment delivered, worker still idle" shape). It stays
-                // detached (blocking the daemon loop 500ms per inject is worse),
-                // but the failure is now visible on the same
-                // `cas::coordination` lane the delivery telemetry uses.
-                let pane_id = self.id.clone();
+                // cas-6e76 (GH #224): the submit CR is what turns injected text
+                // into an actual turn.  Awaiting the write makes its success a
+                // prerequisite for `InjectOutcome::Delivered`; a failed CR is
+                // retryable instead of becoming a silent composer draft.
                 self.inject_submit_pending
                     .store(true, std::sync::atomic::Ordering::Release);
-                let submit_pending = std::sync::Arc::clone(&self.inject_submit_pending);
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
-                    let mut guard = writer.lock().await;
-                    match guard.write_all(b"\r").and_then(|()| guard.flush()) {
-                        Ok(()) => {
-                            submit_pending.store(false, std::sync::atomic::Ordering::Release);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "cas::coordination",
-                                stage = "inject_submit_failed",
-                                target_agent = %pane_id,
-                                error = %e,
-                                "injected payload was written but its submit CR failed — the text is \
-                                 sitting unsubmitted in the pane composer and no turn started; later \
-                                 injections remain deferred until this pane is replaced"
-                            );
-                        }
-                    }
-                });
+                tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
+                if let Err(error) = pty.write(b"\r").await {
+                    self.inject_submit_pending
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "inject_submit_failed",
+                        target_agent = %self.id,
+                        %error,
+                        "injected payload was written but its submit CR failed; delivery remains retryable"
+                    );
+                    return Err(error);
+                }
+                self.inject_submit_pending
+                    .store(false, std::sync::atomic::Ordering::Release);
                 self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).
                 self.mark_turn_in_flight();

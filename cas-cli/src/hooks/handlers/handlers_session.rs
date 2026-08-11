@@ -848,6 +848,11 @@ pub fn handle_session_end(
         ) {
             eprintln!("cas: Wrote session-end manifest to {}", path.display());
         }
+        if let Err(error) =
+            crate::hooks::handlers::session_hygiene::write_current_state_snapshot(cas_root)
+        {
+            eprintln!("cas: Failed to write current-state snapshot: {error}");
+        }
     }
 
     // Notify daemon via socket that session ended
@@ -997,6 +1002,7 @@ pub fn handle_session_end(
 mod session_end_reminder_tests {
     use super::*;
     use crate::store::{init_cas_dir, open_reminder_store};
+    use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
 
     #[test]
     fn session_end_cancels_default_reminders_but_not_cross_session_opt_in() {
@@ -1035,6 +1041,14 @@ mod session_end_reminder_tests {
         let pending = reminders.list_pending("session-end-owner").unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].cross_session);
+        assert!(
+            SqliteKnowledgeStore::open(&cas_root)
+                .unwrap()
+                .get_page_by_rel_path("current-state.md")
+                .unwrap()
+                .is_some(),
+            "SessionEnd must write the deterministic current-state snapshot"
+        );
     }
 }
 

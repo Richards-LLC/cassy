@@ -316,6 +316,15 @@ enum TeamSetTarget {
     },
 }
 
+/// Result of applying the zero-argument `cas cloud team set` resolution to a
+/// project immediately after login refreshed the user's membership cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoginTeamSelection {
+    Activated(TeamInfo),
+    NoMembership,
+    MultipleMemberships,
+}
+
 impl TeamSetTarget {
     fn uuid(&self) -> &str {
         match self {
@@ -393,6 +402,78 @@ fn resolve_team_set_target(
             "Multiple cached teams found; pass one explicitly.\n{}\nRun `cas cloud login` to refresh team membership.",
             cached_team_options(user_config)
         ),
+    }
+}
+
+/// Activate the sole cached team for the current project.
+///
+/// This deliberately delegates the one/zero/many decision to the resolver
+/// behind `cas cloud team set` (cas-8850), so login and the explicit command
+/// cannot drift into separate membership-resolution rules. The caller persists
+/// `project_config` only after an [`LoginTeamSelection::Activated`] result.
+pub(crate) fn select_cached_team_after_login(
+    project_config: &mut CloudConfig,
+    user_config: &CloudConfig,
+) -> LoginTeamSelection {
+    match resolve_team_set_target(None, user_config, false) {
+        Ok(TeamSetTarget::CachedTeam { team, .. }) => {
+            project_config.team_id = Some(team.id.clone());
+            project_config.team_slug = Some(team.slug.clone());
+            LoginTeamSelection::Activated(team)
+        }
+        Ok(TeamSetTarget::Uuid(_)) => unreachable!("zero-argument resolution never yields UUID"),
+        Err(_) if user_config.teams.is_empty() => LoginTeamSelection::NoMembership,
+        Err(_) => LoginTeamSelection::MultipleMemberships,
+    }
+}
+
+/// Render the post-login team-selection result.
+///
+/// Zero and multiple memberships retain the existing manual team-set path;
+/// only a sole cached membership becomes the active project team.
+pub(crate) fn print_login_team_selection(cli: &Cli, outcome: &LoginTeamSelection) {
+    match outcome {
+        LoginTeamSelection::Activated(team) if cli.json => eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "login_team_activated",
+                "team_id": team.id,
+                "team_slug": team.slug,
+                "team_name": team.name,
+            })
+        ),
+        LoginTeamSelection::Activated(team) => {
+            eprintln!();
+            eprintln!("  ✓ Active team set from your only membership");
+            eprintln!("    Team: {} ({})", team.name, team.slug);
+            eprintln!("    UUID: {}", team.id);
+        }
+        LoginTeamSelection::NoMembership if cli.json => eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "login_team_selection_required",
+                "reason": "no_memberships",
+                "hint": "cas cloud team set <uuid>",
+            })
+        ),
+        LoginTeamSelection::MultipleMemberships if cli.json => eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "login_team_selection_required",
+                "reason": "multiple_memberships",
+                "hint": "cas cloud team set <uuid>",
+            })
+        ),
+        LoginTeamSelection::NoMembership => {
+            eprintln!(
+                "  No team membership found. Run `cas cloud team set <uuid>` to set the active team."
+            );
+        }
+        LoginTeamSelection::MultipleMemberships => {
+            eprintln!(
+                "  Multiple team memberships found. Run `cas cloud team set <uuid>` to set the active team."
+            );
+        }
     }
 }
 
@@ -3910,6 +3991,49 @@ mod team_cmd_tests {
             .to_string();
         assert!(err.contains("No cached team memberships"));
         assert!(err.contains("cas cloud login"));
+    }
+
+    #[test]
+    fn login_team_selection_activates_the_single_cached_team() {
+        let team = make_team_info(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "petra-stella",
+            "Petra Stella",
+        );
+        let user_config = config_with_teams(vec![team.clone()]);
+        let mut project_config = CloudConfig::default();
+
+        let outcome = select_cached_team_after_login(&mut project_config, &user_config);
+
+        assert_eq!(outcome, LoginTeamSelection::Activated(team.clone()));
+        assert_eq!(project_config.team_id.as_deref(), Some(team.id.as_str()));
+        assert_eq!(
+            project_config.team_slug.as_deref(),
+            Some(team.slug.as_str())
+        );
+    }
+
+    #[test]
+    fn login_team_selection_keeps_existing_team_for_zero_or_many_memberships() {
+        let mut project_config = CloudConfig::default();
+        project_config.set_team("existing-team", "existing-slug");
+
+        assert_eq!(
+            select_cached_team_after_login(&mut project_config, &config_with_teams(vec![])),
+            LoginTeamSelection::NoMembership
+        );
+        assert_eq!(project_config.team_id.as_deref(), Some("existing-team"));
+
+        let many = config_with_teams(vec![
+            make_team_info("team-one", "one", "Team One"),
+            make_team_info("team-two", "two", "Team Two"),
+        ]);
+        assert_eq!(
+            select_cached_team_after_login(&mut project_config, &many),
+            LoginTeamSelection::MultipleMemberships
+        );
+        assert_eq!(project_config.team_id.as_deref(), Some("existing-team"));
+        assert_eq!(project_config.team_slug.as_deref(), Some("existing-slug"));
     }
 
     #[test]

@@ -24,21 +24,21 @@ pub use events::{DirectorEvent, DirectorEventDetector};
 // idle-nudge decision (queue_and_events.rs) so the "is this worker really
 // idle, not just between turns" heuristic has one definition.
 pub(crate) use events::{
-    FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS, effective_stall_threshold_secs,
+    effective_stall_threshold_secs, FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
 };
 pub use panel::PanelRegistry;
 pub use prompts::{
-    MergeAlertFreshness, Prompt, check_merge_alert_freshness, check_merge_alert_freshness_for_task,
-    compute_gated_task_ids, generate_prompt_at, revalidate_event_for_delivery_with_context,
+    check_merge_alert_freshness, check_merge_alert_freshness_for_task, compute_gated_task_ids,
+    generate_prompt_at, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
-    worker_now_has_real_assignment,
+    worker_now_has_real_assignment, MergeAlertFreshness, Prompt,
 };
 pub(crate) use prompts::{epic_completion_is_current, prompt_is_still_deliverable};
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::ListState;
+use ratatui::Frame;
 
 use crate::ui::theme::ActiveTheme;
 use crate::ui::widgets::TreeItemType;
@@ -190,6 +190,7 @@ pub fn render_with_state(
     theme: &ActiveTheme,
     focused_epic_id: Option<&str>,
     supervisor_name: &str,
+    activity_backend_tags: &std::collections::HashMap<String, &'static str>,
     mut state: Option<&mut SidecarState>,
 ) -> PanelAreas {
     let factory_collapsed = state.as_ref().map(|s| s.factory_collapsed).unwrap_or(false);
@@ -360,6 +361,7 @@ pub fn render_with_state(
         focus == SidecarFocus::Activity,
         state.as_ref().and_then(|s| s.activity_state.selected()),
         activity_collapsed,
+        activity_backend_tags,
     );
 
     // Return panel areas for click detection
@@ -378,13 +380,13 @@ mod tests {
 
     use cas_factory::{DirectorData, TaskSummary};
     use cas_types::{Priority, TaskStatus, TaskType};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::widgets::ListState;
+    use ratatui::Terminal;
 
     use crate::ui::theme::ActiveTheme;
 
-    use super::{SidecarFocus, SidecarState, render_with_state};
+    use super::{render_with_state, SidecarFocus, SidecarState};
 
     fn task(id: &str, task_type: TaskType, epic: Option<&str>) -> TaskSummary {
         TaskSummary {
@@ -397,9 +399,9 @@ mod tests {
             epic: epic.map(str::to_string),
             branch: Some(format!("epic/{id}")).filter(|_| task_type == TaskType::Epic),
             updated_at: None,
-        epic_verification_owner: None,
+            epic_verification_owner: None,
         }
-        }
+    }
 
     fn data_with_two_epics() -> DirectorData {
         DirectorData {
@@ -491,6 +493,7 @@ mod tests {
                     &theme,
                     Some("cas-param"),
                     "supervisor",
+                    &std::collections::HashMap::new(),
                     Some(&mut state),
                 );
             })
@@ -545,6 +548,7 @@ mod tests {
                     &theme,
                     None,
                     "supervisor",
+                    &std::collections::HashMap::new(),
                     Some(&mut state),
                 );
             })
@@ -587,8 +591,8 @@ mod tests {
                 epic: Some("cas-live".to_string()),
                 branch: None,
                 updated_at: None,
-            epic_verification_owner: None,
-        }],
+                epic_verification_owner: None,
+            }],
             in_progress_tasks: Vec::new(),
             epic_tasks: vec![task("cas-live", TaskType::Epic, None)],
             agents: Vec::new(),
@@ -640,6 +644,7 @@ mod tests {
                     &theme,
                     None,
                     "supervisor",
+                    &std::collections::HashMap::new(),
                     Some(&mut state),
                 );
             })
@@ -704,6 +709,7 @@ mod tests {
                     &theme,
                     None,
                     "supervisor",
+                    &std::collections::HashMap::new(),
                     Some(&mut state),
                 );
             })

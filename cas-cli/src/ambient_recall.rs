@@ -1704,34 +1704,57 @@ pub(crate) fn render_packet(
         .iter()
         .any(|candidate| candidate.semantic_score.is_some());
     let mut lexical_injected = 0usize;
-    for candidate in &delta {
-        if injected.len() == cap {
-            break;
-        }
-        let independently_semantic = candidate
-            .semantic_score
-            .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR);
-        if !candidate.binding && !candidate.lexical_eligible && !independently_semantic {
-            continue;
-        }
-        let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
-        if lexical_only && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP) {
-            continue;
-        }
-        let Some(why_relevant) = injection_reason(candidate) else {
-            continue;
-        };
-        let mut candidate = candidate.clone();
-        candidate.why_relevant = why_relevant;
-        let card = render_card(&candidate);
-        if full.len() + 1 + card.len() + footer_reserve > byte_budget {
-            break;
-        }
-        full.push('\n');
-        full.push_str(&card);
-        injected.push(candidate);
-        if lexical_only {
-            lexical_injected += 1;
+    let mut non_weak_injected = 0usize;
+    let mut weak_lexical_injected = 0usize;
+    // Stronger evidence gets first use of the packet budget. A second pass may
+    // add weak lexical-only context, but never more weak rows than the packet
+    // already contains non-weak rows. This keeps fallback complementary even
+    // when the only local hits are common corpus words that evade the bounded
+    // document-frequency floor.
+    for weak_pass in [false, true] {
+        for candidate in delta.iter().filter(|candidate| {
+            let weak_lexical_only =
+                !candidate.binding && candidate.lexical_weak && candidate.semantic_score.is_none();
+            weak_lexical_only == weak_pass
+        }) {
+            if injected.len() == cap {
+                break;
+            }
+            let independently_semantic = candidate
+                .semantic_score
+                .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR);
+            if !candidate.binding && !candidate.lexical_eligible && !independently_semantic {
+                continue;
+            }
+            let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
+            if lexical_only
+                && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP)
+            {
+                continue;
+            }
+            if weak_pass && weak_lexical_injected == non_weak_injected {
+                continue;
+            }
+            let Some(why_relevant) = injection_reason(candidate) else {
+                continue;
+            };
+            let mut candidate = candidate.clone();
+            candidate.why_relevant = why_relevant;
+            let card = render_card(&candidate);
+            if full.len() + 1 + card.len() + footer_reserve > byte_budget {
+                break;
+            }
+            full.push('\n');
+            full.push_str(&card);
+            injected.push(candidate);
+            if lexical_only {
+                lexical_injected += 1;
+            }
+            if weak_pass {
+                weak_lexical_injected += 1;
+            } else {
+                non_weak_injected += 1;
+            }
         }
     }
     if injected.is_empty() {
@@ -2585,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn weak_lexical_survivors_are_labeled_and_capped_per_packet() {
+    fn weak_lexical_survivors_are_labeled_but_cannot_make_a_packet_alone() {
         let identity = identity(RecallRole::Supervisor);
         let query = RecallQuery::build(
             &identity,
@@ -2628,16 +2651,59 @@ mod tests {
             authored_evidence: Vec::new(),
             rejected_authored: 0,
         };
-        let mut ledger = RecallLedger::default();
-        let (packet, injected) =
-            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
-        assert_eq!(injected.len(), LEXICAL_INJECTION_CAP);
-        assert!(packet.full.contains("why=lexical(weak)"));
         assert!(
-            packet
-                .full
-                .contains("[recall disclosure: injected=3 omitted=9")
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).is_none()
         );
+    }
+
+    /// GH #213: the post-cas-8284 release still admitted three unrelated
+    /// history cards when these common-but-not-stopword words appeared once
+    /// each in a small result corpus. Weak lexical fallback may complement
+    /// stronger evidence, but it must never become most of the packet.
+    #[test]
+    fn common_word_weak_lexical_cards_cannot_dominate_an_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table history_commits (
+                sha text primary key, subject text, body text, indexed_at text,
+                scope text, is_merge integer
+            );
+            insert into tasks values
+                ('cas-legal', 'Legal pass support entity file wording', '', '', '', null, null, 'r1', 'in_progress');
+            insert into history_commits values
+                ('weak-pass', 'Legacy deployment pass notes', '', 'r2', 'project', 0),
+                ('weak-support', 'Browser support placement cleanup', '', 'r3', 'project', 0),
+                ('weak-entity', 'ManyChat entity phone country identity', '', 'r4', 'project', 0),
+                ('weak-file', 'Polish home and file browser UI', '', 'r5', 'project', 0);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let identity = identity(RecallRole::Supervisor);
+        let request = RecallRequest {
+            prompt: "pass support entity file wording".into(),
+            task_id: Some("cas-legal".into()),
+            ..Default::default()
+        };
+        let query = RecallQuery::build(&identity, &request).unwrap();
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let candidates = retrieve_candidates(&identity, &request, &[&retriever]).unwrap();
+
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
+        let weak_injected = injected.iter().filter(|row| row.lexical_weak).count();
+        assert!(injected.iter().any(|row| row.evidence_id == "cas-legal"));
+        assert!(weak_injected * 2 <= injected.len());
+        assert_eq!(injected.len(), 2);
+        assert_eq!(packet.omitted, 3);
+        assert!(packet.full.contains("injected=2 omitted=3"));
     }
 
     #[test]

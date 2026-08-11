@@ -127,10 +127,11 @@ fn test_negative_feedback_from_cold_to_archive() {
 }
 
 #[test]
-fn test_in_context_entries_are_skipped() {
+fn test_non_expired_in_context_entries_are_skipped_by_decay() {
     let mut pinned = make_entry("pin-001", EntryType::Observation, MemoryTier::InContext);
     pinned.helpful_count = 0;
     pinned.harmful_count = 5;
+    pinned.valid_until = Some(Utc::now() + Duration::seconds(1));
 
     let store = make_store(vec![pinned]);
     let count = apply_memory_decay(&store).unwrap();
@@ -142,7 +143,7 @@ fn test_in_context_entries_are_skipped() {
 }
 
 #[test]
-fn cas_4caa_expired_entries_demote_to_archive_including_pinned() {
+fn test_expired_in_context_entries_demote_to_archive() {
     let mut working = make_entry("expired-working", EntryType::Learning, MemoryTier::Working);
     working.valid_until = Some(Utc::now() - Duration::seconds(1));
 

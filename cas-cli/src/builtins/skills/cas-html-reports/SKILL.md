@@ -104,7 +104,7 @@ These hold for every type, every audience, every domain. Details and rationale i
 Consistency is the whole game: **same things look the same**, across figures and across reports. Show
 the *variance*, not just the values. Actual, plan, and forecast are visually distinguishable by fill,
 not only by color. Numbers are right-aligned, sums are bold, units are stated once and never mixed.
-See `references/presentation-rules.md`.
+See `references/presentation-rules.md`; chart sections and wall-of-text visual-rhythm guidance follow the cross-harness `cas-dataviz` skill.
 
 ## Worked examples
 

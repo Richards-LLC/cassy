@@ -379,6 +379,27 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
         content: include_str!("builtins/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
     },
+    // cas-1e7e: cross-harness data visualization guidance for static evidence artifacts.
+    BuiltinFile {
+        path: "skills/cas-dataviz/SKILL.md",
+        content: include_str!("builtins/skills/cas-dataviz/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/references/design-review.md",
+        content: include_str!("builtins/skills/cas-dataviz/references/design-review.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/references/quality-checklist.md",
+        content: include_str!("builtins/skills/cas-dataviz/references/quality-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/scripts/validate_palette.js",
+        content: include_str!("builtins/skills/cas-dataviz/scripts/validate_palette.js"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/examples/2026-08-11-commit-classes.html",
+        content: include_str!("builtins/skills/cas-dataviz/examples/2026-08-11-commit-classes.html"),
+    },
     // design-spec skill (GH #64): generates DESIGN.md — the UI/UX source of
     // truth (normative token frontmatter + 8 sections). Design counterpart to
     // codemap (structure) and project-overview (domain).
@@ -724,6 +745,26 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
         content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-dataviz/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/references/design-review.md",
+        content: include_str!("builtins/codex/skills/cas-dataviz/references/design-review.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/references/quality-checklist.md",
+        content: include_str!("builtins/codex/skills/cas-dataviz/references/quality-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/scripts/validate_palette.js",
+        content: include_str!("builtins/codex/skills/cas-dataviz/scripts/validate_palette.js"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/examples/2026-08-11-commit-classes.html",
+        content: include_str!("builtins/codex/skills/cas-dataviz/examples/2026-08-11-commit-classes.html"),
     },
     // design-spec skill (GH #64) — codex mirror.
     BuiltinFile {
@@ -1093,6 +1134,26 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
         content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
     },
+    BuiltinFile {
+        path: "skills/cas-dataviz/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-dataviz/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/references/design-review.md",
+        content: include_str!("builtins/grok/skills/cas-dataviz/references/design-review.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/references/quality-checklist.md",
+        content: include_str!("builtins/grok/skills/cas-dataviz/references/quality-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/scripts/validate_palette.js",
+        content: include_str!("builtins/grok/skills/cas-dataviz/scripts/validate_palette.js"),
+    },
+    BuiltinFile {
+        path: "skills/cas-dataviz/examples/2026-08-11-commit-classes.html",
+        content: include_str!("builtins/grok/skills/cas-dataviz/examples/2026-08-11-commit-classes.html"),
+    },
     // design-spec skill (GH #64) — grok twin.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
@@ -1339,6 +1400,14 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-html-reports"),
         codex: Some("skills/cas-html-reports"),
         grok: Some("skills/cas-html-reports"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-1e7e: all harnesses need the same claim-first visualization guidance.
+        id: "cas-dataviz",
+        claude: Some("skills/cas-dataviz"),
+        codex: Some("skills/cas-dataviz"),
+        grok: Some("skills/cas-dataviz"),
         note: "",
     },
     RequiredCapability {
@@ -2925,6 +2994,34 @@ This is the body content."#;
         }
     }
 
+    /// cas-641f: workers must walk the repository's cross-surface blast
+    /// radius before close, rather than proving only the path they changed.
+    #[test]
+    fn test_worker_skills_require_cas_src_surface_checklist() {
+        for (label, content) in [
+            ("claude", include_str!("builtins/skills/cas-worker.md")),
+            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
+            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+        ] {
+            for required in [
+                "cas-src surface checklist",
+                "This is a requirement, not a suggestion",
+                "not applicable",
+                "Codex, and Grok mirrors",
+                "CLI parity, docs, and dispatch registration",
+                "config_gen",
+                ".codex/hooks.json",
+                "bootstrap/reconciliation expectations",
+                "doctor_snapshot",
+                "cas-2327",
+                "reverse states",
+                "release-notes impact",
+            ] {
+                assert!(content.contains(required), "{label} surface checklist missing {required:?}");
+            }
+        }
+    }
+
     /// cas-3627 (GH #159): the worker builtin must teach the difference
     /// between the INNER test loop and the FINAL proof.
     ///
@@ -3279,6 +3376,60 @@ This is the body content."#;
                         "{label} {path} must be byte-identical to the claude copy \
                          (cas-html-reports is harness-neutral)"
                     );
+                }
+            }
+        }
+    }
+
+    /// cas-1e7e: visualization guidance is a cross-harness skill rather than
+    /// a Claude-only bundled capability. Keep its trigger surface, review,
+    /// validator, and static evidence example together in every catalog.
+    #[test]
+    fn test_builtin_skills_contains_cas_dataviz() {
+        const FILES: &[&str] = &[
+            "skills/cas-dataviz/SKILL.md",
+            "skills/cas-dataviz/references/design-review.md",
+            "skills/cas-dataviz/references/quality-checklist.md",
+            "skills/cas-dataviz/scripts/validate_palette.js",
+            "skills/cas-dataviz/examples/2026-08-11-commit-classes.html",
+        ];
+        let mut claude_bodies = Vec::new();
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| -> &'static str {
+                catalog.iter().find(|b| b.path == path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label} catalog")).content
+            };
+            let skill = get(FILES[0]);
+            assert!(is_managed_by_cas(skill), "{label} cas-dataviz must be managed by CAS");
+            let description = skill.lines().find_map(|line| line.strip_prefix("description: "))
+                .expect("cas-dataviz needs a description");
+            assert!(description.len() <= 360, "{label} trigger description exceeds 360 bytes");
+            for marker in [
+                "message, not the chart", "claim-title", "annotate the decisive", "Show uncertainty",
+                "small multiples", "table", "@media print", "cas-html-reports", "color last",
+                "becoming text-dense", "30 seconds", "Visually verify the rendered artifact",
+                "390×844", "Grepping HTML", "H7 acceptance-report precedent",
+            ] {
+                assert!(skill.contains(marker), "{label} cas-dataviz missing {marker:?}");
+            }
+            let review = get(FILES[1]);
+            for marker in ["Preserve", "Missing", "Deliberate default inversions", "color-last procedure", "computable palette validator", "one-axis rule", "message-first", "annotation practice", "print/PDF"] {
+                assert!(review.contains(marker), "{label} design review missing {marker:?}");
+            }
+            assert!(get(FILES[3]).contains("export function validate"), "{label} missing runnable validator");
+            let example = get(FILES[4]);
+            for marker in ["<!DOCTYPE html>", "@media print", "role=\"img\"", "<table", "Provenance:", "Merge commits were the largest"] {
+                assert!(example.contains(marker), "{label} example missing {marker:?}");
+            }
+            if label == "claude" {
+                claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();
+            } else {
+                for (path, claude) in &claude_bodies {
+                    assert_eq!(get(path), *claude, "{label} {path} must match the Claude mirror");
                 }
             }
         }

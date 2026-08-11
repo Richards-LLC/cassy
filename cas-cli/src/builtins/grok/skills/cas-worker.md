@@ -18,6 +18,10 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
 2. Start exactly one assigned task: `cas__task action=start id=<task-id>`.
 3. Read it with `action=show`, including depth and acceptance criteria; also read project `CLAUDE.md`.
 4. Implement only its scope. Commit logical units in project style (`git log --oneline -10`) with the task ID. In shared-directory mode, use `factory/<name>`; commit guards reject `main`/`staging`.
+
+**Outcome wording (observed 2026-08-11):** Bad: `docs: update SKILL.md, mirrors, and tests`.
+Good: `docs(cas-2a13): add real failure pairs so guidance writers turn observed mistakes into durable corrections`.
+Name the problem and resulting change; an implementation inventory makes history and close evidence hard to use.
 5. Post progress with `action=notes id=<task-id> note_type=progress notes="..."`.
 6. Before closing a deep task, follow [close-gate.md](cas-worker/references/close-gate.md), complete the required **cas-src surface checklist** below in one pre-close note, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture a fresh proof command's exit code and tail.
 7. Close: `cas__task action=close id=<task-id> reason="..."`

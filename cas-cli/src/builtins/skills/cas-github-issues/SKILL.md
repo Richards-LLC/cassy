@@ -138,6 +138,10 @@ Close the loop on GitHub so the reporter (and the next sweep) can see it:
 gh issue comment <n> --body "Tracked as \`cas-XXXX\`. <one line on the plan.>"
 ```
 
+**Issue-comment specificity (observed 2026-08-11):** Bad: `Tracked as \`cas-2a13\`.`
+Good: `Tracked as \`cas-2a13\`. I’ll add real bad/good pairs to the guidance writers use.`
+Keep the tracker link, then state the concrete outcome; a bare ID leaves the reporter without an answer.
+
 The commit that fixes the issue should carry `Fixes #<n>` so GitHub closes it
 on merge.
 

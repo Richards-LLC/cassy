@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.62.0] - 2026-08-11
+
+### Added
+- **CAS now includes cross-harness data-visualization guidance.** The built-in skill and its quality checks make it easier to turn repository data into readable, reviewable visual artifacts.
+
+### Changed
+- **Pull-request validation is faster while preserving the release gate.** A focused warm suite now protects merge requests, while heavier checks remain available on main, schedules, and manual dispatch.
+- **Workers and release flows now give clearer, more reliable handoffs.** The checked-in guidance covers the supported task surfaces, artifact evidence, and protected-main release sequence.
+
+### Fixed
+- **Hub restarts now complete with live viewers attached.** Existing viewer connections drain within a bounded window, then CAS safely closes any remaining stale connections before the replacement hub starts.
+- **Runtime coordination and cloud sync report actionable truth more consistently.** Stale CI failures no longer trigger misleading alerts, weak ambient matches cannot dominate recall, supervisor memory writes use the intended gate, and rejected cloud records retain itemized reasons.
+
 ## [2.61.1] - 2026-08-10
 
 ### Fixed

@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ci="$repo_root/.github/workflows/ci.yml"
 release="$repo_root/.github/workflows/release.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
+ruleset="$repo_root/docs/branch-protection/main-ruleset.json"
 
 pass=0
 fail=0
@@ -42,6 +43,17 @@ job_block() {
 }
 
 ci_text="$(<"$ci")"
+mapfile -t required_contexts < <(
+    grep -oE '"context": "[^"]+"' "$ruleset" | sed -E 's/"context": "(.*)"/\1/'
+)
+if [[ "${#required_contexts[@]}" -eq 0 ]]; then
+    printf 'FAIL main ruleset declares no required status checks\n'
+    fail=$((fail + 1))
+else
+    for context in "${required_contexts[@]}"; do
+        require_text "$ci_text" "name: $context" "ruleset-required context is a CI job: $context"
+    done
+fi
 require_text "$ci_text" '- "factory/**"' 'factory pushes trigger CI'
 require_text "$ci_text" '- "epic/**"' 'epic pushes trigger CI'
 require_text "$ci_text" '- "v*"' 'release tags trigger CI'

@@ -7,9 +7,14 @@ use std::io;
 use clap::{Parser, Subcommand};
 
 use crate::cli::Cli;
-use crate::cli::cloud::print_backfill_notice;
-use crate::cloud::{FetchTeamsOutcome, default_endpoint, fetch_and_cache_teams,
-    is_acceptable_endpoint, maybe_apply_team_backfill};
+use crate::cli::cloud::{
+    LoginTeamSelection, print_backfill_notice, print_login_team_selection,
+    select_cached_team_after_login,
+};
+use crate::cloud::{
+    CloudConfig, FetchTeamsOutcome, default_endpoint, fetch_and_cache_teams, is_acceptable_endpoint,
+    maybe_apply_team_backfill,
+};
 use crate::ui::components::{
     Component, Formatter, Spinner, SpinnerMsg, clear_inline, render_inline_view, rerender_inline,
 };
@@ -329,7 +334,9 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                         // Best-effort: fetch team membership from /api/me and
                         // cache into ~/.cas/cloud.json so T3's resolution chain
                         // works offline immediately after login.
-                        match fetch_and_cache_teams(&args.endpoint, access_token) {
+                        let membership_outcome =
+                            fetch_and_cache_teams(&args.endpoint, access_token);
+                        match &membership_outcome {
                             FetchTeamsOutcome::Updated { team_count } => {
                                 tracing::debug!(
                                     team_count,
@@ -351,6 +358,13 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                                      Team auto-scope will work after the next `cas cloud sync`."
                                 );
                             }
+                        }
+
+                        if matches!(
+                            membership_outcome,
+                            FetchTeamsOutcome::Updated { .. } | FetchTeamsOutcome::Empty
+                        ) {
+                            apply_login_team_selection(cli);
                         }
 
                         // T6: first-run backfill — auto-promote to team scope on first
@@ -532,7 +546,8 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
 
     // Best-effort: fetch team membership from /api/me and cache into
     // ~/.cas/cloud.json so T3's resolution chain works immediately.
-    match fetch_and_cache_teams(endpoint, token) {
+    let membership_outcome = fetch_and_cache_teams(endpoint, token);
+    match &membership_outcome {
         FetchTeamsOutcome::Updated { team_count } => {
             tracing::debug!(
                 team_count,
@@ -548,6 +563,13 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
             // will retry via the lazy-refresh path.
             tracing::warn!("could not fetch team membership from /api/me during token login (non-fatal)");
         }
+    }
+
+    if matches!(
+        membership_outcome,
+        FetchTeamsOutcome::Updated { .. } | FetchTeamsOutcome::Empty
+    ) {
+        apply_login_team_selection(cli);
     }
 
     // T6: first-run backfill — auto-promote to team scope on first login when
@@ -566,6 +588,34 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
     }
 
     Ok(())
+}
+
+/// Use the cached-membership resolver behind `cas cloud team set` to make a
+/// sole team membership active for the project that just logged in. Failures
+/// remain non-fatal, matching the surrounding best-effort membership refresh.
+fn apply_login_team_selection(cli: &Cli) {
+    let user_config = match crate::cloud::user_level_cloud_json_path()
+        .and_then(|path| CloudConfig::load_from(&path).ok())
+    {
+        Some(config) => config,
+        None => return,
+    };
+    let mut project_config = match CloudConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "could not load project cloud config after login");
+            return;
+        }
+    };
+
+    let outcome = select_cached_team_after_login(&mut project_config, &user_config);
+    if matches!(outcome, LoginTeamSelection::Activated(_))
+        && let Err(error) = project_config.save()
+    {
+        tracing::warn!(%error, "could not save active team selected after login");
+        return;
+    }
+    print_login_team_selection(cli, &outcome);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -3629,6 +3629,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     last_pending_detail, factory_session, created_at, processed_at
              FROM prompt_queue
              WHERE transport_delivered_at IS NULL
+               AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
                AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
              ORDER BY id DESC
@@ -4190,6 +4191,52 @@ mod tests {
         assert!(
             reported[0].processed_at.is_some(),
             "the row is terminal, not in flight"
+        );
+    }
+
+    /// A terminal relay remains forensic evidence in the queue, but once a
+    /// supervisor explicitly acknowledges it, repeating its full banner on
+    /// every `worker_status` call is pure context noise.  This pins the
+    /// historical shape where a legacy suppressed row has `acked_at` set while
+    /// its terminal stage remains `suppressed`.
+    #[test]
+    fn an_acknowledged_stale_lifecycle_relay_is_not_replayed() {
+        let (_temp, store) = create_test_store();
+        let stale = store
+            .enqueue_full(
+                "lifecycle-wake:3403",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-acked\">",
+                Some("cas-src-fast-pelican-83"),
+                Some("task_awaiting_merge: cas-acked"),
+                Some(NotificationPriority::High),
+            )
+            .unwrap();
+        store
+            .mark_suppressed(
+                stale,
+                Some("task lifecycle occurrence no longer matches current task state"),
+            )
+            .unwrap();
+
+        // Reproduce an acknowledgement written by an older receipt path: it
+        // supplies durable acknowledgement evidence without rewriting the
+        // historical terminal stage.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET acked_at = ?, acked_via = 'explicit_ack' WHERE id = ?",
+                params![Utc::now().to_rfc3339(), stale],
+            )
+            .unwrap();
+        }
+
+        assert!(
+            store
+                .list_undelivered_lifecycle_relays(10)
+                .unwrap()
+                .is_empty(),
+            "an acknowledged stale relay must stay forensic in SQLite without replaying into worker_status"
         );
     }
 

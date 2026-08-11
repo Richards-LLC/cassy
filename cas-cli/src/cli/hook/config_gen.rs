@@ -2,6 +2,39 @@ use std::path::{Path, PathBuf};
 
 use toml::map::Map;
 
+/// Pretty-print JSON with every object recursively sorted by key.
+///
+/// `serde_json::Value` can preserve the insertion order from a user-edited
+/// file, so pretty-printing it directly can leave a generated config dirty
+/// even when its meaning did not change. Arrays retain their order because
+/// hook-group order is semantically significant.
+pub(crate) fn canonical_json_pretty(value: &serde_json::Value) -> serde_json::Result<String> {
+    let mut canonical = value.clone();
+    canonicalize_json_objects(&mut canonical);
+    serde_json::to_string_pretty(&canonical)
+}
+
+fn canonicalize_json_objects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, value) in &mut entries {
+                canonicalize_json_objects(value);
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in entries {
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                canonicalize_json_objects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Check whether a Claude *config directory* (e.g. `~/.claude`, `~/.claude-alt`)
 /// has CAS hooks in its `settings.json`.
 ///
@@ -631,7 +664,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     });
 
     // Write back with pretty formatting
-    let formatted = serde_json::to_string_pretty(&config)?;
+    let formatted = canonical_json_pretty(&config)?;
 
     // Check if content actually changed
     if existing_content.as_ref() == Some(&formatted) {
@@ -822,7 +855,7 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         }));
     }
 
-    let formatted = serde_json::to_string_pretty(&config)?;
+    let formatted = canonical_json_pretty(&config)?;
     if existing_content.as_ref() == Some(&formatted) {
         return Ok(false);
     }

@@ -756,7 +756,8 @@ impl TeamsManager {
     /// (`"args": ["cas", ...]` with no `command` field) and tripped
     /// /doctor on every CC version, regardless of #58441 state.
     ///
-    /// Defaults mirror `cli/hook/config_gen.rs`: 2000ms timeout for both.
+    /// Defaults mirror `cli/hook/config_gen.rs`: 2000ms timeout for every
+    /// command hook in this compact factory set.
     /// `PreToolUse` matcher covers the filesystem allow list plus
     /// intercept-only tools like `SendMessage` and `AskUserQuestion`; those
     /// intercept-only tools are deliberately omitted from `permissions.allow`.
@@ -786,6 +787,27 @@ impl TeamsManager {
                         {
                             "type": "command",
                             "command": "cas hook PermissionRequest",
+                            "timeout": 2000
+                        }
+                    ]
+                }
+            ],
+            // cas-bd5c (GH #239): this is the context-injection seam. Team
+            // members are launched with this per-team `--settings` file, not
+            // the normal generated project settings. Omitting SessionStart
+            // therefore made a team-spawned supervisor start without the
+            // ambient memory/context bundle even though direct launches ran
+            // `cas hook SessionStart` normally.
+            //
+            // Keep this deliberately narrow: factory settings still do not
+            // mirror all of config_gen's hooks, only the hooks needed for
+            // factory safety/delivery plus the session-start bundle.
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook SessionStart",
                             "timeout": 2000
                         }
                     ]
@@ -2064,6 +2086,26 @@ mod tests {
             );
             assert!(path.is_file(), "{name} settings file was not pre-written");
         }
+
+        // GH #239: the director-message/team-spawn shape launches the
+        // supervisor with this alt-profile `--settings` file. It must retain
+        // the same SessionStart hook that a directly launched session gets,
+        // or `handle_session_start` (and thus ambient recall/context) has no
+        // chance to run at all.
+        let supervisor_settings = std::fs::read_to_string(
+            alt_team_dir.join("supervisor-settings.json"),
+        )
+        .expect("alt-profile supervisor settings must be readable");
+        let supervisor_settings: serde_json::Value =
+            serde_json::from_str(&supervisor_settings).expect("settings must be valid JSON");
+        let session_start_command = supervisor_settings["hooks"]["SessionStart"][0]["hooks"][0]
+            ["command"]
+            .as_str();
+        assert_eq!(
+            session_start_command,
+            Some("cas hook SessionStart"),
+            "the director-message alt-profile supervisor must invoke the same SessionStart handler as direct launches"
+        );
 
         assert!(
             !home.join(".claude").join("teams").exists(),
@@ -4058,18 +4100,28 @@ mod tests {
             .output();
     }
 
-    // ---- cas-7a01 (GH #155): the turn-start hook must be installed ----
+    // ---- SessionStart + turn-start hooks must be installed ----
 
-    /// A handler that never fires is not a fix. Factory settings installed
-    /// exactly two events (`PreToolUse`, `PermissionRequest`), so the inbox
-    /// surfacing added at `UserPromptSubmit` would have been dead code for the
-    /// very population it exists to serve.
+    /// A handler that never fires is not a fix. Factory settings used to omit
+    /// both SessionStart (ambient context, cas-bd5c / GH #239) and the
+    /// turn-start seam before cas-7a01. Each must be emitted for both roles.
     #[test]
-    fn factory_settings_wire_the_turn_start_hook_for_both_roles() {
+    fn factory_settings_wire_session_and_turn_start_hooks_for_both_roles() {
         for (role, body) in [
             ("worker", TeamsManager::worker_settings_contents()),
             ("supervisor", TeamsManager::supervisor_settings_contents()),
         ] {
+            let session_start = body["hooks"]["SessionStart"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{role} settings install no SessionStart hook"));
+            let session_start_command = session_start[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("hook entry must carry a shell command");
+            assert_eq!(
+                session_start_command, "cas hook SessionStart",
+                "{role}: SessionStart must dispatch to the ambient context handler"
+            );
+
             let entries = body["hooks"]["UserPromptSubmit"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{role} settings install no UserPromptSubmit hook"));
@@ -4083,12 +4135,12 @@ mod tests {
         }
     }
 
-    /// Scope guard from the supervisor's ruling: extend the factory block
-    /// minimally. `cli/hook/config_gen.rs` installs fourteen events; auditing
-    /// that difference is separate work, and silently widening this block
-    /// changes factory behaviour far beyond the delivery bug.
+    /// Scope guard: the factory block deliberately carries only the four
+    /// factory-critical events. `cli/hook/config_gen.rs` installs many more;
+    /// auditing that difference is separate work, and silently widening this
+    /// block would change factory behaviour beyond the named seams.
     #[test]
-    fn the_factory_hooks_block_gains_only_the_turn_start_event() {
+    fn factory_hooks_block_is_limited_to_factory_critical_events() {
         let body = TeamsManager::worker_settings_contents();
         let mut events: Vec<&str> = body["hooks"]
             .as_object()
@@ -4099,8 +4151,13 @@ mod tests {
         events.sort_unstable();
         assert_eq!(
             events,
-            vec!["PermissionRequest", "PreToolUse", "UserPromptSubmit"],
-            "the factory hooks block must not drift beyond the three wired events"
+            vec![
+                "PermissionRequest",
+                "PreToolUse",
+                "SessionStart",
+                "UserPromptSubmit",
+            ],
+            "the factory hooks block must not drift beyond the four wired events"
         );
     }
 }

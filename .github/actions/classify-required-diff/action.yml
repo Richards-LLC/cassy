@@ -1,0 +1,38 @@
+name: Classify required CI diff
+description: Fast-pass only empty, documentation-only, and exact package-version diffs.
+inputs:
+  base-sha:
+    description: Commit on the base side of the comparison.
+    required: true
+outputs:
+  class:
+    description: The conservative CI diff classification.
+    value: ${{ steps.classify.outputs.class }}
+  fast-pass:
+    description: Whether expensive job steps may be skipped.
+    value: ${{ steps.classify.outputs.fast-pass }}
+runs:
+  using: composite
+  steps:
+    - id: classify
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+      run: |
+        # checkout fetch-depth: 0 makes this a true merge-base comparison,
+        # including an ancestry-only merge with no content changes.
+        if [[ -z "$BASE_SHA" ]]; then
+          # Schedules and manual dispatches do not have a comparison event.
+          # They are intentionally never eligible to fast-pass.
+          class=full
+        else
+          merge_base="$(git merge-base "$BASE_SHA" HEAD)"
+          class="$(scripts/classify-ci-diff.sh "$merge_base" HEAD)"
+        fi
+        printf 'class=%s\n' "$class" >> "$GITHUB_OUTPUT"
+        if [[ "$class" == empty || "$class" == docs-only || "$class" == version-bump ]]; then
+          printf 'fast-pass=true\n' >> "$GITHUB_OUTPUT"
+          echo "::notice title=CI fast-pass::fast-passed: $class"
+        else
+          printf 'fast-pass=false\n' >> "$GITHUB_OUTPUT"
+        fi

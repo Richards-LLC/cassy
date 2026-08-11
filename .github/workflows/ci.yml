@@ -87,15 +87,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - uses: ./.github/actions/setup-rust-linux
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - if: steps.classify-diff.outputs.fast-pass != 'true'
+        uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
 
       - name: Install nextest
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         uses: taiki-e/install-action@nextest
 
       - name: Build and test Commander web assets
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         working-directory: hub-web
         run: |
           npm ci
@@ -105,14 +115,17 @@ jobs:
           git diff --exit-code -- dist
 
       - name: Check
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas
 
       - name: Test portable x86_64 ISA audit
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
       - name: Build (without MCP proxy)
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
@@ -131,17 +144,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - uses: ./.github/actions/setup-rust-linux
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - if: steps.classify-diff.outputs.fast-pass != 'true'
+        uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite
 
       - name: Install nextest
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         uses: taiki-e/install-action@nextest
 
       # Keep --no-fail-fast so failures never mask later binaries. This runs
       # every test binary; the doctest lane below covers what nextest cannot.
       - name: Test full suite
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo nextest run -p cas --no-fail-fast
@@ -160,14 +183,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - uses: ./.github/actions/setup-rust-linux
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - if: steps.classify-diff.outputs.fast-pass != 'true'
+        uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-docs
 
       # nextest does not run doctests; keep this separate so it never waits
       # behind the partitioned suite.
       - name: Test doctests
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --doc
@@ -253,17 +285,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Install Rust
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       # ghostty_vt_sys builds its native library with Zig even for cargo check.
       - name: Install Zig
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         run: ./scripts/bootstrap-zig.sh
 
       # Zig discovers Darwin SDKs through xcrun, which follows DEVELOPER_DIR.
       # Keep this visible so runner-image/toolchain drift is diagnosable.
       - name: Report Apple and Zig toolchains
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         run: |
           echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           xcode-select --print-path
@@ -274,11 +316,13 @@ jobs:
           ./.context/zig/zig env
 
       - name: Setup sccache
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         shell: bash
         run: |
           if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
@@ -289,16 +333,19 @@ jobs:
           fi
 
       - name: Cache cargo
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
       - name: Check workspace
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check --workspace --all-targets
 
       - name: Check (without MCP proxy)
+        if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas --no-default-features

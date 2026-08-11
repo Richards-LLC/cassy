@@ -13,11 +13,14 @@ use crate::ui::components::{Formatter, Header, KeyValue, Renderable, StatusLine}
 use crate::ui::theme::ActiveTheme;
 
 use crate::cli::Cli;
-use crate::cli::hook::config_gen::{get_cas_hooks_config, has_cas_hook_entries};
+use crate::cli::hook::config_gen::{
+    canonical_json_pretty, get_cas_hooks_config, has_cas_hook_entries,
+};
 
 pub(crate) mod config_gen;
 pub use crate::cli::hook::config_gen::{
-    configure_codex_mcp_server, configure_mcp_server, global_has_cas_hooks, strip_cas_hooks,
+    configure_mcp_server, global_has_cas_hooks, provision_codex_project,
+    provision_codex_user_config, strip_cas_hooks,
 };
 
 /// Arguments for the hook command
@@ -336,7 +339,7 @@ fn cleanup_single_file(path: &Path, dry_run: bool) -> anyhow::Result<CleanupActi
         }
         Ok(CleanupAction::Deleted)
     } else {
-        let output = serde_json::to_string_pretty(&settings)?;
+        let output = canonical_json_pretty(&settings)?;
         std::fs::write(path, output)?;
         Ok(CleanupAction::Stripped)
     }
@@ -683,7 +686,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
         merge_worktree_permissions(project_root, settings_obj);
 
         // Write back
-        let output = serde_json::to_string_pretty(&settings)?;
+        let output = canonical_json_pretty(&settings)?;
         std::fs::write(&settings_path, output)?;
         false
     } else {
@@ -707,7 +710,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
             merge_worktree_permissions(project_root, settings_obj);
         }
 
-        let output = serde_json::to_string_pretty(&settings)?;
+        let output = canonical_json_pretty(&settings)?;
         std::fs::write(&settings_path, output)?;
         true
     };

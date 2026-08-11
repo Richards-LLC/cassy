@@ -32,7 +32,19 @@ jobs:
           sudo apt-get install -y gcc mold
 
       - name: Setup sccache
+        id: setup-sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        shell: bash
+        run: |
+          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+            echo "::warning::sccache backend unavailable — building uncached"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+          fi
 
       # Keep Cargo's registry and dependency artifacts warm across releases.
       # The explicit lockfile key prevents a dependency update from restoring
@@ -73,7 +85,19 @@ jobs:
           mold --version
 
       - name: Setup sccache
+        id: setup-sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        shell: bash
+        run: |
+          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+            echo "::warning::sccache backend unavailable — building uncached"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
@@ -139,7 +163,19 @@ jobs:
         run: ./scripts/bootstrap-zig.sh
 
       - name: Setup sccache
+        id: setup-sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        shell: bash
+        run: |
+          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+            echo "::warning::sccache backend unavailable — building uncached"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+          fi
 
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2

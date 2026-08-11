@@ -359,6 +359,31 @@ fn test_is_not_important_prompt_short() {
     assert!(!is_important_prompt("no"));
 }
 
+#[test]
+fn test_context_memory_gate_rejects_transient_and_recursive_prompts() {
+    assert!(
+        !is_context_memory_worthy_prompt("hello what directory are you working in?"),
+        "short session chatter belongs in prompt attribution, not injected memory"
+    );
+    assert!(
+        !is_context_memory_worthy_prompt(
+            "Analyze this user prompt and determine if it expresses a coding preference or rule that should be remembered."
+        ),
+        "recursive control-plane prompts must not become recall candidates"
+    );
+    assert!(
+        !is_context_memory_worthy_prompt(&"x".repeat(12_001)),
+        "one oversized prompt must not occupy the memory injection budget"
+    );
+}
+
+#[test]
+fn test_context_memory_gate_keeps_actionable_task_requests() {
+    assert!(is_context_memory_worthy_prompt(
+        "Implement a regression test for the token-budgeted context renderer."
+    ));
+}
+
 // =========================================================================
 // format_bash_command tests
 // =========================================================================

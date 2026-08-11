@@ -285,3 +285,36 @@ fn codex_worker_runtime_instruction_allows_close_then_escalate() {
         "runtime worker instruction should not forbid close universally"
     );
 }
+
+#[test]
+fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
+    let root = repo_root();
+    for flavor in ["", "codex/", "grok/"] {
+        let base = root.join(format!("cas-cli/src/builtins/{flavor}skills/cas-worker"));
+        let worker = load(&base.with_extension("md"));
+        let close_gate = load(&base.join("references/close-gate.md"));
+
+        for marker in [
+            "never retry the denied target",
+            "A `/dev/null` denial is a guard defect to report",
+            "every applicable entry must paste its proving file, command, or test",
+            "Bare assertions such as “synced all mirrors” or “migration covered” are non-compliant",
+        ] {
+            assert!(
+                worker.contains(marker),
+                "{flavor} worker guidance missing {marker:?}"
+            );
+        }
+        for marker in [
+            "Crossed-message freshness handshake",
+            "before any corrective commit",
+            "git merge-base --is-ancestor <delivered-tip> <target-tip>",
+            "re-close or stop; do not edit stale state",
+        ] {
+            assert!(
+                close_gate.contains(marker),
+                "{flavor} close gate missing {marker:?}"
+            );
+        }
+    }
+}

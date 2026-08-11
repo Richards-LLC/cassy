@@ -45,6 +45,10 @@ Post order: user top-level → capture `ts` → user reply → dev top-level →
 - **Plain language** in the User thread — no internal jargon, no module names.
 - **Honest reverts:** if something shipped and came back out, say so plainly.
 
+**Was → Now punch (observed 2026-08-11):** Bad: `Added hook support, tests, and CI updates.`
+Good: `Was → Codex ignored an allowed hook decision. Now → it receives the harness-specific empty allow response.`
+Lead with the user-visible before/after; an implementation inventory is not a release note.
+
 ## Artifact
 
 Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`

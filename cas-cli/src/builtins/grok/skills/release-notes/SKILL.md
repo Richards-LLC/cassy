@@ -1,6 +1,6 @@
 ---
 name: release-notes
-description: Draft and post release notes for a merge to `staging` or `main`, and install/maintain the project's rubric at `docs/release-notes/RUBRIC.md`. Use when a PR merges to staging or main, when the user asks to "announce the release", "post release notes", "write the Slack update", "draft the user/dev threads", or when a project has no `docs/release-notes/RUBRIC.md` yet. Every staging/main merge must be announced per the rubric.
+description: Use when a merge reaches staging or main, or when the user asks to draft or post release notes, Slack updates, or a release-notes rubric.
 managed_by: cas
 ---
 

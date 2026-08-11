@@ -1,5 +1,7 @@
 use crate::cli::hook::*;
-use crate::cli::hook::config_gen::{get_cas_hooks_config, has_cas_hook_entries};
+use crate::cli::hook::config_gen::{
+    configure_codex_mcp_server, get_cas_hooks_config, has_cas_hook_entries,
+};
 use crate::cli::hook::configure_claude_hooks_with_home;
 use crate::config::HookConfig;
 use tempfile::TempDir;
@@ -271,7 +273,9 @@ fn test_configure_codex_creates_config() {
     );
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/command"),
-        Some(&serde_json::json!("cas hook PreToolUse"))
+        Some(&serde_json::json!(
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse"
+        ))
     );
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/timeout"),
@@ -362,6 +366,14 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
                         "type": "command",
                         "command": "custom pre-tool hook"
                     }]
+                },
+                {
+                    "matcher": ".*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "cas hook PreToolUse",
+                        "timeout": 999
+                    }]
                 }
             ],
             "PostToolUse": [
@@ -439,16 +451,94 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
     );
     assert_eq!(
         pre_tool[1].pointer("/hooks/0/command"),
-        Some(&serde_json::json!("cas hook PreToolUse"))
+        Some(&serde_json::json!(
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse"
+        ))
     );
     assert_eq!(
         pre_tool[1].pointer("/hooks/0/timeout"),
         Some(&serde_json::json!(3))
     );
 
+    let first_hooks_bytes = std::fs::read_to_string(&hooks_path).unwrap();
     assert!(
         !configure_codex_mcp_server(temp.path()).unwrap(),
         "second configuration pass should not rewrite either Codex file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        first_hooks_bytes,
+        "a second Codex hook generation must be byte-identical"
+    );
+}
+
+#[test]
+fn codex_hooks_regeneration_converges_hand_reordered_json() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let hooks_path = codex_dir.join("hooks.json");
+
+    std::fs::write(
+        &hooks_path,
+        r#"{
+  "hooks": {
+    "PreToolUse": [{"hooks": [{"timeout": 3, "command": "cas hook PreToolUse", "type": "command"}], "matcher": "^Bash$"}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "cas hook PostToolUse", "timeout": 3}], "matcher": "^Bash$"}]
+  },
+  "description": "intentionally hand-reordered"
+}"#,
+    )
+    .unwrap();
+
+    assert!(configure_codex_mcp_server(temp.path()).unwrap());
+    let canonical = std::fs::read_to_string(&hooks_path).unwrap();
+    assert!(
+        canonical.find("\"description\"").unwrap() < canonical.find("\"hooks\"").unwrap(),
+        "root object keys should converge to lexical order"
+    );
+    assert!(
+        canonical.find("\"PostToolUse\"").unwrap()
+            < canonical.find("\"PreToolUse\"").unwrap(),
+        "hook event keys should converge to lexical order"
+    );
+    assert!(
+        !configure_codex_mcp_server(temp.path()).unwrap(),
+        "canonicalized hooks should need no further configuration"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        canonical,
+        "regenerating a canonicalized hooks file must preserve every byte"
+    );
+}
+
+#[test]
+fn committed_codex_hooks_file_regenerates_without_byte_changes() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let hooks_path = codex_dir.join("hooks.json");
+    std::fs::write(&hooks_path, include_str!("../../../../.codex/hooks.json")).unwrap();
+
+    let committed_bytes = std::fs::read_to_string(&hooks_path).unwrap();
+    assert!(
+        configure_codex_mcp_server(temp.path()).unwrap(),
+        "the first pass creates .codex/config.toml"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        committed_bytes,
+        "the committed hooks fixture must already be canonical"
+    );
+    assert!(
+        !configure_codex_mcp_server(temp.path()).unwrap(),
+        "a second configuration pass should be a no-op"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path).unwrap(),
+        committed_bytes,
+        "an unchanged committed hooks fixture must remain byte-identical"
     );
 }
 

@@ -876,6 +876,53 @@ pub(super) fn row_needs_renudge_cadence(
 /// short enough to conclude "unobserved" long before the operator does.
 const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long a normal, transport-delivered message may remain unsurfaced before
+/// the daemon retries a *normal* nudge.  This deliberately does not borrow the
+/// urgent interrupt path: ordinary traffic must never escalate itself.
+const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A normal write that has not yet produced evidence of a harness turn.
+#[derive(Debug, Clone)]
+pub(crate) struct NormalDeliveryProbe {
+    pub(crate) pane: String,
+    pub(crate) target: String,
+    pub(crate) bytes_at_delivery: u64,
+    pub(crate) delivered_at: std::time::Instant,
+    pub(crate) nudge_sent_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NormalDeliveryProbeAction {
+    Observed,
+    Wait,
+    RetryNormalNudge,
+    FlagSupervisor,
+}
+
+/// Decision seam for the delivered-unsurfaced watchdog (GH #224).
+pub(super) fn normal_delivery_probe_action(
+    bytes_at_delivery: u64,
+    bytes_now: Option<u64>,
+    elapsed_since_delivery: std::time::Duration,
+    nudge_sent_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> NormalDeliveryProbeAction {
+    if bytes_now.is_some_and(|bytes| bytes > bytes_at_delivery) {
+        return NormalDeliveryProbeAction::Observed;
+    }
+    match nudge_sent_at {
+        None if elapsed_since_delivery >= NORMAL_DELIVERY_OBSERVE_WINDOW => {
+            NormalDeliveryProbeAction::RetryNormalNudge
+        }
+        Some(nudged_at)
+            if now.saturating_duration_since(nudged_at) >= NORMAL_DELIVERY_OBSERVE_WINDOW =>
+        {
+            NormalDeliveryProbeAction::FlagSupervisor
+        }
+        _ => NormalDeliveryProbeAction::Wait,
+    }
+}
+
 /// cas-ac7e (GH #130): an urgent row whose payload has been typed into a pane
 /// and whose wake is still unproven.
 #[derive(Debug, Clone)]
@@ -1094,6 +1141,83 @@ impl FactoryDaemon {
         self.lifecycle_redelivery_counts.remove(&row_id);
         self.inbox_deferred_writes.remove(&row_id);
         self.urgent_wake_probes.remove(&row_id);
+        self.normal_delivery_probes.remove(&row_id);
+    }
+
+    /// Retry a normal message whose PTY write never yielded any pane output,
+    /// then surface the residual failure to the supervisor.  The retry uses
+    /// `Mux::inject`, never `interrupt_and_inject`: this watchdog is evidence
+    /// and visibility, not permission to auto-escalate a normal message.
+    async fn resolve_normal_delivery_probes(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        let now = std::time::Instant::now();
+        let actions: Vec<_> = self
+            .normal_delivery_probes
+            .iter()
+            .map(|(id, probe)| {
+                (
+                    *id,
+                    probe.pane.clone(),
+                    probe.target.clone(),
+                    normal_delivery_probe_action(
+                        probe.bytes_at_delivery,
+                        self.app.mux.pane_bytes_received(&probe.pane),
+                        now.saturating_duration_since(probe.delivered_at),
+                        probe.nudge_sent_at,
+                        now,
+                    ),
+                )
+            })
+            .collect();
+
+        for (row_id, pane, target, action) in actions {
+            match action {
+                NormalDeliveryProbeAction::Observed => {
+                    self.normal_delivery_probes.remove(&row_id);
+                }
+                NormalDeliveryProbeAction::Wait => {}
+                NormalDeliveryProbeAction::RetryNormalNudge => {
+                    let _ = self
+                        .app
+                        .mux
+                        .inject(
+                            &pane,
+                            "CAS delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
+                        )
+                        .await;
+                    if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
+                        probe.nudge_sent_at = Some(now);
+                    }
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "normal_delivery_watchdog_nudge",
+                        message_id = row_id,
+                        target_agent = %pane,
+                        "normal transport delivery remained unsurfaced; sent one non-urgent nudge"
+                    );
+                }
+                NormalDeliveryProbeAction::FlagSupervisor => {
+                    self.normal_delivery_probes.remove(&row_id);
+                    let notice = format!(
+                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then produced no pane output for two watchdog windows. A single normal nudge was attempted; no urgent escalation was sent.</system-notice>"
+                    );
+                    if let Err(error) = queue.enqueue_with_session(
+                        "delivery-watchdog",
+                        self.app.supervisor_name(),
+                        &notice,
+                        &self.session_name,
+                    ) {
+                        tracing::error!(%error, message_id = row_id, "failed to queue normal delivery watchdog flag");
+                    }
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "normal_delivery_watchdog_flagged",
+                        message_id = row_id,
+                        target_agent = %pane,
+                        "normal delivery stayed unsurfaced after retry; supervisor notified without urgent escalation"
+                    );
+                }
+            }
+        }
     }
 
     /// cas-ac7e (GH #130): settle every outstanding urgent wake probe against
@@ -2150,6 +2274,7 @@ impl FactoryDaemon {
         // selects a row, so an urgent row is consumed the moment its pane
         // proves it took the turn — and never before.
         self.resolve_urgent_wake_probes(queue.as_ref());
+        self.resolve_normal_delivery_probes(queue.as_ref()).await;
 
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor
@@ -3713,6 +3838,32 @@ impl FactoryDaemon {
                 // cas-d732: the row is consumed — its re-nudge clock is dead
                 // weight now, and leaving it would leak one entry per row.
                 self.forget_row_delivery_state(queued.id);
+                // cas-6e76 (GH #224): a successful normal PTY write only
+                // proves transport.  Preserve its output baseline after
+                // retiring prior row state so this fresh watchdog probe is not
+                // immediately forgotten.
+                if !queued.urgent && queued.target != self.app.supervisor_name() {
+                    let normal_delivery_pane = if queued.target == "supervisor" {
+                        self.app.supervisor_name().to_string()
+                    } else {
+                        queued.target.clone()
+                    };
+                    let bytes_at_delivery = self
+                        .app
+                        .mux
+                        .pane_bytes_received(&normal_delivery_pane)
+                        .unwrap_or(0);
+                    self.normal_delivery_probes.insert(
+                        queued.id,
+                        NormalDeliveryProbe {
+                            pane: normal_delivery_pane,
+                            target: queued.target.clone(),
+                            bytes_at_delivery,
+                            delivered_at: std::time::Instant::now(),
+                            nudge_sent_at: None,
+                        },
+                    );
+                }
                 // cas-b8ce (GH #176): reaching this arm means the delivery was
                 // NOT wake-deferred and NOT awaiting an urgent wake probe — the
                 // content went into the recipient's turn over CAS's transport.
@@ -8129,7 +8280,7 @@ mod urgent_wake_probe_tests {
         UrgentProbeAction, UrgentWakeOutcome, classify_urgent_wake, lifecycle_redelivery_decision,
         row_needs_renudge_cadence, urgent_probe_action, urgent_wake_is_unresolved,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// The 7206 shape: the daemon broke the turn and typed the redirect at
     /// 20:23:57, the pane produced nothing, and the recipient acted only on a
@@ -8304,6 +8455,64 @@ mod urgent_wake_probe_tests {
             interrupts >= 2,
             "the redirect must still be RETRIED — holding it forever is the \
              stranding this task fixes, not a fix for it"
+        );
+    }
+
+    #[test]
+    fn normal_watchdog_retries_idle_codex_then_flags_cas_6e76() {
+        use super::{
+            NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction, normal_delivery_probe_action,
+        };
+
+        let start = Instant::now();
+        assert_eq!(
+            normal_delivery_probe_action(10, Some(10), Duration::from_secs(30), None, start),
+            NormalDeliveryProbeAction::Wait
+        );
+        assert_eq!(
+            normal_delivery_probe_action(
+                10,
+                Some(10),
+                NORMAL_DELIVERY_OBSERVE_WINDOW,
+                None,
+                start + NORMAL_DELIVERY_OBSERVE_WINDOW,
+            ),
+            NormalDeliveryProbeAction::RetryNormalNudge,
+            "an idle normal recipient gets exactly one normal retry at the cadence"
+        );
+        let nudged_at = start + NORMAL_DELIVERY_OBSERVE_WINDOW;
+        assert_eq!(
+            normal_delivery_probe_action(
+                10,
+                Some(11),
+                NORMAL_DELIVERY_OBSERVE_WINDOW + Duration::from_secs(1),
+                Some(nudged_at),
+                nudged_at + Duration::from_secs(1),
+            ),
+            NormalDeliveryProbeAction::Observed,
+            "a seeded idle recipient that reacts to the normal nudge is surfaced and retires the probe"
+        );
+        assert_eq!(
+            normal_delivery_probe_action(
+                10,
+                Some(10),
+                NORMAL_DELIVERY_OBSERVE_WINDOW * 2,
+                Some(nudged_at),
+                nudged_at + NORMAL_DELIVERY_OBSERVE_WINDOW,
+            ),
+            NormalDeliveryProbeAction::FlagSupervisor,
+            "the second silent window is a supervisor-visible flag, never an auto-urgent"
+        );
+        assert_eq!(
+            normal_delivery_probe_action(
+                10,
+                Some(11),
+                NORMAL_DELIVERY_OBSERVE_WINDOW,
+                None,
+                start + NORMAL_DELIVERY_OBSERVE_WINDOW,
+            ),
+            NormalDeliveryProbeAction::Observed,
+            "any post-delivery pane output closes the watchdog"
         );
     }
 }

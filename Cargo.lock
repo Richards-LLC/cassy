@@ -859,10 +859,12 @@ name = "cas-pty"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "fs2",
  "libc",
  "portable-pty",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "toml",

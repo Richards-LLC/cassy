@@ -663,6 +663,10 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         );
     }
 
+    // Only the normal, unblocked Stop path finalizes still-unreferenced cards.
+    // Failures are intentionally swallowed inside the bounded helper.
+    crate::ambient_recall::finalize_ambient_recall_feedback(input, cas_root);
+
     // Clean up session files
     // NOTE: Agent cleanup (graceful_shutdown) happens in SessionEnd, NOT here.
     // Stop hook can be blocked and the agent continues working, so we can't

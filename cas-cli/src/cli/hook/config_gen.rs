@@ -2,6 +2,41 @@ use std::path::{Path, PathBuf};
 
 use toml::map::Map;
 
+/// Pretty-print JSON with every object recursively sorted by key.
+///
+/// `serde_json::Value` can preserve the insertion order from a user-edited
+/// file, so pretty-printing it directly can leave a generated config dirty
+/// even when its meaning did not change. Arrays retain their order because
+/// hook-group order is semantically significant.
+pub(crate) fn canonical_json_pretty(value: &serde_json::Value) -> serde_json::Result<String> {
+    let mut canonical = value.clone();
+    canonicalize_json_objects(&mut canonical);
+    let mut formatted = serde_json::to_string_pretty(&canonical)?;
+    formatted.push('\n');
+    Ok(formatted)
+}
+
+fn canonicalize_json_objects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, value) in &mut entries {
+                canonicalize_json_objects(value);
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in entries {
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                canonicalize_json_objects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Check whether a Claude *config directory* (e.g. `~/.claude`, `~/.claude-alt`)
 /// has CAS hooks in its `settings.json`.
 ///
@@ -631,7 +666,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     });
 
     // Write back with pretty formatting
-    let formatted = serde_json::to_string_pretty(&config)?;
+    let formatted = canonical_json_pretty(&config)?;
 
     // Check if content actually changed
     if existing_content.as_ref() == Some(&formatted) {
@@ -653,6 +688,17 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
 /// were needed.
 pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     let codex_dir = project_root.join(".codex");
+    configure_codex_dir(&codex_dir)
+}
+
+/// Configure the Codex files in an explicit config directory. The user-level
+/// distribution path uses this with `~/.codex`; project provisioning uses the
+/// public project-root wrapper above.
+pub fn configure_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
+    configure_codex_dir(codex_dir)
+}
+
+fn configure_codex_dir(codex_dir: &Path) -> anyhow::Result<bool> {
     let config_path = codex_dir.join("config.toml");
 
     if !codex_dir.exists() {
@@ -765,6 +811,51 @@ pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     Ok(changed || hooks_changed)
 }
 
+/// Install a project-local Codex configuration and its two required trust
+/// registrations. Codex ignores a project `.codex` layer until the project is
+/// trusted, and then skips every non-managed hook until its current handler
+/// hash is trusted. Both registrations are durable, locked transactions in
+/// `cas_pty::codex_trust`; neither leaves an interactive prompt for the first
+/// Codex session to resolve.
+pub fn provision_codex_project(project_root: &Path) -> anyhow::Result<bool> {
+    let codex_home = cas_pty::codex_home().ok_or_else(|| {
+        anyhow::anyhow!("could not resolve CODEX_HOME or a home directory for Codex trust")
+    })?;
+    provision_codex_project_with_config(project_root, &codex_home.join("config.toml"))
+}
+
+/// Testable form of [`provision_codex_project`] with an explicit user config.
+/// A project `hooks.json` is evaluated against the user's global `config.toml`,
+/// never its sibling project config, so both trust registrations share this
+/// explicit target.
+fn provision_codex_project_with_config(
+    project_root: &Path,
+    user_config_path: &Path,
+) -> anyhow::Result<bool> {
+    let configured = configure_codex_mcp_server(project_root)?;
+    match cas_pty::ensure_project_trusted_in(user_config_path, project_root)? {
+        cas_pty::CodexTrustOutcome::Added(_) | cas_pty::CodexTrustOutcome::AlreadyPresent => {}
+        cas_pty::CodexTrustOutcome::Skipped(reason) => {
+            anyhow::bail!("Codex project trust could not be verified: {reason}");
+        }
+    }
+    let hooks_path = project_root.join(".codex/hooks.json");
+    cas_pty::ensure_cas_hooks_trusted_in(user_config_path, &hooks_path)?;
+    Ok(configured)
+}
+
+/// Configure and trust the user-level Codex installation. User-level hooks do
+/// not depend on a project trust entry, but their own hash state still lives in
+/// this same `config.toml` and must be registered before Codex can run them.
+pub fn provision_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
+    let configured = configure_codex_user_config(codex_dir)?;
+    cas_pty::ensure_cas_hooks_trusted_in(
+        &codex_dir.join("config.toml"),
+        &codex_dir.join("hooks.json"),
+    )?;
+    Ok(configured)
+}
+
 /// Install CAS's command guards and task-anchor hook using Codex's native
 /// `hooks.json` schema.
 ///
@@ -793,7 +884,10 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks` is not an object"))?;
     for (event, command) in [
-        ("PreToolUse", "cas hook PreToolUse"),
+        (
+            "PreToolUse",
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+        ),
         ("PostToolUse", "cas hook PostToolUse"),
     ] {
         let groups = hooks
@@ -802,13 +896,20 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
             .as_array_mut()
             .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.{event}` is not an array"))?;
 
+        // CAS owns both the current harness-aware command and the pre-cas-a53c
+        // form. Remove either before adding the canonical entry so an upgrade
+        // never leaves two registrations for the same Codex event.
+        let legacy_command = format!("cas hook {event}");
         groups.retain(|group| {
             !group
                 .get("hooks")
                 .and_then(|handlers| handlers.as_array())
                 .is_some_and(|handlers| {
                     handlers.iter().any(|handler| {
-                        handler.get("command").and_then(|value| value.as_str()) == Some(command)
+                        matches!(
+                            handler.get("command").and_then(|value| value.as_str()),
+                            Some(existing) if existing == command || existing == legacy_command
+                        )
                     })
                 })
         });
@@ -822,10 +923,72 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         }));
     }
 
-    let formatted = serde_json::to_string_pretty(&config)?;
+    let formatted = canonical_json_pretty(&config)?;
     if existing_content.as_ref() == Some(&formatted) {
         return Ok(false);
     }
     std::fs::write(hooks_path, formatted)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod codex_provision_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn project_provisioning_writes_both_trust_layers_idempotently() {
+        let project = TempDir::new().unwrap();
+        let user_home = TempDir::new().unwrap();
+        let user_config = user_home.path().join("config.toml");
+        std::fs::write(&user_config, "model = \"gpt-5\"\n# retain this\n").unwrap();
+
+        assert!(provision_codex_project_with_config(project.path(), &user_config).unwrap());
+        let after_first = std::fs::read_to_string(&user_config).unwrap();
+        let config: toml::Value = toml::from_str(&after_first).unwrap();
+        let project_key = project.path().to_string_lossy().to_string();
+        assert_eq!(
+            config
+                .get("projects")
+                .and_then(|projects| projects.get(&project_key))
+                .and_then(|project| project.get("trust_level"))
+                .and_then(toml::Value::as_str),
+            Some("trusted"),
+            "project-local .codex is ignored until this user-level entry exists"
+        );
+        let hooks_path = project.path().join(".codex/hooks.json");
+        let state = config
+            .get("hooks")
+            .and_then(|hooks| hooks.get("state"))
+            .expect("CAS hook hashes must be trusted in the same user config");
+        let pre_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
+        let post_key = format!("{}:post_tool_use:0:0", hooks_path.display());
+        assert!(state.get(&pre_key).is_some());
+        assert!(state.get(&post_key).is_some());
+        assert!(after_first.contains("# retain this"));
+
+        assert!(
+            !provision_codex_project_with_config(project.path(), &user_config).unwrap(),
+            "the second provisioning run must not rewrite config.toml or hooks.json"
+        );
+        assert_eq!(std::fs::read_to_string(&user_config).unwrap(), after_first);
+    }
+
+    #[test]
+    fn user_provisioning_registers_global_hook_state_in_its_own_config() {
+        let codex_dir = TempDir::new().unwrap();
+        assert!(provision_codex_user_config(codex_dir.path()).unwrap());
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(codex_dir.path().join("config.toml")).unwrap())
+                .unwrap();
+        let hooks_path = codex_dir.path().join("hooks.json");
+        let state = config
+            .get("hooks")
+            .and_then(|hooks| hooks.get("state"))
+            .expect("trusted hook state missing");
+        let pre_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
+        let post_key = format!("{}:post_tool_use:0:0", hooks_path.display());
+        assert!(state.get(&pre_key).is_some());
+        assert!(state.get(&post_key).is_some());
+    }
 }

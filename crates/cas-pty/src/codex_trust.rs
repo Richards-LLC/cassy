@@ -37,16 +37,22 @@
 //! - a config that does not parse, a result that would not parse, and a path
 //!   that cannot be a TOML key (control characters, non-UTF-8) all abort the
 //!   write instead of guessing;
-//! - the read-modify-write window is guarded by a bounded lock file so a
-//!   concurrent factory process (or a human answering Codex's own prompt) does
-//!   not have its edit reverted;
+//! - the read-modify-write/read-back transaction is guarded by a blocking OS
+//!   advisory lock so a concurrent factory process (or another CAS-owned
+//!   Codex registration) cannot lose an update or launch before its state is
+//!   verified;
 //! - the file is replaced via write-temp-then-rename, through any symlink and
-//!   preserving the original mode, so a concurrently reading Codex process never
-//!   observes a half-written config and a `0600` config stays `0600`.
+//!   preserving the original mode, then the file and its parent directory are
+//!   synced and parsed back before launch; a concurrently reading Codex process
+//!   never observes a half-written config and a `0600` config stays `0600`.
 
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+
+use fs2::FileExt;
+use sha2::{Digest, Sha256};
 
 /// What [`ensure_project_trusted`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +87,296 @@ fn escape_toml_basic(value: &str) -> String {
         }
     }
     out
+}
+
+/// The two CAS-native Codex handlers whose hash state CAS owns. Codex's trust
+/// key also includes a positional matcher-group and handler index, so the
+/// values are discovered from the generated `hooks.json` before writing state.
+const CAS_CODEX_HOOKS: [(&str, &str, &str); 2] = [
+    (
+        "PreToolUse",
+        "pre_tool_use",
+        "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+    ),
+    ("PostToolUse", "post_tool_use", "cas hook PostToolUse"),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HookTrustEntry {
+    key: String,
+    hash: String,
+}
+
+/// Return the canonical Codex trust hash for a normalized command hook.
+///
+/// Captured against Codex CLI 0.147.0 using its `hooks/list` RPC and confirmed
+/// against the upstream `NormalizedHookIdentity` implementation: SHA-256 of
+/// canonical JSON for `{ event_name, matcher, hooks: [handler] }`.
+fn codex_command_hook_hash(
+    event_name: &str,
+    matcher: &str,
+    command: &str,
+    timeout: u64,
+    runs_async: bool,
+) -> String {
+    let identity = serde_json::json!({
+        "event_name": event_name,
+        "matcher": matcher,
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": timeout,
+            "async": runs_async,
+        }],
+    });
+    // `serde_json::Map` is a BTreeMap in our configuration, so this emits the
+    // recursively sorted canonical form Codex hashes. The regression below pins
+    // the two hashes returned by the real CLI.
+    let bytes = serde_json::to_vec(&identity).expect("JSON hook identity serializes");
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> {
+    if !hooks_path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Codex hooks path must be absolute to register trust",
+        ));
+    }
+    let source = hooks_path.to_string_lossy().to_string();
+    if path_is_unsafe_key(&source) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Codex hooks path contains control characters or invalid UTF-8",
+        ));
+    }
+    let contents = std::fs::read_to_string(hooks_path)?;
+    let hooks: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to parse {}: {error}", hooks_path.display()),
+        )
+    })?;
+    let root = hooks
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "hooks.json has no hooks object")
+        })?;
+
+    let mut entries = Vec::with_capacity(CAS_CODEX_HOOKS.len());
+    for (event, event_key, expected_command) in CAS_CODEX_HOOKS {
+        let groups = root
+            .get(event)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("hooks.json is missing CAS {event} hook groups"),
+                )
+            })?;
+        let mut found = None;
+        for (group_index, group) in groups.iter().enumerate() {
+            let matcher = group
+                .get("matcher")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let Some(handlers) = group.get("hooks").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for (handler_index, handler) in handlers.iter().enumerate() {
+                if handler.get("type").and_then(serde_json::Value::as_str) != Some("command")
+                    || handler.get("command").and_then(serde_json::Value::as_str)
+                        != Some(expected_command)
+                {
+                    continue;
+                }
+                let timeout = handler
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(600)
+                    .max(1);
+                let runs_async = handler
+                    .get("async")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                found = Some(HookTrustEntry {
+                    key: format!("{source}:{event_key}:{group_index}:{handler_index}"),
+                    hash: codex_command_hook_hash(
+                        event_key,
+                        matcher,
+                        expected_command,
+                        timeout,
+                        runs_async,
+                    ),
+                });
+                break;
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        entries.push(found.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("hooks.json does not contain canonical CAS {event} command"),
+            )
+        })?);
+    }
+    Ok(entries)
+}
+
+fn hook_state_is_trusted(config: &str, entry: &HookTrustEntry) -> Result<bool, toml::de::Error> {
+    let parsed: toml::Value = toml::from_str(config)?;
+    Ok(parsed
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(|state| state.get(&entry.key))
+        .and_then(|state| state.get("trusted_hash"))
+        .and_then(toml::Value::as_str)
+        == Some(entry.hash.as_str()))
+}
+
+fn hook_state_entry_block(entry: &HookTrustEntry) -> String {
+    format!(
+        "\n[hooks.state.\"{}\"]\ntrusted_hash = \"{}\"\n",
+        escape_toml_basic(&entry.key),
+        entry.hash
+    )
+}
+
+/// Update the exact table spelling CAS itself appends, retaining all unrelated
+/// comments and configuration bytes. Other valid TOML spellings are deliberately
+/// not rewritten: CAS must never reserialize an operator's whole Codex config
+/// merely to refresh a hook hash.
+fn refresh_owned_hook_state(existing: &str, entry: &HookTrustEntry) -> io::Result<Option<String>> {
+    if hook_state_is_trusted(existing, entry)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
+    {
+        return Ok(None);
+    }
+    let parsed: toml::Value = toml::from_str(existing)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let has_state = parsed
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(|state| state.get(&entry.key))
+        .is_some();
+    if !has_state {
+        let mut updated = existing.to_string();
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&hook_state_entry_block(entry));
+        return Ok(Some(updated));
+    }
+
+    let header = format!("[hooks.state.\"{}\"]", escape_toml_basic(&entry.key));
+    let Some(header_start) = existing
+        .lines()
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .find_map(|(start, line)| (line.trim() == header).then_some(start))
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "existing CAS hook trust uses an unsupported TOML spelling; refusing to rewrite it",
+        ));
+    };
+    let after_header = existing[header_start..]
+        .find('\n')
+        .map(|relative| header_start + relative + 1)
+        .unwrap_or(existing.len());
+    let section_end = existing[after_header..]
+        .find("\n[")
+        .map(|relative| after_header + relative + 1)
+        .unwrap_or(existing.len());
+    let section = &existing[after_header..section_end];
+    let Some((line_start, line_end)) = section
+        .lines()
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .find_map(|(start, line)| {
+            line.trim_start()
+                .starts_with("trusted_hash")
+                .then_some((after_header + start, after_header + start + line.len()))
+        })
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "existing CAS hook trust lacks trusted_hash; refusing to rewrite it",
+        ));
+    };
+    let indent = existing[line_start..line_end]
+        .chars()
+        .take_while(|ch| ch.is_whitespace())
+        .collect::<String>();
+    let mut updated = String::with_capacity(existing.len() + entry.hash.len());
+    updated.push_str(&existing[..line_start]);
+    updated.push_str(&format!("{indent}trusted_hash = \"{}\"", entry.hash));
+    updated.push_str(&existing[line_end..]);
+    Ok(Some(updated))
+}
+
+/// Record the current CAS hook definitions as trusted in Codex's user config.
+///
+/// Codex uses this separate state from project trust: without it the project
+/// layer loads, but non-managed handlers are silently skipped until someone
+/// opens `/hooks`. Uses the same lock/fsync/read-back transaction as the
+/// project-trust writer, and only appends CAS-owned state entries. A changed
+/// definition deliberately receives a new state key only after the generator
+/// has emitted its canonical handler shape.
+pub fn ensure_cas_hooks_trusted_in(config_path: &Path, hooks_path: &Path) -> io::Result<bool> {
+    let entries = cas_hook_trust_entries(hooks_path)?;
+    let entries_for_write = entries.clone();
+    update_codex_config_locked(
+        config_path,
+        move |existing| {
+            let mut updated = existing.to_string();
+            let mut changed = false;
+            for entry in &entries_for_write {
+                if let Some(next) = refresh_owned_hook_state(&updated, entry)? {
+                    updated = next;
+                    changed = true;
+                }
+            }
+            Ok(changed.then_some(updated))
+        },
+        |read_back| {
+            for entry in &entries {
+                if !hook_state_is_trusted(read_back, entry).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "read-back verification failed for CAS hook state {}",
+                            entry.key
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        },
+    )
+}
+
+/// Resolve the active Codex user config (`CODEX_HOME` or `~/.codex`) and trust
+/// the CAS handlers in `hooks_path` without an interactive `/hooks` review.
+pub fn ensure_cas_hooks_trusted(hooks_path: &Path) -> io::Result<bool> {
+    let home = codex_home().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not resolve CODEX_HOME or a home directory for Codex hook trust",
+        )
+    })?;
+    ensure_cas_hooks_trusted_in(&home.join("config.toml"), hooks_path)
 }
 
 /// The literal block appended for a newly trusted path.
@@ -135,61 +431,155 @@ fn candidate_keys(workdir: &Path) -> Vec<String> {
     keys
 }
 
-/// Serializes read-modify-write of the config within this process. Across
-/// processes, [`ConfigLock`] guards the same window.
-fn write_lock() -> &'static Mutex<()> {
+/// Serializes config mutations within this process. Across processes,
+/// [`ConfigLock`] guards the same transaction.
+fn config_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Best-effort cross-process lock over the read-modify-write window.
+/// Cross-process lock over the read-modify-write/read-back window.
 ///
 /// Atomic rename only prevents a *torn read*; it does not prevent a lost
 /// update. Two factory processes (or a human answering Codex's own trust prompt
 /// in the window) would otherwise have the later rename revert the whole file to
-/// the earlier snapshot. Acquisition is bounded: a stale lock from a crashed
-/// process must never wedge a spawn, so after the timeout we proceed unlocked.
+/// the earlier snapshot. This deliberately blocks instead of falling back to an
+/// unlocked write: spawning Codex before its entry is durable reintroduces the
+/// trust-prompt race this lock exists to prevent. OS advisory locks release when
+/// a process exits, including a crash, so there is no stale-lock timeout path.
 struct ConfigLock {
-    path: PathBuf,
-    held: bool,
+    file: File,
 }
 
 impl ConfigLock {
-    fn acquire(config_path: &Path) -> Self {
+    fn acquire(config_path: &Path) -> io::Result<Self> {
         let path = config_path.with_extension("toml.cas-lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Self { path, held: true },
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    if std::time::Instant::now() >= deadline {
-                        tracing::warn!(
-                            lock = %path.display(),
-                            "cas-28a49: Codex config lock still held after 2s; proceeding \
-                             unlocked (remove the file if it is stale)"
-                        );
-                        return Self { path, held: false };
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-                // Unwritable directory, missing parent, etc. — the write itself
-                // will report the real error.
-                Err(_) => return Self { path, held: false },
-            }
-        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        file.lock_exclusive()?;
+        Ok(Self { file })
     }
 }
 
 impl Drop for ConfigLock {
     fn drop(&mut self) {
-        if self.held {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        let _ = FileExt::unlock(&self.file);
     }
+}
+
+fn verify_trusted_project_entry(contents: &str, keys: &[String]) -> io::Result<()> {
+    let parsed: toml::Value = toml::from_str(contents).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("read-back TOML parse failed while verifying [projects]: {error}"),
+        )
+    })?;
+    let mut trusted = false;
+    for key in keys {
+        trusted |= parsed
+            .get("projects")
+            .and_then(|projects| projects.get(key))
+            .and_then(|project| project.get("trust_level"))
+            .and_then(toml::Value::as_str)
+            == Some("trusted");
+    }
+    if !trusted {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("read-back verification failed: no trusted [projects.{keys:?}] entry"),
+        ));
+    }
+    Ok(())
+}
+
+/// Persist the directory entry created by the rename as well as the file's
+/// contents. This is a no-op on platforms where opening a directory for fsync
+/// is not supported; the read-back still guards the launch ordering there.
+#[cfg(unix)]
+fn sync_parent_directory(config_path: &Path) -> io::Result<()> {
+    if let Some(parent) = config_path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_config_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Mutate Codex's user config while holding the single transaction lock used by
+/// every CAS-owned Codex registration.
+///
+/// `mutate` receives the complete current TOML and returns `Some(updated)` only
+/// when it needs to replace the file. `verify` receives a freshly read file
+/// *after* the temp file and containing directory are synced, while the lock is
+/// still held. It must reject any state that would make a caller unsafe to
+/// launch Codex. This lets project trust and hook approval state share one
+/// read-modify-write/read-back boundary without either feature having to parse
+/// or serialize the other's tables.
+pub fn update_codex_config_locked<F, V>(
+    config_path: &Path,
+    mutate: F,
+    verify: V,
+) -> io::Result<bool>
+where
+    F: FnOnce(&str) -> io::Result<Option<String>>,
+    V: FnOnce(&str) -> io::Result<()>,
+{
+    let _guard = config_write_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // `read_to_string` follows a symlink but `rename` would replace the link.
+    // Resolve first so managed writes preserve a dotfiles-managed link.
+    let config_path = std::fs::canonicalize(config_path)
+        .ok()
+        .unwrap_or_else(|| config_path.to_path_buf());
+    let _lock = ConfigLock::acquire(&config_path)?;
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+
+    let changed = if let Some(updated) = mutate(&existing)? {
+        toml::from_str::<toml::Value>(&updated).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "CAS Codex config mutation would produce invalid TOML at {}: {error}",
+                    config_path.display()
+                ),
+            )
+        })?;
+        let tmp = config_path.with_extension(format!("toml.cas-{}", std::process::id()));
+        std::fs::write(&tmp, &updated)?;
+        // Rename replaces original metadata; preserve a restrictive config mode.
+        if let Ok(meta) = std::fs::metadata(&config_path) {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+        OpenOptions::new().read(true).open(&tmp)?.sync_all()?;
+        if let Err(error) = std::fs::rename(&tmp, &config_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+        sync_parent_directory(&config_path)?;
+        true
+    } else {
+        false
+    };
+
+    let read_back = std::fs::read_to_string(&config_path)?;
+    verify(&read_back)?;
+    Ok(changed)
 }
 
 /// Ensure `workdir` is trusted in the Codex config at `config_path`.
@@ -208,22 +598,6 @@ pub fn ensure_project_trusted_in(
             "worker cwd is not absolute; cannot key a Codex trust entry",
         ));
     }
-    let _guard = write_lock().lock().unwrap_or_else(|e| e.into_inner());
-
-    // `read_to_string` follows a symlink but `rename` would replace the *link*.
-    // Operators who keep ~/.codex/config.toml symlinked into a dotfiles repo
-    // must keep that link, so write through to the real file.
-    let config_path = std::fs::canonicalize(config_path)
-        .ok()
-        .unwrap_or_else(|| config_path.to_path_buf());
-    let _lock = ConfigLock::acquire(&config_path);
-
-    let existing = match std::fs::read_to_string(&config_path) {
-        Ok(contents) => contents,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-
     let keys = candidate_keys(workdir);
     if keys.iter().any(|key| path_is_unsafe_key(key)) {
         return Ok(CodexTrustOutcome::Skipped(
@@ -232,76 +606,68 @@ pub fn ensure_project_trusted_in(
         ));
     }
 
-    let mut already_present = false;
-    for key in &keys {
-        match config_has_project(&existing, &key) {
-            Ok(false) => {}
-            Ok(true) => already_present = true,
-            Err(e) => {
-                tracing::warn!(
-                    config = %config_path.display(),
-                    error = %e,
-                    "cas-28a49: Codex config does not parse as TOML; leaving it untouched"
-                );
-                return Ok(CodexTrustOutcome::Skipped(
-                    "the Codex config file does not parse as TOML; refusing to modify it",
-                ));
+    let keys_for_write = keys.clone();
+    let changed = match update_codex_config_locked(
+        config_path,
+        move |existing| {
+            let mut already_present = false;
+            for key in &keys_for_write {
+                match config_has_project(existing, key) {
+                    Ok(false) => {}
+                    Ok(true) => already_present = true,
+                    Err(error) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Codex config does not parse as TOML: {error}"),
+                        ));
+                    }
+                }
             }
+            if already_present {
+                return Ok(None);
+            }
+            let mut updated = existing.to_string();
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            for key in &keys_for_write {
+                updated.push_str(&trust_entry_block(key));
+            }
+            Ok(Some(updated))
+        },
+        |read_back| verify_trusted_project_entry(read_back, &keys),
+    ) {
+        Ok(changed) => changed,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            tracing::warn!(
+                config = %config_path.display(),
+                error = %error,
+                "cas-3603: Codex config mutation/read-back verification failed; leaving launch blocked"
+            );
+            return Ok(CodexTrustOutcome::Skipped(
+                "the Codex config could not be verified after mutation; refusing to launch",
+            ));
         }
-    }
-    if already_present {
-        return Ok(CodexTrustOutcome::AlreadyPresent);
-    }
-
-    let mut updated = existing;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    for key in &keys {
-        updated.push_str(&trust_entry_block(key));
-    }
-    if let Err(e) = toml::from_str::<toml::Value>(&updated) {
-        tracing::error!(
-            config = %config_path.display(),
-            error = %e,
-            "cas-28a49: appending the Codex trust entry would produce invalid TOML; \
-             leaving the config untouched"
-        );
-        return Ok(CodexTrustOutcome::Skipped(
-            "appending the trust entry would produce invalid TOML; config left untouched",
-        ));
-    }
-
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Write-then-rename so a Codex process reading config.toml concurrently
-    // never sees a truncated file.
-    let tmp = config_path.with_extension(format!("toml.cas-{}", std::process::id()));
-    std::fs::write(&tmp, &updated)?;
-    // The rename replaces the original's metadata wholesale, so carry the
-    // original mode across: this file can hold API keys and MCP env secrets, and
-    // a 0600 config must not silently widen to 0644.
-    if let Ok(meta) = std::fs::metadata(&config_path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    if let Err(e) = std::fs::rename(&tmp, &config_path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(CodexTrustOutcome::Added(keys))
+        Err(error) => return Err(error),
+    };
+    Ok(if changed {
+        CodexTrustOutcome::Added(keys)
+    } else {
+        CodexTrustOutcome::AlreadyPresent
+    })
 }
 
 /// Ensure `workdir` is trusted in the resolved Codex config
 /// (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`).
 ///
-/// Never fails a spawn: I/O errors are logged and reported, and the caller
-/// launches Codex anyway (worst case is the pre-existing behaviour).
-pub fn ensure_project_trusted(workdir: &Path) -> CodexTrustOutcome {
+/// The caller must treat any error or `Skipped` result as a failed precondition
+/// and must not launch Codex. Starting first would let Codex cache a missing
+/// trust entry and park at its interactive prompt even if a later write lands.
+pub fn ensure_project_trusted(workdir: &Path) -> io::Result<CodexTrustOutcome> {
     let Some(home) = codex_home() else {
-        return CodexTrustOutcome::Skipped(
+        return Ok(CodexTrustOutcome::Skipped(
             "could not resolve CODEX_HOME or a home directory for ~/.codex",
-        );
+        ));
     };
     let config_path = home.join("config.toml");
     match ensure_project_trusted_in(&config_path, workdir) {
@@ -312,9 +678,9 @@ pub fn ensure_project_trusted(workdir: &Path) -> CodexTrustOutcome {
                 "cas-28a49: pre-trusted workdir for Codex; without this the CLI parks on its \
                  interactive trust prompt and the worker never registers"
             );
-            CodexTrustOutcome::Added(keys)
+            Ok(CodexTrustOutcome::Added(keys))
         }
-        Ok(other) => other,
+        Ok(other) => Ok(other),
         Err(e) => {
             tracing::warn!(
                 config = %config_path.display(),
@@ -323,7 +689,7 @@ pub fn ensure_project_trusted(workdir: &Path) -> CodexTrustOutcome {
                 "cas-28a49: could not pre-trust workdir for Codex; if the worker never registers, \
                  add [projects.\"<workdir>\"] trust_level = \"trusted\" to the Codex config"
             );
-            CodexTrustOutcome::Skipped("failed to update the Codex config file")
+            Err(e)
         }
     }
 }
@@ -428,6 +794,142 @@ mod tests {
     }
 
     #[test]
+    fn locked_transaction_supports_independent_hook_state_mutation_and_read_back() {
+        // cas-3603: hooks-trust registration uses the same transaction as
+        // `[projects]`; this proves an unrelated config table is retained and
+        // must pass a fresh verifier before the transaction returns.
+        let dir = TempDir::new();
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+        let hook_state = "[hooks.state.\"/tmp/hooks.json:pre_tool_use:cas:handler\"]\ntrusted_hash = \"sha256:example\"\n";
+
+        let changed = update_codex_config_locked(
+            &config_path,
+            |existing| Ok(Some(format!("{existing}\n{hook_state}"))),
+            |read_back| {
+                let parsed: toml::Value = toml::from_str(read_back).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
+                let hash = parsed
+                    .get("hooks")
+                    .and_then(|value| value.get("state"))
+                    .and_then(|value| value.get("/tmp/hooks.json:pre_tool_use:cas:handler"))
+                    .and_then(|value| value.get("trusted_hash"))
+                    .and_then(toml::Value::as_str);
+                if hash == Some("sha256:example") {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "hook state was not present after read-back",
+                    ))
+                }
+            },
+        )
+        .unwrap();
+        assert!(changed);
+        assert!(
+            std::fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("model = \"gpt-5\"")
+        );
+    }
+
+    #[test]
+    fn codex_hook_hashes_match_the_live_cli_canonical_identities() {
+        // Recorded from `codex app-server` hooks/list with codex-cli 0.147.0.
+        // Codex normalizes the hook identity before hashing, so matching the
+        // generated JSON bytes themselves is not sufficient.
+        assert_eq!(
+            codex_command_hook_hash(
+                "pre_tool_use",
+                "^Bash$",
+                "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+                3,
+                false,
+            ),
+            "sha256:1acc1fe9f8d33d69fb3a16be30738b902dac8e20155fdb9a6490b2a52545ca77"
+        );
+        assert_eq!(
+            codex_command_hook_hash("post_tool_use", "^Bash$", "cas hook PostToolUse", 3, false),
+            "sha256:94c125201a0019ec158d7abb96cd3fc0d8282bb499aa506f202ce794748cdb2b"
+        );
+    }
+
+    #[test]
+    fn hook_trust_registration_uses_actual_indexes_and_is_idempotent() {
+        let dir = TempDir::new();
+        let config_path = dir.join("config.toml");
+        let hooks_path = dir.join("project/.codex/hooks.json");
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        // A non-CAS matcher group ahead of PreToolUse proves we use Codex's
+        // positional trust key, rather than assuming every CAS handler is 0:0.
+        std::fs::write(
+            &hooks_path,
+            r#"{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher":"^Read$","hooks":[{"type":"command","command":"operator hook"}]},
+      {"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}
+    ],
+    "PostToolUse": [
+      {"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse","timeout":3}]}
+    ]
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(&config_path, "# operator content\nmodel = \"gpt-5\"\n").unwrap();
+
+        assert!(ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
+        let after_first = std::fs::read_to_string(&config_path).unwrap();
+        let entries = cas_hook_trust_entries(&hooks_path).unwrap();
+        assert_eq!(
+            entries[0].key,
+            format!("{}:pre_tool_use:1:0", hooks_path.display())
+        );
+        assert_eq!(
+            entries[1].key,
+            format!("{}:post_tool_use:0:0", hooks_path.display())
+        );
+        for entry in &entries {
+            assert!(hook_state_is_trusted(&after_first, entry).unwrap());
+        }
+        assert!(after_first.contains("# operator content"));
+
+        assert!(!ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), after_first);
+    }
+
+    #[test]
+    fn hook_trust_registration_refreshes_only_its_stale_hash() {
+        let dir = TempDir::new();
+        let config_path = dir.join("config.toml");
+        let hooks_path = dir.join("project/.codex/hooks.json");
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hooks_path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}],"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse","timeout":3}]}]}}"#,
+        )
+        .unwrap();
+        ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap();
+        let entries = cas_hook_trust_entries(&hooks_path).unwrap();
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let stale = original.replacen(&entries[0].hash, "sha256:stale", 1);
+        std::fs::write(&config_path, stale).unwrap();
+
+        assert!(ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
+        let refreshed = std::fs::read_to_string(&config_path).unwrap();
+        assert!(hook_state_is_trusted(&refreshed, &entries[0]).unwrap());
+        assert!(hook_state_is_trusted(&refreshed, &entries[1]).unwrap());
+        assert_eq!(
+            refreshed.matches(&entries[0].key).count(),
+            1,
+            "refresh must update the owned block rather than append a duplicate"
+        );
+    }
+
+    #[test]
     fn inline_projects_table_entry_is_not_duplicated() {
         // The shape Codex's own config can take; appending here would produce a
         // duplicate-table parse error for the whole file.
@@ -464,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn respects_an_explicit_untrusted_decision() {
+    fn preserves_an_explicit_untrusted_decision_and_blocks_launch_precondition() {
         let dir = TempDir::new();
         let config_path = dir.join("config.toml");
         let workdir = dir.join("proj");
@@ -476,7 +978,7 @@ mod tests {
         std::fs::write(&config_path, &original).unwrap();
 
         let outcome = ensure_project_trusted_in(&config_path, &workdir).unwrap();
-        assert_eq!(outcome, CodexTrustOutcome::AlreadyPresent);
+        assert!(matches!(outcome, CodexTrustOutcome::Skipped(_)));
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
     }
 

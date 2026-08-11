@@ -1386,11 +1386,21 @@ pub struct Pty {
     is_codex: bool,
 }
 
+/// Whether a configured command ultimately launches the Codex harness.
+///
+/// Factory workers may be started through `nice -n … codex` to keep a busy
+/// compile from starving the supervisor.  This classification feeds prompt
+/// submission timing as well as the spawn preflight, so it must describe the
+/// executable behind the wrapper rather than only the outer command.
+fn command_launches_codex(command: &str, args: &[String]) -> bool {
+    command == "codex" || (command == "nice" && args.iter().any(|arg| arg == "codex"))
+}
+
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, config: PtyConfig) -> Result<Self> {
         let id = id.into();
-        let is_codex = config.command == "codex";
+        let is_codex = command_launches_codex(&config.command, &config.args);
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
         // `mcp_servers.cs.command=cas`, but Codex can only launch it if the `cas`
@@ -1398,8 +1408,7 @@ impl Pty {
         // niced wrapper form (cas-0bf4) so the preflight covers both. Refuse loudly
         // with remediation rather than spawning a worker that comes up with zero
         // CAS tools and flails.
-        let codex_spawn =
-            is_codex || (config.command == "nice" && config.args.iter().any(|a| a == "codex"));
+        let codex_spawn = is_codex;
         if codex_spawn && !cas_binary_on_path() {
             return Err(Error::pty(
                 "Codex agent cannot start: the `cas` MCP server binary is not on PATH. \
@@ -1727,6 +1736,7 @@ impl Pty {
                                     != Some(libc::ESRCH)
                         };
                         if !alive {
+                            let _ = self.child.wait();
                             return;
                         }
                         if tokio::time::Instant::now() >= deadline {
@@ -1742,12 +1752,14 @@ impl Pty {
                 // Force mode and graceful escalation both finish by touching
                 // the direct-child handle as a belt-and-suspenders fallback.
                 let _ = self.child.kill();
+                let _ = self.child.wait();
                 return;
             }
         }
         // Non-Unix/no-PID fallback: portable_pty only exposes an immediate
         // direct-child kill.
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     /// Immediate group-wide teardown for synchronous process-exit paths.
@@ -3758,6 +3770,31 @@ mod tests {
         }
 
         #[test]
+        fn nice_wrapped_codex_keeps_codex_submit_classification_cas_6e76() {
+            let _e = ScopedEnv::new();
+            unsafe {
+                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
+            }
+            let config = PtyConfig::codex(
+                "w1",
+                "worker",
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None, // effort
+                None,
+            );
+
+            assert!(command_launches_codex(&config.command, &config.args));
+            assert!(
+                !command_launches_codex("nice", &["-n".into(), "10".into(), "claude".into()]),
+                "the wrapper test must not classify every niced harness as Codex"
+            );
+        }
+
+        #[test]
         fn claude_supervisor_command_unwrapped_even_when_sentinel_set() {
             let _e = ScopedEnv::new();
             unsafe {
@@ -3892,6 +3929,16 @@ mod tests {
             exited,
             "Ctrl+C (0x03) from interrupt() must terminate cat (INTR signal)"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn kill_tree_force_reaps_the_direct_child_without_a_zombie() {
+        let config = PtyConfig { command: "sleep".to_string(), args: vec!["120".to_string()], cwd: None, env: vec![], rows: 24, cols: 80 };
+        let mut pty = match Pty::spawn("zombie-reap-probe", config) { Ok(pty) => pty, Err(_) => return };
+        let pid = pty.process_group_id().expect("PTY child pid");
+        pty.kill_tree(true).await;
+        assert!(std::fs::read_to_string(format!("/proc/{pid}/stat")).is_err(), "force teardown must wait the direct child");
     }
 
     // -------------------------------------------------------------------

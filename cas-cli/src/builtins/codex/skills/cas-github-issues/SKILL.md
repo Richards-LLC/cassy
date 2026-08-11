@@ -1,6 +1,6 @@
 ---
 name: cas-github-issues
-description: Sweep a project's GitHub Issues and reconcile them with CAS tasks — dedupe double-filed reports, verify-and-close issues that claim to be fixed, task genuinely new issues into the active epic (creating a successor epic when none is open), comment each issue with its task ID, unblock chained tasks whose lane has merged, and file issues for defects observed since the last sweep. Use when running the recurring issue sweep, when asked to triage/burn down GitHub issues, when a bug report needs to become a task, or when you observed a defect that belongs in the issue tracker.
+description: Use when sweeping, triaging, deduplicating, verifying, closing, or filing GitHub issues, or reconciling issues with CAS tasks.
 managed_by: cas
 ---
 
@@ -137,6 +137,10 @@ Close the loop on GitHub so the reporter (and the next sweep) can see it:
 ```bash
 gh issue comment <n> --body "Tracked as \`cas-XXXX\`. <one line on the plan.>"
 ```
+
+**Issue-comment specificity (observed 2026-08-11):** Bad: `Tracked as \`cas-2a13\`.`
+Good: `Tracked as \`cas-2a13\`. I’ll add real bad/good pairs to the guidance writers use.`
+Keep the tracker link, then state the concrete outcome; a bare ID leaves the reporter without an answer.
 
 The commit that fixes the issue should carry `Fixes #<n>` so GitHub closes it
 on merge.

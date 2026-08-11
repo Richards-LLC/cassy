@@ -37,6 +37,10 @@ Every task spec must include:
 - **Test guidance** — Name the specific scenarios the worker must test, including at least one error path. Don't leave test design entirely to the worker.
 - **Evidence-source plan** — For report/investigation/evidence tasks, explicitly name the MCP/log/recording/task-record sources the worker should use. Treat live `.cas/cas.db` access as an exception: only require it when safer surfaces are insufficient, and then specify read-only URI or copied-snapshot access.
 
+**Task-description specificity (observed 2026-08-11):** Bad: `Improve issue intake (GH #221).`
+Good: `Codex workers receive a task but remain idle; instrument the wake path and prove a delivered message surfaces a turn (GH #224).`
+State the symptom, failing surface, and repro/observable; a title restatement leaves the worker to rediscover the assignment.
+
 For EPIC subtasks specifically, shape the spec prose using the Implementation Unit Template below. `Spec Requirements` enumerates *what must be present*; the template specifies *how the prose is shaped*.
 
 ## Implementation Unit Template

@@ -99,6 +99,7 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 
 - [ ] Version/changelog commit landed on `main` through a reviewed PR with required checks green
 - [ ] PR URL + required-check status surfaced before the explicit merge (no `--auto` / admin bypass)
+- [ ] After every release-train version bump, regenerate `Cargo.lock` and verify `cargo metadata --locked` before tagging.
 - [ ] Release tag points at the fetched `origin/main` landing and is pushed
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details

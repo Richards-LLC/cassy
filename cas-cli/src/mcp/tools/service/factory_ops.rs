@@ -579,14 +579,27 @@ fn format_assigned_task_info(
 ///
 /// Pure over its input so the wording and the empty case are unit-testable
 /// without a daemon, a queue, or a clock.
-fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay]) -> String {
-    if rows.is_empty() {
+fn format_undelivered_relay_section(
+    rows: &[cas_store::UndeliveredLifecycleRelay],
+    terminal_count: usize,
+) -> String {
+    if rows.is_empty() && terminal_count == 0 {
         return String::new();
     }
-    let mut out = format!(
+    let mut out = String::new();
+    if terminal_count > 0 {
+        out.push_str(&format!(
+            "⚠ {terminal_count} UNDELIVERED SUPERVISOR RELAY{} for terminal tasks suppressed; acknowledge each by its `lifecycle-wake:<id>` ID with `coordination action=message_ack notification_id=<id>` to dismiss it durably.\n",
+            if terminal_count == 1 { "" } else { "s" }
+        ));
+    }
+    if rows.is_empty() {
+        return format!("{out}\n");
+    }
+    out.push_str(&format!(
         "⚠ UNDELIVERED SUPERVISOR RELAY ({}) — these never reached you:\n",
         rows.len()
-    );
+    ));
     for row in rows {
         let what = row
             .summary
@@ -1829,10 +1842,11 @@ impl CasService {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let undelivered_section = format_undelivered_relay_section(&unresolved_lifecycle_relays(
-            undelivered_relays,
-            &closed_task_ids,
-        ));
+        let terminal_count = closed_task_ids.len();
+        let undelivered_section = format_undelivered_relay_section(
+            &unresolved_lifecycle_relays(undelivered_relays, &closed_task_ids),
+            terminal_count,
+        );
 
         if agents.is_empty() {
             let mut msg = String::from(
@@ -7137,7 +7151,7 @@ mod spawn_lifecycle_tests {
     fn an_undelivered_relay_is_named_in_worker_status() {
         let out = format_undelivered_relay_section(&[lost_relay(
             "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
-        )]);
+        )], 0);
         assert!(
             out.contains("UNDELIVERED SUPERVISOR RELAY"),
             "the banner must state the failure outright: {out}"
@@ -7162,7 +7176,7 @@ mod spawn_lifecycle_tests {
     /// has to be believed the single time it fires.
     #[test]
     fn no_undelivered_relays_renders_nothing() {
-        assert!(format_undelivered_relay_section(&[]).is_empty());
+        assert!(format_undelivered_relay_section(&[], 0).is_empty());
     }
 
     #[test]
@@ -7174,7 +7188,7 @@ mod spawn_lifecycle_tests {
             &["cas-reconciled".to_string()],
         );
 
-        let rendered = format_undelivered_relay_section(&remaining);
+        let rendered = format_undelivered_relay_section(&remaining, 1);
         assert!(
             !rendered.contains("cas-reconciled"),
             "closed lane must not replay: {rendered}"
@@ -7182,6 +7196,10 @@ mod spawn_lifecycle_tests {
         assert!(
             rendered.contains("cas-open"),
             "open lane remains a real signal: {rendered}"
+        );
+        assert!(
+            rendered.contains("1 UNDELIVERED SUPERVISOR RELAY for terminal tasks suppressed"),
+            "terminal relays collapse to one count while live relays remain detailed: {rendered}"
         );
     }
 

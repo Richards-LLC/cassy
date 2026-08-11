@@ -108,6 +108,8 @@ require_text "$suite" 'cargo nextest run -p cas --no-fail-fast' 'fresh SHA runs 
 require_text "$suite" 'cargo nextest archive -p cas --archive-file' 'passing fresh SHA archives every cas test binary'
 require_text "$suite" 'cargo nextest run' 'archive hit retains full nextest coverage'
 require_text "$suite" '--archive-file .nextest-cache/cas-tests.tar.zst' 'suite executes the exact archived binaries'
+require_text "$suite" '--extract-to .' 'archive restores compile-time binary paths in the workspace'
+require_text "$suite" '--extract-overwrite' 'archive may restore into the warmed target directory'
 require_text "$suite" '--no-fail-fast' 'suite reports every test failure'
 require_absent "$suite" 'restore-keys:' 'suite never falls back to stale test binaries'
 require_absent "$suite" '--partition' 'suite avoids duplicate test-graph compilation across runners'

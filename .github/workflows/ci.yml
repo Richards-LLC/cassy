@@ -173,6 +173,8 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo nextest run -p cas --no-fail-fast
 
+      # Extract at the stable GitHub workspace path: integration tests embed
+      # CARGO_BIN_EXE_cas at compile time and must find target/debug/cas there.
       # Keep --no-fail-fast so failures never mask later binaries. This runs
       # every archived test binary; the doctest lane below covers what nextest
       # cannot.
@@ -181,6 +183,8 @@ jobs:
         run: >-
           cargo nextest run
           --archive-file .nextest-cache/cas-tests.tar.zst
+          --extract-to .
+          --extract-overwrite
           --no-fail-fast
 
       - name: Archive passing test binaries

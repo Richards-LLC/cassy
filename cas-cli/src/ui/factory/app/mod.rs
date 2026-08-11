@@ -236,13 +236,6 @@ fn hardlink_seed_tree_inner(
                 stats,
             )?;
         } else if file_type.is_file() {
-            // Cargo coordinates writes through target/**/.cargo-lock.  A
-            // hardlink would make independently seeded worker targets share
-            // that inode, serializing their otherwise private builds. Cargo
-            // recreates the lock file on first use, so omit it at every depth.
-            if entry.file_name() == ".cargo-lock" {
-                continue;
-            }
             let metadata = entry.metadata()?;
             if entry.path().extension().is_some_and(|extension| extension == "d") {
                 let dep_info = std::fs::read_to_string(entry.path())?;
@@ -5162,67 +5155,6 @@ mod spawn_isolation_tests {
             std::fs::metadata(seeded_dep_info).unwrap().ino(),
             "rebased dep-info must not mutate the immutable baseline hardlink"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn target_seed_skips_cargo_lock_so_workers_hold_private_locks() {
-        use std::fs::OpenOptions;
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::MetadataExt;
-
-        let tmp = TempDir::new().unwrap();
-        let snapshot = tmp.path().join("snapshot");
-        let source_lock = snapshot.join("debug").join(".cargo-lock");
-        let source_artifact = snapshot.join("debug").join("deps").join("libwarm.rlib");
-        std::fs::create_dir_all(source_lock.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(source_artifact.parent().unwrap()).unwrap();
-        std::fs::write(&source_lock, b"Cargo lock").unwrap();
-        std::fs::write(&source_artifact, b"warm artifact").unwrap();
-
-        let worker_a = tmp.path().join("worker-a-target");
-        let worker_b = tmp.path().join("worker-b-target");
-        for worker_target in [&worker_a, &worker_b] {
-            let mut stats = TargetSeedStats::default();
-            hardlink_seed_tree(&snapshot, worker_target, worker_target, &mut stats).unwrap();
-            assert_eq!(stats.files, 1, "only the reusable artifact is seeded");
-            assert!(
-                !worker_target.join("debug/.cargo-lock").exists(),
-                "a seeded target must not inherit the snapshot Cargo lock"
-            );
-        }
-
-        let worker_a_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(worker_a.join("debug/.cargo-lock"))
-            .unwrap();
-        let worker_b_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(worker_b.join("debug/.cargo-lock"))
-            .unwrap();
-        assert_ne!(
-            worker_a_lock.metadata().unwrap().ino(),
-            worker_b_lock.metadata().unwrap().ino(),
-            "Cargo must recreate a private lock inode for each seeded target"
-        );
-        // Non-blocking exclusive locks succeeding on both files prove the
-        // seeded targets cannot serialize each other through a shared inode.
-        assert_eq!(
-            unsafe { libc::flock(worker_a_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
-        assert_eq!(
-            unsafe { libc::flock(worker_b_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
-        unsafe {
-            libc::flock(worker_a_lock.as_raw_fd(), libc::LOCK_UN);
-            libc::flock(worker_b_lock.as_raw_fd(), libc::LOCK_UN);
-        }
     }
 
     /// WorkerSpawnPrep::run() must return the worktree path as cwd for N=4

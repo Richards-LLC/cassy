@@ -11,7 +11,10 @@ use crate::store::Store;
 pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasError> {
     use crate::types::{EntryType, MemoryTier};
 
-    let entries = store.list_decayable()?;
+    // Expiry is an absolute validity boundary, not a soft signal like age or
+    // stability. List every active entry so even a previously pinned memory is
+    // removed from the in-context tier once its valid_until has passed.
+    let entries = store.list()?;
     let now = Utc::now();
     let mut count = 0;
 
@@ -19,7 +22,20 @@ pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasErr
         let mut updated = entry.clone();
         let mut needs_update = false;
 
-        // InContext and Archive entries already filtered out by list_decayable()
+        if updated.is_expired() && updated.memory_tier != MemoryTier::Archive {
+            updated.memory_tier = MemoryTier::Archive;
+            needs_update = true;
+        }
+
+        // Archived entries need no further decay work. Expired entries above
+        // intentionally reach this branch after their one-time demotion.
+        if updated.memory_tier == MemoryTier::Archive {
+            if needs_update {
+                store.update(&updated)?;
+                count += 1;
+            }
+            continue;
+        }
 
         if updated.entry_type == EntryType::Observation
             && updated.memory_tier == MemoryTier::Working

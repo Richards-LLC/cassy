@@ -287,6 +287,10 @@ pub fn build_context_with_stores(
     // Add pinned memories (in-context tier - always shown full, ignores budget)
     if let Some(store) = stores.primary_store() {
         if let Ok(pinned_entries) = store.list_pinned() {
+            let pinned_entries: Vec<_> = pinned_entries
+                .into_iter()
+                .filter(|entry| !entry.is_expired())
+                .collect();
             if !pinned_entries.is_empty() {
                 if !context_parts.is_empty() {
                     context_parts.push(String::new());
@@ -669,6 +673,7 @@ pub fn build_context_with_stores(
         let filtered_entries: Vec<Entry> = merged_entries
             .iter()
             .filter(|e| e.entry_type != EntryType::Observation || e.feedback_score() > 0)
+            .filter(|e| !e.is_expired())
             .cloned()
             .collect();
 

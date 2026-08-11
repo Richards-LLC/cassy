@@ -2,6 +2,41 @@ use std::path::{Path, PathBuf};
 
 use toml::map::Map;
 
+/// Pretty-print JSON with every object recursively sorted by key.
+///
+/// `serde_json::Value` can preserve the insertion order from a user-edited
+/// file, so pretty-printing it directly can leave a generated config dirty
+/// even when its meaning did not change. Arrays retain their order because
+/// hook-group order is semantically significant.
+pub(crate) fn canonical_json_pretty(value: &serde_json::Value) -> serde_json::Result<String> {
+    let mut canonical = value.clone();
+    canonicalize_json_objects(&mut canonical);
+    let mut formatted = serde_json::to_string_pretty(&canonical)?;
+    formatted.push('\n');
+    Ok(formatted)
+}
+
+fn canonicalize_json_objects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, value) in &mut entries {
+                canonicalize_json_objects(value);
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in entries {
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                canonicalize_json_objects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Check whether a Claude *config directory* (e.g. `~/.claude`, `~/.claude-alt`)
 /// has CAS hooks in its `settings.json`.
 ///
@@ -631,7 +666,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     });
 
     // Write back with pretty formatting
-    let formatted = serde_json::to_string_pretty(&config)?;
+    let formatted = canonical_json_pretty(&config)?;
 
     // Check if content actually changed
     if existing_content.as_ref() == Some(&formatted) {
@@ -793,7 +828,10 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks` is not an object"))?;
     for (event, command) in [
-        ("PreToolUse", "cas hook PreToolUse"),
+        (
+            "PreToolUse",
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+        ),
         ("PostToolUse", "cas hook PostToolUse"),
     ] {
         let groups = hooks
@@ -802,13 +840,20 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
             .as_array_mut()
             .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.{event}` is not an array"))?;
 
+        // CAS owns both the current harness-aware command and the pre-cas-a53c
+        // form. Remove either before adding the canonical entry so an upgrade
+        // never leaves two registrations for the same Codex event.
+        let legacy_command = format!("cas hook {event}");
         groups.retain(|group| {
             !group
                 .get("hooks")
                 .and_then(|handlers| handlers.as_array())
                 .is_some_and(|handlers| {
                     handlers.iter().any(|handler| {
-                        handler.get("command").and_then(|value| value.as_str()) == Some(command)
+                        matches!(
+                            handler.get("command").and_then(|value| value.as_str()),
+                            Some(existing) if existing == command || existing == legacy_command
+                        )
                     })
                 })
         });
@@ -822,7 +867,7 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         }));
     }
 
-    let formatted = serde_json::to_string_pretty(&config)?;
+    let formatted = canonical_json_pretty(&config)?;
     if existing_content.as_ref() == Some(&formatted) {
         return Ok(false);
     }

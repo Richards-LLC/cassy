@@ -1,6 +1,6 @@
 ---
 name: cas-github-issues
-description: Sweep a project's GitHub Issues and reconcile them with CAS tasks — dedupe double-filed reports, verify-and-close issues that claim to be fixed, task genuinely new issues into the active epic (creating a successor epic when none is open), comment each issue with its task ID, unblock chained tasks whose lane has merged, and file issues for defects observed since the last sweep. Use when running the recurring issue sweep, when asked to triage/burn down GitHub issues, when a bug report needs to become a task, or when you observed a defect that belongs in the issue tracker.
+description: Use when sweeping, triaging, deduplicating, verifying, closing, or filing GitHub issues, or reconciling issues with CAS tasks.
 managed_by: cas
 ---
 

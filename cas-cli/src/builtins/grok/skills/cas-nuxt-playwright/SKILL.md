@@ -1,6 +1,6 @@
 ---
 name: cas-nuxt-playwright
-description: "Nuxt + Playwright E2E testing reference for Nuxt 3/4 apps with Firebase auth and Quasar UI. Covers SSR/SPA detection, Firebase auth patterns (IndexedDB vs localStorage), Quasar selectors, hydration timing, route mock rules, and a diagnostic table for common failures. Opt-in only: invoke ONLY when the operator explicitly asks for Playwright or E2E testing help. Do NOT auto-invoke during normal development, editing files under tests/, or task verification — Playwright stays available on demand, never as a default."
+description: Opt-in only: invoke ONLY when the operator explicitly asks for Nuxt + Playwright E2E testing help; do not invoke for ordinary development, test edits, or routine verification.
 managed_by: cas
 user-invocable: true
 ---

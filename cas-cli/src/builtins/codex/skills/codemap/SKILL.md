@@ -1,6 +1,6 @@
 ---
 name: codemap
-description: Generate or update `.claude/CODEMAP.md` — a tight structural map of the repo (top-level layout, workspace members, key modules, entrypoints, where domain logic lives). Use when the user asks for a "codemap", "/codemap", "update codemap", "regenerate codemap", "the codemap is stale", or when SessionStart/PreToolUse warns that `.claude/CODEMAP.md` is missing or stale. This is the remediation skill for the codemap freshness gate.
+description: Use when the user asks for a codemap, or when .claude/CODEMAP.md is missing or stale.
 managed_by: cas
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: cas-servers
-description: Run long-lived servers (dev servers, API stubs, watchers, preview builds) through the CAS server registry instead of a raw background shell command. Use when you need `npm run dev`, `vite`, `next dev`, `cargo watch`, `python -m http.server`, a Playwright webServer, or any process that must keep listening after the command returns — and when you need to find out what is already listening on a port, or stop something you or another worker started.
+description: Use when starting, inspecting, or stopping a long-lived local server, watcher, API stub, preview, or Playwright webServer.
 managed_by: cas
 ---
 

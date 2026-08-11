@@ -3483,6 +3483,66 @@ async fn test_worker_activity_includes_idle_workers() {
 }
 
 #[tokio::test]
+async fn test_worker_activity_uses_worker_status_signal_full_names_and_suppresses_closed_tasks() {
+    let env = FactoryTestEnv::new();
+    let worker_name = "codex-current-worker-255";
+    let worker_id = env.register_worker(worker_name);
+
+    let mut closed_task = Task::new(
+        "cas-terminal-activity".to_string(),
+        "Terminal activity".to_string(),
+    );
+    closed_task.status = TaskStatus::Closed;
+    closed_task.assignee = Some(worker_name.to_string());
+    env.task_store().add(&closed_task).expect("add closed task");
+
+    let mut terminal_event = Event::new(
+        EventType::WorkerGitCommit,
+        EventEntityType::Task,
+        &closed_task.id,
+        "stale closed-task activity",
+    )
+    .with_session(worker_id.clone());
+    terminal_event.created_at = chrono::Utc::now() - chrono::Duration::minutes(8);
+    env.event_store()
+        .record(&terminal_event)
+        .expect("record terminal activity");
+
+    // TaskNoteAdded is part of worker_status's last-activity input but was
+    // previously discarded from worker_activity's hook-only event subset.
+    let fresh_signal = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        "cas-live-activity",
+        "fresh progress-note activity",
+    )
+    .with_session(worker_id);
+    env.event_store()
+        .record(&fresh_signal)
+        .expect("record fresh worker-status signal");
+
+    let result = env
+        .service
+        .factory(Parameters(factory_req("worker_activity")))
+        .await
+        .expect("worker_activity should succeed");
+    let text = get_text(&result);
+
+    assert!(
+        text.contains("• codex-current-worker-255 - fresh progress-note activity"),
+        "fresh worker_status activity must use the full registered worker name: {text}"
+    );
+    assert!(
+        text.contains("1 terminal-task activity row suppressed"),
+        "terminal task events must collapse to one operator-facing count: {text}"
+    );
+    assert!(
+        !text.contains("stale closed-task activity"),
+        "closed-task activity must not be presented as live work: {text}"
+    );
+}
+
+#[tokio::test]
 async fn test_worker_activity_codex_tool_call_uses_worker_status_rollout_signal() {
     use std::io::Write;
 

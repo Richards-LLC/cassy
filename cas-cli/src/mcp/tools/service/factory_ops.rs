@@ -25,6 +25,34 @@ pub(crate) use super::agent_liveness::WORKER_STALE_SECS;
 /// dead.
 pub(crate) const WORKER_DEAD_SECS: i64 = 75;
 
+/// Shared event-store freshness window for the supervisor's worker views.
+///
+/// `worker_status` and `worker_activity` both answer whether a worker has
+/// done anything recently, so they must read the same bounded source rather
+/// than diverging on an arbitrary event count or activity class.
+const WORKER_ACTIVITY_WINDOW_SECS: i64 = 600;
+
+/// Whether an event is evidence of work a worker actually performed.
+///
+/// Registration and lifecycle bookkeeping share the event store but must not
+/// mask a fresher transcript/tool signal. Keep this predicate shared by the
+/// activity feed and `worker_status` so their freshness claims agree.
+fn is_worker_activity_event(event: &cas_types::Event) -> bool {
+    use cas_types::EventType;
+
+    matches!(
+        event.event_type,
+        EventType::WorkerSubagentSpawned
+            | EventType::WorkerSubagentCompleted
+            | EventType::WorkerFileEdited
+            | EventType::WorkerGitCommit
+            | EventType::WorkerVerificationBlocked
+            | EventType::VerificationStarted
+            | EventType::VerificationAdded
+            | EventType::TaskNoteAdded
+    )
+}
+
 /// The harness (`SupervisorCli`) a worker registered under, read from
 /// `Agent.metadata["worker_cli"]` (cas-058f: persisted at registration time
 /// from `CAS_FACTORY_WORKER_CLI`, mirroring the existing `worker_effort`
@@ -1691,12 +1719,18 @@ impl CasService {
         // activity" line in worker_status. A worker in the investigation phase
         // emits checkpoint events but no edits; showing "last activity: 45s ago
         // (checkpoint)" is the signal that tells the supervisor NOT to reset.
-        const ACTIVITY_WINDOW_SECS: i64 = 600;
-        let activity_cutoff = chrono::Utc::now() - chrono::Duration::seconds(ACTIVITY_WINDOW_SECS);
+        let activity_cutoff =
+            chrono::Utc::now() - chrono::Duration::seconds(WORKER_ACTIVITY_WINDOW_SECS);
         let activity_events: Vec<cas_types::Event> = {
             use cas_store::{EventStore, SqliteEventStore};
             SqliteEventStore::open(&self.inner.cas_root)
                 .and_then(|es| es.list_since(activity_cutoff, 200))
+                .map(|events| {
+                    events
+                        .into_iter()
+                        .filter(is_worker_activity_event)
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
@@ -2486,9 +2520,9 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::open_agent_store;
+        use crate::store::{open_agent_store, open_task_store};
         use cas_store::{EventStore, SqliteEventStore};
-        use cas_types::{AgentRole, AgentStatus, EventType};
+        use cas_types::{AgentRole, AgentStatus, TaskStatus};
 
         let event_store = SqliteEventStore::open(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -2535,41 +2569,60 @@ impl CasService {
             visible_workers.iter().map(|a| a.id.clone()).collect();
         let visible_worker_names: std::collections::HashSet<String> =
             visible_workers.iter().map(|a| a.name.clone()).collect();
-
-        // Get recent worker activity events. These are only the activity
-        // classes CAS hooks/MCP calls explicitly persist; ordinary Codex tool
-        // calls do not create rows here (cas-a568).
-        let events = event_store.list_recent(50).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to list events: {e}"),
-            )
-        })?;
-
-        // Filter to worker activity events
-        let worker_events: Vec<_> = events
-            .into_iter()
-            .filter(|e| {
-                matches!(
-                    e.event_type,
-                    EventType::WorkerSubagentSpawned
-                        | EventType::WorkerSubagentCompleted
-                        | EventType::WorkerFileEdited
-                        | EventType::WorkerGitCommit
-                        | EventType::WorkerVerificationBlocked
-                        | EventType::VerificationStarted
-                        | EventType::VerificationAdded
-                )
-            })
-            .filter(|e| {
-                e.session_id
-                    .as_ref()
-                    .is_some_and(|id| visible_worker_ids.contains(id))
-                    || visible_worker_ids.contains(&e.entity_id)
-                    || visible_worker_names.contains(&e.entity_id)
-            })
-            .take(20)
+        let worker_names_by_id: std::collections::HashMap<String, String> = visible_workers
+            .iter()
+            .map(|agent| (agent.id.clone(), agent.name.clone()))
             .collect();
+
+        // Use the same bounded event window as `worker_status`'s
+        // `last_activity` signal. The activity feed is an operator-facing
+        // corroborating view, so filtering it to a smaller, hook-only subset
+        // would make an active worker disappear from this surface while the
+        // status roster correctly reports fresh work.
+        let activity_cutoff =
+            chrono::Utc::now() - chrono::Duration::seconds(WORKER_ACTIVITY_WINDOW_SECS);
+        let activity_events: Vec<cas_types::Event> = event_store
+            .list_since(activity_cutoff, 200)
+            .map_err(|e| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to list events: {e}"),
+                )
+            })?
+            .into_iter()
+            .filter(is_worker_activity_event)
+            .collect();
+
+        // cas-9f6f: terminal task events are durable forensic data, not live
+        // worker activity. Keep one compact count for supervisor awareness
+        // instead of letting old closed-task rows crowd out active workers.
+        let closed_task_ids: std::collections::HashSet<String> =
+            open_task_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| store.list(Some(TaskStatus::Closed)).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|task| task.id)
+                .collect();
+        let mut terminal_event_count = 0usize;
+        let mut live_worker_events = Vec::new();
+        for event in &activity_events {
+            let belongs_to_visible_worker = event
+                .session_id
+                .as_ref()
+                .is_some_and(|id| visible_worker_ids.contains(id))
+                || visible_worker_ids.contains(&event.entity_id)
+                || visible_worker_names.contains(&event.entity_id);
+            if !belongs_to_visible_worker {
+                continue;
+            }
+            if closed_task_ids.contains(&event.entity_id) {
+                terminal_event_count += 1;
+            } else {
+                live_worker_events.push(event);
+            }
+        }
+        let worker_events: Vec<_> = live_worker_events.into_iter().take(20).collect();
 
         // cas-a568: `worker_activity` is the supervisor's corroborating view
         // for worker_status's STALLED verdict, so it must consume the same
@@ -2586,9 +2639,9 @@ impl CasService {
                 let clone_path = agent.metadata.get("clone_path").map(String::as_str);
                 let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
                 let transcript_path = worker_status_transcript_path(clone_path, session_id, cli)?;
-                let event_activity = last_worker_activity_secs(&worker_events, &agent.id);
+                let event_activity = last_worker_activity_secs(&activity_events, &agent.id);
                 let effective_activity = last_worker_activity_secs_with_transcript(
-                    &worker_events,
+                    &activity_events,
                     &agent.id,
                     cli,
                     Some(&transcript_path),
@@ -2604,23 +2657,36 @@ impl CasService {
             })
             .collect();
 
-        if worker_events.is_empty() && transcript_activity.is_empty() {
+        if worker_events.is_empty() && transcript_activity.is_empty() && terminal_event_count == 0 {
             return Ok(Self::success(
-                "No recent worker activity.\n\nworker_activity combines CAS-recorded file-edit, commit, subagent, and verification events with resolved worker transcript/rollout freshness. Not every tool call creates a CAS event; transcript activity is unavailable when a worker's transcript cannot be resolved.",
+                "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
         }
 
         let mut output = String::from("Worker Activity\n===============\n\n");
+        if terminal_event_count > 0 {
+            output.push_str(&format!(
+                "⚠ {terminal_event_count} terminal-task activity row{} suppressed; closed work is not live worker activity.\n",
+                if terminal_event_count == 1 { "" } else { "s" }
+            ));
+        }
         for event in worker_events {
             let ago = format_relative_time(event.created_at);
-            let session_short = event
+            let worker_name = event
                 .session_id
                 .as_ref()
-                .map(|s| &s[..8.min(s.len())])
-                .unwrap_or("unknown");
+                .and_then(|id| worker_names_by_id.get(id))
+                .or_else(|| worker_names_by_id.get(&event.entity_id))
+                .map(String::as_str)
+                .or_else(|| {
+                    visible_worker_names
+                        .contains(&event.entity_id)
+                        .then_some(event.entity_id.as_str())
+                })
+                .unwrap_or("unknown worker");
             output.push_str(&format!(
                 "• {} - {} ({})\n",
-                session_short, event.summary, ago
+                worker_name, event.summary, ago
             ));
         }
         for (worker_name, age_secs, in_flight) in transcript_activity {

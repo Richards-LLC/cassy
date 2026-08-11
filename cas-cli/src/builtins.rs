@@ -2994,6 +2994,34 @@ This is the body content."#;
         }
     }
 
+    /// cas-641f: workers must walk the repository's cross-surface blast
+    /// radius before close, rather than proving only the path they changed.
+    #[test]
+    fn test_worker_skills_require_cas_src_surface_checklist() {
+        for (label, content) in [
+            ("claude", include_str!("builtins/skills/cas-worker.md")),
+            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
+            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+        ] {
+            for required in [
+                "cas-src surface checklist",
+                "This is a requirement, not a suggestion",
+                "not applicable",
+                "Codex, and Grok mirrors",
+                "CLI parity, docs, and dispatch registration",
+                "config_gen",
+                ".codex/hooks.json",
+                "bootstrap/reconciliation expectations",
+                "doctor_snapshot",
+                "cas-2327",
+                "reverse states",
+                "release-notes impact",
+            ] {
+                assert!(content.contains(required), "{label} surface checklist missing {required:?}");
+            }
+        }
+    }
+
     /// cas-3627 (GH #159): the worker builtin must teach the difference
     /// between the INNER test loop and the FINAL proof.
     ///

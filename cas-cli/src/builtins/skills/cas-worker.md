@@ -19,7 +19,7 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
 3. Read it with `action=show`, including depth and acceptance criteria; also read project `CLAUDE.md`.
 4. Implement only its scope. Commit logical units in project style (`git log --oneline -10`) with the task ID. In shared-directory mode, use `factory/<name>`; commit guards reject `main`/`staging`.
 5. Post progress with `action=notes id=<task-id> note_type=progress notes="..."`.
-6. Before closing a deep task, follow [close-gate.md](cas-worker/references/close-gate.md), invoke [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture a fresh proof command's exit code and tail.
+6. Before closing a deep task, follow [close-gate.md](cas-worker/references/close-gate.md), complete the required **cas-src surface checklist** below in one pre-close note, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture a fresh proof command's exit code and tail.
 7. Close: `mcp__cas__task action=close id=<task-id> reason="..."`
    - **Success:** message the supervisor, return to step 1, and wait. Do not pull the next ready task yourself.
    - **pending supervisor review:** wait for feedback.
@@ -63,6 +63,18 @@ Your scope is locked at assignment:
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
 - **Report context headroom** ("context: ~60% used") in every milestone progress note.
 - **Checkpoint, never compact.** When context is low: commit, push, leave a handoff note, and ask for respawn. Prefer small pushed commits. See [discipline.md](cas-worker/references/discipline.md).
+
+## cas-src surface checklist — required before close
+
+In the pre-close task note, state each applicable entry and how you addressed it; write `not applicable` for the rest. This is a requirement, not a suggestion.
+
+- **Builtin skill/agent:** sync Claude, Codex, and Grok mirrors (`cas-8921` missed Codex/Grok).
+- **MCP tool:** cover CLI parity, docs, and dispatch registration.
+- **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json`.
+- **Migration:** update pinned bootstrap/reconciliation expectations and `doctor_snapshot` (`cas-96f9`/m232).
+- **Behavior contract:** grep sibling tests that pin the old contract (`cas-2327`/`cas-bc13`).
+- **State transition:** cover reverse states too (hold/release, pause/resume, remember/archive, snooze/unsnooze).
+- **User-visible change:** assess release-notes impact.
 
 ## Communication
 

@@ -49,6 +49,8 @@ pub enum HubCommands {
     Service(HubServiceArgs),
     /// Mint a ten-minute one-time browser pairing invitation
     Pair(HubPairArgs),
+    /// Approve a Commander page's short-code pairing request through Petra Stella Cloud
+    Authorize(HubAuthorizeArgs),
     /// List or revoke paired Commander devices
     Auth(HubAuthArgs),
 }
@@ -81,6 +83,21 @@ pub struct HubPairArgs {
         default_value = "machine:read,session:read,pane:read"
     )]
     pub scopes: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HubAuthorizeArgs {
+    /// Eight-character code displayed by Commander (for example K7MW-4H2Q)
+    pub code: String,
+    /// Reduce the page-requested scopes; may never add a scope
+    #[arg(long, value_delimiter = ',')]
+    pub scopes: Option<Vec<String>>,
+    /// Public hub URL when the hub record has no Tailscale Serve URL
+    #[arg(long)]
+    pub hub_url: Option<String>,
+    /// Approve without an interactive confirmation prompt
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -141,6 +158,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             args.tailscale_serve_port,
         ),
         HubCommands::Pair(pair) => pair_device(&pair, cli),
+        HubCommands::Authorize(authorize) => super::hub_reverse_pairing::authorize(&authorize, cli),
         HubCommands::Auth(auth) => manage_auth(&auth, cli),
     }
 }

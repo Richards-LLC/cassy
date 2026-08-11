@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "cas hook PreToolUse",
+            "timeout": 3,
+            "type": "command"
+          }
+        ],
+        "matcher": "^Bash$"
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [

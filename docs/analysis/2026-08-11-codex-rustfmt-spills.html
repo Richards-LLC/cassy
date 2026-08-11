@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex worker rustfmt spills — root-cause investigation — 2026-08-11</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8fa;
+      --surface: #ffffff;
+      --text: #17202a;
+      --muted: #52606d;
+      --line: #c7d0d9;
+      --accent: #1557a0;
+      --accent-soft: #e9f2fc;
+      --good: #17663a;
+      --warn: #8a5100;
+      --code: #eef1f4;
+      --shadow: 0 8px 24px rgba(23, 32, 42, 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10151b;
+        --surface: #18212a;
+        --text: #eef3f7;
+        --muted: #b8c4ce;
+        --line: #465462;
+        --accent: #82bfff;
+        --accent-soft: #172f48;
+        --good: #7bd8a4;
+        --warn: #ffc36d;
+        --code: #202b35;
+        --shadow: none;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.58;
+    }
+    .skip-link {
+      position: absolute;
+      left: .75rem;
+      top: -4rem;
+      z-index: 10;
+      padding: .65rem .85rem;
+      background: var(--surface);
+      color: var(--accent);
+      border: 2px solid var(--accent);
+    }
+    .skip-link:focus { top: .75rem; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    header, main, footer { width: min(1120px, calc(100% - 2rem)); margin-inline: auto; }
+    header { padding: 3.5rem 0 1.5rem; }
+    main { padding-bottom: 3rem; }
+    footer { border-top: 1px solid var(--line); padding: 1.5rem 0 3rem; color: var(--muted); }
+    h1, h2 { line-height: 1.18; letter-spacing: -.02em; }
+    h1 { max-width: 920px; margin: 0 0 .8rem; font-size: clamp(2rem, 5vw, 3.7rem); }
+    h2 { margin: 2.4rem 0 .8rem; font-size: clamp(1.45rem, 3vw, 2rem); }
+    p, li { max-width: 78ch; }
+    a { color: var(--accent); }
+    .eyebrow { color: var(--accent); font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .verdict {
+      margin-top: 1.4rem;
+      padding: 1.35rem 1.5rem;
+      border: 1px solid var(--line);
+      border-left: 6px solid var(--accent);
+      border-radius: .65rem;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .verdict strong { color: var(--good); }
+    .mechanisms {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+      margin: 1.25rem 0;
+    }
+    .card {
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: .55rem;
+      background: var(--surface);
+      break-inside: avoid;
+    }
+    .card h2, .card h3 { margin-top: 0; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    caption { padding: .8rem 1rem; text-align: left; color: var(--muted); font-weight: 650; }
+    th, td { padding: .75rem .9rem; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+    thead th { border-top: 0; background: var(--accent-soft); color: var(--text); }
+    tbody th { width: 22%; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    code { padding: .08rem .25rem; border-radius: .2rem; background: var(--code); }
+    pre { max-width: 100%; overflow-x: auto; padding: 1rem; border: 1px solid var(--line); border-radius: .45rem; background: var(--code); white-space: pre-wrap; }
+    .timeline { list-style: none; margin: 1.2rem 0; padding: 0; }
+    .timeline li { position: relative; max-width: none; margin-left: .7rem; padding: 0 0 1.15rem 1.5rem; border-left: 2px solid var(--line); }
+    .timeline li::before { content: ""; position: absolute; left: -.43rem; top: .32rem; width: .72rem; height: .72rem; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
+    .time { display: inline-block; min-width: 6rem; font-variant-numeric: tabular-nums; font-weight: 750; color: var(--accent); }
+    .decision { border-left: 5px solid var(--good); }
+    .operator { border-left: 5px dashed var(--warn); }
+    .label { display: inline-block; margin-right: .35rem; padding: .08rem .42rem; border: 1px solid currentColor; border-radius: 999px; font-size: .82rem; font-weight: 750; }
+    @media (max-width: 620px) {
+      header { padding-top: 2.2rem; }
+      th, td { padding: .6rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      :root { --bg: #fff; --surface: #fff; --text: #000; --muted: #333; --line: #777; --accent: #000; --accent-soft: #eee; --good: #000; --warn: #000; --code: #f3f3f3; --shadow: none; }
+      body { font-size: 10.5pt; }
+      header, main, footer { width: 100%; }
+      header { padding-top: 0; }
+      h2 { break-after: avoid; }
+      tr, .card, .verdict { break-inside: avoid; }
+      thead { display: table-header-group; }
+      .table-wrap { overflow: visible; }
+      table { min-width: 0; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .85em; }
+      .skip-link { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to report</a>
+  <header>
+    <div class="eyebrow">Investigation · 11 August 2026</div>
+    <h1>Codex worker rustfmt spills</h1>
+    <p>Root cause, ruled-out hypotheses, and the guard-versus-normalization decision.</p>
+    <section class="verdict" aria-labelledby="verdict-title">
+      <h2 id="verdict-title">Verdict</h2>
+      <p><strong>High confidence:</strong> the spills are caused by model-issued formatter commands, not Codex auto-save or a hidden tool default. Mutating <code>cargo fmt</code> selects Cargo targets; direct <code>rustfmt</code> follows child modules unless <code>skip_children=true</code> is explicit.</p>
+    </section>
+    <div class="mechanisms" aria-label="Confirmed formatter spill mechanisms">
+      <section class="card">
+        <h2>Trigger 1: Cargo scope</h2>
+        <p><code>cargo fmt --all</code> explicitly rewrote the workspace and immediately exposed broad churn.</p>
+      </section>
+      <section class="card">
+        <h2>Trigger 2: module traversal</h2>
+        <p>Direct rustfmt on <code>mod.rs</code> and <code>lib.rs</code> recursively formatted children not named on the command line.</p>
+      </section>
+    </div>
+  </header>
+
+  <main id="main">
+    <section aria-labelledby="overview-title">
+      <h2 id="overview-title">Overview</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Investigation scope and conclusion</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Result</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Question</th><td>What repeatedly rewrites unrelated Rust files in Codex worker worktrees?</td></tr>
+            <tr><th scope="row">Verdict</th><td>Explicit workspace Cargo formatting and recursive direct rustfmt module traversal.</td></tr>
+            <tr><th scope="row">Confidence</th><td>High for the causal mechanisms and 2026-08-11 incident; medium-high for retrospective <code>cas-bb1c</code> attribution.</td></tr>
+            <tr><th scope="row">Scope examined</th><td>Three incident notes; one complete warm-evidence rollout; formatter calls across retained 2026-08-09–11 rollouts; project hooks and CAS PreToolUse policy.</td></tr>
+            <tr><th scope="row">Author</th><td>CAS factory worker <code>warm-cheetah-6</code>, task <code>cas-852a0</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="evidence-title">
+      <h2 id="evidence-title">Evidence</h2>
+      <div class="table-wrap">
+        <table>
+          <caption>Evidence extracted 2026-08-11 from the eager-leopard-72 rollout, CAS task notes, Git history, and repository configuration</caption>
+          <thead><tr><th scope="col">Observation</th><th scope="col">Source</th><th scope="col">What it proves</th></tr></thead>
+          <tbody>
+            <tr><td>At 13:07:57Z the model invoked <code>cargo fmt --all &amp;&amp; git diff…</code>.</td><td>Rollout ordinal 130</td><td>The workspace formatter was explicit, not an implicit tool action.</td></tr>
+            <tr><td>At 13:08:00Z output listed changes across benches and many unrelated CLI modules.</td><td>Ordinal 131</td><td>The Cargo command produced the first spill.</td></tr>
+            <tr><td>At 13:08:19Z every path outside three task-owned tracked files was restored.</td><td>Ordinals 146–147</td><td>The first spill was removed before the next experiment.</td></tr>
+            <tr><td>At 13:08:23Z direct rustfmt named seven files, including CLI and core module roots.</td><td>Ordinal 152</td><td>The second command appeared file-scoped but included traversal roots.</td></tr>
+            <tr><td>One second later Git listed unrelated children including <code>auth.rs</code>, <code>cloud.rs</code>, <code>doctor.rs</code>, and <code>factory/mod.rs</code>.</td><td>Ordinal 153</td><td>Rustfmt recursively followed module declarations and caused a distinct second spill.</td></tr>
+            <tr><td><code>cas-bb1c</code> used targeted rustfmt; its commit includes <code>crates/cas-store/src/lib.rs</code>; about 19 cas-store children changed.</td><td>Task notes; commit <code>d5e2ef4b</code></td><td>The historical file family and timing match module-root traversal. This is inference because the original rollout is not retained.</td></tr>
+            <tr><td>Project Codex hooks registered only <code>PostToolUse</code>.</td><td><code>.codex/hooks.json</code> before the fix</td><td>CAS could observe after execution but could not prevent shell writes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="reasoning-title">
+      <h2 id="reasoning-title">Reasoning chain</h2>
+      <p>The 2026-08-11 chronology is a controlled A/B sequence. The worker ran Cargo formatting, observed churn, and restored it. It then ran direct rustfmt on apparent task files, observed a different child-module spill, and restored that too. The clean boundary between experiments excludes residue from the first command.</p>
+      <p>Rustfmt traversal also reconciles <code>cas-bb1c</code>: “targeted by path” did not mean “limited to that path” because one target was the crate's <code>lib.rs</code>.</p>
+      <div class="mechanisms">
+        <section class="card"><h3>Ruled out: auto-save</h3><p>Each confirmed spill starts at an explicit shell call; no formatter write precedes it.</p></section>
+        <section class="card"><h3>Ruled out: check mode</h3><p>Retained check invocations are non-mutating; confirmed writes follow mutating commands.</p></section>
+        <section class="card"><h3>Ruled out: concurrent writer</h3><p>The restore → rustfmt → immediate status sequence attributes the warm second spill to one command.</p></section>
+      </div>
+    </section>
+
+    <section aria-labelledby="timeline-title">
+      <h2 id="timeline-title">Timeline</h2>
+      <ol class="timeline">
+        <li><span class="time">13:07:57</span> Model requests <code>cargo fmt --all</code>. <span class="label">Trigger 1</span></li>
+        <li><span class="time">13:08:00</span> Git output shows workspace-wide formatting churn. <span class="label">Detected</span></li>
+        <li><span class="time">13:08:19</span> Unrelated paths restored. <span class="label">Mitigated</span></li>
+        <li><span class="time">13:08:23</span> Model requests direct rustfmt on task files including module roots. <span class="label">Trigger 2</span></li>
+        <li><span class="time">13:08:24</span> Git output shows many unrelated child modules. <span class="label">Detected</span></li>
+        <li><span class="time">13:08:30</span> Unrelated paths restored again. <span class="label">Mitigated</span></li>
+        <li><span class="time">13:08:44</span> Worker records the accidental workspace rewrite. <span class="label">Reported</span></li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="falsify-title">
+      <h2 id="falsify-title">What would falsify this</h2>
+      <p>A clean worktree gaining formatting-only changes before any formatter process starts, direct rustfmt with <code>skip_children=true</code> changing an unlisted child, or process-level evidence of another writer in the one-second windows would overturn the conclusion.</p>
+    </section>
+
+    <section aria-labelledby="actions-title">
+      <h2 id="actions-title">Next actions</h2>
+      <section class="card decision">
+        <h3><span class="label">Implement now</span> Worker guard and Codex configuration</h3>
+        <p>Route unified exec through <code>cas hook PreToolUse</code>. Deny mutating worker <code>cargo fmt</code> and direct mutating rustfmt without explicit <code>skip_children=true</code>. Preserve checks, stdout-only output, and supervisor authority. Fresh <code>cas init/update</code> configuration now converges both CAS pre- and post-tool hooks while preserving custom groups. The official <a href="https://learn.chatgpt.com/codex/hooks">Codex Hooks documentation</a> confirms that unified exec is exposed as <code>Bash</code> and nested code-mode calls honor hook decisions.</p>
+      </section>
+      <section class="card operator">
+        <h3><span class="label">Operator decision</span> One-time normalization plus CI gate</h3>
+        <p>An isolated <code>cargo fmt --all</code> normalization followed immediately by a CI <code>cargo fmt --all -- --check</code> gate would remove chronic baseline drift, at the cost of a large blame-noise commit. Do not run it from a worker. Normalization reduces future noise but does not replace scope enforcement.</p>
+      </section>
+    </section>
+
+    <section aria-labelledby="provenance-title">
+      <h2 id="provenance-title">Provenance</h2>
+      <p>Analysis branch: <code>factory/warm-cheetah-6</code>. Warm-incident base: <code>f96b5831</code>. Historical commits: <code>006131d7</code> and <code>d5e2ef4b</code>. Data window: 2026-08-09 through 2026-08-11.</p>
+      <pre><code>jq -c 'select(.type=="response_item" and
+  (.payload.type=="function_call" or .payload.type=="custom_tool_call")) |
+  {timestamp,ordinal,name:.payload.name,input:.payload.input}' &lt;rollout&gt;
+
+jq -r 'select(.type=="event_msg" and .payload.type=="item_completed" and
+  .payload.item.type=="CommandExecution" and (.ordinal&gt;=130 and .ordinal&lt;=160)) |
+  "ORD=\(.ordinal) TIME=\(.timestamp) CMD=\(.payload.item.command[-1])"' &lt;rollout&gt;
+
+git show --name-only d5e2ef4b1de2eadbd8a613ebd8da62b6948b6921</code></pre>
+      <p>Primary data: retained eager-leopard-72 Codex rollout beginning 2026-08-11T13:03:47Z. See the <a href="2026-08-11-codex-rustfmt-spills.md">Markdown source</a> for the complete local path and full evidence wording.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>This HTML is the self-contained review surface for <a href="2026-08-11-codex-rustfmt-spills.md">2026-08-11-codex-rustfmt-spills.md</a>. The Markdown file is the source of truth.</p>
+  </footer>
+</body>
+</html>

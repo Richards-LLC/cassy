@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cross-project task proposals — design decision — 2026-08-11</title>
+  <style>
+    :root { --bg:#f7f8fa; --panel:#fff; --text:#18202a; --muted:#596575; --line:#c8d0da; --accent:#174f87; --accent-soft:#e9f2fb; --good:#17643a; --warn:#7a4d00; --bad:#8a2934; --code:#eef1f4; }
+    * { box-sizing: border-box; }
+    html { color-scheme: light dark; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    a { color:var(--accent); }
+    a:focus-visible, summary:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+    .skip { position:absolute; left:-999px; top:0; }
+    .skip:focus { left:1rem; top:1rem; padding:.6rem; background:var(--panel); z-index:2; }
+    header, main, footer { width:min(1120px, calc(100% - 2rem)); margin-inline:auto; }
+    header { padding:3rem 0 1.5rem; }
+    h1 { max-width:900px; margin:.25rem 0 .8rem; font-size:clamp(2rem,5vw,3.7rem); line-height:1.04; letter-spacing:-.035em; }
+    h2 { margin:2.6rem 0 .7rem; font-size:1.55rem; }
+    h3 { margin:1.7rem 0 .5rem; font-size:1.12rem; }
+    p, li { max-width:84ch; }
+    .eyebrow { color:var(--accent); font-weight:750; letter-spacing:.08em; text-transform:uppercase; font-size:.78rem; }
+    .recommendation { max-width:960px; margin:1.2rem 0; padding:1.2rem 1.35rem; border-left:6px solid var(--accent); background:var(--accent-soft); font-size:1.18rem; font-weight:650; }
+    .meta { display:flex; flex-wrap:wrap; gap:.5rem 1.25rem; color:var(--muted); font-size:.9rem; }
+    section { scroll-margin-top:1rem; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem; margin:1rem 0; }
+    .table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+    table { width:100%; border-collapse:collapse; min-width:720px; }
+    caption { text-align:left; padding:.8rem 1rem; color:var(--muted); font-weight:650; }
+    th, td { padding:.72rem .85rem; border-top:1px solid var(--line); text-align:left; vertical-align:top; }
+    thead th { background:var(--code); border-top:0; position:sticky; top:0; }
+    tr.selected th, tr.selected td { background:var(--accent-soft); }
+    .marker { display:inline-block; border:2px solid var(--accent); border-radius:999px; padding:.08rem .45rem; font-size:.76rem; font-weight:750; white-space:nowrap; }
+    code, pre { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+    code { background:var(--code); border-radius:4px; padding:.08rem .25rem; }
+    pre { overflow:auto; padding:1rem; border:1px solid var(--line); border-radius:8px; background:var(--code); font-size:.86rem; }
+    .flow { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:1rem; }
+    .flow svg { width:100%; height:auto; }
+    .node { fill:var(--accent-soft); stroke:var(--accent); stroke-width:2; }
+    .planned { fill:var(--panel); stroke-dasharray:8 5; }
+    .svg-text { fill:var(--text); font:14px system-ui,sans-serif; }
+    .svg-small { fill:var(--muted); font:12px system-ui,sans-serif; }
+    .invariant { border-left:4px solid var(--good); padding:.35rem 0 .35rem 1rem; }
+    .boundary { border-left:4px solid var(--warn); padding:.35rem 0 .35rem 1rem; }
+    details { margin:.8rem 0; border:1px solid var(--line); border-radius:8px; padding:.65rem .85rem; background:var(--panel); }
+    summary { cursor:pointer; font-weight:700; }
+    footer { margin-top:3rem; padding:1.5rem 0 3rem; border-top:1px solid var(--line); color:var(--muted); font-size:.88rem; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#10151b; --panel:#18202a; --text:#edf2f7; --muted:#b4bfcc; --line:#425063; --accent:#8bc4ff; --accent-soft:#17324d; --good:#77d49c; --warn:#f0bf70; --bad:#ff9aa7; --code:#242e3a; } }
+    @media (max-width:600px) { header{padding-top:2rem} h2{font-size:1.35rem} .recommendation{font-size:1.05rem} }
+    @media print {
+      :root { --bg:#fff; --panel:#fff; --text:#000; --muted:#333; --line:#777; --accent:#000; --accent-soft:#eee; --good:#000; --warn:#000; --bad:#000; --code:#f3f3f3; }
+      body { background:#fff; font-size:10.5pt; }
+      header,main,footer { width:100%; }
+      a[href^="http"]::after { content:" (" attr(href) ")"; font-size:8pt; }
+      .skip { display:none; }
+      table { min-width:0; }
+      thead { display:table-header-group; }
+      tr, .card, .flow, details { break-inside:avoid; }
+      details { display:block; }
+      details > * { display:block; }
+      summary { list-style:none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header>
+    <div class="eyebrow">Design decision · 11 August 2026</div>
+    <h1>Cross-project work should arrive as a proposal, not a foreign task replica.</h1>
+    <p class="recommendation">Add a dedicated cloud proposal API and proposal store. Require an explicit target, gate the client to supervisors/directors, validate a shared-team grant in the cloud, stamp provenance there, and create an ordinary target task only after receiving-side acceptance.</p>
+    <div class="meta"><span>Status: design decided</span><span>Implementation: cloud-first successor</span><span>Audience: CAS CLI + Cloud maintainers</span><span>Source: cas-a0ba / cas#171</span><span>Cloud: <a href="https://github.com/Richards-LLC/petra-stella-cloud/issues/44">petra-stella-cloud#44</a></span></div>
+  </header>
+
+  <main id="content">
+    <section aria-labelledby="context">
+      <h2 id="context">Decision context</h2>
+      <p>Supervisors currently relay cross-project work through markdown. That loses priority, dependencies, status, deduplication, and machine-readable completion. The required experience is a tracked proposal that a target project can accept or reject, optionally blocking an origin task until the accepted target task closes.</p>
+      <p>This is creation only. Cross-project close, update, transfer, gate bypass, implicit target selection, and non-supervisor creation stay out of scope. The current generic sync path cannot preserve explicit targeting, granted authority, trustworthy provenance, and observable completion at the same time.</p>
+    </section>
+
+    <section aria-labelledby="options">
+      <h2 id="options">Options</h2>
+      <div class="table-wrap"><table>
+        <caption>Alternatives evaluated; the selected row is labeled and outlined by background.</caption>
+        <thead><tr><th scope="col">Option</th><th scope="col">Cost</th><th scope="col">Risk</th><th scope="col">Effort</th><th scope="col">Reversibility</th><th scope="col">Outcome</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Generic team task push under a different project</th><td>Low initially</td><td>Unacceptable: opaque/forgeable provenance; no close observation; no dependency sync</td><td>Low</td><td>Poor after data ships</td><td>Creates a row but not the feature</td></tr>
+          <tr><th scope="row">Foreign task replica in origin DB</th><td>Medium</td><td>Unacceptable: weakens fail-closed project scoping</td><td>Medium</td><td>Expensive</td><td>Easy joins at the cost of contamination safety</td></tr>
+          <tr class="selected"><th scope="row"><span class="marker">Selected</span> Dedicated proposal API + dependency signals</th><td>Medium</td><td>Controlled: isolated endpoints and tables</td><td>Medium/high</td><td>Good</td><td>Target review, provenance, and close observation all preserved</td></tr>
+          <tr><th scope="row">Keep markdown requests</th><td>None</td><td>Continued lossy handoff and polling</td><td>None</td><td>Immediate</td><td>No improvement</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section aria-labelledby="why">
+      <h2 id="why">Why this one</h2>
+      <p>The deciding criterion is whether the origin can learn that the target closed without weakening project-scoped pull. Only a cloud-owned dependency signal can do that. A dedicated API also stamps authenticated provenance and keeps proposed work outside the executable target backlog.</p>
+    </section>
+
+    <section aria-labelledby="giveup">
+      <h2 id="giveup">What we give up</h2>
+      <p>Generic team push already carries task-shaped JSON and would be quicker. The selected design adds a migration and a cloud-first sequence. That delay is preferable to silently omitting automatic unblocking and presenting client-authored provenance as authoritative.</p>
+    </section>
+
+    <section aria-labelledby="reversal">
+      <h2 id="reversal">Reversal cost</h2>
+      <p>The API is additive. Reversal disables proposal creation and archives the proposal/dependency tables; normal sync is untouched. Tasks already accepted are ordinary tasks and need no rollback migration.</p>
+    </section>
+
+    <section aria-labelledby="decisions">
+      <h2 id="decisions">Decided contract</h2>
+      <h3>Authorization predicate</h3>
+      <div class="invariant"><p><strong>Both gates must pass.</strong> CAS permits only a registered supervisor/director and refuses other roles before network I/O. Cloud requires bearer-token membership and two existing explicit projects in one shared team; it does not auto-register a target.</p></div>
+      <ol>
+        <li>Runtime refusal: <code>Cross-project task creation requires a registered supervisor or director session.</code></li>
+        <li>Grant refusal: <code>Cross-project task creation requires membership in a team shared by the origin and target projects.</code></li>
+      </ol>
+      <p>Team membership is the v1 grant. A future project allowlist may narrow it. Origin and target are explicit request fields and are never derived from cwd, a push envelope, or session defaults.</p>
+
+      <h3>Proposed-state flow</h3>
+      <ol>
+        <li><code>task create project=&lt;target&gt;</code> takes an idempotency key; omitting <code>project</code> keeps today's local path.</li>
+        <li>CLI checks role and active team, then sends the proposal without inserting a foreign local task.</li>
+        <li>Cloud validates both projects, reserves a target task ID, stamps provenance, and stores <code>proposed</code>.</li>
+        <li>An optional origin blocker is validated and recorded transactionally.</li>
+        <li>Target supervisors list proposals separately; proposals are never ready, claimable, assignable, or ordinary open tasks.</li>
+        <li>Accept atomically records <code>accepted</code> and materializes one normal target <code>open</code> task.</li>
+        <li>Reject records actor, time, and reason; it creates no task and reports a failed handoff rather than silent unblocking.</li>
+        <li>Target close resolves the external edge; origin returns to open only after all local and external blockers resolve.</li>
+      </ol>
+      <p>Proposal states are <code>proposed</code>, <code>accepted</code>, and <code>rejected</code>. They are not <code>TaskStatus</code> values.</p>
+
+      <h3>Provenance schema</h3>
+      <div class="table-wrap"><table>
+        <caption>Server-attested provenance; clients cannot override these fields.</caption>
+        <thead><tr><th scope="col">Field</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">proposal_id / target_task_id</th><td>Cloud identities</td></tr>
+          <tr><th scope="row">creator_user_id / team_id</th><td>Validated bearer identity and grant scope</td></tr>
+          <tr><th scope="row">origin_project_canonical_id / target_project_canonical_id</th><td>Existing projects resolved by cloud</td></tr>
+          <tr><th scope="row">received_at / client_request_id</th><td>Server time and idempotency identity</td></tr>
+          <tr><th scope="row">decided_by_user_id / decided_at</th><td>Authenticated receiving decision</td></tr>
+        </tbody>
+      </table></div>
+      <div class="table-wrap" style="margin-top:1rem"><table>
+        <caption>Client-asserted provenance; every UI must label it as asserted.</caption>
+        <thead><tr><th scope="col">Field</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">origin_session_id</th><td>Local registered CAS session</td></tr>
+          <tr><th scope="row">origin_agent_id / origin_agent_name</th><td>Local agent identity</td></tr>
+          <tr><th scope="row">origin_agent_role</th><td>Supervisor/director role checked by CLI</td></tr>
+          <tr><th scope="row">client_version / client_build</th><td>CAS binary identity</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section aria-labelledby="flow">
+      <h2 id="flow">End-to-end planned flow</h2>
+      <figure class="flow" aria-describedby="flow-summary">
+        <svg viewBox="0 0 980 280" role="img" aria-labelledby="flow-title flow-desc" preserveAspectRatio="xMidYMid meet">
+          <title id="flow-title">Planned cross-project proposal and dependency flow</title>
+          <desc id="flow-desc">An origin supervisor sends explicit origin and target fields to a cloud proposal API. A target supervisor accepts into a normal open task. Target close is returned as an external dependency signal to the origin.</desc>
+          <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="currentColor"/></marker></defs>
+          <rect class="node planned" x="20" y="72" width="180" height="58" rx="7"/><text class="svg-text" x="110" y="97" text-anchor="middle">Origin supervisor</text><text class="svg-small" x="110" y="116" text-anchor="middle">explicit origin + target</text>
+          <rect class="node planned" x="285" y="72" width="180" height="58" rx="7"/><text class="svg-text" x="375" y="97" text-anchor="middle">Cloud proposal API</text><text class="svg-small" x="375" y="116" text-anchor="middle">auth + provenance</text>
+          <rect class="node planned" x="550" y="72" width="180" height="58" rx="7"/><text class="svg-text" x="640" y="97" text-anchor="middle">Target inbox</text><text class="svg-small" x="640" y="116" text-anchor="middle">proposed; not ready</text>
+          <rect class="node planned" x="800" y="72" width="160" height="58" rx="7"/><text class="svg-text" x="880" y="97" text-anchor="middle">Open target task</text><text class="svg-small" x="880" y="116" text-anchor="middle">after accept</text>
+          <path d="M200,101 H278 M465,101 H543 M730,101 H793" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/><text class="svg-small" x="240" y="87" text-anchor="middle">proposal</text><text class="svg-small" x="505" y="87" text-anchor="middle">validated</text><text class="svg-small" x="765" y="87" text-anchor="middle">accept</text>
+          <rect class="node planned" x="370" y="205" width="240" height="52" rx="7"/><text class="svg-text" x="490" y="227" text-anchor="middle">Origin external blocker</text><text class="svg-small" x="490" y="246" text-anchor="middle">resolved only by target close</text>
+          <path d="M880,130 C880,225 700,230 618,230" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="8 5" marker-end="url(#arrow)"/><text class="svg-small" x="760" y="214" text-anchor="middle">close status signal</text>
+        </svg>
+        <figcaption id="flow-summary">All nodes are planned. Current behavior remains local create → local project database → project-scoped sync. Source: design trace on CAS <code>f96b5831</code>, 2026-08-11.</figcaption>
+      </figure>
+    </section>
+
+    <section aria-labelledby="wire">
+      <h2 id="wire">Wire and storage contract</h2>
+      <p><code>POST /api/teams/{team_id}/task-proposals</code> accepts explicit origin/target IDs, idempotency key, task payload, asserted CAS provenance, client identity, and an optional origin blocker. It returns <code>201 {proposal_id,target_task_id,state:"proposed",provenance}</code>. Repeats return the same IDs. Expected errors: <code>403</code> missing shared-team grant, <code>404</code> unknown explicit project, <code>409</code> blocker absent from cloud state.</p>
+      <pre><code>{
+  "client_request_id": "018f...",
+  "origin_project_canonical_id": "petra-stella-cloud",
+  "target_project_canonical_id": "cas-src",
+  "origin_session_id": "session-uuid",
+  "origin_agent_id": "agent-uuid",
+  "origin_agent_name": "supervisor",
+  "origin_agent_role": "supervisor",
+  "client_version": "2.x",
+  "client_build": "git-sha",
+  "task": {
+    "title": "...", "description": "...", "priority": 2,
+    "task_type": "task", "labels": [], "design": "...",
+    "acceptance_criteria": "...", "external_ref": "..."
+  },
+  "blocks_origin_task_id": "cas-abcd"
+}</code></pre>
+      <p>Triage uses a target-project proposal list and idempotent accept/reject endpoints. Opposite second decisions return <code>409</code>. Dependency reconciliation is project-scoped and returns proposal state, target status, and resolution; rejection is <code>handoff_rejected</code>.</p>
+      <pre><code>POST /api/teams/{team_id}/task-proposals
+GET  /api/teams/{team_id}/task-proposals?target_project_id=...&amp;state=proposed
+POST /api/teams/{team_id}/task-proposals/{proposal_id}/accept
+POST /api/teams/{team_id}/task-proposals/{proposal_id}/reject
+GET  /api/teams/{team_id}/cross-project-task-dependencies?origin_project_id=...&amp;since=...</code></pre>
+      <p>Cloud adds <code>task_proposals</code>: immutable task payload, state, explicit resolved project IDs, both provenance classes, decision audit, and unique <code>(creator_user_id, client_request_id)</code>. It also adds <code>cross_project_task_dependencies</code>: explicit origin and target identities, <code>blocks</code> as the only v1 type, timestamps, and uniqueness against duplicate edges. CLI adds a local external-dependency projection, not a foreign task replica.</p>
+    </section>
+
+    <section aria-labelledby="scope">
+      <h2 id="scope">Scope truth</h2>
+      <p>The local tasks table has no row-level project ID; its boundary is its owning <code>.cas/cas.db</code>. Pending proposals remain separate, so <code>scope=project</code> truthfully means the current CAS database and must name its canonical ID. <code>scope=global</code> is rejected; <code>scope=all</code> is documented as equivalent to the current project until a multi-project aggregator exists. The tool must not claim to filter a nonexistent column.</p>
+    </section>
+
+    <section aria-labelledby="boundary">
+      <h2 id="boundary">Current versus planned boundary</h2>
+      <div class="boundary"><p><strong>Current:</strong> team membership validation, explicit project-scoped pulls, normal task sync, and task mutations. <strong>Planned:</strong> proposal/dependency tables and endpoints, CLI <code>project</code> parameter, triage actions, provenance rendering, and external dependency reconciliation. Cloud ships first.</p></div>
+    </section>
+
+    <section aria-labelledby="tests">
+      <h2 id="tests">Implementation acceptance tests</h2>
+      <ol>
+        <li>Local create without <code>project</code> stays compatible.</li><li>Worker/unknown roles fail before network I/O.</li><li>No shared-team grant returns a named <code>403</code>.</li><li>No cwd inference; missing origin/target is an error.</li><li>One idempotency key yields one proposal/task ID.</li><li>Proposals stay outside ready/list until accepted.</li><li>Accept creates one open task with visible provenance.</li><li>Reject creates no task and audits reason.</li><li>External blocker stays blocked while pending/open, flags rejection, and unblocks after close.</li><li>Project task listing names its real database boundary.</li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="evidence">
+      <h2 id="evidence">Evidence</h2>
+      <div class="table-wrap"><table>
+        <caption>Code observations establishing the design boundary; examined 2026-08-11.</caption>
+        <thead><tr><th scope="col">Observation</th><th scope="col">Source</th><th scope="col">What it proves</th></tr></thead>
+        <tbody>
+          <tr><td>Create opens current store and writes open/project</td><td><code>lifecycle.rs:43–56,75,163–208</code></td><td>No cross-project create path</td></tr>
+          <tr><td>Team push uses one current-process project</td><td><code>team_push.rs:80–96</code></td><td>No per-proposal target contract</td></tr>
+          <tr><td>Foreign/missing project rows are refused</td><td><code>pull.rs:85–135</code></td><td>Foreign replicas weaken a safety boundary</td></tr>
+          <tr><td>Dependencies are explicitly not synced</td><td><code>syncing_task.rs:161–175</code></td><td>Generic task sync cannot carry the edge</td></tr>
+          <tr><td>Ready joins local deps to local tasks</td><td><code>task_store.rs:795–820</code></td><td>New external projection is required</td></tr>
+          <tr><td>Cloud stores task payload as opaque JSON</td><td><code>team sync push route:28–42,91–141</code></td><td>Generic push provenance is client-authored</td></tr>
+          <tr><td>Cloud pull requires and filters one project</td><td><code>team sync pull route:39–80</code></td><td>Normal pull cannot observe both projects</td></tr>
+          <tr><td>Cloud PK omits project</td><td><code>drizzle/schema.ts:15–54</code></td><td>Cross-project replicas are unsafe</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section aria-labelledby="questions">
+      <h2 id="questions">Open implementation questions</h2>
+      <ul><li>Cloud chooses a collision-safe server task-ID generator preserving the <code>cas-</code> prefix.</li><li>Dependency cursors should reuse server revision/cursor conventions, not client clocks.</li><li>Web explorer triage is optional; the API contract does not depend on it.</li></ul>
+    </section>
+  </main>
+
+  <footer>
+    <p><strong>Provenance.</strong> Examined 2026-08-11 against CAS commit <code>f96b5831</code> and the local Petra Stella Cloud <code>main</code> checkout. Evidence came from targeted <code>rg</code> and <code>nl -ba</code> traces over lifecycle, sync, pull, dependency, route, and schema code.</p>
+    <p>Markdown source of truth: <a href="2026-08-11-cross-project-task-proposals.md">2026-08-11-cross-project-task-proposals.md</a>. Cloud API request text: <a href="2026-08-11-cloud-task-proposal-api-request.md">2026-08-11-cloud-task-proposal-api-request.md</a>. Tracking: <a href="https://github.com/Richards-LLC/petra-stella-cloud/issues/44">Richards-LLC/petra-stella-cloud#44</a>.</p>
+  </footer>
+</body>
+</html>

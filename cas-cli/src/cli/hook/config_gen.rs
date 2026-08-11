@@ -644,9 +644,9 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
 
 /// Configure CAS for Codex via `.codex/config.toml` and `.codex/hooks.json`.
 ///
-/// Registers the MCP server and installs a native Codex `PostToolUse` hook for
-/// shell/unified-exec calls. Codex documents both shell commands and
-/// `exec_command` under the canonical `Bash` matcher:
+/// Registers the MCP server and installs native Codex `PreToolUse` and
+/// `PostToolUse` hooks for shell/unified-exec calls. Codex documents both shell
+/// commands and `exec_command` under the canonical `Bash` matcher:
 /// <https://developers.openai.com/codex/config-advanced#hooks>
 ///
 /// Returns `Ok(true)` if either file was modified, `Ok(false)` if no changes
@@ -753,7 +753,7 @@ pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
         }
     }
 
-    let hooks_changed = configure_codex_post_tool_use_hook(&codex_dir)?;
+    let hooks_changed = configure_codex_tool_hooks(&codex_dir)?;
 
     if changed {
         let formatted = toml::to_string_pretty(&config)?;
@@ -765,13 +765,14 @@ pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     Ok(changed || hooks_changed)
 }
 
-/// Install the task-anchor hook using Codex's native `hooks.json` schema.
+/// Install CAS's command guards and task-anchor hook using Codex's native
+/// `hooks.json` schema.
 ///
 /// The timeout is three seconds (Codex timeout units are seconds, unlike the
 /// millisecond values in Claude's settings). Existing non-CAS hook groups are
-/// preserved, while an older CAS PostToolUse entry is converged to this exact
-/// matcher and handler.
-fn configure_codex_post_tool_use_hook(codex_dir: &Path) -> anyhow::Result<bool> {
+/// preserved, while older CAS entries are converged to these exact matchers and
+/// handlers.
+fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
     let hooks_path = codex_dir.join("hooks.json");
     let existing_content = if hooks_path.exists() {
         Some(std::fs::read_to_string(&hooks_path)?)
@@ -791,31 +792,35 @@ fn configure_codex_post_tool_use_hook(codex_dir: &Path) -> anyhow::Result<bool> 
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks` is not an object"))?;
-    let post_tool_use = hooks
-        .entry("PostToolUse")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.PostToolUse` is not an array"))?;
+    for (event, command) in [
+        ("PreToolUse", "cas hook PreToolUse"),
+        ("PostToolUse", "cas hook PostToolUse"),
+    ] {
+        let groups = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.{event}` is not an array"))?;
 
-    post_tool_use.retain(|group| {
-        !group
-            .get("hooks")
-            .and_then(|handlers| handlers.as_array())
-            .is_some_and(|handlers| {
-                handlers.iter().any(|handler| {
-                    handler.get("command").and_then(|value| value.as_str())
-                        == Some("cas hook PostToolUse")
+        groups.retain(|group| {
+            !group
+                .get("hooks")
+                .and_then(|handlers| handlers.as_array())
+                .is_some_and(|handlers| {
+                    handlers.iter().any(|handler| {
+                        handler.get("command").and_then(|value| value.as_str()) == Some(command)
+                    })
                 })
-            })
-    });
-    post_tool_use.push(serde_json::json!({
-        "matcher": "^Bash$",
-        "hooks": [{
-            "type": "command",
-            "command": "cas hook PostToolUse",
-            "timeout": 3
-        }]
-    }));
+        });
+        groups.push(serde_json::json!({
+            "matcher": "^Bash$",
+            "hooks": [{
+                "type": "command",
+                "command": command,
+                "timeout": 3
+            }]
+        }));
+    }
 
     let formatted = serde_json::to_string_pretty(&config)?;
     if existing_content.as_ref() == Some(&formatted) {

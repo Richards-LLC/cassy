@@ -4,6 +4,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The hook runner that will interpret a PreToolUse response.
+///
+/// Claude Code accepts `permissionDecision: "allow"`; Codex 0.147 accepts
+/// the deny form but rejects an explicit allow, where an empty response is the
+/// accepted allow/no-op. The command wrapper selects Codex explicitly with
+/// `CAS_HOOK_HARNESS=codex`; unknown callers preserve Claude's established
+/// protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreToolUseHarness {
+    ClaudeCode,
+    Codex,
+}
+
+impl PreToolUseHarness {
+    fn current() -> Self {
+        if std::env::var("CAS_HOOK_HARNESS")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("codex"))
+        {
+            Self::Codex
+        } else {
+            Self::ClaudeCode
+        }
+    }
+}
+
 /// Input received from Claude Code hooks via stdin
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct HookInput {
@@ -511,15 +537,12 @@ impl HookOutput {
     /// migration is trivial; deferred from the enum refactor to keep that diff
     /// focused.
     pub fn with_pre_tool_permission(decision: &str, reason: &str) -> Self {
-        Self {
-            hook_specific_output: Some(HookSpecificOutput::PreToolUse {
-                permission_decision: Some(decision.to_string()),
-                permission_decision_reason: Some(reason.to_string()),
-                updated_input: None,
-                additional_context: None,
-            }),
-            ..Default::default()
-        }
+        Self::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::current(),
+            decision,
+            reason,
+            None,
+        )
     }
 
     /// PreToolUse permission decision with `additionalContext` for Claude.
@@ -533,12 +556,39 @@ impl HookOutput {
         reason: &str,
         additional_context: &str,
     ) -> Self {
+        Self::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::current(),
+            decision,
+            reason,
+            Some(additional_context),
+        )
+    }
+
+    /// The single PreToolUse permission-decision emitter.
+    ///
+    /// Claude Code 2.1.227 live captures establish that decisions must be
+    /// nested under `hookSpecificOutput`, tagged with
+    /// `hookEventName: "PreToolUse"`. Keeping both ordinary decisions and
+    /// success receipts here prevents those paths from drifting apart.
+    pub fn with_pre_tool_permission_for_harness(
+        harness: PreToolUseHarness,
+        decision: &str,
+        reason: &str,
+        additional_context: Option<&str>,
+    ) -> Self {
+        // Codex executes a PreToolUse call when the hook emits no decision.
+        // Its runner rejects the Claude-only `permissionDecision:"allow"`,
+        // so an empty response is its captured allow shape. Its deny shape is
+        // accepted and intentionally continues below for safety gates.
+        if harness == PreToolUseHarness::Codex && decision == "allow" {
+            return Self::empty();
+        }
         Self {
             hook_specific_output: Some(HookSpecificOutput::PreToolUse {
                 permission_decision: Some(decision.to_string()),
                 permission_decision_reason: Some(reason.to_string()),
                 updated_input: None,
-                additional_context: Some(additional_context.to_string()),
+                additional_context: additional_context.map(str::to_string),
             }),
             ..Default::default()
         }

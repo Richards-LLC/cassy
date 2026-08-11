@@ -4,7 +4,7 @@
 //! deliberately queried only once a minute.  That is at most sixty REST calls
 //! per hour for the run list plus the occasional failed-run detail lookup.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use std::time::Duration;
 use cas_store::{NotificationPriority, PromptQueueStore};
 use serde::Deserialize;
 
-use crate::bounded_process::{Deadline, run_command};
+use crate::bounded_process::{run_command, Deadline};
 
 /// The GitHub Actions polling cadence.  A factory uses at most 60 list calls
 /// per hour; failed runs add one jobs call and one optional log lookup.
@@ -27,6 +27,16 @@ pub(crate) struct CiFailure {
     pub run_url: String,
     pub failing_job: String,
     pub failing_test: Option<String>,
+    /// Older failed runs on this branch that the current failure supersedes.
+    /// They are retained only to make the one current alert explain what did
+    /// not get replayed to the supervisor.
+    suppressed_red_runs: Vec<SuppressedCiRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuppressedCiRun {
+    head_sha: String,
+    run_id: u64,
 }
 
 impl CiFailure {
@@ -207,31 +217,66 @@ impl CiTransport for GhCiTransport {
     }
 }
 
-/// Keep only completed failed runs on the trunk or currently-live factory lanes.
+/// Keep only the latest completed failure for each watched branch.
+///
+/// GitHub Action run IDs increase monotonically.  Selecting the highest run ID
+/// per branch makes the current completed conclusion authoritative: a newer
+/// green run resolves an older failure, while a newer red run replaces it.  We
+/// deliberately do this before looking up failed jobs/logs so a historical
+/// backlog is both silent and cheap to scan.
 pub(crate) fn collect_failures(
     transport: &dyn CiTransport,
     watched_branches: &BTreeSet<String>,
 ) -> Result<Vec<CiFailure>, CiWatchError> {
-    let mut failures = Vec::new();
-    for run in transport.completed_runs()? {
-        if run.status != "completed"
-            || run.conclusion.as_deref() != Some("failure")
-            || !watched_branches.contains(&run.head_branch)
-        {
+    let runs = transport.completed_runs()?;
+    let mut latest_by_branch = BTreeMap::<String, &CiRun>::new();
+
+    for run in &runs {
+        if run.status != "completed" || !watched_branches.contains(&run.head_branch) {
             continue;
         }
+        let replace = latest_by_branch
+            .get(&run.head_branch)
+            .is_none_or(|current| run.id > current.id);
+        if replace {
+            latest_by_branch.insert(run.head_branch.clone(), run);
+        }
+    }
+
+    let mut failures = Vec::new();
+    for (_, run) in latest_by_branch {
+        if run.conclusion.as_deref() != Some("failure") {
+            continue;
+        }
+
+        let mut suppressed_red_runs: Vec<_> = runs
+            .iter()
+            .filter(|older| {
+                older.head_branch == run.head_branch
+                    && older.id < run.id
+                    && older.status == "completed"
+                    && older.conclusion.as_deref() == Some("failure")
+            })
+            .map(|older| SuppressedCiRun {
+                head_sha: older.head_sha.clone(),
+                run_id: older.id,
+            })
+            .collect();
+        suppressed_red_runs.sort_by_key(|older| older.run_id);
+
         let failing_job = transport.failing_job(run.id)?;
         let failing_test = transport
             .failed_log(run.id)?
             .as_deref()
             .and_then(first_failing_test);
         failures.push(CiFailure {
-            branch: run.head_branch,
-            head_sha: run.head_sha,
+            branch: run.head_branch.clone(),
+            head_sha: run.head_sha.clone(),
             run_id: run.id,
-            run_url: run.html_url,
+            run_url: run.html_url.clone(),
             failing_job,
             failing_test,
+            suppressed_red_runs,
         });
     }
     Ok(failures)
@@ -254,8 +299,21 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
         .as_deref()
         .map(|name| format!("\nFirst failing test: {name}"))
         .unwrap_or_default();
+    let suppressed = failure
+        .suppressed_red_runs
+        .first()
+        .zip(failure.suppressed_red_runs.last())
+        .map(|(oldest, newest)| {
+            format!(
+                "\nSuppressed {} historical red run(s) on this branch ({} through {}).",
+                failure.suppressed_red_runs.len(),
+                oldest.head_sha,
+                newest.head_sha,
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nFailing job: {}{}\nThis red run is deduped by branch + SHA; inspect or fix it before merging further lanes.\n</ci-red-run>",
+        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nFailing job: {}{}{}\nThis red run is the branch's latest completed conclusion; inspect or fix it before merging further lanes.\n</ci-red-run>",
         failure.branch,
         failure.head_sha,
         failure.run_id,
@@ -264,6 +322,7 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
         failure.run_url,
         failure.failing_job,
         test,
+        suppressed,
     )
 }
 
@@ -321,11 +380,15 @@ mod tests {
     }
 
     fn run(branch: &str, conclusion: Option<&str>) -> CiRun {
+        run_with(branch, "deadbeef", 42, conclusion)
+    }
+
+    fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
-            id: 42,
+            id,
             head_branch: branch.to_string(),
-            head_sha: "deadbeef".to_string(),
-            html_url: "https://github.test/org/repo/actions/runs/42".to_string(),
+            head_sha: head_sha.to_string(),
+            html_url: format!("https://github.test/org/repo/actions/runs/{id}"),
             status: "completed".to_string(),
             conclusion: conclusion.map(str::to_string),
         }
@@ -351,6 +414,49 @@ mod tests {
     }
 
     #[test]
+    fn red_run_followed_by_green_is_silent_without_failed_run_lookups() {
+        let transport = FakeTransport {
+            runs: vec![
+                run_with("main", "stale-red", 41, Some("failure")),
+                run_with("main", "current-green", 42, Some("success")),
+            ],
+            job: "should not run".to_string(),
+            log: None,
+            calls: Cell::new(0),
+        };
+
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+            .expect("the run list is valid");
+
+        assert!(failures.is_empty());
+        assert_eq!(transport.calls.get(), 0);
+    }
+
+    #[test]
+    fn newest_red_run_is_the_only_alert_and_names_suppressed_range() {
+        let transport = FakeTransport {
+            runs: vec![
+                run_with("main", "oldest-red", 40, Some("failure")),
+                run_with("main", "middle-red", 41, Some("failure")),
+                run_with("main", "current-red", 42, Some("failure")),
+            ],
+            job: "Fast Validation".to_string(),
+            log: None,
+            calls: Cell::new(0),
+        };
+
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+            .expect("the run list is valid");
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].head_sha, "current-red");
+        assert_eq!(transport.calls.get(), 1);
+        let body = relay_body(&failures[0]);
+        assert!(body.contains("Suppressed 2 historical red run(s)"));
+        assert!(body.contains("oldest-red through middle-red"));
+    }
+
+    #[test]
     fn repeat_failure_has_one_stable_branch_sha_dedupe_key() {
         let failure = CiFailure {
             branch: "main".to_string(),
@@ -359,6 +465,7 @@ mod tests {
             run_url: "url".to_string(),
             failing_job: "test".to_string(),
             failing_test: None,
+            suppressed_red_runs: Vec::new(),
         };
         assert_eq!(failure.dedupe_key(), "ci-red-run:main:abc123");
         assert_eq!(failure.dedupe_key(), failure.clone().dedupe_key());
@@ -376,6 +483,7 @@ mod tests {
             run_url: "https://github.test/runs/1".to_string(),
             failing_job: "Fast Validation".to_string(),
             failing_test: None,
+            suppressed_red_runs: Vec::new(),
         };
         assert!(emit_failure(&queue, "factory-session", &failure).unwrap());
         assert!(!emit_failure(&queue, "factory-session", &failure).unwrap());

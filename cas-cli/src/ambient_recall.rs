@@ -2111,7 +2111,13 @@ fn injection_reason(candidate: &EvidenceCandidate) -> Option<String> {
 fn render_card(candidate: &EvidenceCandidate) -> String {
     let flags = [
         candidate.binding.then_some("binding"),
-        candidate.stale.then_some("STALE"),
+        candidate
+            .stale
+            .then_some(if candidate.surface == EvidenceSurface::Memory {
+                "EXPIRED"
+            } else {
+                "STALE"
+            }),
         candidate.conflict_key.as_deref().map(|_| "CONFLICT"),
     ]
     .into_iter()
@@ -2578,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_cards_are_deltas_and_changed_revisions_reappear() {
+    fn cas_4caa_expired_memory_cards_are_labeled_expired() {
         let identity = identity(RecallRole::Supervisor);
         let query = RecallQuery::build(
             &identity,
@@ -2612,7 +2618,7 @@ mod tests {
         };
         let (packet, _) = render_packet(&identity, &query, &changed, &mut ledger).unwrap();
         assert!(packet.full.contains("@r2"));
-        assert!(packet.full.contains("STALE"));
+        assert!(packet.full.contains("EXPIRED"));
     }
 
     #[test]
@@ -2939,7 +2945,10 @@ mod tests {
             },
         )
         .unwrap();
-        let mut stopword = candidate("live-stopword-what", EvidenceScope::Project("project-a".into()));
+        let mut stopword = candidate(
+            "live-stopword-what",
+            EvidenceScope::Project("project-a".into()),
+        );
         stopword.lexical_eligible = false;
         stopword.lexical_weak = true;
         stopword.why_relevant = "lexical(weak) match: what".into();
@@ -2965,11 +2974,17 @@ mod tests {
         assert!(slug_rows[..3].iter().all(|row| !row.lexical_eligible));
         assert!(slug_rows[3].lexical_eligible);
 
-        let mut semantic_noise = candidate("live-semantic-noise", EvidenceScope::Project("project-a".into()));
+        let mut semantic_noise = candidate(
+            "live-semantic-noise",
+            EvidenceScope::Project("project-a".into()),
+        );
         semantic_noise.lexical_eligible = false;
         semantic_noise.semantic_score = Some(0.467);
         semantic_noise.why_relevant = "semantic match 0.467".into();
-        let mut semantic_useful = candidate("live-semantic-useful", EvidenceScope::Project("project-a".into()));
+        let mut semantic_useful = candidate(
+            "live-semantic-useful",
+            EvidenceScope::Project("project-a".into()),
+        );
         semantic_useful.lexical_eligible = false;
         semantic_useful.semantic_score = Some(SEMANTIC_INJECTION_FLOOR);
         semantic_useful.why_relevant = format!("semantic match {SEMANTIC_INJECTION_FLOOR:.3}");
@@ -2986,12 +3001,18 @@ mod tests {
         let (packet, injected) =
             render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
         assert_eq!(
-            injected.iter().map(|row| row.evidence_id.as_str()).collect::<Vec<_>>(),
+            injected
+                .iter()
+                .map(|row| row.evidence_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["live-semantic-useful"],
             "the supervisor one-card cap may omit eligible lexical evidence, but it must never
              select a stopword, ubiquitous slug, or sub-floor semantic card"
         );
-        assert_eq!(packet.omitted, 6, "every excluded live-shape card is omitted");
+        assert_eq!(
+            packet.omitted, 6,
+            "every excluded live-shape card is omitted"
+        );
         assert!(packet.full.contains("injected=1 omitted=6"));
         assert!(!packet.full.contains("live-stopword-what"));
         assert!(!packet.full.contains("live-slug-"));

@@ -226,12 +226,13 @@ impl CasCore {
                                 || (scope_filter == ScopeFilter::Project
                                     && e.scope == Scope::Project);
                             let tags_ok = matches_tags(&e.tags);
+                            let expired = e.is_expired();
                             let now = Utc::now();
-                            let stale = e.valid_until.map(|value| value < now).unwrap_or(false)
+                            let stale = expired
                                 || e.review_after.map(|value| value <= now).unwrap_or(false);
                             let conflict = e.harmful_count > e.helpful_count && e.harmful_count > 0;
                             let mut signals = Vec::new();
-                            if e.valid_until.map(|value| value < now).unwrap_or(false) {
+                            if expired {
                                 signals.push("expired".to_string());
                             }
                             if e.review_after.map(|value| value <= now).unwrap_or(false) {
@@ -242,7 +243,10 @@ impl CasCore {
                             }
                             (
                                 format!("[Entry] {}", e.preview(60)),
-                                scope_ok && tags_ok,
+                                // Expired facts stay readable by id from the
+                                // store, but must not be surfaced as current
+                                // recall/search evidence.
+                                scope_ok && tags_ok && !expired,
                                 HitMetadata {
                                     origin: e.source_tool.clone(),
                                     scope: e.scope.to_string(),

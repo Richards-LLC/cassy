@@ -17,6 +17,8 @@ every hour is noise.
 
 ## Why you may be here: the unfiled-reports banner
 
+`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a CAS memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
+
 CAS emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
 staged at the `docs/requests/` root — reports the write-first flow wrote but
 never pushed, so nobody outside that checkout can see them. Sweeping those

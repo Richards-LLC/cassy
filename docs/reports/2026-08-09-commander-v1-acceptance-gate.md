@@ -1,12 +1,13 @@
 # Commander v1 assembled acceptance gate
 
-**Verdict: RELEASABLE at public `v2.61.1`. Confidence: high.** The binding prowl + soundwave
-phone-browser, security, fan-out, controller-arbitration, crash, compatibility, and zero-agent rows
-carry forward as passed. Public `v2.61.1` contains both stock macOS app-bundle CLI discovery and the
-legacy-receipt compatibility correction. On stock prowl, the exact upgrade restart truthfully removed
-the prior CAS-owned mapping, selected the absolute signed app CLI, republished the stable URL, preserved
-machine identity, and returned HTTPS `200` without a wrapper, symlink, or manual reset. Every binding
-Commander v1 row is now green.
+**Verdict: NOT RELEASABLE at public `v2.61.1`. Confidence: high.** A fresh 2026-08-11 closure rerun
+used byte-identical public Linux artifacts on soundwave and unicron plus real Chrome 151 at `390×844`.
+Pairing, direct two-machine access, three-viewer fan-out, controller arbitration, resize, targeted
+interrupt, and attributed messaging reached the deterministic fixture through exactly one upstream.
+The required live-viewer hub restart then timed out after 10 seconds because the old hub PID or machine
+lock remained live; it correctly launched no competing replacement. The run stopped fail-closed before
+the adversarial, `SIGILL`, and legacy-protocol continuation rows. Prior green evidence remains historical,
+but it cannot override this newer binding failure.
 
 The normative contract is
 [`docs/specs/2026-08-08-commander-security-architecture.md`](../specs/2026-08-08-commander-security-architecture.md),
@@ -16,19 +17,35 @@ especially `H7-ADV-01`, `H7-FLEET-02`, `H7-INVARIANT-03`, and `H7-CRASH-04`.
 
 | Field | Executed result |
 | --- | --- |
-| Question | Does the exact public `v2.61.1` prowl restart recheck clear the final Commander v1 gate while every other prowl + soundwave row carries forward? |
-| Verdict | **Yes. Stock macOS upgrade restart removed the owned mapping, discovered the signed app CLI, republished Serve, preserved identity/URL, and returned HTTPS `200` with no manual recovery.** |
-| Confidence | High; the public asset, atomic install, stock PATH, before/after and teardown receipts, selected CLI path, identity, HTTPS result, and unchanged factory daemons were observed directly. |
+| Question | Does a fresh full two-machine phone-class rerun against exact public `v2.61.1` complete every binding H7 row? |
+| Verdict | **No. Live-viewer `cas hub restart --tailscale-serve` timed out after 10 seconds with the old hub PID or machine lock still live; no replacement started.** |
+| Confidence | High; public tag/workflow/assets, installed bytes, real Chrome DOM/network behavior, fixture event ledger, exact restart stderr, process/Serve aftermath, and zero-residue cleanup were observed directly. |
 | Executed source boundary | Clean public release peel `b5a37cb5675d4ae74b609d6479f824375f4c7efa`; annotated tag object `496075b676b5c7d7a747433f063635eaa49ea5e5`; contains `cas-0c54` merge `997939d7` and `cas-a13a` corrective `42d0a69c`. |
 | Public release | `v2.61.1`; GitHub Release published 2026-08-10 23:01 UTC, neither draft nor prerelease. |
-| macOS ARM64 asset | 19,381,860 bytes; archive SHA-256 `7e268a030834bd7372ad6bcef2d69ed5b6f3bb1a7e43c4102ea3d630c92b53ba`; extracted binary SHA-256 `97ed6e4c0a3e879a0fe600659833c3de61dfd3ae500037784c8ee21116e67893`. |
-| Binding machines | `prowl` controller hub and distinct `soundwave` target hub. Unicron and shield are explicitly out of scope. |
-| Browser | Real Google Chrome `151.0.7922.108`; isolated phone metrics `390×844`; controller origin `prowl`. |
+| Linux x86-64 asset | 21,998,541 bytes; archive SHA-256 `d40a089b1af31a2ed083d57d6b1d53d0640194cad09988fff24043de5d370c27`; extracted binary SHA-256 `fb0fc976fa738b50280043195adaadbcd765a900b47e4c649ce6c96a86c2f383`. |
+| Binding machines | `soundwave` controller hub and distinct `unicron` target hub, both running the exact public Linux binary. |
+| Browser | Real Google Chrome `151.0.7922.108`; isolated phone metrics `390×844`; controller origin `soundwave`. |
 | Physical Android | Offline and explicitly **not claimed**. |
-| Evidence window | 2026-08-10 23:01–23:02 UTC for the `v2.61.1` recheck, with binding non-restart rows carried from the 19:51–19:58 UTC H7 pass. |
-| Author | H7 assembled release gate (`cas-3d85`) and focused re-verification (`cas-f382`). |
+| Evidence window | 2026-08-11 13:04–13:21 UTC for the fresh closure rerun; earlier evidence is retained below as history. |
+| Author | H7 assembled release gate (`cas-3d85`), closure rerun worker `proud-newt-50`. |
 
-## Evidence
+## 2026-08-11 closure rerun evidence
+
+| Observation | Redacted source | What it proves |
+| --- | --- | --- |
+| Annotated tag object `496075b6…` peels `b5a37cb5…`; official Release run `31439277281` completed successfully. Fresh Linux and macOS archives matched GitHub sizes and SHA-256 metadata and contained only `cas` plus `LICENSE`. | GitHub tag/release/workflow reads; fresh archive manifests and hashes | The rerun is bound to immutable public `v2.61.1`, not post-release main or a local build. |
+| Soundwave's prior dirty local build and unicron's public `v2.60.0` binary were preserved under SHA-addressed backups, then atomically replaced. Both installed binaries became byte-identical public `v2.61.1` SHA-256 `fb0fc976…`. | Install and backup receipts under `.cas/artifacts/cas-3d85/proud-newt-50/` | Both real machines executed the same published artifact. |
+| Supervisor-authorized cleanup removed exactly one dead soundwave HTTPS:443 mapping to `127.0.0.1:42759` after proving its systemd hub service inactive and no listener, hub process, runtime, or receipt. Before/after Serve state is retained. | `soundwave-stale-serve-before.json`, service status, `soundwave-stale-serve-after.json` | Known legacy-receipt residue was removed narrowly before the run; it was not mistaken for live operator state. |
+| Real Chrome 151 at `390×844` paired three soundwave devices and one direct unicron device, opened the temporary zero-worker two-pane session, enforced observer/controller UI, completed controller takeover, and sent resize, targeted interrupt, and attributed message operations. The fixture recorded one upstream connection, maximum concurrent upstreams `1`. | `browser-result-v2611.stderr`; `fixture-events-v2611.jsonl`; redacted device inventories | `H7-FLEET-02` and `H7-INVARIANT-03` progressed through direct fleet access, arbitration, fan-out, and control without creating another upstream. |
+| With those live viewers attached, exact public `cas --json hub restart --tailscale-serve` exited `1`: `cas hub pid 1244423 or its machine lock remained live after 10.0s; no replacement was started`. The browsers then closed, the old hub exited, and soundwave Serve became `{}`. | `browser-result-v2611.exit`, `browser-result-v2611.stderr`, `soundwave-hub-after-restart-timeout.*`, `soundwave-serve-after-restart-timeout.json` | Singleton safety is truthful, but the required live-viewer restart recovery fails. This is the release-blocking row tracked by GH #217 / `cas-017a`. |
+| All 3 soundwave and 1 unicron H7 devices were exactly revoked; both hubs and the fixture stopped; Serve is `{}` on both hosts; the temporary session/exit receipt, invitations, profiles, listeners, and harness files are absent from live state. Logical sessions returned `3→3` on soundwave and `0→0` on unicron. | Final auth, hub, Serve, listener, session, and CAS server-registry receipts | The failed run left zero live authority or test runtime residue. |
+
+The earlier `cas-f382` proof remains valid for its narrow stock macOS upgrade-restart condition, which
+ran without attached live viewers. It cannot establish the assembled live-viewer restart row exercised
+here. The newer failure therefore narrows—not erases—the earlier evidence and supersedes its overall
+RELEASABLE conclusion.
+
+## Prior accepted evidence (historical)
 
 | Observation | Redacted source | What it proves |
 | --- | --- | --- |
@@ -51,34 +68,34 @@ especially `H7-ADV-01`, `H7-FLEET-02`, `H7-INVARIANT-03`, and `H7-CRASH-04`.
 
 ## Reasoning chain
 
-1. Immutable release identity plus installed-byte checks bind the focused restart behavior to public
-   `v2.61.1`; the non-restart matrix carries from the accepted public `v2.60.0` pass by contract.
-2. Real Chrome on prowl's origin paired the soundwave hub, observed two panes through three viewers,
-   enforced a single controller, and exercised the full adversarial and revocation matrix.
-3. Both protocol phases opened exactly one daemon upstream. The SIGILL receipt matched the killed PID
-   and start fingerprint, and the restarted legacy fixture reattached without adding sessions or agents.
-4. Process/session deltas are either zero or exactly attributed to an unrelated factory worker. The
-   browser trace shows push/event traffic, not idle agent polling.
-5. With no PATH entry or wrapper, `v2.61.0` selects the signed app-bundle CLI exactly as intended, so
-   the original discovery defect is fixed.
-6. `v2.61.0` exposed a receipt-compatibility defect, and `cas-0c54` corrected it. Public `v2.61.1`
-   truthfully removed the owned mapping and republished Serve with stable identity/URL and HTTPS `200`
-   under the exact stock conditions. The last failed row is now green, so the carried matrix is fully green.
+1. Immutable tag, workflow, asset, and installed-byte checks bind both machines to public `v2.61.1`.
+2. After two harness-only same-origin navigation retries that banked no product rows, the checked final
+   harness paired both machines and proved real fan-out, arbitration, control, attribution, and one upstream.
+3. The assembled live-viewer restart failed exactly at the singleton handoff: the old PID or machine
+   lock remained live for 10 seconds, so the CLI correctly refused to start a competing replacement.
+4. That truthful refusal still fails the required recovery behavior. Fail-closed sequencing therefore
+   stopped the run before adversarial, crash, and compatibility continuation rows; historical passes
+   cannot be promoted into fresh results.
+5. Cleanup revoked exactly four devices and restored both hosts to zero Commander runtime residue and
+   their original logical-session counts. The surviving soundwave Codex delta belongs to unrelated
+   factory worktrees, not Commander.
+6. `cas-f382` proved a narrower stock macOS restart without attached live viewers. The new result does
+   not invalidate that observation, but it does disprove the broader `v2.61.1` release conclusion.
 
 ## Acceptance matrix
 
 | Binding gate | State | Executed conclusion |
 | --- | --- | --- |
-| Public artifact | **PASS** | Exact immutable public `v2.61.1` macOS bytes were independently verified and installed on prowl; the peel contains both required corrections. |
-| Clean-home, TLS/HSTS, hostile Origin, plaintext refusal | **PASS** | Banked public-artifact receipts remain green. |
-| `H7-ADV-01` | **PASS** | Hostile browser cases, DPoP/pairing/ticket replay, copied key, method mismatch, scope escalation, and revocation rejected; child suite owns accelerated expiry coverage. |
-| `H7-FLEET-02` | **PASS** | Prowl + soundwave, real Chrome phone viewport, direct observation/control, arbitration, and attributed audit passed. |
-| `H7-INVARIANT-03` | **PASS** | Three viewers used one upstream; two panes rendered; no logical session or Commander-attributable model-process delta; no idle agent polling. |
-| `H7-CRASH-04` | **PASS** | Exact SIGILL produced typed actionable diagnosis for both viewers; other session and controller-hub reads stayed healthy. |
-| Daemon restart / protocol compatibility | **PASS** | Protocol-v1 fixture restarted and both viewers reattached through one new upstream. |
-| macOS hub restart / Serve republish | **PASS** | Stock public `v2.61.1` removed the prior owned mapping, selected the app CLI, republished the same URL, preserved machine identity, and returned HTTPS `200` without manual recovery. |
-| Assembled workspace / release / vendor / ISA | **PASS** | Canonical Linux CI run `31425559709` is green at exact SHA `69c3a1c6`; local Commander-scoped suites and the exact installed Linux ELF ISA audit are green. |
-| Cleanup and authority | **PASS** | Zero active test devices, fixture/browser processes, fixture listeners, or temporary invitation/profile state; original metadata restored. |
+| Public artifact | **PASS** | Immutable public `v2.61.1` Linux bytes were independently verified and installed byte-identically on soundwave and unicron; the macOS archive was re-verified too. |
+| Clean-home, TLS/HSTS, hostile Origin, plaintext refusal | **NOT REEXECUTED** | Historical public-artifact receipts remain evidence, but the binding rerun stopped before this complete hostile matrix. |
+| `H7-ADV-01` | **NOT REEXECUTED** | Fail-closed stop at live-viewer restart prevented the adversarial continuation; no historical row is rebanked. |
+| `H7-FLEET-02` | **PARTIAL** | Soundwave + unicron, phone Chrome, direct observation/control, arbitration, and attributed operations passed before the restart abort. |
+| `H7-INVARIANT-03` | **PARTIAL** | Three soundwave viewers and one unicron viewer used one upstream; the full post-restart/no-polling continuation was not reached. |
+| `H7-CRASH-04` | **NOT REEXECUTED** | The run stopped before SIGILL injection. |
+| Daemon restart / protocol compatibility | **NOT REEXECUTED** | The run stopped before the protocol-v1 continuation. |
+| Live-viewer hub restart / Serve republish | **FAIL** | Public `v2.61.1` timed out after 10 seconds because the old PID or machine lock remained live; no replacement started. GH #217 / `cas-017a`. |
+| Assembled workspace / release / vendor / ISA | **CARRIED** | Prior canonical evidence remains valid but was not the binding row under test. |
+| Cleanup and authority | **PASS** | Four devices revoked; hubs, Serve mappings, fixture, listeners, temporary metadata, invitations, and profiles absent from live state; session counts restored. |
 
 ## Additional environment finding — outside the Commander verdict
 
@@ -90,37 +107,36 @@ macOS list-rank mismatch even in isolation. The failed receipts are preserved as
 `assembled-emfile.*` and `assembled-flake.*` under the durable task artifacts. Canonical Linux CI run
 `31425559709` passes the full suite at the exact same `69c3a1c6` commit, as do the referenced earlier
 Linux source boundaries. The retrieval test has no Commander seam, so this is recorded and filed but
-does not create a Commander gate failure or weaken the public `v2.61.1` green restart evidence.
+does not explain or weaken the new assembled live-viewer restart failure.
 
 ## What would falsify this
 
-The executed public `v2.61.1` row falsified the prior blocking conclusion. This releasable verdict
-would be overturned by a reproduction from supported public state in which stock-path restart fails
-to remove the unchanged CAS-owned mapping, changes machine identity or public URL, requires a manual
-Serve operation, or does not restore HTTPS `200`.
+A corrective public release would falsify this blocking conclusion only if a fresh full H7 continuation,
+with live viewers attached, exits restart successfully, establishes exactly one replacement hub and
+Serve mapping, reconnects the viewers without manual recovery, and then completes every remaining
+adversarial, crash, compatibility, count, and cleanup row.
 
 ## Next actions
 
 | Action | Owner | Completion proof |
 | --- | --- | --- |
-| Complete P0 corrective `cas-0c54` and publish immutable `v2.61.1`. | Runtime/release owners | **DONE:** tag peel, assets, digests, and focused legacy fixtures recorded. |
-| Rerun only the stock macOS upgrade-restart row and Serve-republish spot check on prowl. | H7 verifier | **DONE:** no wrapper/PATH contamination/manual reset; stable machine-id and URL; truthful teardown/republish; HTTPS `200`. |
-| Flip Commander v1 to releasable while carrying forward every other executed row. | H7 verifier | **DONE:** paired Markdown/HTML updated from public `v2.61.1`; Slack remains unposted pending explicit user approval. |
+| Fix the live-viewer restart handoff defect. | GH #217 / `cas-017a` owner | Public corrective source and focused regression proof. |
+| Cut the next immutable public release. | Runtime/release owners | Tag peel, workflow, assets, sizes, and SHA-256 receipts. |
+| Run a fresh full H7 continuation bound only to that public artifact. | H7 verifier | Every binding row green in one fail-closed sequence, with zero residue. Slack remains unposted until then. |
 
 ## Cleanup and redaction
 
 - No pairing capability, credential, proof, private key, WebSocket ticket, Authorization value, tailnet
   IP, terminal content, prompt content, or raw secret is retained in the report or repository.
-- All three H7 devices are revoked; active device count is zero. The consumed invitation files and six
-  isolated Chrome profiles were deleted after the remote `/tmp` filesystem refused recoverable Trash;
-  those ephemeral deletions are not recoverable.
-- Both fixture processes are stopped, port `39459` is clear, and the exact pre-run session JSON and
-  daemon-exit receipt are restored byte-for-byte.
-- Soundwave's operator systemd service remains PID `2256851`, active/running, `NRestarts=0`; its unit,
-  linger state, and operator devices were not changed.
-- Prowl's two pre-existing factory daemons remained PIDs `9324` and `21707` throughout the recheck. The
-  hub is healthy on public `v2.61.1` as PID `62771`; the focused row required no manual reset, machine
-  identity and public URL are unchanged, and no wrapper or `/opt/homebrew/bin/tailscale` entry exists.
+- Exactly four H7 devices (three soundwave, one unicron) are revoked; active count is zero on both hosts.
+  Profiles, invitations, harness scratch, and the temporary zero-worker fixture metadata were moved to
+  recoverable Trash; the baseline absence of that metadata is restored.
+- Both public-byte hubs and the fixture are stopped. Tailscale Serve is `{}` on both hosts; no hub
+  process, port `39459`/`4173` listener, temporary session, or daemon-exit receipt remains live.
+- Logical sessions returned `3→3` on soundwave and `0→0` on unicron. Claude/Codex/Grok changed
+  `3/17/0→3/18/0` on soundwave and stayed `0/0/0` on unicron; surviving post-baseline Codex processes
+  are rooted in unrelated factory worktrees, not Commander.
+- Pre-run binaries were preserved in SHA-addressed backups before both hosts received public `v2.61.1`.
 - Physical Android remains unclaimed. Slack remains explicitly unposted.
 
 ## Provenance
@@ -128,9 +144,13 @@ Serve operation, or does not restore HTTPS `200`.
 - Markdown source: `docs/reports/2026-08-09-commander-v1-acceptance-gate.md`
 - Human review surface: `docs/reports/2026-08-09-commander-v1-acceptance-gate.html`
 - Explicitly unposted draft: `docs/release-notes/2026-08-09-commander-v1-slack-draft.md`
+- Closure-rerun artifacts: `.cas/artifacts/cas-3d85/proud-newt-50/` — immutable release and install
+  receipts, stale-Serve before/after proof, checked browser harness, fixture ledger, exact restart failure,
+  final auth/process/session/Serve/listener receipts, observed 2026-08-11 13:04–13:21 UTC.
 - Focused recheck source boundary: public peel `b5a37cb5675d4ae74b609d6479f824375f4c7efa`,
   annotated tag `496075b676b5c7d7a747433f063635eaa49ea5e5`, containing `997939d7` and `42d0a69c`.
 - Public macOS ARM64 asset: 19,381,860 bytes, archive SHA-256 `7e268a030834bd7372ad6bcef2d69ed5b6f3bb1a7e43c4102ea3d630c92b53ba`, extracted SHA-256 `97ed6e4c0a3e879a0fe600659833c3de61dfd3ae500037784c8ee21116e67893`.
+- Public Linux x86-64 asset: 21,998,541 bytes, archive SHA-256 `d40a089b1af31a2ed083d57d6b1d53d0640194cad09988fff24043de5d370c27`, extracted SHA-256 `fb0fc976fa738b50280043195adaadbcd765a900b47e4c649ce6c96a86c2f383`.
 - Canonical assembled receipt: Linux CI run `31425559709`, completed successfully at exact source SHA
   `69c3a1c6a24c1107865e3666e1cfa33ef9797615`; macOS test-infrastructure follow-up: `cas-d20f`.
 - Durable redacted artifacts: `.cas/artifacts/cas-3d85/ready-viper-55/` — browser network/auth result,
@@ -139,8 +159,7 @@ Serve operation, or does not restore HTTPS `200`.
 - Focused recheck artifacts: `.cas/artifacts/cas-f382/fast-panda-84/` — public archives, install/backup
   receipts, stock-PATH proofs, restart and teardown receipts, failed `v2.61.0` state, and green
   `v2.61.1` assertions, observed 2026-08-10 22:03–23:02 UTC.
-- Commands: exact Git/release and installed-binary reads; SSH process/session/service/auth probes;
-  deterministic protocol-v2/v1 fixtures; Chrome CDP at `390×844`; DPoP/pairing/ticket adversarial
-  requests; exact PID `SIGILL`; guarded device revocation; metadata restoration; source workspace,
-  canonical exact-commit Linux workspace/release/vendor proof, local Commander-scoped suites, and exact
-  installed-public-Linux ISA audit.
+- Current commands: exact Git/release and installed-binary reads; batch SSH process/session/service/auth
+  probes; public hub start/restart/stop; Tailscale Serve before/after reads; deterministic protocol-v2
+  fixture; checked Chrome CDP harness at `390×844`; guarded device revocation and metadata restoration.
+  Earlier commands below remain historical evidence only.

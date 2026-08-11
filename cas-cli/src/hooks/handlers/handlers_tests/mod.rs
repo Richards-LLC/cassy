@@ -3,6 +3,7 @@ mod ask_user_question_remind;
 mod basic;
 mod factory_auto_approve;
 mod factory_inbox_surfacing;
+mod formatter_scope_guard;
 mod message_display;
 mod permission_request_factory;
 mod preferences_context;

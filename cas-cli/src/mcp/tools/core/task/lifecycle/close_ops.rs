@@ -7017,9 +7017,19 @@ fn validate_pre_close_worktree(
     .map_err(|reason| {
         format!("PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve the task-owned worktree: {reason}")
     })?;
-    if actual.repo_selector != expected.repo_selector
-        || actual.git_common_dir != expected.git_common_dir
-    {
+    // A WorkTarget can be stamped before a checkout gains a project pin, so
+    // its durable `remote:` selector may legitimately differ from the
+    // current `project:` selector. The repository resolver already treats a
+    // checkout as the full set of identities it answers to; retain that same
+    // equivalence here instead of reintroducing a raw-string close-path gate.
+    let selector_matches = crate::mcp::tools::core::task::repo_context::canonical_selector(
+        &actual.repo_selector,
+    ) == crate::mcp::tools::core::task::repo_context::canonical_selector(&expected.repo_selector)
+        || crate::mcp::tools::core::task::repo_context::repo_answers_to(
+            &actual.repo_root,
+            &expected.repo_selector,
+        );
+    if !selector_matches || actual.git_common_dir != expected.git_common_dir {
         return Err(format!(
             "PRE-CLOSE HOOK CONTEXT REJECTED: task targets repository `{}`, but its recorded \
              worktree resolves to `{}`. No close-time executable gate was run.",
@@ -16007,6 +16017,56 @@ mod system_b_worktree_resolution_tests {
             .status()
             .expect("git");
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn pinned_repo_context_with_remote(dir: &std::path::Path) -> crate::mcp::tools::core::task::repo_context::RepoContext {
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(
+            dir,
+            &["remote", "add", "origin", "git@github.com:pippenz/cas.git"],
+        );
+        std::fs::create_dir(dir.join(".cas")).unwrap();
+        std::fs::write(
+            dir.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-src\"\n",
+        )
+        .unwrap();
+        crate::mcp::tools::core::task::repo_context::resolve_path_context(dir, "main")
+            .expect("pinned repository context")
+    }
+
+    #[test]
+    fn pre_close_hook_accepts_remote_target_for_project_pinned_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = pinned_repo_context_with_remote(dir.path());
+        assert_eq!(actual.repo_selector, "project:cas-src");
+        let expected = crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "remote:github.com/pippenz/cas".to_string(),
+            repo_root: actual.repo_root.clone(),
+            git_common_dir: actual.git_common_dir.clone(),
+            target_branch: "main".to_string(),
+        };
+
+        validate_pre_close_worktree(dir.path(), &expected, None)
+            .expect("a remote-form target must validate against its pinned checkout");
+    }
+
+    #[test]
+    fn pre_close_hook_rejects_a_foreign_remote_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = pinned_repo_context_with_remote(dir.path());
+        let expected = crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "remote:github.com/someone/other".to_string(),
+            repo_root: actual.repo_root.clone(),
+            git_common_dir: actual.git_common_dir.clone(),
+            target_branch: "main".to_string(),
+        };
+
+        let error = validate_pre_close_worktree(dir.path(), &expected, None)
+            .expect_err("a foreign remote must remain rejected");
+        assert!(error.contains("PRE-CLOSE HOOK CONTEXT REJECTED"));
+        assert!(error.contains("remote:github.com/someone/other"));
+        assert!(error.contains("project:cas-src"));
     }
 
     #[test]

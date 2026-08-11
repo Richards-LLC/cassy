@@ -5,7 +5,13 @@ date: 2026-08-07
 priority: P2
 ---
 
-> **Disposition (2026-08-07, cas-ab75):** FILED — still live and uncovered; filed as [#171](https://github.com/pippenz/cas/issues/171). Cross-linked to CAS task `cas-a0ba` (open, P2). Archived.
+> **Disposition (2026-08-11, cas-a0ba):** DESIGN COMPLETE — the authorization predicate,
+> proposal/triage flow, provenance schema, and cross-project dependency projection are decided in
+> [`docs/specs/2026-08-11-cross-project-task-proposals.md`](../../specs/2026-08-11-cross-project-task-proposals.md).
+> The required cloud contract is filed as
+> [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44);
+> CLI implementation is intentionally split to a successor gated on that endpoint. Original CAS
+> issue: [#171](https://github.com/pippenz/cas/issues/171).
 
 # Feature Request: let supervisors create tasks in other projects, when appropriate and authorized
 

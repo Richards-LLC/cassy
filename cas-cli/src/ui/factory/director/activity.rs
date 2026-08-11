@@ -1,7 +1,8 @@
 //! Activity log widget for the director panel
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::Frame;
+use std::collections::HashMap;
 
 use crate::ui::factory::director::data::DirectorData;
 use crate::ui::theme::ActiveTheme;
@@ -16,6 +17,7 @@ pub fn render_with_focus(
     focused: bool,
     _selected: Option<usize>,
     collapsed: bool,
+    backend_tags: &HashMap<String, &'static str>,
 ) {
     if collapsed {
         super::panel::render_collapsed_header(
@@ -40,5 +42,6 @@ pub fn render_with_focus(
         &data.agent_id_to_name,
         theme,
         focused,
+        backend_tags,
     );
 }

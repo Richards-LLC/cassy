@@ -150,6 +150,7 @@ pub fn render_compact_activity_list(
     agent_id_to_name: &HashMap<String, String>,
     theme: &ActiveTheme,
     focused: bool,
+    backend_tags: &HashMap<String, &'static str>,
 ) {
     let styles = &theme.styles;
     let border_style = if focused {
@@ -175,6 +176,7 @@ pub fn render_compact_activity_list(
         inner.width,
         inner.height as usize,
         Utc::now(),
+        backend_tags,
     );
 
     if items.is_empty() {
@@ -196,6 +198,7 @@ fn build_compact_activity_items_at(
     width: u16,
     max_items: usize,
     now: DateTime<Utc>,
+    backend_tags: &HashMap<String, &'static str>,
 ) -> Vec<ListItem<'static>> {
     let styles = &theme.styles;
     let items: Vec<ListItem> = events
@@ -210,6 +213,7 @@ fn build_compact_activity_items_at(
                 width,
                 now,
                 idx < COMPACT_WRAP_RECENT_COUNT,
+                backend_tags,
             )
         })
         .collect();
@@ -231,6 +235,7 @@ fn compact_activity_item(
     width: u16,
     now: DateTime<Utc>,
     wrap_summary: bool,
+    backend_tags: &HashMap<String, &'static str>,
 ) -> ListItem<'static> {
     let styles = &theme.styles;
     let time = format_relative_at(event.created_at, now);
@@ -247,9 +252,10 @@ fn compact_activity_item(
     let prefix = format!("{time:>4} {icon} ");
     let prefix_width = prefix.chars().count();
     let summary_width = (width as usize).saturating_sub(prefix_width).max(1);
+    let activity_summary = format_activity_summary(event, backend_tags);
 
     if !wrap_summary {
-        let summary = truncate(&event.summary, summary_width);
+        let summary = truncate(&activity_summary, summary_width);
         return ListItem::new(Line::from(vec![
             Span::styled(format!("{time:>4} "), styles.text_muted),
             Span::styled(format!("{icon} "), icon_style),
@@ -257,7 +263,7 @@ fn compact_activity_item(
         ]));
     }
 
-    let wrapped = wrap_text(&event.summary, summary_width);
+    let wrapped = wrap_text(&activity_summary, summary_width);
     let mut lines = Vec::with_capacity(wrapped.len().max(1));
     let first = wrapped.first().cloned().unwrap_or_default();
     lines.push(Line::from(vec![
@@ -274,6 +280,24 @@ fn compact_activity_item(
     }
 
     ListItem::new(lines)
+}
+
+/// Prefix verification decisions with the backend of the agent that recorded
+/// them. Other activity rows retain their established text exactly.
+pub fn format_activity_summary(
+    event: &Event,
+    backend_tags: &HashMap<String, &'static str>,
+) -> String {
+    if event.event_type == EventType::VerificationAdded {
+        if let Some(backend) = event
+            .session_id
+            .as_ref()
+            .and_then(|agent_id| backend_tags.get(agent_id))
+        {
+            return format!("[{backend}] {}", event.summary);
+        }
+    }
+    event.summary.clone()
 }
 
 fn event_category_style(event_type: &EventType, styles: &crate::ui::theme::Styles) -> Style {
@@ -399,7 +423,15 @@ mod tests {
             })
             .collect();
 
-        let items = build_compact_activity_items_at(&events, &HashMap::new(), &theme, 26, 6, now);
+        let items = build_compact_activity_items_at(
+            &events,
+            &HashMap::new(),
+            &theme,
+            26,
+            6,
+            now,
+            &HashMap::new(),
+        );
 
         assert_eq!(items.len(), 6);
         assert!(items[..COMPACT_WRAP_RECENT_COUNT]
@@ -458,6 +490,7 @@ mod tests {
                 40,
                 1,
                 created_at + Duration::minutes(3),
+                &HashMap::new(),
             ),
             40,
             4,
@@ -470,6 +503,7 @@ mod tests {
                 40,
                 1,
                 created_at + Duration::minutes(16),
+                &HashMap::new(),
             ),
             40,
             4,
@@ -477,5 +511,21 @@ mod tests {
 
         assert!(first_render.contains("3m"));
         assert!(second_render.contains("16m"));
+    }
+
+    #[test]
+    fn verification_summary_identifies_the_deciding_backend() {
+        let mut event = test_event(
+            EventType::VerificationAdded,
+            "Verification approved: cas-1234",
+            Utc::now(),
+        );
+        event.session_id = Some("supervisor-session".to_string());
+        let backends = HashMap::from([("supervisor-session".to_string(), "codex")]);
+
+        assert_eq!(
+            format_activity_summary(&event, &backends),
+            "[codex] Verification approved: cas-1234"
+        );
     }
 }

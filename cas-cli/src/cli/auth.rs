@@ -12,7 +12,7 @@ use crate::cli::cloud::{
     select_cached_team_after_login,
 };
 use crate::cloud::{
-    FetchTeamsOutcome, default_endpoint, fetch_and_cache_teams, is_acceptable_endpoint,
+    CloudConfig, FetchTeamsOutcome, default_endpoint, fetch_and_cache_teams, is_acceptable_endpoint,
     maybe_apply_team_backfill,
 };
 use crate::ui::components::{

@@ -694,23 +694,49 @@ mod tests {
     /// AC(3): concurrent contenders resolve to exactly one owner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_election_resolves_to_exactly_one_owner() {
+        use tokio::sync::Barrier;
+
         let dir = tempfile::tempdir().unwrap();
         let mut flags = Vec::new();
         let mut shutdowns = Vec::new();
+        // Do not measure whether Tokio happened to schedule every task inside
+        // an arbitrary wall-clock window. Releasing all contenders together
+        // makes this an actual election test, even on an oversubscribed CI
+        // runner where a fixed 600ms sleep can observe zero owners.
+        let start = Arc::new(Barrier::new(6));
 
         for _ in 0..5 {
             let config = test_config(dir.path());
             flags.push(Arc::clone(&config.owns_socket));
             shutdowns.push(Arc::clone(&config.shutdown));
-            tokio::spawn(run_socket_election(config, pong_handler()));
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                run_socket_election(config, pong_handler()).await;
+            });
         }
 
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        start.wait().await;
+        assert!(
+            wait_for_any_owner(&flags, Duration::from_secs(5)).await,
+            "one concurrent contender must claim daemon.sock"
+        );
         let owners = flags.iter().filter(|f| f.load(Ordering::SeqCst)).count();
         assert_eq!(owners, 1, "exactly one contender may own daemon.sock");
 
         for s in shutdowns {
             s.store(true, Ordering::SeqCst);
         }
+    }
+
+    async fn wait_for_any_owner(flags: &[Arc<AtomicBool>], timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if flags.iter().any(|flag| flag.load(Ordering::SeqCst)) {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+        flags.iter().any(|flag| flag.load(Ordering::SeqCst))
     }
 }

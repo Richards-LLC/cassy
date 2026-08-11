@@ -843,6 +843,28 @@ const SETUP_SCHEMA = {
 
 phase('Resolve')
 
+// Some Workflow transports encode the argument object as a JSON string. Decode
+// it before destructuring so a real review cannot be mistaken for an empty diff.
+let resolvedArgs = args ?? {}
+if (typeof args === 'string') {
+  try {
+    resolvedArgs = JSON.parse(args)
+  } catch {
+    log('ERROR: invalid JSON args — expected a JSON object')
+    return {
+      residual: [], pre_existing: [], dropped: [], mode: 'headless',
+      status: 'invalid_args',
+      error: 'invalid_args',
+      skipped_reason: 'invalid args',
+      execution: buildExecution({
+        skippedReason: 'invalid args — JSON parsing failed',
+        requiredMissing: [...ALWAYS_ON_PERSONAS],
+      }),
+      stats: { personas_run: 0, dropped_findings: 0 },
+    }
+  }
+}
+
 const {
   diff_text: diffText,
   file_list: fileList,
@@ -851,7 +873,7 @@ const {
   task_context: taskContext,
   mode = 'headless',
   task_id: taskId,
-} = args ?? {}
+} = resolvedArgs
 
 if (!diffText || !diffText.trim() || diffText.trim() === 'EMPTY_DIFF') {
   log('Diff is empty — returning clean envelope')
@@ -926,7 +948,7 @@ Return a single JSON object matching this schema exactly. No prose outside the J
 const intentSummary = setup?.intent_summary ?? '(intent extraction failed)'
 const isFallowSkipped = !!setup?.fallow_skip_reason
 const fallowRuns = !isFallowSkipped
-const gpt55Runs = gpt55ShouldRun(args ?? {}, fileCount, changeLines)
+const gpt55Runs = gpt55ShouldRun(resolvedArgs, fileCount, changeLines)
 
 // Build the active persona list from setup flags + always-on
 const toRun = [...ALWAYS_ON_PERSONAS]
@@ -942,7 +964,7 @@ log(`Intent: ${intentSummary.split('\n')[0]}`)
 log(`Active personas: ${toRun.join(', ')}`)
 log(`Conditional: security=${setup?.activate_security}, performance=${setup?.activate_performance}, adversarial=${setup?.activate_adversarial}, fallow=${fallowRuns}, gpt55=${gpt55Runs}`)
 
-const shardPlan = planReviewShards(diffText, fileList ?? '', personasToDispatch, args ?? {})
+const shardPlan = planReviewShards(diffText, fileList ?? '', personasToDispatch, resolvedArgs)
 const shardPlanSummary = summarizeShardPlan(shardPlan)
 if (shardPlan.enabled) {
   const { missing_files: missing, duplicate_files: duplicates, extra_files: extra } = shardPlan.coverage

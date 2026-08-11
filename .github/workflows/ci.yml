@@ -285,6 +285,7 @@ jobs:
             echo "::warning::sccache backend unavailable — building uncached"
             echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
             echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
           fi
 
       - name: Cache cargo

@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ci="$repo_root/.github/workflows/ci.yml"
 release="$repo_root/.github/workflows/release.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
+fallback="$repo_root/scripts/sccache-unavailable.sh"
 ruleset="$repo_root/docs/branch-protection/main-ruleset.json"
 
 pass=0
@@ -160,6 +161,16 @@ require_count "$all_actions" 'mozilla-actions/sccache-action@v0.0.11' '5' 'every
 require_count "$all_actions" 'continue-on-error: true' '5' 'every sccache setup action and post-step fails open'
 require_count "$all_actions" 'sccache --start-server' '5' 'every sccache setup probes backend availability'
 require_count "$all_actions" 'sccache backend unavailable — building uncached' '5' 'every sccache outage logs its uncached fallback'
+require_count "$all_actions" 'SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh' '5' 'every sccache fallback makes the action post hook harmless'
+if [[ -x "$fallback" ]] \
+    && "$fallback" --show-stats | grep -qF 'sccache unavailable; build ran uncached' \
+    && "$fallback" --show-stats --stats-format=json | jq -e '.stats.compile_requests == 0 and .stats.cache_hits.counts == {}' >/dev/null; then
+    printf 'ok   sccache post fallback is executable and emits valid zero stats\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL sccache post fallback must be executable and emit valid zero stats\n'
+    fail=$((fail + 1))
+fi
 
 printf '\ntest result: %s passed; %s failed\n' "$pass" "$fail"
 if [[ "$fail" -ne 0 ]]; then

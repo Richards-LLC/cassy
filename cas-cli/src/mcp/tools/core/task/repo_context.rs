@@ -239,7 +239,7 @@ fn repo_identities(repo_root: &Path) -> Vec<String> {
 }
 
 /// Whether a checkout answers to the declared target selector.
-fn repo_answers_to(repo_root: &Path, target_selector: &str) -> bool {
+pub(crate) fn repo_answers_to(repo_root: &Path, target_selector: &str) -> bool {
     let want = canonical_selector(target_selector);
     repo_identities(repo_root)
         .iter()

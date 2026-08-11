@@ -21,6 +21,17 @@ require_text() {
     fi
 }
 
+require_absent() {
+    local haystack="$1" needle="$2" label="$3"
+    if grep -qF -- "$needle" <<<"$haystack"; then
+        printf 'FAIL %s (unexpected %s)\n' "$label" "$needle"
+        fail=$((fail + 1))
+    else
+        printf 'ok   %s\n' "$label"
+        pass=$((pass + 1))
+    fi
+}
+
 job_block() {
     local job="$1"
     awk -v header="  ${job}:" '
@@ -42,29 +53,23 @@ require_text "$scoped" 'github.base_ref != github.event.repository.default_branc
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
 require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one test binary'
 
-full_jobs=(
+required_jobs=(
     fast-validation-preflight
     fast-validation-suite
     fast-validation-docs
     fast-validation
-    clippy
     macos-check
-    test-compile-guard
-    panic-isolation-release
-    panic-isolation-release-fast
-    build-benchmark
 )
-for job in "${full_jobs[@]}"; do
+for job in "${required_jobs[@]}"; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"
+    require_absent "$block" 'refs/heads/epic/' "$job is not double-run from epic pushes"
+    require_absent "$block" 'refs/heads/factory/' "$job is absent from factory pushes"
+done
+
+for job in fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check; do
+    block="$(job_block "$job")"
     require_text "$block" "refs/tags/" "$job runs on release tags"
-    if grep -qF 'refs/heads/factory/' <<<"$block"; then
-        printf 'FAIL %s leaks into factory pushes\n' "$job"
-        fail=$((fail + 1))
-    else
-        printf 'ok   %s is absent from factory pushes\n' "$job"
-        pass=$((pass + 1))
-    fi
 done
 
 required_pr_jobs=(fast-validation macos-check)
@@ -80,15 +85,14 @@ preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
-require_text "$suite" 'shard: [1, 2]' 'suite uses two parallel shards'
-require_text "$suite" '--partition count:${{ matrix.shard }}/2' 'suite shards are exhaustive count partitions'
 require_text "$suite" 'cargo nextest run -p cas --no-fail-fast' 'suite retains full nextest coverage'
+require_absent "$suite" '--partition' 'suite avoids duplicate test-graph compilation across runners'
 require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
 require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'
-require_text "$fan_in" 'fast-validation-suite' 'required Fast Validation waits for both suite shards'
+require_text "$fan_in" 'fast-validation-suite' 'required Fast Validation waits for the full suite'
 require_text "$fan_in" 'fast-validation-docs' 'required Fast Validation waits for doctests'
 require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required Fast Validation rejects a failed preflight'
-require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed suite shard'
+require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed full suite'
 require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation rejects failed doctests'
 
 # Main PRs schedule only the required Fast Validation lanes and macOS Check.
@@ -97,13 +101,13 @@ require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation reject
 require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane skips main PRs'
 for job in clippy test-compile-guard panic-isolation-release panic-isolation-release-fast build-benchmark; do
     block="$(job_block "$job")"
-    if grep -qF "github.event_name == 'pull_request'" <<<"$block"; then
-        printf 'FAIL %s can run on a main PR\n' "$job"
-        fail=$((fail + 1))
-    else
-        printf 'ok   %s cannot run on a main PR\n' "$job"
-        pass=$((pass + 1))
-    fi
+    require_text "$block" "refs/heads/main" "$job runs on main"
+    require_text "$block" "github.event_name == 'schedule'" "$job runs on schedule"
+    require_text "$block" "github.event_name == 'workflow_dispatch'" "$job supports supervisor dispatch"
+    require_absent "$block" "github.event_name == 'pull_request'" "$job cannot run on PRs"
+    require_absent "$block" 'refs/heads/epic/' "$job cannot run on epic pushes"
+    require_absent "$block" 'refs/heads/factory/' "$job cannot run on factory pushes"
+    require_absent "$block" 'refs/tags/' "$job cannot run on tag pushes"
 done
 
 all_actions="$(<"$setup")$(<"$ci")$(<"$release")"

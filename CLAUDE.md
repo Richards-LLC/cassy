@@ -69,6 +69,14 @@ only be removed during a maintenance window. Set
 `CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
 shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
 
+**Standing operator CI-load policy:** factory/* pushes run only Scoped
+Validation; protected-default PRs run only the required Fast Validation and
+macOS Check lanes. The non-required full/heavy tier (Clippy, Test Compile
+Guard, Build Benchmark, and both Panic Isolation profiles) belongs only to
+supervisor-controlled main pushes, schedules, or manual dispatches—never
+factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
+`scripts/test-ci-test-tiers.sh`, rather than relying on convention.
+
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
 `--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when

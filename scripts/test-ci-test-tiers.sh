@@ -97,7 +97,17 @@ preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
-require_text "$suite" 'cargo nextest run -p cas --no-fail-fast' 'suite retains full nextest coverage'
+require_text "$suite" 'actions/cache/restore@v4' 'suite restores exact-revision test binaries'
+require_text "$suite" 'actions/cache/save@v4' 'suite saves passing exact-revision test binaries'
+require_text "$suite" '${{ github.sha }}' 'test-binary cache key includes the exact source revision'
+require_text "$suite" "hashFiles('Cargo.lock')" 'test-binary cache key includes the dependency lockfile'
+require_text "$suite" 'CARGO_PROFILE_TEST_DEBUG: "0"' 'test-binary archive omits expensive debug info'
+require_text "$suite" "steps.nextest-binaries.outputs.cache-hit != 'true'" 'suite compiles only on an exact cache miss'
+require_text "$suite" 'cargo nextest archive -p cas --archive-file' 'cache miss compiles every cas test binary'
+require_text "$suite" 'cargo nextest run' 'suite retains full nextest coverage'
+require_text "$suite" '--archive-file .nextest-cache/cas-tests.tar.zst' 'suite executes the exact archived binaries'
+require_text "$suite" '--no-fail-fast' 'suite reports every test failure'
+require_absent "$suite" 'restore-keys:' 'suite never falls back to stale test binaries'
 require_absent "$suite" '--partition' 'suite avoids duplicate test-graph compilation across runners'
 require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
 require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'

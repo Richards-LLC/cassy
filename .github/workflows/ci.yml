@@ -139,12 +139,56 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      # Keep --no-fail-fast so failures never mask later binaries. This runs
-      # every test binary; the doctest lane below covers what nextest cannot.
-      - name: Test full suite
+      # Cargo/sccache can reuse dependency objects here, but linking the 79
+      # workspace test binaries is not cacheable. Preserve that exact-revision
+      # output as a nextest archive: a warm rerun downloads the tested binaries
+      # instead of spending another ~3m16 compiling and linking them.
+      #
+      # The UTC date is a real build input (build.rs embeds CAS_BUILD_DATE).
+      # There is deliberately no restore-key prefix: a stale archive must never
+      # substitute for this exact source, lockfile, toolchain, and build date.
+      - name: Fingerprint exact test-binary inputs
+        id: nextest-inputs
+        shell: bash
+        run: |
+          printf 'build-date=%s\n' "$(date -u +%F)" >> "$GITHUB_OUTPUT"
+          rustc -vV | sha256sum | awk '{ print "rust=" $1 }' >> "$GITHUB_OUTPUT"
+          cargo nextest --version | sha256sum | awk '{ print "nextest=" $1 }' >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact-revision test binaries
+        id: nextest-binaries
+        uses: actions/cache/restore@v4
+        with:
+          path: .nextest-cache/cas-tests.tar.zst
+          key: >-
+            cas-nextest-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ hashFiles('Cargo.lock') }}-${{ steps.nextest-inputs.outputs.build-date }}-${{ steps.nextest-inputs.outputs.rust }}-${{ steps.nextest-inputs.outputs.nextest }}
+
+      - name: Compile test binaries on cache miss
+        if: steps.nextest-binaries.outputs.cache-hit != 'true'
         env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo nextest run -p cas --no-fail-fast
+        run: |
+          mkdir -p .nextest-cache
+          cargo nextest archive -p cas --archive-file .nextest-cache/cas-tests.tar.zst
+
+      # Keep --no-fail-fast so failures never mask later binaries. This runs
+      # every archived test binary; the doctest lane below covers what nextest
+      # cannot.
+      - name: Test full suite
+        run: >-
+          cargo nextest run
+          --archive-file .nextest-cache/cas-tests.tar.zst
+          --no-fail-fast
+
+      # Never bless a compile-only archive whose tests failed. PR caches are
+      # scoped by Actions, and the exact key above is immutable for a rerun.
+      - name: Save passing exact-revision test binaries
+        if: success() && steps.nextest-binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .nextest-cache/cas-tests.tar.zst
+          key: ${{ steps.nextest-binaries.outputs.cache-primary-key }}
 
   fast-validation-docs:
     name: Fast Validation — doctests

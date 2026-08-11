@@ -535,6 +535,51 @@ impl PushRejectionReason {
     }
 }
 
+/// A row the cloud excluded because its revision cannot be accepted.
+///
+/// Unlike [`PushRejection`], this is a property of the submitted revision
+/// itself, rather than a project/scope ownership collision. The server returns
+/// these under the optional per-entity `invalid` sibling so clients can name
+/// the precise queue row instead of reducing it to an aggregate skip count.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PushInvalid {
+    pub id: String,
+    pub reason: PushInvalidReason,
+    /// Server-provided explanation; preserved as JSON so future cloud builds
+    /// can enrich it without making an otherwise actionable row opaque.
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PushInvalidReason {
+    InvalidRevision,
+}
+
+impl PushInvalidReason {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidRevision => "invalid_revision",
+        }
+    }
+}
+
+/// A server-itemized row that must remain visible in the local sync queue.
+#[derive(Debug, Clone)]
+pub(crate) enum PushItemizedFailure {
+    Rejection(PushRejection),
+    Invalid(PushInvalid),
+}
+
+impl PushItemizedFailure {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Rejection(rejection) => &rejection.id,
+            Self::Invalid(invalid) => &invalid.id,
+        }
+    }
+}
+
 /// Parse and validate the server's optional per-row rejection list.
 ///
 /// `None` preserves the aggregate-only server contract. `Some` may itemize a
@@ -577,6 +622,96 @@ pub(crate) fn itemized_rejections_for(
         }
     }
     Ok(Some(by_id))
+}
+
+/// Parse and validate optional per-row malformed-revision diagnostics.
+///
+/// As with rejections, malformed itemization fails closed: accepting a 2xx
+/// without a unique local queue mapping would silently discard a row.
+pub(crate) fn itemized_invalids_for(
+    entity: &serde_json::Value,
+    location: &str,
+    skipped: usize,
+    queued_ids: impl Iterator<Item = String>,
+) -> Result<Option<HashMap<String, PushInvalid>>, String> {
+    let detail = entity
+        .as_object()
+        .ok_or_else(|| format!("{location} is not an object: {entity}"))?;
+    let Some(value) = detail.get("invalid") else {
+        return Ok(None);
+    };
+    let invalid: Vec<PushInvalid> = serde_json::from_value(value.clone())
+        .map_err(|error| format!("unrecognized {location}.invalid: {error}"))?;
+
+    if invalid.len() > skipped {
+        return Err(format!(
+            "{location}.invalid count {} exceeds skipped count {skipped}",
+            invalid.len()
+        ));
+    }
+
+    let queued_ids = queued_ids.collect::<std::collections::HashSet<_>>();
+    let mut by_id = HashMap::with_capacity(invalid.len());
+    for invalid in invalid {
+        if !queued_ids.contains(&invalid.id) {
+            return Err(format!(
+                "{location}.invalid names row {} that was not in this sub-batch",
+                invalid.id
+            ));
+        }
+        if by_id.insert(invalid.id.clone(), invalid).is_some() {
+            return Err(format!("{location}.invalid contains a duplicate id"));
+        }
+    }
+    Ok(Some(by_id))
+}
+
+/// Parse all optional itemized failure siblings for one entity response.
+///
+/// `rejected[]` keeps its existing ownership-collision contract. `invalid[]`
+/// is an independent sibling for malformed revisions; the combined list must
+/// still be a subset of the server's aggregate skipped count and every id must
+/// map uniquely to this local sub-batch.
+pub(crate) fn itemized_failures_for(
+    entity: &serde_json::Value,
+    location: &str,
+    skipped: usize,
+    queued_ids: impl Iterator<Item = String>,
+) -> Result<Option<HashMap<String, PushItemizedFailure>>, String> {
+    let queued_ids = queued_ids.collect::<Vec<_>>();
+    let rejections =
+        itemized_rejections_for(entity, location, skipped, queued_ids.iter().cloned())?;
+    let invalids = itemized_invalids_for(entity, location, skipped, queued_ids.into_iter())?;
+
+    if rejections.is_none() && invalids.is_none() {
+        return Ok(None);
+    }
+
+    let mut failures = HashMap::new();
+    for rejection in rejections.unwrap_or_default().into_values() {
+        failures.insert(
+            rejection.id.clone(),
+            PushItemizedFailure::Rejection(rejection),
+        );
+    }
+    for invalid in invalids.unwrap_or_default().into_values() {
+        if failures
+            .insert(invalid.id.clone(), PushItemizedFailure::Invalid(invalid))
+            .is_some()
+        {
+            return Err(format!(
+                "{location}.rejected and {location}.invalid contain a duplicate id"
+            ));
+        }
+    }
+
+    if failures.len() > skipped {
+        return Err(format!(
+            "{location}.rejected plus {location}.invalid count {} exceeds skipped count {skipped}",
+            failures.len()
+        ));
+    }
+    Ok(Some(failures))
 }
 
 /// Response shape from the personal push endpoint (`POST /api/sync/push`).
@@ -666,16 +801,16 @@ impl PushResponse {
         }
     }
 
-    pub(crate) fn itemized_rejections_for(
+    pub(crate) fn itemized_failures_for(
         &self,
         entity_type: &str,
         skipped: usize,
         queued_ids: impl Iterator<Item = String>,
-    ) -> Result<Option<HashMap<String, PushRejection>>, String> {
+    ) -> Result<Option<HashMap<String, PushItemizedFailure>>, String> {
         let Some(entity) = self.fields.get(entity_type) else {
             return Ok(None);
         };
-        itemized_rejections_for(entity, entity_type, skipped, queued_ids)
+        itemized_failures_for(entity, entity_type, skipped, queued_ids)
     }
 }
 

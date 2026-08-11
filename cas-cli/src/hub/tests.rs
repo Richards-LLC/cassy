@@ -26,6 +26,14 @@ fn private_tempdir() -> tempfile::TempDir {
     tempfile::tempdir_in(parent).expect("canonical temporary fixture directory")
 }
 
+// This fixture launches a second test binary, then waits for both its Tokio
+// runtime and the parent-side reaper/connector chain to receive CPU time. The
+// normal isolated run takes about 3 seconds, so the former 5-second deadline
+// flakes under full-suite build contention. Fifteen seconds keeps a bounded
+// failure while leaving enough scheduling headroom for a busy developer host.
+const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
     let auth = PreAuthAuthorizer;
@@ -218,7 +226,7 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
     let (identity, reaper) = supervise_spawned_daemon("death-fixture", child, store.clone())
         .expect("Linux fixture has a process-start fingerprint");
 
-    let port = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let port = tokio::time::timeout(H1_DEATH_REAL_PROCESS_TIMEOUT, async {
         loop {
             if let Ok(value) = std::fs::read_to_string(&port_file) {
                 break value.parse::<u16>().unwrap();
@@ -249,7 +257,7 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
 
     // SAFETY: exact child pid is fingerprinted above and owned by this test.
     assert_eq!(unsafe { libc::kill(identity.pid as i32, libc::SIGILL) }, 0);
-    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let disconnected = tokio::time::timeout(H1_DEATH_REAL_PROCESS_TIMEOUT, async {
         loop {
             let event = event_rx.recv().await.unwrap();
             if event.kind == MachineEventKind::DaemonDisconnected {

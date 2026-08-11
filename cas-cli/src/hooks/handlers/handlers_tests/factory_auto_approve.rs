@@ -211,6 +211,50 @@ fn factory_write_under_declared_scratchpad_is_allowed() {
 }
 
 #[test]
+fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account_configs() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("supervisor"));
+    let home = tempfile::tempdir().expect("home");
+    let _home = set_env_var("HOME", home.path().as_os_str());
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    for config_dir in [".claude", ".claude-work"] {
+        let path = home
+            .path()
+            .join(config_dir)
+            .join("projects")
+            .join("-home-pippenz-Petrastella-cas-src")
+            .join("memory")
+            .join("task-context.md");
+        let input = input_for("Write", path.to_str());
+        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+        assert!(
+            allow_reason(&out).is_some(),
+            "supervisor harness-memory write must be allowed: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn worker_write_under_harness_file_memory_remains_denied() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let home = tempfile::tempdir().expect("home");
+    let _home = set_env_var("HOME", home.path().as_os_str());
+    let path = home
+        .path()
+        .join(".claude-work/projects/-home-pippenz-Petrastella-cas-src/memory/task-context.md");
+    let input = input_for("Write", path.to_str());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(
+        deny_reason(&out).is_some(),
+        "worker scope must not expand into supervisor harness memory"
+    );
+}
+
+#[test]
 fn factory_write_under_harness_session_scratchpad_is_allowed() {
     let _g = super::env_lock();
     let _role = set_role_env(Some("worker"));

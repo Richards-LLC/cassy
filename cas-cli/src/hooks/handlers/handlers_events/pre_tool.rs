@@ -275,11 +275,17 @@ pub fn handle_pre_tool_use(
     // Durable workspace contract (GH #196).  Factory file creation is
     // intentionally narrow: the checked-out worktree, a configured durable
     // artifacts root, and the harness-provided scratchpad are sanctioned.
+    // Supervisors may also write the harness's per-project file-memory tree;
+    // workers remain restricted to the original roots.
     // A scratchpad may itself be under /tmp, but it is explicitly ephemeral
     // and is rejected later if cited as close evidence.
     if is_factory_agent {
         let factory = stores.config().factory();
-        if let Some(path) = factory_unsanctioned_write_path(input, &factory.artifacts_root) {
+        if let Some(path) = factory_unsanctioned_write_path(
+            input,
+            &factory.artifacts_root,
+            crate::harness_policy::is_supervisor(input),
+        ) {
             let artifacts = resolved_factory_artifacts_root(factory.artifacts_root.as_deref());
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -1357,6 +1363,7 @@ fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bo
 fn factory_unsanctioned_write_path(
     input: &HookInput,
     configured_artifacts_root: &Option<String>,
+    is_supervisor: bool,
 ) -> Option<std::path::PathBuf> {
     let tool = input.tool_name.as_deref()?;
     let tool_input = input.tool_input.as_ref()?;
@@ -1374,14 +1381,15 @@ fn factory_unsanctioned_write_path(
         _ => return None,
     };
 
-    raw_paths
-        .into_iter()
-        .find_map(|raw_path| unsanctioned_factory_path(input, configured_artifacts_root, &raw_path))
+    raw_paths.into_iter().find_map(|raw_path| {
+        unsanctioned_factory_path(input, configured_artifacts_root, is_supervisor, &raw_path)
+    })
 }
 
 fn unsanctioned_factory_path(
     input: &HookInput,
     configured_artifacts_root: &Option<String>,
+    is_supervisor: bool,
     raw_path: &str,
 ) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
@@ -1405,11 +1413,52 @@ fn unsanctioned_factory_path(
     if !path.is_absolute()
         || is_non_creation_stream_device(&path)
         || is_harness_session_scratchpad(&path, &input.session_id)
+        || (is_supervisor && is_harness_file_memory_path(&path, home.as_deref()))
         || sanctioned.iter().any(|root| path.starts_with(root))
     {
         return None;
     }
     Some(path)
+}
+
+/// The Claude harness persists its direct file memory per project below
+/// `~/.claude/projects/<project>/memory`, or an account-specific sibling such
+/// as `~/.claude-work/projects/<project>/memory`.  This is a narrow
+/// supervisor-only workspace-contract exception: all components after HOME
+/// are fixed except the account suffix, project slug, and files below memory.
+/// Reject parent traversal so the exception cannot authorize an adjacent
+/// harness directory.
+fn is_harness_file_memory_path(path: &std::path::Path, home: Option<&std::path::Path>) -> bool {
+    use std::path::Component;
+
+    let Some(home) = home else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(home) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(Component::Normal(config_dir)) = components.next() else {
+        return false;
+    };
+    let Some(config_dir) = config_dir.to_str() else {
+        return false;
+    };
+    if config_dir != ".claude"
+        && !config_dir
+            .strip_prefix(".claude-")
+            .is_some_and(|suffix| !suffix.is_empty())
+    {
+        return false;
+    }
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("projects")))
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("memory")))
+    {
+        return false;
+    }
+
+    components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Shell redirection to these character devices is a stream operation, not
@@ -1486,7 +1535,7 @@ mod workspace_contract_tests {
         ] {
             let input = bash_input(command, cwd.path());
             assert_eq!(
-                factory_unsanctioned_write_path(&input, &None),
+                factory_unsanctioned_write_path(&input, &None, false),
                 Some(home.path().join(expected)),
                 "write must remain guarded: {command}"
             );

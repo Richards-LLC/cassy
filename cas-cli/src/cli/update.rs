@@ -15,7 +15,10 @@ use crate::builtins::{
 };
 use crate::cli::Cli;
 use crate::cli::factory_tooling;
-use crate::cli::hook::{configure_claude_hooks, configure_codex_mcp_server, configure_mcp_server};
+use crate::cli::hook::{
+    configure_claude_hooks, configure_mcp_server, provision_codex_project,
+    provision_codex_user_config,
+};
 use crate::cli::init::{generate_cas_skill, update_claude_md};
 use crate::cli::update::preview::{build_update_transaction, show_enhanced_dry_run};
 use crate::migration::{check_migrations, run_migrations};
@@ -433,7 +436,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             fmt.subheading("Syncing .codex files")?;
         }
 
-        match configure_codex_mcp_server(project_root) {
+        match provision_codex_project(project_root) {
             Ok(true) => {
                 codex_config_updated.push("config.toml");
                 codex_config_updated.push("hooks.json");
@@ -553,8 +556,9 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
 /// in their tracked tree fall back to user-level skills. Without a user-level
 /// refresh path, those workers silently consume stale skill prompts after a
 /// `cas update` because `--sync` only writes into the current project. This is
-/// the user-level analogue of `--sync`: builtins only, no project-scoped
-/// config (settings.json, CLAUDE.md, hooks, db-backed rules/skills).
+/// the user-level analogue of `--sync`: it refreshes builtins and, for an
+/// existing Codex install, its global MCP configuration and trusted hook state.
+/// It never writes project-scoped settings, CLAUDE.md, or db-backed rules/skills.
 fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")
@@ -622,6 +626,7 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
     };
 
     let codex_result = if codex_dir.exists() {
+        let codex_config_updated = provision_codex_user_config(&codex_dir)?;
         let r = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir)?;
         codex_pruned =
             prune_stale_user_skills_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir)?;
@@ -629,10 +634,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme.clone());
             fmt.write_raw("  ")?;
-            if r.total_updated() > 0 {
+            if r.total_updated() > 0 || codex_config_updated {
                 fmt.success(&format!(
-                    "~/.codex: updated {} files ({} agents, {} skills)",
-                    r.total_updated(),
+                    "~/.codex: updated {} files ({} agents, {} skills; config/hooks refreshed)",
+                    r.total_updated() + usize::from(codex_config_updated),
                     r.agents_updated,
                     r.skills_updated
                 ))?;

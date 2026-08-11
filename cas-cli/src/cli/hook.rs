@@ -19,7 +19,8 @@ use crate::cli::hook::config_gen::{
 
 pub(crate) mod config_gen;
 pub use crate::cli::hook::config_gen::{
-    configure_codex_mcp_server, configure_mcp_server, global_has_cas_hooks, strip_cas_hooks,
+    configure_mcp_server, global_has_cas_hooks, provision_codex_project,
+    provision_codex_user_config, strip_cas_hooks,
 };
 
 /// Arguments for the hook command

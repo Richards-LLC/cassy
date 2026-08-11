@@ -48,7 +48,8 @@ mod error;
 mod pty;
 
 pub use codex_trust::{
-    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, ensure_project_trusted,
+    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, ensure_cas_hooks_trusted,
+    ensure_cas_hooks_trusted_in, ensure_project_trusted, ensure_project_trusted_in,
     update_codex_config_locked,
 };
 

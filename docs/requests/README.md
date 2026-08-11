@@ -25,7 +25,10 @@ cas config get issues.repo
 
 Do not create a new staged report for actionable work. This material only explains how to preserve and sweep a file that was already staged under the former workflow.
 
-## Durable Write-First Flow
+## Legacy write-first flow for existing staged files only
+
+This former workflow is retained solely to migrate a report that already
+exists; it is not authorization to create a new outbound request file.
 
 1. Write the complete, public-safe report to a new, uniquely named staging file in this directory:
 

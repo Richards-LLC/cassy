@@ -46,6 +46,10 @@ Match controls via [model-selection.md](cas-supervisor/references/model-selectio
 
 Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), worker-recovery, reference, code-review-queue, or filing-cas-bugs.
 
+## Cross-team routing
+
+File CAS defects in `pippenz/cas`, even when a downstream project exposed them. File actionable Richards-LLC team requests directly on that team's issue board, never in its checkout, and save a CAS memory receipt (URL, ask, date). `docs/requests/` is legacy-only for outbound actionable work; see `filing-cas-bugs` for the full policy.
+
 ## Context budgeting
 
 `project_session_start_truncation.md`: **Immutable Core** (this body, 8 KB cap), **Task Context** (on demand), and **Ephemeral** output. Add here only what every session needs; put detail in `references/`.

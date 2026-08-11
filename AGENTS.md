@@ -55,6 +55,14 @@ not serialize. An existing `RUSTC_WRAPPER` wins; set
 `CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
 cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
+**CI speed is a standing operator requirement.** A `factory/*` push must run
+only Scoped Validation; the protected-default-branch PR event is the canonical
+Fast Validation/macOS gate, so non-main pushes must not duplicate required
+checks for the same SHA. Build Benchmark and both release-profile panic jobs
+run only on `main` pushes, scheduled runs, or manual dispatch. Preserve all
+coverage on `main` and scheduled runs; enforce this policy in
+`scripts/test-ci-test-tiers.sh`, never by convention alone.
+
 New isolated workers also seed their private `target/` from compiled artifacts
 hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
 small Cargo dep-info files are copied with their target root rebased. Refresh that

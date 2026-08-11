@@ -30,6 +30,29 @@ job_block() {
     ' "$ci"
 }
 
+job_ids() {
+    awk '
+        /^jobs:$/ { inside_jobs = 1; next }
+        inside_jobs && /^  [A-Za-z0-9_-]+:$/ {
+            sub(/^  /, "")
+            sub(/:$/, "")
+            print
+        }
+    ' "$ci"
+}
+
+only_main_push_ref() {
+    local job="$1" block="$2" ref
+    require_text "$block" "github.ref == 'refs/heads/main'" "$job runs push work only on main"
+    while IFS= read -r ref; do
+        [[ -z "$ref" ]] && continue
+        if [[ "$ref" != 'refs/heads/main' ]]; then
+            printf 'FAIL %s permits non-main push ref %s\n' "$job" "$ref"
+            fail=$((fail + 1))
+        fi
+    done < <(grep -oE 'refs/(heads|tags)/[^'"'"' )]+' <<<"$block" | sort -u)
+}
+
 ci_text="$(<"$ci")"
 require_text "$ci_text" '- "factory/**"' 'factory pushes trigger CI'
 require_text "$ci_text" '- "epic/**"' 'epic pushes trigger CI'
@@ -42,19 +65,8 @@ require_text "$scoped" 'github.base_ref != github.event.repository.default_branc
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
 require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one test binary'
 
-all_non_scoped_jobs=(
-    fast-validation-preflight
-    fast-validation-suite
-    fast-validation-docs
-    fast-validation
-    clippy
-    macos-check
-    test-compile-guard
-    panic-isolation-release
-    panic-isolation-release-fast
-    build-benchmark
-)
-for job in "${all_non_scoped_jobs[@]}"; do
+while IFS= read -r job; do
+    [[ "$job" == 'scoped-validation' ]] && continue
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"
     if grep -qF 'refs/heads/factory/' <<<"$block"; then
@@ -64,7 +76,7 @@ for job in "${all_non_scoped_jobs[@]}"; do
         printf 'ok   %s is absent from factory pushes\n' "$job"
         pass=$((pass + 1))
     fi
-done
+done < <(job_ids)
 
 required_pr_lanes=(fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check)
 for job in "${required_pr_lanes[@]}"; do
@@ -98,13 +110,9 @@ require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation reject
 # of its lanes, so the same SHA never duplicates a costly required check.
 for job in fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check; do
     block="$(job_block "$job")"
-    if grep -qF 'refs/heads/epic/' <<<"$block" || grep -qF 'refs/tags/' <<<"$block"; then
-        printf 'FAIL %s can run required work on a non-main push\n' "$job"
-        fail=$((fail + 1))
-    else
-        printf 'ok   %s is PR/main/schedule/manual only\n' "$job"
-        pass=$((pass + 1))
-    fi
+    only_main_push_ref "$job" "$block"
+    require_text "$block" "github.event_name == 'schedule'" "$job runs on schedule"
+    require_text "$block" "github.event_name == 'workflow_dispatch'" "$job runs by manual dispatch"
 done
 
 # Main PRs schedule only the required Fast Validation lanes and macOS Check.
@@ -126,8 +134,11 @@ done
 # never a worker or epic/tag-push cost.
 for job in panic-isolation-release panic-isolation-release-fast build-benchmark; do
     block="$(job_block "$job")"
-    if grep -qF 'refs/heads/epic/' <<<"$block" || grep -qF 'refs/tags/' <<<"$block"; then
-        printf 'FAIL %s leaks into an epic or tag push\n' "$job"
+    only_main_push_ref "$job" "$block"
+    require_text "$block" "github.event_name == 'schedule'" "$job runs on schedule"
+    require_text "$block" "github.event_name == 'workflow_dispatch'" "$job runs by manual dispatch"
+    if grep -qF "github.event_name == 'pull_request'" <<<"$block"; then
+        printf 'FAIL %s runs on a pull request\n' "$job"
         fail=$((fail + 1))
     else
         printf 'ok   %s is main/schedule/manual only\n' "$job"

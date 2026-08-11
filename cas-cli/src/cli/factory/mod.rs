@@ -7,6 +7,7 @@
 
 mod cloud_attach;
 mod daemon;
+mod doctor;
 mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
@@ -357,6 +358,9 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone)]
 pub enum FactoryCommands {
+    /// Report local Claude/Codex/CAS-MCP readiness without spawning workers.
+    Doctor,
+
     /// Run the bounded unified factory readiness report without spawning workers
     Preflight {
         /// Explicit CAS root (.cas directory)
@@ -706,6 +710,7 @@ pub enum FactoryCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
@@ -1108,7 +1113,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // Resolve per-worker specs from the cascade (cas-2992): config files,
     // CLI flags, and per-worker JSON overrides in priority order.
-    let mut resolved_worker_specs = {
+    let (mut resolved_worker_specs, worker_fallback_model) = {
         // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited: this
         // `!= Claude` check is harness-agnostic by construction ("only pass
         // an explicit override when it's not the Claude default"), so Grok
@@ -1129,9 +1134,12 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        resolve_specs(args.workers as usize, sources).map_err(|e| {
+        let fallback_model = cas_factory::configured_factory_default_model(&sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
+        let specs = resolve_specs(args.workers as usize, sources).map_err(|e| {
             anyhow::anyhow!("Failed to resolve worker specs: {e}")
-        })?
+        })?;
+        (specs, fallback_model)
     };
 
     // cas-7199 / cas-a487: any resolved worker spec that landed on Codex
@@ -1140,14 +1148,15 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // post-cascade check catches all of those regardless of which layer
     // set it) must actually be usable. Default mode rewrites to Claude
     // with a loud, non-suppressible notice; --strict-cli / [factory]
-    // strict_cli bails instead. `default_model: None` on fallback — an
-    // incompatible codex model name is dropped in favor of Claude's own
-    // built-in default rather than trying to re-derive a specific
-    // fallback model from a separate config surface.
+    // strict_cli bails instead. An incompatible Codex model is replaced by
+    // the cascaded `[factory.defaults].model`, if configured.
     let strict_cli = args.strict_cli || cas_config.factory().strict_cli;
-    let codex_fallback_notices =
-        cas_factory::apply_codex_fallback(&mut resolved_worker_specs, strict_cli, None)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let codex_fallback_notices = cas_factory::apply_codex_fallback(
+        &mut resolved_worker_specs,
+        strict_cli,
+        worker_fallback_model.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     for notice in &codex_fallback_notices {
         tracing::warn!(target: "cas::factory", "{notice}");
     }
@@ -1162,7 +1171,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // Resolve supervisor spec from the cascade (cas-1948): [factory.supervisor] TOML
     // + --supervisor-cli/model/effort CLI flags + --supervisor-spec JSON override.
-    let mut resolved_supervisor_spec = {
+    let (mut resolved_supervisor_spec, supervisor_fallback_model) = {
         // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited, same as
         // resolved_worker_specs above: harness-agnostic, Grok flows through
         // as Some(Grok) correctly.
@@ -1181,9 +1190,12 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        resolve_supervisor_spec(sources).map_err(|e| {
+        let fallback_model = cas_factory::configured_factory_default_model(&sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
+        let spec = resolve_supervisor_spec(sources).map_err(|e| {
             anyhow::anyhow!("Failed to resolve supervisor spec: {e}")
-        })?
+        })?;
+        (spec, fallback_model)
     };
 
     // cas-7199 / cas-a487: same Codex-availability fallback as
@@ -1197,7 +1209,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     let supervisor_codex_fallback_notices = cas_factory::apply_codex_fallback_for_supervisor(
         &mut resolved_supervisor_spec,
         strict_cli,
-        None,
+        supervisor_fallback_model.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     for notice in &supervisor_codex_fallback_notices {

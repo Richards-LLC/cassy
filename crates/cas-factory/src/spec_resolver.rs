@@ -170,6 +170,35 @@ pub struct ConfigSources {
     pub supervisor_spec_json: Option<String>,
 }
 
+/// Return the cascaded `[factory.defaults].model` value without applying
+/// per-worker or CLI model overrides.  Callers use this as the safe Claude
+/// replacement when an explicitly Codex-only model cannot survive a
+/// `codex -> claude` fallback.
+pub fn configured_factory_default_model(
+    sources: &ConfigSources,
+) -> Result<Option<String>, SpecResolverError> {
+    let user_path = sources
+        .user_config
+        .clone()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cas").join("config.toml")));
+    let mut model = None;
+    if let Some(path) = user_path
+        && let Some((defaults, _, _)) = load_config_file(&path)?
+        && let Some(defaults) = defaults
+        && defaults.model.is_some()
+    {
+        model = defaults.model;
+    }
+    if let Some(path) = &sources.project_config
+        && let Some((defaults, _, _)) = load_config_file(path)?
+        && let Some(defaults) = defaults
+        && defaults.model.is_some()
+    {
+        model = defaults.model;
+    }
+    Ok(model)
+}
+
 /// Resolve `workers` [`WorkerSpec`] slots from the layered config sources.
 ///
 /// Returns a `Vec<WorkerSpec>` of length `workers`.  Returns an empty vec
@@ -1044,5 +1073,27 @@ mod codex_fallback_tests {
         };
         let notices = apply_codex_fallback_for_supervisor(&mut spec, false, None).unwrap();
         assert!(notices.is_empty(), "claude spec must never be touched");
+    }
+
+    #[test]
+    fn configured_factory_default_model_reads_the_project_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[factory.defaults]\nmodel = \"claude-sonnet-4-5\"\n",
+        )
+        .unwrap();
+        let sources = ConfigSources {
+            user_config: Some(dir.path().join("missing-user.toml")),
+            project_config: Some(config),
+            ..ConfigSources::default()
+        };
+        assert_eq!(
+            configured_factory_default_model(&sources)
+                .unwrap()
+                .as_deref(),
+            Some("claude-sonnet-4-5")
+        );
     }
 }

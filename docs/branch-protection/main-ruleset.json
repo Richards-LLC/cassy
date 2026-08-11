@@ -1,5 +1,5 @@
 {
-  "name": "main: require Fast Validation",
+  "name": "main: require test suite and macOS validation",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
@@ -16,7 +16,8 @@
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          { "context": "Fast Validation" },
+          { "context": "Fast Validation — full suite" },
+          { "context": "Fast Validation — doctests" },
           { "context": "macOS Check" }
         ]
       }

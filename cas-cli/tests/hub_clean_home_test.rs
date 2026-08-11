@@ -241,6 +241,19 @@ esac
     );
     assert_hsts(&preflight);
 
+    let mut held_proxy_client = TcpStream::connect(("127.0.0.1", trusted_backend_port)).unwrap();
+    held_proxy_client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    write!(
+        held_proxy_client,
+        "POST /v1/auth/pairing/exchange HTTP/1.1\r\nHost: 127.0.0.1:{trusted_backend_port}\r\nOrigin: https://clean-host.tail.example\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{{"
+    )
+    .unwrap();
+    held_proxy_client.flush().unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let restart_started = Instant::now();
     let restart = cas_command(home.path(), bin.as_os_str())
         .args([
             "--json",
@@ -256,6 +269,15 @@ esac
         restart.status.success(),
         "trusted proxy restart failed: {}",
         String::from_utf8_lossy(&restart.stderr)
+    );
+    assert!(
+        restart_started.elapsed() < Duration::from_secs(8),
+        "trusted-proxy restart exceeded its bounded drain window"
+    );
+    let mut closed = [0_u8; 1];
+    assert!(
+        matches!(held_proxy_client.read(&mut closed), Ok(0) | Err(_)),
+        "old trusted proxy left the held client silently live"
     );
     let status = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "status"])
@@ -521,13 +543,7 @@ fn restart_force_closes_a_held_client_and_starts_the_replacement() {
 
     let started = Instant::now();
     let restart = cas_command(home.path(), &path)
-        .args([
-            "--json",
-            "hub",
-            "restart",
-            "--port",
-            &port.to_string(),
-        ])
+        .args(["--json", "hub", "restart", "--port", &port.to_string()])
         .output()
         .expect("restart hub with held client");
     let elapsed = started.elapsed();

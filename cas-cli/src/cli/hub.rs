@@ -18,6 +18,7 @@ use crate::hub::{
 };
 
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Args, Debug, Clone)]
 pub struct HubArgs {
@@ -350,10 +351,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         let result = if let Some(proxy_listener) = tailscale_listener {
             serve_with_trusted_tls_proxy(listener, state, proxy_listener).await
         } else {
-            axum::serve(listener, router(state))
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-                .context("Commander hub server failed")
+            serve_with_bounded_connection_drain(listener, router(state)).await
         };
         event_task.abort();
         paths.remove_process_record()?;
@@ -367,6 +365,39 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         let _ = tailscale_manager.disable_owned();
         result
     })
+}
+
+async fn serve_with_bounded_connection_drain(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+) -> Result<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_requested(shutdown_rx))
+        .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result.context("Commander hub server failed"),
+        _ = shutdown_signal() => {
+            let _ = shutdown_tx.send(true);
+            match tokio::time::timeout(HUB_CONNECTION_DRAIN_TIMEOUT, &mut server).await {
+                Ok(result) => result.context("Commander hub server failed"),
+                Err(_) => {
+                    // Axum's graceful shutdown deliberately waits for upgraded
+                    // WebSockets and other active requests forever. Returning
+                    // drops the server future; the enclosing runtime then closes
+                    // those tasks so Commander clients observe a non-normal close
+                    // and reconnect to the replacement hub.
+                    tracing::warn!(
+                        timeout_seconds = HUB_CONNECTION_DRAIN_TIMEOUT.as_secs_f64(),
+                        "Commander connection drain expired; force-closing live clients"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -432,9 +463,22 @@ async fn serve_with_trusted_tls_proxy<R: crate::hub::SessionReadModel>(
 
     match first {
         FirstExit::Shutdown => {
-            let (plaintext, trusted_proxy) = tokio::join!(plaintext, trusted_proxy);
-            plaintext.context("Commander loopback listener failed")?;
-            trusted_proxy.context("Commander trusted proxy listener failed")?;
+            match tokio::time::timeout(HUB_CONNECTION_DRAIN_TIMEOUT, async {
+                tokio::join!(&mut plaintext, &mut trusted_proxy)
+            })
+            .await
+            {
+                Ok((plaintext, trusted_proxy)) => {
+                    plaintext.context("Commander loopback listener failed")?;
+                    trusted_proxy.context("Commander trusted proxy listener failed")?;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_seconds = HUB_CONNECTION_DRAIN_TIMEOUT.as_secs_f64(),
+                        "Commander connection drain expired; force-closing live clients"
+                    );
+                }
+            }
             Ok(())
         }
         FirstExit::Plaintext(result) => {

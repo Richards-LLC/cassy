@@ -70,7 +70,7 @@ for job in "${required_pr_jobs[@]}"; do
     require_text "$block" "github.event_name == 'pull_request'" "$job runs for pull requests"
     require_text "$block" 'github.base_ref == github.event.repository.default_branch' "$job targets the default PR base"
     require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job deduplicates push/PR runs by head SHA"
-    require_text "$block" 'cancel-in-progress: true' "$job cancels the duplicate required-check run"
+    require_text "$block" 'cancel-in-progress: false' "$job queues duplicate required-check runs without cancellation"
 done
 
 all_actions="$(<"$setup")$(<"$ci")$(<"$release")"

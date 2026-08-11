@@ -83,7 +83,7 @@ jobs:
     # independent macOS required check below.
     concurrency:
       group: fast-validation-${{ github.event.pull_request.head.sha || github.sha }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -180,7 +180,7 @@ jobs:
       || startsWith(github.ref, 'refs/tags/')))
     concurrency:
       group: macos-check-${{ github.event.pull_request.head.sha || github.sha }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
     # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
     # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.

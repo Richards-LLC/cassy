@@ -352,6 +352,20 @@ pub(crate) fn describe_target_push_state(
             "\nPush state: pushed {target_branch} -> origin/{target_branch} ({}).",
             short_sha(sha)
         ),
+        TargetPushOutcome::ProtectedDefaultBranch {
+            sha,
+            remote_sha,
+            reason,
+        } => {
+            let remote = remote_sha.as_deref().map(short_sha).unwrap_or("unresolved");
+            format!(
+                "\n\nPROTECTED_DEFAULT_BRANCH_REQUIRES_PR: GitHub rules rejected the direct \
+                 push of {target_branch} at {} (origin/{target_branch}: {remote}). Retry the \
+                 landing through a pull request; repeating `git push origin {target_branch}` \
+                 cannot satisfy the ruleset.\nGitHub evidence: {reason}",
+                short_sha(sha)
+            )
+        }
         TargetPushOutcome::NotPushed {
             sha,
             remote_sha,
@@ -375,6 +389,47 @@ pub(crate) fn describe_target_push_state(
             )
         }
     }
+}
+
+/// Render the typed, resumable PR handoff for a GH013-protected default branch.
+///
+/// This is deliberately a refusal rather than implicit PR creation/merge: the
+/// interactive supervisor must see the PR URL and required-check status before
+/// choosing to merge it. No `--auto` or admin bypass is prescribed.
+fn protected_default_branch_pr_error(
+    source_branch: &str,
+    target_branch: &str,
+    outcome: &crate::worktree::git::TargetPushOutcome,
+) -> Option<String> {
+    use crate::worktree::git::TargetPushOutcome;
+
+    let TargetPushOutcome::ProtectedDefaultBranch {
+        sha,
+        remote_sha,
+        reason,
+    } = outcome
+    else {
+        return None;
+    };
+    let remote = remote_sha.as_deref().map(short_sha).unwrap_or("unresolved");
+
+    Some(format!(
+        "PROTECTED_DEFAULT_BRANCH_REQUIRES_PR\n\n\
+         The local merge completed, but GitHub rules rejected the direct push to the \
+         protected default branch `{target_branch}`. Local {target_branch}: {}; \
+         origin/{target_branch}: {remote}. Repeating `git push origin {target_branch}` \
+         cannot satisfy this ruleset. Use the source branch for the PR route.\n\n\
+         Run these commands from the repository root:\n\
+         1. `git push -u origin {source_branch}`\n\
+         2. `PR_URL=$(gh pr create --base {target_branch} --head {source_branch} --fill)`\n\
+         3. `gh pr view \"$PR_URL\" --json url,number,statusCheckRollup`\n\
+         4. Surface that PR URL and required-check status to the supervisor.\n\
+         5. After the required checks are green: `gh pr merge \"$PR_URL\" --merge`\n\
+         6. `git fetch origin {target_branch}`, then retry this `worktree_merge` so CAS \
+         can reconcile and close the delivery.\n\n\
+         GitHub evidence:\n{reason}",
+        short_sha(sha)
+    ))
 }
 
 /// Translate worktree merge failures into supervisor-actionable MCP errors.
@@ -2409,12 +2464,37 @@ impl CasCore {
             // guaranteed close-rejection loop that only a manual
             // `git push origin <target>` could break. Publishing before the
             // close is what makes the receipt and the guard agree.
-            target_push = Some((
-                receipt.target_branch.clone(),
-                manager
+            // A protected-default-branch PR may have landed between attempts.
+            // Once a fresh `origin/<target>` contains the immutable receipt
+            // commit, do not retry the rejected direct push of the different
+            // local merge commit; the remote ancestry is the authoritative PR
+            // landing proof and the delivery can reconcile normally.
+            let default_branch = manager.git().detect_default_branch();
+            let remote_target = format!("origin/{}", receipt.target_branch);
+            let pr_landed_sha = (receipt.target_branch == default_branch)
+                .then(|| manager.git().resolve_commit(&remote_target))
+                .flatten()
+                .filter(|_| {
+                    crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+                        &cwd,
+                        &receipt.commit_sha,
+                        &remote_target,
+                    )
+                });
+            let push_outcome = match pr_landed_sha {
+                Some(sha) => crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha },
+                None => manager
                     .git()
                     .publish_branch_to_origin(&receipt.target_branch),
-            ));
+            };
+            if let Some(error) = protected_default_branch_pr_error(
+                &receipt.source_branch,
+                &receipt.target_branch,
+                &push_outcome,
+            ) {
+                return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
+            }
+            target_push = Some((receipt.target_branch.clone(), push_outcome));
 
             if transaction.state != cas_types::WorkerDeliveryState::CloseReady {
                 cas_store::transition_worker_delivery(
@@ -2546,6 +2626,11 @@ impl CasCore {
             let outcome = manager.git().publish_branch_to_origin(&branch);
             (branch, outcome)
         });
+        if let Some(error) =
+            protected_default_branch_pr_error(&worktree.branch, &push_branch, &push_outcome)
+        {
+            return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
+        }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
 
         if !reconciled_delivery {
@@ -2727,7 +2812,8 @@ mod tests {
         classify_delivery_merge_preflight, derive_delivery_supervisor_authority,
         describe_branch_ci_state, describe_target_push_state, is_cas_pattern_worktree,
         is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with, path_is_under,
-        resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
+        protected_default_branch_pr_error, resolve_worktree_merge_cleanup,
+        worktree_merge_mcp_error,
     };
     use crate::worktree::git::TargetPushOutcome;
     use crate::worktree::{GitError, WorktreeError};
@@ -2811,6 +2897,44 @@ mod tests {
         // Short SHAs on both sides so the two tips are visibly different.
         assert!(note.contains("42d81bd9aaaa"), "{note}");
         assert!(note.contains("c2698df216cd"), "{note}");
+    }
+
+    #[test]
+    fn protected_default_branch_error_names_the_interactive_pr_route() {
+        let error = protected_default_branch_pr_error(
+            "factory/warm-cheetah-6",
+            "main",
+            &TargetPushOutcome::ProtectedDefaultBranch {
+                sha: "42d81bd9aaaabbbbccccddddeeeeffff00001111".to_string(),
+                remote_sha: Some("c2698df216cd9abe7db530ec1d035f6a378d1d06".to_string()),
+                reason:
+                    "remote: error: GH013: Repository rule violations found for refs/heads/main."
+                        .to_string(),
+            },
+        )
+        .expect("protected branch must produce a typed PR handoff");
+
+        assert!(
+            error.starts_with("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"),
+            "{error}"
+        );
+        assert!(
+            error.contains("git push -u origin factory/warm-cheetah-6"),
+            "{error}"
+        );
+        assert!(
+            error.contains("gh pr create --base main --head factory/warm-cheetah-6 --fill"),
+            "{error}"
+        );
+        assert!(error.contains("statusCheckRollup"), "{error}");
+        assert!(
+            error.contains("Surface that PR URL and required-check status"),
+            "{error}"
+        );
+        assert!(error.contains("gh pr merge \"$PR_URL\" --merge"), "{error}");
+        assert!(!error.contains("--auto"), "{error}");
+        assert!(error.contains("git fetch origin main"), "{error}");
+        assert!(error.contains("GH013"), "{error}");
     }
 
     #[test]

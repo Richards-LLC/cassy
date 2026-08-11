@@ -45,6 +45,19 @@ pub enum TargetPushOutcome {
     AlreadyCurrent { sha: String },
     /// The push ran and succeeded; `origin/<branch>` now carries the tip.
     Pushed { sha: String },
+    /// GitHub rejected a push to the repository's default branch because an
+    /// active repository ruleset requires the change to land through a pull
+    /// request. This is distinct from an ordinary push failure: retrying the
+    /// same `git push` cannot succeed, and the caller must preserve the source
+    /// branch for the PR route.
+    ProtectedDefaultBranch {
+        /// Local tip that the rejected push attempted to publish.
+        sha: String,
+        /// Remote default-branch tip observed before the rejected push.
+        remote_sha: Option<String>,
+        /// GitHub's GH013 diagnostic, retained as evidence.
+        reason: String,
+    },
     /// The merge is LOCAL ONLY. `reason` says why the push did not land.
     NotPushed {
         /// Local tip of the target branch, or `None` if it did not resolve.
@@ -67,6 +80,38 @@ impl TargetPushOutcome {
                 | Self::AlreadyCurrent { .. }
                 | Self::Pushed { .. }
         )
+    }
+}
+
+fn classify_push_rejection(
+    branch: &str,
+    default_branch: &str,
+    local_sha: String,
+    remote_sha: Option<String>,
+    stderr: &str,
+) -> TargetPushOutcome {
+    let reason = stderr.trim();
+    if branch == default_branch
+        && reason.contains("GH013")
+        && reason.contains("Repository rule violations")
+    {
+        return TargetPushOutcome::ProtectedDefaultBranch {
+            sha: local_sha,
+            remote_sha,
+            reason: reason.to_string(),
+        };
+    }
+
+    let reason = reason
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("git push failed with no diagnostic output")
+        .to_string();
+    TargetPushOutcome::NotPushed {
+        sha: Some(local_sha),
+        remote_sha,
+        reason,
     }
 }
 
@@ -703,22 +748,20 @@ impl GitOperations {
             Ok(output) if output.status.success() => TargetPushOutcome::Pushed { sha: local_sha },
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                let reason = stderr
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .unwrap_or("git push failed with no diagnostic output")
-                    .to_string();
+                let remote_sha = self.resolve_commit(&remote_ref);
+                let outcome = classify_push_rejection(
+                    branch,
+                    &self.detect_default_branch(),
+                    local_sha,
+                    remote_sha,
+                    &stderr,
+                );
                 tracing::warn!(
                     branch = %branch,
-                    reason = %reason,
+                    reason = %stderr.trim(),
                     "cas-5ee0: merge target was not published to origin"
                 );
-                TargetPushOutcome::NotPushed {
-                    sha: Some(local_sha),
-                    remote_sha: self.resolve_commit(&remote_ref),
-                    reason,
-                }
+                outcome
             }
             Err(e) => {
                 let reason = if e.kind() == std::io::ErrorKind::TimedOut {
@@ -817,5 +860,46 @@ impl GitOperations {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod protected_branch_tests {
+    use super::{TargetPushOutcome, classify_push_rejection};
+
+    const RECORDED_GH013: &str = "remote: error: GH013: Repository rule violations found for refs/heads/main.\nremote: - 2 of 2 required status checks are expected.\nTo github.com:pippenz/cas.git\n ! [remote rejected] main -> main (push declined due to repository rule violations)";
+
+    #[test]
+    fn recorded_gh013_on_default_branch_is_typed_as_pr_required() {
+        let outcome = classify_push_rejection(
+            "main",
+            "main",
+            "local-sha".to_string(),
+            Some("remote-sha".to_string()),
+            RECORDED_GH013,
+        );
+
+        assert_eq!(
+            outcome,
+            TargetPushOutcome::ProtectedDefaultBranch {
+                sha: "local-sha".to_string(),
+                remote_sha: Some("remote-sha".to_string()),
+                reason: RECORDED_GH013.to_string(),
+            }
+        );
+        assert!(!outcome.is_published());
+    }
+
+    #[test]
+    fn gh013_on_non_default_target_keeps_the_existing_failure_shape() {
+        let outcome = classify_push_rejection(
+            "epic/release",
+            "main",
+            "local-sha".to_string(),
+            Some("remote-sha".to_string()),
+            RECORDED_GH013,
+        );
+
+        assert!(matches!(outcome, TargetPushOutcome::NotPushed { .. }));
     }
 }

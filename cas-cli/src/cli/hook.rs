@@ -399,32 +399,19 @@ fn find_settings_files_with_cas_hooks(
 /// Configure Claude Code hooks
 fn execute_configure(force: bool, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    let hooks_in_global = global_has_cas_hooks();
 
     match configure_claude_hooks(&cwd, force) {
         Ok(created) => {
             if cli.json {
                 println!(
-                    r#"{{"status":"configured","created":{created},"hooks_skipped":{hooks_in_global}}}"#
+                    r#"{{"status":"configured","created":{created},"hooks_skipped":false}}"#
                 );
             } else {
                 let theme = ActiveTheme::default();
                 let mut stdout = io::stdout();
                 let mut fmt = Formatter::stdout(&mut stdout, theme);
 
-                if hooks_in_global {
-                    StatusLine::success(if created {
-                        "Created .claude/settings.json (permissions only — hooks are global)"
-                    } else {
-                        "Updated .claude/settings.json (permissions only — hooks are global)"
-                    })
-                    .render(&mut fmt)?;
-                    fmt.newline()?;
-                    StatusLine::info(
-                        "CAS hooks already in every known Claude config dir — skipped to avoid duplicates.",
-                    )
-                    .render(&mut fmt)?;
-                } else if created {
+                if created {
                     StatusLine::success("Created .claude/settings.json with CAS hooks")
                         .render(&mut fmt)?;
                     fmt.newline()?;
@@ -560,9 +547,10 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 /// This function creates or updates the settings.json file to include
 /// CAS hooks for SessionStart, Stop, and PostToolUse events.
 ///
-/// When global ~/.claude/settings.json already has CAS hooks configured,
-/// this function only writes permissions and statusLine to the project
-/// settings — no hooks — to avoid duplicate hook execution.
+/// Project settings are the canonical generated hook surface. Global settings
+/// may also carry hooks, but must never change the project file's generated
+/// shape: config-dir-dependent stripping made tracked settings churn whenever
+/// sessions used a different `CLAUDE_CONFIG_DIR` (cas-ce22).
 ///
 /// Returns Ok(true) if file was created, Ok(false) if updated.
 /// Configure CAS hooks, injecting an explicit home directory for the global-settings
@@ -593,10 +581,8 @@ pub(crate) fn configure_claude_hooks_with_home(
 pub(crate) fn configure_claude_hooks_with_config_dirs(
     project_root: &Path,
     force: bool,
-    config_dirs: &[std::path::PathBuf],
+    _config_dirs: &[std::path::PathBuf],
 ) -> anyhow::Result<bool> {
-    use config_gen::all_config_dirs_have_cas_hooks;
-
     let claude_dir = project_root.join(".claude");
     let settings_path = claude_dir.join("settings.json");
     let cas_dir = project_root.join(".cas");
@@ -617,12 +603,6 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
 
     let cas_hooks = get_cas_hooks_config(&hook_config);
 
-    // Check if EVERY known config dir's global settings already have CAS hooks —
-    // if so, skip project-level hooks to avoid duplicate execution. Only write
-    // permissions and statusLine. If any config dir lacks them, project hooks
-    // stay: they are what keeps sessions under that dir working (cas-5b96).
-    let skip_hooks = all_config_dirs_have_cas_hooks(config_dirs);
-
     let created = if settings_path.exists() && !force {
         // Merge with existing settings
         let content = std::fs::read_to_string(&settings_path)?;
@@ -632,25 +612,19 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
             anyhow::bail!("settings.json is not an object");
         }
 
-        if skip_hooks {
-            // Global hooks exist — strip any existing CAS hooks from project settings
-            strip_cas_hooks(&mut settings);
-        } else {
-            // No global hooks — add hooks to project settings
-            let hooks = settings
-                .as_object_mut()
-                .unwrap()
-                .entry("hooks")
-                .or_insert_with(|| serde_json::json!({}));
+        let hooks = settings
+            .as_object_mut()
+            .unwrap()
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}));
 
-            let hooks_obj = hooks
-                .as_object_mut()
-                .ok_or_else(|| anyhow::anyhow!("hooks is not an object"))?;
+        let hooks_obj = hooks
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("hooks is not an object"))?;
 
-            let cas_hooks_obj = cas_hooks.as_object().unwrap();
-            for (key, value) in cas_hooks_obj.get("hooks").unwrap().as_object().unwrap() {
-                hooks_obj.insert(key.clone(), value.clone());
-            }
+        let cas_hooks_obj = cas_hooks.as_object().unwrap();
+        for (key, value) in cas_hooks_obj.get("hooks").unwrap().as_object().unwrap() {
+            hooks_obj.insert(key.clone(), value.clone());
         }
 
         // Add statusLine configuration (overwrite if exists - CAS owns this)
@@ -691,19 +665,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
         false
     } else {
         // Create new settings file
-        let mut settings = if skip_hooks {
-            // Global hooks exist — only write permissions and statusLine
-            let mut obj = serde_json::Map::new();
-            if let Some(perms) = cas_hooks.get("permissions") {
-                obj.insert("permissions".to_string(), perms.clone());
-            }
-            if let Some(sl) = cas_hooks.get("statusLine") {
-                obj.insert("statusLine".to_string(), sl.clone());
-            }
-            serde_json::Value::Object(obj)
-        } else {
-            cas_hooks.clone()
-        };
+        let mut settings = cas_hooks.clone();
 
         // Add worktree directory if worktrees are enabled
         if let Some(settings_obj) = settings.as_object_mut() {

@@ -47,6 +47,11 @@ Save the postable draft to `docs/release-notes/<date>-<topic>-slack.md` (date `Y
 
 Post to the channel named in the rubric, in order: **user top-level → capture its `ts` → user reply → dev top-level → capture its `ts` → dev reply.** A reply must carry the parent's `ts`; a reply posted without one becomes a stray top-level message.
 
+Immediately after posting, before ending the task or turn, annotate the saved
+draft with a `## POSTED` block containing the UTC timestamp, channel, and a
+permalink for every top-level post and reply. This mandatory, searchable receipt
+records that the outward action happened.
+
 If no Slack transport is configured, stop after Step 4 and tell the user the draft path plus the channel to post it in — do not silently skip the announcement.
 
 ## Anti-patterns

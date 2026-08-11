@@ -86,6 +86,13 @@ always presents one complete harness snapshot.
 - Use **zero ticket/task/epic IDs** (including `cas-xxxx`).
 - Use **zero internal agent, worker, supervisor, director, or factory narration**.
 
+## Posting receipt
+
+Immediately after posting, before ending the task or turn, annotate the saved
+release-note draft with a `## POSTED` block containing the UTC timestamp,
+channel, and a permalink for every post and reply. This makes both runtime and
+diary announcements searchable and verifiable.
+
 ## Why
 
 These messages are for a product/stakeholder audience. They communicate *impact*,
@@ -104,6 +111,7 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration
+- [ ] Draft has a `## POSTED` receipt with UTC timestamp, channel, and every permalink
 
 ### Harness-diary update
 
@@ -111,5 +119,6 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] Exactly three replies, ordered Grok → Claude → Codex
 - [ ] Each reply includes version range, CAS touchpoints, verdict/action, and source gaps
 - [ ] Parent and replies contain zero ticket IDs and zero factory narration
+- [ ] Draft has a `## POSTED` receipt with UTC timestamp, channel, and every permalink
 - [ ] If runtime code also shipped, complete the runtime-release checklist too
 - [ ] If the merge is diary-only, make no runtime-release claim

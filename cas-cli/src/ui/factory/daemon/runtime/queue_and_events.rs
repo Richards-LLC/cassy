@@ -3843,15 +3843,20 @@ impl FactoryDaemon {
                 // retiring prior row state so this fresh watchdog probe is not
                 // immediately forgotten.
                 if !queued.urgent && queued.target != self.app.supervisor_name() {
+                    let normal_delivery_pane = if queued.target == "supervisor" {
+                        self.app.supervisor_name().to_string()
+                    } else {
+                        queued.target.clone()
+                    };
                     let bytes_at_delivery = self
                         .app
                         .mux
-                        .pane_bytes_received(&pane_target)
+                        .pane_bytes_received(&normal_delivery_pane)
                         .unwrap_or(0);
                     self.normal_delivery_probes.insert(
                         queued.id,
                         NormalDeliveryProbe {
-                            pane: pane_target.clone(),
+                            pane: normal_delivery_pane,
                             target: queued.target.clone(),
                             bytes_at_delivery,
                             delivered_at: std::time::Instant::now(),
@@ -8275,7 +8280,7 @@ mod urgent_wake_probe_tests {
         UrgentProbeAction, UrgentWakeOutcome, classify_urgent_wake, lifecycle_redelivery_decision,
         row_needs_renudge_cadence, urgent_probe_action, urgent_wake_is_unresolved,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// The 7206 shape: the daemon broke the turn and typed the redirect at
     /// 20:23:57, the pane produced nothing, and the recipient acted only on a
@@ -8454,7 +8459,7 @@ mod urgent_wake_probe_tests {
     }
 
     #[test]
-    fn normal_delivery_watchdog_retries_once_then_flags_without_urgent_cas_6e76() {
+    fn normal_watchdog_retries_idle_codex_then_flags_cas_6e76() {
         use super::{
             NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction, normal_delivery_probe_action,
         };
@@ -8476,6 +8481,17 @@ mod urgent_wake_probe_tests {
             "an idle normal recipient gets exactly one normal retry at the cadence"
         );
         let nudged_at = start + NORMAL_DELIVERY_OBSERVE_WINDOW;
+        assert_eq!(
+            normal_delivery_probe_action(
+                10,
+                Some(11),
+                NORMAL_DELIVERY_OBSERVE_WINDOW + Duration::from_secs(1),
+                Some(nudged_at),
+                nudged_at + Duration::from_secs(1),
+            ),
+            NormalDeliveryProbeAction::Observed,
+            "a seeded idle recipient that reacts to the normal nudge is surfaced and retires the probe"
+        );
         assert_eq!(
             normal_delivery_probe_action(
                 10,

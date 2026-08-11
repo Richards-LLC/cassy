@@ -21,6 +21,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cas_store::{IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, SqliteKnowledgeStore};
+use cas_types::{AgentStatus, TaskStatus, TaskType};
+
+use crate::store::{AgentStore, TaskStore, open_agent_store, open_task_store};
+
+const CURRENT_STATE_REL_PATH: &str = "current-state.md";
+const CURRENT_STATE_SOURCE: &str = "cas://session-end-current-state";
+
 /// Append one structured JSON-lines event to today's factory session log.
 ///
 /// Mid-session callers use the active `CAS_FACTORY_SESSION`; outside factory
@@ -238,6 +246,180 @@ pub fn write_session_end_manifest(
             ("git_status_untracked", &untracked),
         ],
     )
+}
+
+/// Upsert the one mechanical handoff snapshot used to seed the next session.
+///
+/// Unlike a handoff memory, this is deliberately assembled only from local
+/// stores, Git, and the saved release-receipt artifacts. It makes no model
+/// call, and failures are returned to the SessionEnd caller so that caller can
+/// keep the hook best-effort.
+pub fn write_current_state_snapshot(cas_root: &Path) -> Result<(), String> {
+    let repo = main_worktree_path(cas_root)
+        .ok_or_else(|| "could not resolve the main worktree".to_string())?;
+    let task_store =
+        open_task_store(cas_root).map_err(|error| format!("could not open task store: {error}"))?;
+    let tasks = task_store
+        .list(None)
+        .map_err(|error| format!("could not list tasks: {error}"))?;
+    let agents = open_agent_store(cas_root)
+        .map_err(|error| format!("could not open agent store: {error}"))?
+        .list(Some(AgentStatus::Active))
+        .map_err(|error| format!("could not list active agents: {error}"))?;
+
+    let mut open_epics: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Epic && task.status != TaskStatus::Closed)
+        .collect();
+    open_epics.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut epic_lines = Vec::new();
+    for epic in open_epics {
+        let subtasks = task_store
+            .get_subtasks(&epic.id)
+            .map_err(|error| format!("could not list subtasks for {}: {error}", epic.id))?;
+        let remaining = subtasks
+            .iter()
+            .filter(|task| task.status != TaskStatus::Closed)
+            .count();
+        epic_lines.push(format!(
+            "- {} — {} ({} subtasks; {} open)",
+            epic.id,
+            epic.title,
+            subtasks.len(),
+            remaining
+        ));
+    }
+
+    let mut awaiting_merge: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::AwaitingMerge)
+        .collect();
+    awaiting_merge.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut live_agents = agents;
+    live_agents.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let head = git_value(&repo, &["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|| "unavailable".to_string());
+    let tag = git_value(&repo, &["describe", "--tags", "--exact-match"])
+        .unwrap_or_else(|| "none".to_string());
+    let last_release = latest_posted_release_receipt(&repo)
+        .unwrap_or_else(|| "No posted release receipt found.".to_string());
+
+    let mut body = format!(
+        "# Current State\n\n\
+This page is regenerated automatically at SessionEnd from local CAS data; it is not a manual handoff.\n\n\
+## Runtime and HEAD\n\n\
+- Runtime version: v{}\n\
+- HEAD: {head}\n\
+- HEAD tag: {tag}\n\n\
+## Open Epics\n\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    if epic_lines.is_empty() {
+        body.push_str("- None.\n");
+    } else {
+        body.push_str(&epic_lines.join("\n"));
+        body.push('\n');
+    }
+
+    body.push_str("\n## Pending Merges\n\n");
+    if awaiting_merge.is_empty() {
+        body.push_str("- None.\n");
+    } else {
+        for task in awaiting_merge {
+            body.push_str(&format!("- {} — {}\n", task.id, task.title));
+        }
+    }
+
+    body.push_str("\n## Live Fleet\n\n");
+    if live_agents.is_empty() {
+        body.push_str("- No active agents.\n");
+    } else {
+        for agent in live_agents {
+            body.push_str(&format!(
+                "- {} ({}, {}, {} active tasks; heartbeat {})\n",
+                agent.name,
+                agent.id,
+                agent.role,
+                agent.active_tasks,
+                agent.last_heartbeat.to_rfc3339()
+            ));
+        }
+    }
+
+    body.push_str("\n## Last Release Announced\n\n");
+    body.push_str(&format!("- {last_release}\n"));
+
+    let store = SqliteKnowledgeStore::open(cas_root)
+        .map_err(|error| format!("could not open knowledge store: {error}"))?;
+    let existing = store
+        .get_page_by_rel_path(CURRENT_STATE_REL_PATH)
+        .map_err(|error| format!("could not read current-state page: {error}"))?;
+    if existing.as_ref().is_some_and(|page| page.locked) {
+        return Err("current-state page is locked; preserving the user-owned page".to_string());
+    }
+
+    let id = match &existing {
+        Some(page) => page.id.clone(),
+        None => store
+            .generate_id()
+            .map_err(|error| format!("could not allocate current-state page ID: {error}"))?,
+    };
+    let mut page = KnowledgePage::new(id, "workflow", "Current State");
+    page.rel_path = CURRENT_STATE_REL_PATH.to_string();
+    page.sources = vec![CURRENT_STATE_SOURCE.to_string()];
+    page.snippet = format!("Runtime v{} at HEAD {head}", env!("CARGO_PKG_VERSION"));
+    if let Some(existing) = existing {
+        page.created_at = existing.created_at;
+    }
+
+    store
+        .commit_ingest(&IngestBatch {
+            pages: vec![PageWrite { page, body }],
+            ..IngestBatch::default()
+        })
+        .map_err(|error| format!("could not write current-state page: {error}"))?;
+    Ok(())
+}
+
+fn git_value(repo: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn latest_posted_release_receipt(repo: &Path) -> Option<String> {
+    let release_dir = repo.join("docs/release-notes");
+    let mut latest: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(release_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).ok()?;
+        if !body.to_ascii_uppercase().contains("POSTED") {
+            continue;
+        }
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        if latest
+            .as_ref()
+            .is_none_or(|(current, _)| modified > *current)
+        {
+            latest = Some((modified, name));
+        }
+    }
+    latest.map(|(_, name)| name)
 }
 
 /// Summary of WIP candidates in the main worktree.
@@ -788,6 +970,74 @@ mod tests {
             .arg(dir)
             .args(["config", "user.name", "test"])
             .status();
+    }
+
+    #[test]
+    fn current_state_snapshot_upserts_head_epics_merges_fleet_and_release_receipt() {
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        init_repo(repo);
+        fs::write(repo.join("README.md"), "snapshot fixture").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-qm", "snapshot fixture"])
+            .status()
+            .unwrap();
+
+        let cas_root = crate::store::init_cas_dir(repo).unwrap();
+        let tasks = crate::store::open_task_store(&cas_root).unwrap();
+        let mut epic = cas_types::Task::new("cas-epic".to_string(), "Snapshot epic".to_string());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        let mut child = cas_types::Task::new("cas-child".to_string(), "Pending merge".to_string());
+        child.status = TaskStatus::AwaitingMerge;
+        tasks
+            .create_atomic(&child, &[], Some(&epic.id), Some("test"))
+            .unwrap();
+
+        let agents = crate::store::open_agent_store(&cas_root).unwrap();
+        let agent = cas_types::Agent::new("agent-1".to_string(), "Snapshot worker".to_string());
+        agents.register(&agent).unwrap();
+
+        let releases = repo.join("docs/release-notes");
+        fs::create_dir_all(&releases).unwrap();
+        fs::write(
+            releases.join("2026-08-11-v9.9.9-slack.md"),
+            "# v9.9.9\n\n**Status:** POSTED 2026-08-11\n",
+        )
+        .unwrap();
+
+        write_current_state_snapshot(&cas_root).unwrap();
+        // A second run must update the same page rather than creating another.
+        write_current_state_snapshot(&cas_root).unwrap();
+
+        let knowledge = SqliteKnowledgeStore::open(&cas_root).unwrap();
+        let page = knowledge
+            .get_page_by_rel_path(CURRENT_STATE_REL_PATH)
+            .unwrap()
+            .expect("SessionEnd snapshot page");
+        let body = knowledge.read_body(&page.rel_path).unwrap();
+        assert_eq!(
+            knowledge
+                .list_pages()
+                .unwrap()
+                .iter()
+                .filter(|page| page.rel_path == CURRENT_STATE_REL_PATH)
+                .count(),
+            1
+        );
+        assert!(body.contains("HEAD:"), "snapshot: {body}");
+        assert!(body.contains("cas-epic — Snapshot epic (1 subtasks; 1 open)"));
+        assert!(body.contains("cas-child — Pending merge"));
+        assert!(body.contains("Snapshot worker (agent-1"));
+        assert!(body.contains("2026-08-11-v9.9.9-slack.md"));
     }
 
     #[test]

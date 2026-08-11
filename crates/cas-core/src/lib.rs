@@ -60,7 +60,11 @@ pub use dedup::{
 };
 
 // Re-export sync types for convenience
-pub use sync::{SkillSyncReport, SkillSyncer, SpecSyncReport, SpecSyncer, SyncReport, Syncer};
+pub use sync::{
+    AgentsMdFileReport, AgentsMdSyncMode, AgentsMdSyncReport, GENERATED_HEADER, SkillSyncReport,
+    SkillSyncer, SpecSyncReport, SpecSyncer, SyncReport, Syncer, sync_agents_md,
+    transform_agents_md,
+};
 
 // Re-export search types for convenience
 pub use search::{

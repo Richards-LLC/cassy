@@ -33,9 +33,14 @@
 //! - Stale files are automatically removed when rules become unproven
 //! - Skills are synced when enabled, removed when disabled
 
+pub mod agents_md;
 pub mod skills;
 pub mod specs;
 
+pub use agents_md::{
+    AgentsMdFileReport, AgentsMdSyncMode, AgentsMdSyncReport, GENERATED_HEADER, sync_agents_md,
+    transform_agents_md,
+};
 pub use skills::{SkillSyncReport, SkillSyncer, create_planning_skill, generate_planning_skill};
 pub use specs::{SpecSyncReport, SpecSyncer};
 

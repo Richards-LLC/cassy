@@ -15,6 +15,26 @@ After a release is pushed + tagged, post to **#cas-internal** (`C0B44GUKDK2`). A
 1. **User-perspective post**
 2. **Dev-perspective post**
 
+### Protected-main landing before the tag
+
+`main` is protected by required checks. Prepare the version bump, changelog,
+and release-note draft on a source branch; do not merge or push that commit
+directly to `main`, and do not create the release tag before the PR lands.
+
+1. Push the source branch: `git push -u origin <source-branch>`.
+2. Open the release PR: `PR_URL=$(gh pr create --base main --head <source-branch> --fill)`.
+3. Surface its URL and required checks to the operator/supervisor:
+   `gh pr view "$PR_URL" --json url,number,statusCheckRollup`.
+4. After the required checks are green, merge explicitly:
+   `gh pr merge "$PR_URL" --merge`. Do not use `--auto` or an admin bypass.
+5. Fetch the landed commit (`git fetch origin main`), tag that exact
+   `origin/main` commit, then run the artifact/release flow and push the tag.
+
+If `coordination action=worktree_merge ... allow_trunk=true` encounters the
+ruleset first, it returns `PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` with the
+source/target-specific form of these commands. Follow that handoff and retry
+the merge action after fetching the PR landing so CAS can reconcile delivery.
+
 ### Shape (identical for both posts)
 
 1. **Open with the punch** — one or two lines of plain, punchy language framed as **how it was → how it is now**. Lead with the change in experience, not the mechanism.
@@ -77,7 +97,9 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 
 ### Runtime release
 
-- [ ] Release pushed to `origin/main` + tag pushed
+- [ ] Version/changelog commit landed on `main` through a reviewed PR with required checks green
+- [ ] PR URL + required-check status surfaced before the explicit merge (no `--auto` / admin bypass)
+- [ ] Release tag points at the fetched `origin/main` landing and is pushed
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

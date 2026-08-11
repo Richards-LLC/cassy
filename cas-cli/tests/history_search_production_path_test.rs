@@ -59,12 +59,54 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
+/// Git can report an object as invalid when a just-written loose object has not
+/// become visible to the next Git process yet. This fixture intentionally uses
+/// a separate `git add` and `git commit` process, so keep the recovery at that
+/// boundary rather than retrying a whole test (GH #250).
+const OBJECT_VISIBILITY_COMMIT_ATTEMPTS: usize = 3;
+
+fn is_object_visibility_error(stderr: &str) -> bool {
+    stderr.contains("invalid object") || stderr.contains("Error building trees")
+}
+
+fn commit_with_object_visibility_retry(repo: &Path, message: &str) {
+    for attempt in 1..=OBJECT_VISIBILITY_COMMIT_ATTEMPTS {
+        let out = Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo)
+            .output()
+            .unwrap_or_else(|e| panic!("git commit {message:?}: {e}"));
+        if out.status.success() {
+            return;
+        }
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !is_object_visibility_error(&stderr) || attempt == OBJECT_VISIBILITY_COMMIT_ATTEMPTS {
+            panic!("git commit {message:?} failed: {stderr}");
+        }
+    }
+
+    unreachable!("the final attempt either committed or panicked");
+}
+
 fn commit(repo: &Path, path: &str, contents: &str, message: &str) {
     let full = repo.join(path);
     std::fs::create_dir_all(full.parent().unwrap()).unwrap();
     std::fs::write(&full, contents).unwrap();
     git(repo, &["add", path]);
-    git(repo, &["commit", "-m", message]);
+    commit_with_object_visibility_retry(repo, message);
+}
+
+#[test]
+fn fixture_commit_retry_is_limited_to_git_object_visibility_errors() {
+    assert!(is_object_visibility_error(
+        "error: invalid object 0123456789012345678901234567890123456789 for 'src/newer.rs'"
+    ));
+    assert!(is_object_visibility_error("fatal: Error building trees"));
+    assert!(!is_object_visibility_error(
+        "Author identity unknown\n\nfatal: unable to auto-detect email address"
+    ));
+    assert_eq!(OBJECT_VISIBILITY_COMMIT_ATTEMPTS, 3);
 }
 
 impl Fixture {

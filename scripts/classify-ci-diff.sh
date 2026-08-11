@@ -31,23 +31,90 @@ if "$docs_only"; then
     exit 0
 fi
 
-# A release-only patch is the exact two-line bump Cargo currently generates:
-# the cas manifest's package version and the matching `cas` lock entry. Do not
-# broaden this without changing the pinned fixtures in test-ci-test-tiers.sh.
-if [[ "${files[*]}" == "Cargo.lock cas-cli/Cargo.toml" || "${files[*]}" == "cas-cli/Cargo.toml Cargo.lock" ]]; then
-    manifest_diff="$(git diff --unified=0 "$base" "$head" -- cas-cli/Cargo.toml)"
-    lock_diff="$(git diff --unified=0 "$base" "$head" -- Cargo.lock)"
-    if grep -qE '^-version = "[0-9]+\.[0-9]+\.[0-9]+"$' <<<"$manifest_diff" \
-        && grep -qE '^\+version = "[0-9]+\.[0-9]+\.[0-9]+"$' <<<"$manifest_diff" \
-        && grep -qE '^-version = "[0-9]+\.[0-9]+\.[0-9]+"$' <<<"$lock_diff" \
-        && grep -qE '^\+version = "[0-9]+\.[0-9]+\.[0-9]+"$' <<<"$lock_diff" \
-        && [[ "$(grep -Ec '^[+-](version = )' <<<"$manifest_diff")" == 2 ]] \
-        && [[ "$(grep -Ec '^[+-](version = )' <<<"$lock_diff")" == 2 ]] \
-        && grep -q '^name = "cas"$' < <(git show "$head:Cargo.lock") \
-        && grep -qE '^@@ .* name = "cas"$' <<<"$lock_diff"; then
-        echo version-bump
-        exit 0
+# A release-only patch changes one or more workspace package manifests and the
+# matching package entries in Cargo.lock. Every manifest must change exactly
+# one version line; Cargo.lock may change only version lines for those same
+# packages. Keep this conservative contract pinned in test-ci-test-tiers.sh.
+declare -A manifest_versions lock_old_versions lock_new_versions lock_changes
+has_lock=false
+valid_version_bump=true
+
+for file in "${files[@]}"; do
+    if [[ "$file" == Cargo.lock ]]; then
+        has_lock=true
+        continue
     fi
+
+    manifest_path="${file%/Cargo.toml}"
+    if [[ "$file" != */Cargo.toml ]] \
+        || ! git show "$head:Cargo.toml" | grep -qF "    \"$manifest_path\","; then
+        valid_version_bump=false
+        break
+    fi
+
+    manifest_diff="$(git diff --unified=0 "$base" "$head" -- "$file")"
+    mapfile -t manifest_changes < <(grep -E '^[+-]' <<<"$manifest_diff" | grep -vE '^(---|\+\+\+)' || true)
+    if [[ ${#manifest_changes[@]} != 2 ]] \
+        || [[ ! "${manifest_changes[0]}" =~ ^-version\ =\ \"([^\"]+)\"$ ]] \
+        || [[ ! "${manifest_changes[1]}" =~ ^\+version\ =\ \"([^\"]+)\"$ ]]; then
+        valid_version_bump=false
+        break
+    fi
+    manifest_new_version="${BASH_REMATCH[1]}"
+
+    package_name="$(git show "$head:$file" | awk '
+        /^\[package\]$/ { in_package = 1; next }
+        /^\[/ { in_package = 0 }
+        in_package && /^name = "/ {
+            sub(/^name = "/, "")
+            sub(/"$/, "")
+            print
+            exit
+        }
+    ')"
+    if [[ -z "$package_name" || -n "${manifest_versions[$package_name]+x}" ]]; then
+        valid_version_bump=false
+        break
+    fi
+    manifest_versions["$package_name"]="$manifest_new_version"
+done
+
+if "$valid_version_bump" && "$has_lock" && [[ ${#manifest_versions[@]} -gt 0 ]]; then
+    lock_diff="$(git diff --unified=0 "$base" "$head" -- Cargo.lock)"
+    lock_package=""
+    while IFS= read -r line; do
+        if [[ "$line" == ---* || "$line" == +++* ]]; then
+            continue
+        elif [[ "$line" =~ ^@@.*name\ =\ \"([^\"]+)\"$ ]]; then
+            lock_package="${BASH_REMATCH[1]}"
+        elif [[ "$line" == -* || "$line" == +* ]]; then
+            if [[ -z "$lock_package" || -z "${manifest_versions[$lock_package]+x}" ]] \
+                || [[ ! "$line" =~ ^[-+]version\ =\ \"([^\"]+)\"$ ]]; then
+                valid_version_bump=false
+                break
+            fi
+            lock_changes["$lock_package"]=$(( ${lock_changes[$lock_package]:-0} + 1 ))
+            if [[ "$line" == -* ]]; then
+                lock_old_versions["$lock_package"]="${BASH_REMATCH[1]}"
+            else
+                lock_new_versions["$lock_package"]="${BASH_REMATCH[1]}"
+            fi
+        fi
+    done <<<"$lock_diff"
+
+    for package_name in "${!manifest_versions[@]}"; do
+        if [[ "${lock_changes[$package_name]:-0}" != 2 ]] \
+            || [[ -z "${lock_old_versions[$package_name]+x}" ]] \
+            || [[ "${lock_new_versions[$package_name]:-}" != "${manifest_versions[$package_name]}" ]]; then
+            valid_version_bump=false
+            break
+        fi
+    done
+fi
+
+if "$valid_version_bump" && "$has_lock" && [[ ${#manifest_versions[@]} -gt 0 ]]; then
+    echo version-bump
+    exit 0
 fi
 
 echo full

@@ -9,7 +9,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `contrib/shell-helpers/` — installable `cas-update` wrapper plus its shell-test harness.
 - `docs/` — plans, specs, reports, release notes, research, guides, and operational records.
 - `fixtures/retrieval-parity/` — checked-in retrieval benchmark baseline and query set.
-- `scripts/` — install, release, migration, scoped-test, build-regression, worktree, portable-ISA, and release-preflight checks.
+- `scripts/` — install, release, migration, scoped-test, build-regression, worktree, portable-ISA, release-preflight, and worker build-cache (`refresh-worker-build-cache.sh`) helpers.
 - `migration/` — historical cloud-move logs and systemd material; not the active database migration tree.
 - `homebrew/` — Homebrew formula and formula update helper.
 - `slack-bridge/` — standalone Node/TypeScript service routing Slack traffic to CAS daemons.
@@ -20,7 +20,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `.cargo/` — workspace Cargo configuration.
 - `.github/` — CI/release workflows, including portable ISA validation, and public issue templates.
 - `.config/` — local development/editor configuration.
-- Root docs — `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `CAS-DEEP-DIVE.md`, `CHANGELOG.md`, and `investigation-mcp-worktree.md`.
+- Root docs — `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `AGENTS.md`, `CAS-DEEP-DIVE.md`, `CHANGELOG.md`, and `investigation-mcp-worktree.md`.
 - Root config/assets — `Cargo.toml`, `.mcp.json`, `.env.worktree.template`, `casdemo.png`, and licensing files.
 
 ## Workspace / packages
@@ -44,16 +44,20 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## cas-cli/src — application hub
 `main.rs` starts the CLI; `lib.rs` exports application modules and the canonical `TestEnvGuard`.
 - `cli/mod.rs` — clap command dispatch; use this first to locate a CLI subcommand.
-- `cli/factory/` — `cas factory` launch/configuration, lifecycle, worktree, liveness, parity, and communication probes.
+- `cli/factory/` — `cas factory` launch/configuration, lifecycle, worktree, liveness, parity, communication probes, and `doctor.rs` diagnostics.
+- `cli/{hub,hub_service,hub_reverse_pairing}.rs` — `cas hub` fleet-control CLI: launch, launchd/systemd service install, reverse pairing.
+- `cli/limits.rs` — `cas limits` usage/limit reporting.
+- `cli/sync/agents_md.rs` — managed `AGENTS.md` sync command (core logic in `crates/cas-core/src/sync/agents_md.rs`).
 - `cli/{codemap_cmd,project_overview_cmd,knowledge_cmd}.rs` — documentation freshness gates and knowledge commands.
 - `cli/history_cmd.rs` — history index/search/status/repair command surface.
 - `cli/{hook,update,integrate,config,config_tui,init}.rs` — hook dispatch, managed-file sync, integrations, configuration, and setup.
 - `cli/{claude,claude_md}.rs` — Claude profile launch/login commands and managed `CLAUDE.md` material.
 - `cli/{doctor,status,index_cmd}.rs` — diagnostics, status, and index operations.
+- `hub/` — machine-local Commander hub (EPIC cas-bec9): `server.rs`/`runtime.rs`, `discovery.rs`, `tailscale.rs`, `auth.rs`/`identity.rs`, event stream, death detection.
 - `mcp/{daemon,socket,server}/` — always-available MCP daemon, Unix socket, and request routing.
 - `mcp/tools/core/` — task, memory, knowledge, search, rules, skills, and coordination MCP handlers.
 - `mcp/tools/service/` — factory operations, supervisor queue, messaging, history/code search, liveness, and recovery handlers.
-- `ui/factory/` — bare-`cas` TUI, factory daemon runtime, director events/prompts, app state, and rendering.
+- `ui/factory/` — bare-`cas` TUI, factory daemon runtime (incl. `runtime/ci_watch.rs` CI red-run relays), director events/prompts, app state, and rendering.
 - `bridge/server/` — HTTP bridge server used by `cas bridge serve`.
 - `hooks/handlers/` — SessionStart, PreToolUse, PostToolUse, and session-stop hook behavior.
 - `builtins/` — embedded Claude/Codex/Grok skills, agents, and workflows synced into harness directories; `skills/cli-routing/` routes CLI work and `skills/cas-code-review/` carries review personas/workflows.
@@ -63,7 +67,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `history/` — incremental Git history index, FTS search, provenance, symbol links, and epoch tracking.
 - `ambient_recall.rs` — bounded, scope-gated hook recall contracts and ranking.
 - `hybrid_search/` — lexical/semantic/code/knowledge search composition and capability-aware weighting.
-- `migration/migrations/` — numbered SQLite migrations; current additions include history epochs, code-vector state, and `m231_sync_conflicts_create_table.rs`.
+- `migration/migrations/` — numbered SQLite migrations; current tip `m232_worker_completion_receipts_add_artifact_path.rs`.
 - `daemon/` — background maintenance, filesystem watching, and indexing scheduling.
 - `sync/` — managed artifact rendering from builtins into `.claude/` and harness mirrors.
 - `worktree/` — create, manage, salvage, sweep, and clean worktrees.

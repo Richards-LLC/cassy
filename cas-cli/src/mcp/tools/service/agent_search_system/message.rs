@@ -181,6 +181,92 @@ pub(crate) fn recipient_transport_warning(
     )
 }
 
+const CLAUDE_INTERRUPT_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const CLAUDE_INTERRUPT_CONFIRM_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn interrupt_delivery_is_observed(report: &cas_store::MessageDeliveryReport) -> bool {
+    matches!(
+        report.stage,
+        cas_store::DeliveryStage::Delivered | cas_store::DeliveryStage::Confirmed
+    ) && report.delivered_at.is_some()
+        && report.recipient_transport_at.is_some()
+}
+
+fn interrupt_delivery_failure(report: &cas_store::MessageDeliveryReport) -> Option<String> {
+    report.stage.is_terminal_non_delivery().then(|| {
+        format!(
+            "delivery reached terminal stage {}{}",
+            report.stage,
+            report
+                .pending_detail
+                .as_deref()
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default()
+        )
+    })
+}
+
+fn interrupt_unconfirmed_message(
+    notification_id: i64,
+    report: Option<&cas_store::MessageDeliveryReport>,
+) -> String {
+    let state = report.map_or_else(
+        || "no delivery report was readable".to_string(),
+        |report| {
+            format!(
+                "stage={}, wake_attempt={}, recipient_transport={}",
+                report.stage,
+                report.wake_attempt,
+                if report.recipient_transport_at.is_some() {
+                    "observed"
+                } else {
+                    "unobserved"
+                }
+            )
+        },
+    );
+    format!(
+        "Could not confirm Claude interrupt delivery for notification {notification_id} within {}s ({state}). The queue row remains durable for retry, but this call did not silently claim the teammate was interrupted; inspect `coordination action=message_status notification_id={notification_id}` before proceeding.",
+        CLAUDE_INTERRUPT_CONFIRM_TIMEOUT.as_secs()
+    )
+}
+
+async fn wait_for_claude_interrupt_delivery(
+    queue: &dyn cas_store::PromptQueueStore,
+    notification_id: i64,
+) -> std::result::Result<(), String> {
+    let deadline = tokio::time::Instant::now() + CLAUDE_INTERRUPT_CONFIRM_TIMEOUT;
+    let mut last_report = None;
+    loop {
+        match queue.message_delivery_report(notification_id) {
+            Ok(Some(report)) => {
+                if interrupt_delivery_is_observed(&report) {
+                    return Ok(());
+                }
+                if let Some(failure) = interrupt_delivery_failure(&report) {
+                    return Err(format!(
+                        "Could not interrupt Claude teammate for notification {notification_id}: {failure}"
+                    ));
+                }
+                last_report = Some(report);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(format!(
+                    "Could not verify Claude interrupt notification {notification_id}: {error}"
+                ));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(interrupt_unconfirmed_message(
+                notification_id,
+                last_report.as_ref(),
+            ));
+        }
+        tokio::time::sleep(CLAUDE_INTERRUPT_CONFIRM_POLL).await;
+    }
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
@@ -521,21 +607,21 @@ impl CasService {
         // is not an agent_store registration. Treat it as always registered
         // so outbound replies after an inbound director message are not
         // reported as "not yet registered".
+        let resolved_target_agent = {
+            use crate::store::open_agent_store;
+            open_agent_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| store.list(None).ok())
+                .and_then(|agents| {
+                    agents
+                        .into_iter()
+                        .find(|agent| agent.name.eq_ignore_ascii_case(&resolved_target))
+                })
+        };
         let target_is_registered = resolved_target == "all_workers"
             || resolved_target == "supervisor"
             || resolved_target.eq_ignore_ascii_case("director")
-            || {
-                use crate::store::open_agent_store;
-                open_agent_store(&self.inner.cas_root)
-                    .ok()
-                    .and_then(|store| store.list(None).ok())
-                    .map(|agents| {
-                        agents
-                            .iter()
-                            .any(|a| a.name.eq_ignore_ascii_case(&resolved_target))
-                    })
-                    .unwrap_or(false)
-            };
+            || resolved_target_agent.is_some();
 
         let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
         let urgent = req.urgent.unwrap_or(false);
@@ -552,6 +638,15 @@ impl CasService {
         } else {
             priority
         };
+
+        if urgent && !target_is_registered {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Could not interrupt '{resolved_target}': target is not registered, so no live pane can be interrupted"
+                ),
+            ));
+        }
 
         // cas-b269 review 2: halt fan-out is session-scoped, authorized by
         // AgentRole::Supervisor|Director (and display fallback), fail-closed
@@ -773,18 +868,10 @@ impl CasService {
         {
             recipient_aliases.push(name);
         }
-        let resolved_target_role = {
-            use crate::store::open_agent_store;
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| store.list(None).ok())
-                .and_then(|agents| {
-                    agents
-                        .into_iter()
-                        .find(|agent| agent.name.eq_ignore_ascii_case(&resolved_target))
-                        .map(|agent| agent.role)
-                })
-        };
+        let resolved_target_role = resolved_target_agent.as_ref().map(|agent| agent.role);
+        let resolved_target_cli = resolved_target_agent
+            .as_ref()
+            .map(|agent| crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent));
         let target_is_supervisor = addressed_logical_supervisor
             || resolved_target_role == Some(cas_types::AgentRole::Supervisor);
         let mut counterparty_aliases = vec![resolved_target.as_str()];
@@ -861,6 +948,18 @@ impl CasService {
                     );
                 }
             }
+        }
+
+        // cas-71d9 (GH #269): an urgent write to a Claude teammate is not a
+        // successful interrupt until the daemon's pane-output probe records a
+        // recipient-side transport receipt. Wait through that bounded probe
+        // window and fail explicitly when no observation arrives. The queue
+        // row remains durable, so a late retry is still possible, but the
+        // caller can no longer mistake enqueue success for a broken wait state.
+        if urgent && resolved_target_cli == Some(cas_mux::SupervisorCli::Claude) {
+            wait_for_claude_interrupt_delivery(&*queue, message_id)
+                .await
+                .map_err(|message| Self::error(ErrorCode::INTERNAL_ERROR, message))?;
         }
 
         // cas-6913 / cas-893c: honest delivery-status line. Urgent takes
@@ -1467,9 +1566,19 @@ fn enrich_report_from_harness_artifact(
 #[cfg(test)]
 mod inbox_poll_identity_tests {
     use super::{
-        enrich_report_from_harness_artifact, recipient_transport_warning, resolve_inbox_recipient,
+        enrich_report_from_harness_artifact, interrupt_unconfirmed_message,
+        recipient_transport_warning, resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
+
+    #[test]
+    fn claude_interrupt_timeout_is_an_explicit_failure_surface() {
+        let message = interrupt_unconfirmed_message(269, None);
+        assert!(message.contains("Could not confirm Claude interrupt delivery"));
+        assert!(message.contains("notification 269"));
+        assert!(message.contains("did not silently claim"));
+        assert!(message.contains("message_status notification_id=269"));
+    }
 
     /// cas-7a01 (GH #155): the combination that used to be completely
     /// invisible — CAS nudged the pane and no turn ever carried the message —

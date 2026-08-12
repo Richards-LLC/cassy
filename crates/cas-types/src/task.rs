@@ -143,6 +143,8 @@ pub enum TaskType {
     Chore,
     /// Investigation or research (produces understanding, not code)
     Spike,
+    /// Supervisor-owned promotion, rollout, or sign-off decision
+    Gate,
 }
 
 impl fmt::Display for TaskType {
@@ -154,6 +156,7 @@ impl fmt::Display for TaskType {
             TaskType::Epic => write!(f, "epic"),
             TaskType::Chore => write!(f, "chore"),
             TaskType::Spike => write!(f, "spike"),
+            TaskType::Gate => write!(f, "gate"),
         }
     }
 }
@@ -174,6 +177,8 @@ impl FromStr for TaskType {
             Ok(TaskType::Chore)
         } else if s.eq_ignore_ascii_case("spike") {
             Ok(TaskType::Spike)
+        } else if s.eq_ignore_ascii_case("gate") {
+            Ok(TaskType::Gate)
         } else {
             Err(TypeError::Parse(format!("invalid task type: {s}")))
         }
@@ -755,6 +760,7 @@ mod tests {
         assert_eq!(TaskType::from_str("epic").unwrap(), TaskType::Epic);
         assert_eq!(TaskType::from_str("chore").unwrap(), TaskType::Chore);
         assert_eq!(TaskType::from_str("spike").unwrap(), TaskType::Spike);
+        assert_eq!(TaskType::from_str("gate").unwrap(), TaskType::Gate);
     }
 
     #[test]
@@ -766,6 +772,13 @@ mod tests {
         // Verify round-trip
         let s = spike.to_string();
         assert_eq!(TaskType::from_str(&s).unwrap(), TaskType::Spike);
+    }
+
+    #[test]
+    fn test_gate_task_type() {
+        let gate = TaskType::Gate;
+        assert_eq!(gate.to_string(), "gate");
+        assert_eq!(TaskType::from_str(&gate.to_string()).unwrap(), gate);
     }
 
     #[test]

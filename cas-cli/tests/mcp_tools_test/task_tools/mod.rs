@@ -4,6 +4,7 @@ mod dependencies;
 mod depth_e2e;
 mod depth_light_close;
 mod double_close;
+mod gate;
 mod operations;
 mod reopen_atomicity;
 mod supervisor_review_flow;

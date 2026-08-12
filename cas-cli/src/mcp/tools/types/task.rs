@@ -80,7 +80,9 @@ pub struct TaskCreateRequest {
     pub priority: u8,
 
     /// Task type
-    #[schemars(description = "Type: 'task' (default), 'bug', 'feature', 'epic', 'chore', 'spike'")]
+    #[schemars(
+        description = "Type: 'task' (default), 'bug', 'feature', 'epic', 'chore', 'spike', 'gate'"
+    )]
     #[serde(default = "default_task_type")]
     pub task_type: String,
 

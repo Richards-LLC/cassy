@@ -180,7 +180,7 @@ struct NegativeResultCloseReceipt {
 }
 
 #[derive(Debug)]
-enum SupervisorAuthorityError {
+pub(super) enum SupervisorAuthorityError {
     Identity(String),
     Store(String),
     NotRegistered { caller_id: String, error: String },
@@ -191,6 +191,7 @@ enum SupervisorAuthorityError {
 enum TaskCloseDisposition {
     Delivered,
     NegativeResult,
+    Decision,
 }
 
 impl TaskCloseDisposition {
@@ -202,8 +203,38 @@ impl TaskCloseDisposition {
         match self {
             Self::Delivered => cas_types::TaskTerminalOutcome::Delivered,
             Self::NegativeResult => cas_types::TaskTerminalOutcome::NegativeResult,
+            Self::Decision => cas_types::TaskTerminalOutcome::Decision,
         }
     }
+}
+
+pub(super) fn gate_supervisor_authority_error(
+    operation: &str,
+    error: SupervisorAuthorityError,
+) -> String {
+    match error {
+        SupervisorAuthorityError::Identity(error) => format!(
+            "GATE {operation} REJECTED: gate tasks require an authenticated registered supervisor; caller identity could not be resolved ({error})."
+        ),
+        SupervisorAuthorityError::Store(error) => format!(
+            "GATE {operation} REJECTED: supervisor authority could not be checked ({error})."
+        ),
+        SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
+            "GATE {operation} REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+        ),
+        SupervisorAuthorityError::NotLive(caller) => format!(
+            "GATE {operation} REJECTED: only a live registered supervisor may start or close a gate. Caller `{}` has role {}.",
+            caller.name, caller.role
+        ),
+    }
+}
+
+fn has_recorded_gate_decision(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        line.strip_prefix('[')
+            .and_then(|line| line.split_once("] ✅ DECISION "))
+            .is_some_and(|(_, decision)| !decision.trim().is_empty())
+    })
 }
 
 fn negative_result_missing_receipts(
@@ -462,6 +493,9 @@ pub(crate) enum VerificationSkipReason {
     /// durable evidence and a closed-unmerged PR/branch receipt. No delivery
     /// is being approved, so delivery review/verification gates do not apply.
     SupervisorNegativeResult,
+    /// A live registered supervisor closed a Gate after recording the
+    /// decision in the task timeline. No code delivery is being approved.
+    SupervisorDecision,
     /// cas-1932 (GH #62, minor): an assignee-lookup failure would have
     /// reported "verification skipped", but a current-cycle APPROVED
     /// verification for this task already exists. The close is authorized
@@ -513,6 +547,9 @@ impl VerificationSkipReason {
                 " (measured negative result — supervisor-authorized, delivery intentionally unmerged)"
                     .to_string()
             }
+            VerificationSkipReason::SupervisorDecision => {
+                " (decision recorded — supervisor-authorized gate)".to_string()
+            }
             VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
                 format!(" (verified — approved verification {verification_id} on record)")
             }
@@ -555,6 +592,11 @@ impl VerificationSkipReason {
                 "Closed as a measured negative result by a registered supervisor after durable \
                  evidence and a closed-unmerged PR/branch receipt were validated; no delivery \
                  was approved or merged."
+                    .to_string()
+            }
+            VerificationSkipReason::SupervisorDecision => {
+                "Closed as a decision by a registered supervisor after a non-empty DECISION note \
+                 was recorded; no code delivery was required or approved."
                     .to_string()
             }
             VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
@@ -673,7 +715,7 @@ impl CasCore {
     /// Resolve the authority shared by every supervisor-owned non-delivery
     /// outcome. Callers map the typed failure into operation-specific text,
     /// but identity, registration, role, and liveness checks are identical.
-    fn resolve_live_supervisor_authority(
+    pub(super) fn resolve_live_supervisor_authority(
         &self,
     ) -> Result<cas_types::Agent, SupervisorAuthorityError> {
         let caller_id = self
@@ -691,6 +733,18 @@ impl CasCore {
             return Err(SupervisorAuthorityError::NotLive(caller));
         }
         Ok(caller)
+    }
+
+    fn validate_gate_decision_close(&self, task: &cas_types::Task) -> Result<(), String> {
+        self.resolve_live_supervisor_authority()
+            .map_err(|error| gate_supervisor_authority_error("CLOSE", error))?;
+        if !has_recorded_gate_decision(&task.notes) {
+            return Err(format!(
+                "GATE CLOSE REJECTED: task {} has no non-empty recorded DECISION note. Record the decision first with mcp__cas__task action=notes id={} note_type=decision notes=\"...\", then retry close.",
+                task.id, task.id
+            ));
+        }
+        Ok(())
     }
 
     fn validate_negative_result_close(
@@ -1542,12 +1596,33 @@ impl CasCore {
         // Validate its supervisor authority and all three receipts before any
         // close projection. Ordinary requests take the `None` path and retain
         // the existing gate sequence and response text unchanged.
-        let negative_result_receipt =
-            match self.validate_negative_result_close(&req.id, &req, negative_result.as_ref()) {
-                Ok(receipt) => receipt,
-                Err(message) => return Ok(Self::tool_error(message)),
-            };
-        let close_disposition = if negative_result_receipt.is_some() {
+        if task.task_type == TaskType::Gate && completion_receipt.is_some() {
+            return Ok(Self::tool_error(format!(
+                "GATE CLOSE REJECTED: task {} closes directly on a recorded DECISION note; a worker completion receipt is not applicable.",
+                task.id
+            )));
+        }
+        if task.task_type == TaskType::Gate && negative_result.is_some() {
+            return Ok(Self::tool_error(format!(
+                "GATE CLOSE REJECTED: task {} has the Decision disposition; negative_result is not applicable.",
+                task.id
+            )));
+        }
+
+        let negative_result_receipt = match self.validate_negative_result_close(
+            &req.id,
+            &req,
+            negative_result.as_ref(),
+        ) {
+            Ok(receipt) => receipt,
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
+        let close_disposition = if task.task_type == TaskType::Gate {
+            if let Err(message) = self.validate_gate_decision_close(&task) {
+                return Ok(Self::tool_error(message));
+            }
+            TaskCloseDisposition::Decision
+        } else if negative_result_receipt.is_some() {
             TaskCloseDisposition::NegativeResult
         } else {
             TaskCloseDisposition::Delivered
@@ -1602,72 +1677,74 @@ impl CasCore {
         // depth, orphan, and review convenience paths. Once one exists, no
         // close projection may proceed until that exact dispatch resolves.
         // This guard also protects internal post-merge re-close calls.
-        match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
-            Err(error) => {
-                return Ok(Self::tool_error(format!(
-                    "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. CAS refuses to infer close authority.",
-                    req.id, error
-                )));
-            }
-            Ok(Some(dispatch))
-                if matches!(
-                    dispatch.state,
-                    cas_types::VerificationDispatchState::Pending
-                        | cas_types::VerificationDispatchState::Claimed
-                ) =>
-            {
-                if dispatch.deadline_at <= chrono::Utc::now() {
-                    let timed_out = cas_store::timeout_verification_dispatch(
-                        &self.cas_root,
-                        &req.id,
-                        chrono::Utc::now(),
-                    )
-                    .map_err(|error| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Failed to persist exact verification timeout: {error}"
-                        )),
-                        data: None,
-                    })?
-                    .ok_or_else(|| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(
-                            "Exact verification timeout changed before persistence; retry close.",
-                        ),
-                        data: None,
-                    })?;
-                    let mut timed_out_task = task.clone();
-                    timed_out_task.pending_verification = false;
-                    timed_out_task.updated_at = chrono::Utc::now();
-                    task_store
-                        .update(&timed_out_task)
+        if close_disposition != TaskCloseDisposition::Decision {
+            match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
+                Err(error) => {
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. CAS refuses to infer close authority.",
+                        req.id, error
+                    )));
+                }
+                Ok(Some(dispatch))
+                    if matches!(
+                        dispatch.state,
+                        cas_types::VerificationDispatchState::Pending
+                            | cas_types::VerificationDispatchState::Claimed
+                    ) =>
+                {
+                    if dispatch.deadline_at <= chrono::Utc::now() {
+                        let timed_out = cas_store::timeout_verification_dispatch(
+                            &self.cas_root,
+                            &req.id,
+                            chrono::Utc::now(),
+                        )
                         .map_err(|error| McpError {
                             code: ErrorCode::INTERNAL_ERROR,
                             message: Cow::from(format!(
-                                "Failed to project exact verification timeout: {error}"
+                                "Failed to persist exact verification timeout: {error}"
                             )),
                             data: None,
+                        })?
+                        .ok_or_else(|| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(
+                                "Exact verification timeout changed before persistence; retry close.",
+                            ),
+                            data: None,
                         })?;
-                    let sup_ver = supervisor_verification_tool();
+                        let mut timed_out_task = task.clone();
+                        timed_out_task.pending_verification = false;
+                        timed_out_task.updated_at = chrono::Utc::now();
+                        task_store
+                            .update(&timed_out_task)
+                            .map_err(|error| McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to project exact verification timeout: {error}"
+                                )),
+                                data: None,
+                            })?;
+                        let sup_ver = supervisor_verification_tool();
+                        return Ok(Self::tool_error(format!(
+                            "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
+                            req.id, timed_out.id, req.id, timed_out.id
+                        )));
+                    }
                     return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
-                        req.id, timed_out.id, req.id, timed_out.id
+                        "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.",
+                        req.id, dispatch.id
                     )));
                 }
-                return Ok(Self::tool_error(format!(
-                    "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.",
-                    req.id, dispatch.id
-                )));
+                Ok(Some(dispatch))
+                    if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
+                {
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.",
+                        req.id, dispatch.id
+                    )));
+                }
+                Ok(_) => {}
             }
-            Ok(Some(dispatch))
-                if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
-            {
-                return Ok(Self::tool_error(format!(
-                    "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.",
-                    req.id, dispatch.id
-                )));
-            }
-            Ok(_) => {}
         }
 
         // cas-b269: urgent stop sets halt_task_work; block close until new start.
@@ -2181,7 +2258,9 @@ impl CasCore {
         // close without verification. cas-3bd4: compute the reason as a typed
         // enum so the response message cites the actual state instead of
         // defaulting to "assignee inactive" for every lookup failure.
-        let skip_reason = if !close_disposition.requires_delivery_gates() {
+        let skip_reason = if close_disposition == TaskCloseDisposition::Decision {
+            VerificationSkipReason::SupervisorDecision
+        } else if !close_disposition.requires_delivery_gates() {
             VerificationSkipReason::SupervisorNegativeResult
         } else if verification_enabled && is_supervisor_from_env() {
             if task.task_type == TaskType::Epic && task.epic_verification_owner.is_some() {

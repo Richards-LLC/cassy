@@ -1278,14 +1278,30 @@ impl CasService {
              to resolve request {request_id} to a worker and a state (registered / FAILED); \
              do not report dispatch complete until it shows registered."
         );
+        // Recall is response-only: use the active epic as the task-planning
+        // query and add nothing when the shared BM25 index has no useful
+        // project-local memory/epic result.
+        let related_context = task_store
+            .list(None)
+            .ok()
+            .and_then(|tasks| {
+                tasks.into_iter().find(|task| {
+                    task.task_type == TaskType::Epic && task.status != TaskStatus::Closed
+                })
+            })
+            .and_then(|epic| {
+                self.inner
+                    .related_recall(&format!("{} {}", epic.title, epic.description))
+            })
+            .unwrap_or_default();
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -7587,6 +7603,74 @@ mod spawn_lifecycle_tests {
             "row must stay scannable, got {} chars",
             out.len()
         );
+    }
+
+    /// GH #257: spawning is another planning write moment. Its ordinary queue
+    /// receipt must carry a matching project memory, not require a separate
+    /// pull/search after the worker request was already made.
+    #[tokio::test]
+    async fn spawn_response_surfaces_related_recall_for_active_epic() {
+        use cas_types::{Entry, Task, TaskType};
+
+        let temp = tempfile::tempdir().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("open task store");
+        task_store.init().expect("init task store");
+
+        let mut epic = Task::new(
+            "cas-spawn-recall".to_string(),
+            "Deploy timeline work".to_string(),
+        );
+        epic.task_type = TaskType::Epic;
+        epic.description = "Coordinate the timeline deployment milestone.".to_string();
+        task_store.add(&epic).expect("add epic");
+        core.open_search_index()
+            .expect("open search index")
+            .index_task(&epic)
+            .expect("index epic");
+
+        let mut memory = Entry::new(
+            "m-spawn-recall".to_string(),
+            "Timeline deployment already has a verified rollout plan.".to_string(),
+        );
+        memory.title = Some("Reuse timeline rollout plan".to_string());
+        core.open_store()
+            .expect("open memory store")
+            .add(&memory)
+            .expect("add memory");
+        core.open_search_index()
+            .expect("open search index")
+            .index_entry(&memory)
+            .expect("index memory");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude"
+        }))
+        .expect("valid spawn request");
+
+        let response = service
+            .factory_spawn_workers(request)
+            .await
+            .expect("queue worker spawn");
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Related prior context:"), "{text}");
+        assert!(text.contains("m-spawn-recall"), "{text}");
+        assert!(text.contains("Reuse timeline rollout plan"), "{text}");
     }
 }
 

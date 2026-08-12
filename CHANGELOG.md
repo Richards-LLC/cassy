@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.64.0] - 2026-08-12
+
+### Added
+- **Supervisors can make decisions with the context that matters.** Creating work now surfaces related prior recall, and explicit decision gates make consequential choices visible before work proceeds.
+
+### Changed
+- **Release-only changes validate faster.** Workspace version bumps can take the focused required-check path while preserving the heavier validation tier for product changes.
+- **Task handoffs now stay current through delivery.** Merge relays refresh the target tip and fetch remote receipts before reporting an outcome.
+
+### Fixed
+- **Expired memory and session reminders now respect their intended boundaries.** Valid context survives recall, expired entries stay out, and reminder lifecycle actions remain scoped to the session that created them.
+- **Terminal work states and activity reporting are more trustworthy.** Cancelled and superseded work follows a fail-closed lifecycle, and dirty worktrees still report their real activity floor.
+- **Automation recovery is clearer and safer.** Negative-result closures retain their evidence, CI red-run receipts are preserved, socket ownership elects one daemon safely, and session end snapshots the current state.
+
 ## [2.63.0] - 2026-08-11
 
 ### Added

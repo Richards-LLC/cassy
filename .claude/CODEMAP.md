@@ -67,7 +67,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `history/` — incremental Git history index, FTS search, provenance, symbol links, and epoch tracking.
 - `ambient_recall.rs` — bounded, scope-gated hook recall contracts and ranking.
 - `hybrid_search/` — lexical/semantic/code/knowledge search composition and capability-aware weighting.
-- `migration/migrations/` — numbered SQLite migrations; current tip `m232_worker_completion_receipts_add_artifact_path.rs`.
+- `migration/migrations/` — numbered SQLite migrations; current tip `m233_tasks_add_terminal_outcome.rs`.
 - `daemon/` — background maintenance, filesystem watching, and indexing scheduling.
 - `sync/` — managed artifact rendering from builtins into `.claude/` and harness mirrors.
 - `worktree/` — create, manage, salvage, sweep, and clean worktrees.
@@ -75,7 +75,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `internal_llm.rs` — marks internal model calls so ambient recall cannot recurse into them.
 
 ## cas-cli/tests and benchmarks
-- `cas-cli/tests/` — integration coverage for CLI output, hooks, factory/MCP operations, search, cloud sync, and verification.
+- `cas-cli/tests/` — integration coverage for CLI output, hooks, factory/MCP operations, search, cloud sync, and verification; `mcp_tools_test/task_tools/` splits task-tool coverage into modules (`gate.rs` close gates, `cancellation.rs` terminal outcomes).
 - `cas-cli/tests/common/` and `cas-cli/tests/e2e/` — shared fixtures and end-to-end helpers.
 - `cas-cli/benches/code_indexing.rs` — Criterion benchmark for code indexing.
 - Inline `#[cfg(test)]` modules — unit tests colocated with Rust implementation modules.

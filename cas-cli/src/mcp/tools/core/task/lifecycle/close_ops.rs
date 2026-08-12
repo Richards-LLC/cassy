@@ -11200,6 +11200,14 @@ pub(crate) fn run_declared_pre_close_hook(
     commit_receipt: Option<&str>,
 ) -> Result<cas_types::PreCloseHookEvidence, String> {
     let receipt_repo = worker_worktree_path.unwrap_or(&repo_context.repo_root);
+    // cas-92da (#272 cherry-pick variant): a supervisor may integrate the
+    // worker's delivery as a new squash/cherry-pick commit on the declared
+    // target. Refresh that exact target before resolving or classifying a
+    // supplied receipt; the worker's own branch deliberately will not contain
+    // the rewritten commit in this delivery shape.
+    if commit_receipt.is_some() {
+        fetch_parent_branch_best_effort(receipt_repo, &repo_context.target_branch);
+    }
     let normalized_receipt = commit_receipt
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
@@ -11226,7 +11234,12 @@ pub(crate) fn run_declared_pre_close_hook(
                         .to_string(),
                 );
             }
-            if !git_commit_is_ancestor(path, &tip, "HEAD") {
+            let reachable_from_worktree = git_commit_is_ancestor(path, &tip, "HEAD");
+            let receipt_reachable_from_target =
+                normalized_receipt.as_deref().is_some_and(|receipt| {
+                    commit_is_merged_into_parent(path, receipt, &repo_context.target_branch)
+                });
+            if !reachable_from_worktree && !receipt_reachable_from_target {
                 return Err(
                     "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence is not reachable from \
                      the validated task worktree branch. No close-time executable gate was run."
@@ -18923,6 +18936,140 @@ mod zero_change_close_tests {
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity::default(),
         }
+    }
+
+    fn init_worker_repo_with_origin() -> (TempDir, TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let dir = init_worker_repo();
+        git(
+            dir.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        git(dir.path(), &["push", "-q", "origin", "main"]);
+        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
+        git(dir.path(), &["fetch", "-q", "origin"]);
+        (dir, origin)
+    }
+
+    fn declared_main_context(
+        dir: &Path,
+    ) -> crate::mcp::tools::core::task::repo_context::RepoContext {
+        crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "remote:example.invalid/cas92da".to_string(),
+            repo_root: dir.to_path_buf(),
+            git_common_dir: dir.join(".git"),
+            target_branch: "main".to_string(),
+        }
+    }
+
+    #[test]
+    fn cas92da_pre_close_accepts_receipt_reachable_only_from_fresh_target() {
+        let (dir, origin) = init_worker_repo_with_origin();
+        std::fs::write(
+            dir.path().join("delivered.rs"),
+            "pub fn delivered_by_worker() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "delivered.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "worker delivery"]);
+        git(
+            dir.path(),
+            &["push", "-q", "origin", "factory/test-worker"],
+        );
+
+        let publisher_root = tempfile::tempdir().unwrap();
+        git(
+            publisher_root.path(),
+            &["clone", "-q", origin.path().to_str().unwrap(), "publisher"],
+        );
+        let publisher = publisher_root.path().join("publisher");
+        git(
+            &publisher,
+            &["merge", "-q", "--squash", "origin/factory/test-worker"],
+        );
+        git(
+            &publisher,
+            &["commit", "-q", "-m", "supervisor squash delivery"],
+        );
+        let squash_receipt = head_sha(&publisher);
+        git(&publisher, &["push", "-q", "origin", "HEAD:main"]);
+
+        assert!(
+            resolve_task_commit_receipt_sha(dir.path(), &squash_receipt).is_err(),
+            "precondition: the squash receipt must exist only on the unfetched target"
+        );
+        let task = Task::new("cas-92da".to_string(), "target-only receipt".to_string());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&squash_receipt),
+        )
+        .expect("a freshly fetched target-only squash receipt must pass the pre-close hook");
+
+        assert_eq!(evidence.task_tip.as_deref(), Some(squash_receipt.as_str()));
+        assert!(
+            !git_commit_is_ancestor(dir.path(), &squash_receipt, "HEAD"),
+            "precondition: the squash receipt must remain absent from the worker branch"
+        );
+        assert!(
+            git_commit_is_ancestor(dir.path(), &squash_receipt, "origin/main"),
+            "the pre-close hook must refresh the declared remote target"
+        );
+        validate_task_commit_receipt(dir.path(), &squash_receipt, "main", &test_receipt_window())
+            .expect(
+                "accepted location must still satisfy non-empty-diff and target ancestry proof",
+            );
+    }
+
+    #[test]
+    fn cas92da_pre_close_still_accepts_worktree_reachable_receipt() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        std::fs::write(
+            dir.path().join("worker-only.rs"),
+            "pub fn worker_only() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "worker-only.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "worker-only receipt"]);
+        let receipt = head_sha(dir.path());
+        let task = Task::new("cas-92da".to_string(), "worker receipt".to_string());
+
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&receipt),
+        )
+        .expect("the existing worktree-reachable receipt path must remain valid");
+        assert_eq!(evidence.task_tip.as_deref(), Some(receipt.as_str()));
+    }
+
+    #[test]
+    fn cas92da_pre_close_rejects_receipt_reachable_from_neither_branch() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        git(dir.path(), &["checkout", "-q", "-b", "unrelated", "main"]);
+        std::fs::write(dir.path().join("unrelated.rs"), "pub fn unrelated() {}\n").unwrap();
+        git(dir.path(), &["add", "unrelated.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated receipt"]);
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        let task = Task::new("cas-92da".to_string(), "foreign receipt".to_string());
+
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&receipt),
+        )
+        .expect_err("a receipt on neither the worker nor target branch must remain rejected");
+        assert!(
+            error.contains(
+                "task commit evidence is not reachable from the validated task worktree branch"
+            ),
+            "the existing refusal must be preserved: {error}"
+        );
     }
 
     // ── has_worker_committed_reviewable_changes ──────────────────────────────

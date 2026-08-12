@@ -25,16 +25,38 @@ const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 /// (`cas_pty::codex_trust`), so a Codex timeout that still happens means that
 /// write did not take, and the message says so. Non-Codex harnesses keep the
 /// previous wording verbatim.
-fn registration_timeout_detail(timeout: Duration, cli: cas_mux::SupervisorCli) -> String {
+fn registration_timeout_detail(
+    timeout: Duration,
+    cli: cas_mux::SupervisorCli,
+    pane_tail: Option<&str>,
+) -> String {
     let base = format!(
         "Worker process launched but did not register with CAS within {} seconds; \
          inspect the worker pane/process and daemon logs.",
         timeout.as_secs()
     );
-    match cli {
+    let detail = match cli {
         cas_mux::SupervisorCli::Codex => format!("{base} {}", cas_pty::CODEX_TRUST_TIMEOUT_HINT),
         _ => base,
+    };
+    match pane_tail.filter(|tail| !tail.trim().is_empty()) {
+        Some(tail) => format!("{detail}\n\nLast worker pane output:\n{tail}"),
+        None => detail,
     }
+}
+
+/// Return a bounded, readable final pane excerpt for a timeout diagnosis.
+/// The pane buffer has already been capped at 256 KiB; the error detail must
+/// stay small enough for the spawn-lifecycle row and supervisor relay.
+fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String> {
+    const MAX_CHARS: usize = 2_000;
+    let text = buffer?.as_plain_text();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let tail: String = trimmed.chars().rev().take(MAX_CHARS).collect();
+    Some(tail.chars().rev().collect())
 }
 
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
@@ -1541,7 +1563,7 @@ impl FactoryDaemon {
         Ok(())
     }
 
-    pub(super) fn reconcile_spawn_verifications(&mut self) {
+    pub(super) async fn reconcile_spawn_verifications(&mut self) {
         if self.spawn_verifications.is_empty() {
             return;
         }
@@ -1592,9 +1614,21 @@ impl FactoryDaemon {
                     registration_timeout_detail(
                         SPAWN_REGISTRATION_TIMEOUT,
                         self.app.harness_for(&worker),
+                        timeout_pane_tail(self.pane_buffers.get(&worker)).as_deref(),
                     ),
                 )
             };
+            if !success {
+                // A worker that never registered is not reachable through the
+                // normal shutdown path (which correctly requires an agent row).
+                // Kill its tracked PTY process group directly, then apply the
+                // existing crash cleanup so no unmanaged child survives.
+                if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
+                    tracing::warn!(worker = %worker, error = %error, "failed to reap registration-timeout worker PTY");
+                }
+                self.app.mark_worker_crashed(&worker).await;
+                self.pane_buffers.remove(&worker);
+            }
             append_spawn_audit(
                 self.app.cas_dir(),
                 &self.session_name,
@@ -5318,7 +5352,7 @@ mod tests {
     #[test]
     fn registration_timeout_names_the_codex_trust_cause() {
         let codex =
-            registration_timeout_detail(Duration::from_secs(60), cas_mux::SupervisorCli::Codex);
+            registration_timeout_detail(Duration::from_secs(60), cas_mux::SupervisorCli::Codex, None);
         assert!(
             codex.contains("did not register with CAS within 60 seconds"),
             "must keep the base diagnostic: {codex}"
@@ -5333,7 +5367,7 @@ mod tests {
         );
 
         for other in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Grok] {
-            let detail = registration_timeout_detail(Duration::from_secs(60), other);
+            let detail = registration_timeout_detail(Duration::from_secs(60), other, None);
             assert_eq!(
                 detail,
                 "Worker process launched but did not register with CAS within 60 seconds; \
@@ -5341,6 +5375,17 @@ mod tests {
                 "{other:?} must keep the pre-cas-28a49 wording verbatim"
             );
         }
+    }
+
+    #[test]
+    fn registration_timeout_includes_bounded_pane_tail() {
+        let detail = registration_timeout_detail(
+            Duration::from_secs(60),
+            cas_mux::SupervisorCli::Claude,
+            Some("Claude failed to load settings.json"),
+        );
+        assert!(detail.contains("Last worker pane output:"), "{detail}");
+        assert!(detail.contains("failed to load settings.json"), "{detail}");
     }
 
     #[test]

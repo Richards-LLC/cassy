@@ -1953,7 +1953,11 @@ impl CasCore {
         // gates below; this asks only whether the receipt is ours to verify.
         if let Some(receipt) = req.commit_receipt.as_deref()
             && close_repo_verified
-            && let Some(message) = commit_receipt_repo_binding_error(&close_project_root, receipt)
+            && let Some(message) = commit_receipt_repo_binding_error(
+                &close_project_root,
+                receipt,
+                &resolved_parent_branch,
+            )
         {
             return Ok(Self::tool_error(message));
         }
@@ -6438,8 +6442,23 @@ fn unmerged_commit_shas_against_targets(
 pub(crate) fn commit_receipt_repo_binding_error(
     repo_path: &std::path::Path,
     receipt: &str,
+    target_branch: &str,
 ) -> Option<String> {
-    let reason = resolve_task_commit_receipt_sha(repo_path, receipt).err()?;
+    let reason = match resolve_task_commit_receipt_sha(repo_path, receipt) {
+        Ok(_) => return None,
+        Err(reason) => reason,
+    };
+
+    // A supervisor can merge remotely and close within seconds, before this
+    // worktree has received the new object. Refresh just the bound target
+    // branch before treating an otherwise valid receipt as foreign. The
+    // helper is bounded, prompt-free, and deliberately best-effort, so a
+    // local-only/offline repository still reaches the actionable refusal.
+    fetch_parent_branch_best_effort(repo_path, target_branch);
+    if resolve_task_commit_receipt_sha(repo_path, receipt).is_ok() {
+        return None;
+    }
+
     Some(format!(
         "⚠️ RECEIPT NOT FOUND IN THIS REPOSITORY\n\n\
          task close rejected: commit_receipt `{receipt}` does not resolve in the \
@@ -6454,7 +6473,9 @@ pub(crate) fn commit_receipt_repo_binding_error(
             target_branch=<branch>`, then retry close.\n\
          2. If the work is in this repository, re-copy the SHA \
             (`git log --oneline --all`) — full or an unambiguous abbreviation \
-            both work.",
+            both work.\n\
+         3. The commit may exist only on the remote — run `git fetch` and retry \
+            close.",
         repo_path.display(),
     ))
 }
@@ -14896,7 +14917,7 @@ mod merge_state_gate_tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
 
-        let refusal = commit_receipt_repo_binding_error(dir.path(), &foreign_sha)
+        let refusal = commit_receipt_repo_binding_error(dir.path(), &foreign_sha, "main")
             .expect("a receipt that does not exist in the bound repo must be refused");
         assert!(
             refusal.contains(&foreign_sha[..12]),
@@ -14905,6 +14926,10 @@ mod merge_state_gate_tests {
         assert!(
             refusal.contains("target_repo"),
             "refusal must point cross-repo work at the declared target repo: {refusal}"
+        );
+        assert!(
+            refusal.contains("git fetch"),
+            "refusal must explain the remote-only receipt remedy: {refusal}"
         );
 
         // A receipt that does resolve locally is not refused by this check —
@@ -14918,8 +14943,38 @@ mod merge_state_gate_tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         assert!(
-            commit_receipt_repo_binding_error(dir.path(), &local_sha).is_none(),
+            commit_receipt_repo_binding_error(dir.path(), &local_sha, "main").is_none(),
             "a resolvable receipt must pass the repo-binding check"
+        );
+    }
+
+    #[test]
+    fn receipt_on_origin_target_branch_is_fetched_and_accepted() {
+        let (dir, origin) = init_repo_with_origin("worker");
+        let publisher_root = tempfile::tempdir().unwrap();
+        let origin_path = origin.path().to_str().expect("origin path utf-8");
+        git(publisher_root.path(), &["clone", "-q", origin_path, "publisher"]);
+        let publisher = publisher_root.path().join("publisher");
+        std::fs::write(publisher.join("merged-remotely.rs"), "// remote merge\n").unwrap();
+        git(&publisher, &["add", "merged-remotely.rs"]);
+        git(&publisher, &["commit", "-q", "-m", "feat: merged remotely"]);
+        let remote_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&publisher)
+                .output()
+                .expect("git rev-parse");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&publisher, &["push", "-q", "origin", "HEAD:main"]);
+
+        assert!(
+            resolve_task_commit_receipt_sha(dir.path(), &remote_sha).is_err(),
+            "precondition: the remote receipt must not already exist locally"
+        );
+        assert!(
+            commit_receipt_repo_binding_error(dir.path(), &remote_sha, "main").is_none(),
+            "the bounded origin/main fetch must make a remote-only receipt resolvable"
         );
     }
 
@@ -14935,7 +14990,7 @@ mod merge_state_gate_tests {
             .expect("git rev-parse");
         let short = String::from_utf8_lossy(&out.stdout).trim().to_string();
         assert!(
-            commit_receipt_repo_binding_error(dir.path(), &short).is_none(),
+            commit_receipt_repo_binding_error(dir.path(), &short, "main").is_none(),
             "short receipt `{short}` must resolve in the bound repo"
         );
     }

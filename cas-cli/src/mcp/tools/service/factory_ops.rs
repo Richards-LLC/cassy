@@ -2657,9 +2657,26 @@ impl CasService {
             })
             .collect();
 
-        if worker_events.is_empty() && transcript_activity.is_empty() && terminal_event_count == 0 {
+        // GH #255 round 2: hooks do not reliably observe Codex file edits, so
+        // the event/transcript view above must never make a dirty worker look
+        // idle. Snapshot each visible worktree at query time as a floor under
+        // those asynchronous signals. This deliberately reuses worker_status's
+        // resolver and collector rather than inventing a third git path.
+        let worktree_activity: Vec<_> = visible_workers
+            .iter()
+            .filter_map(|agent| {
+                collect_worker_activity_worktree_snapshot(&self.inner.cas_root, agent)
+            })
+            .collect();
+
+        if worker_activity_has_no_rows(
+            worker_events.len(),
+            transcript_activity.len(),
+            worktree_activity.len(),
+            terminal_event_count,
+        ) {
             return Ok(Self::success(
-                "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
+                "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness and a query-time dirty-worktree floor. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
         }
 
@@ -2698,6 +2715,9 @@ impl CasService {
             output.push_str(&format!(
                 "• {worker_name} - {activity} ({age_secs}s ago; transcript-backed)\n"
             ));
+        }
+        for snapshot in &worktree_activity {
+            output.push_str(&format_worker_activity_worktree_snapshot(snapshot));
         }
 
         Ok(Self::success(output))
@@ -4514,6 +4534,32 @@ struct WorkerWorktreeStatus {
     git_info: String,
 }
 
+/// Query-time worktree evidence that floors `worker_activity` underneath the
+/// event and transcript feeds. A dirty snapshot is live evidence even when a
+/// harness did not emit a corresponding `WorkerFileEdited` event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerActivityWorktreeSnapshot {
+    worker_name: String,
+    dirty_file_count: usize,
+    diffstat: String,
+    last_commit: String,
+}
+
+/// Whether `worker_activity` has no evidence to render at all. Kept pure so
+/// the zero-event worktree floor cannot accidentally be omitted from the
+/// early-empty branch during a future response refactor.
+fn worker_activity_has_no_rows(
+    worker_event_count: usize,
+    transcript_activity_count: usize,
+    worktree_activity_count: usize,
+    terminal_event_count: usize,
+) -> bool {
+    worker_event_count == 0
+        && transcript_activity_count == 0
+        && worktree_activity_count == 0
+        && terminal_event_count == 0
+}
+
 /// cas-f53c: shared resolution for worker clone/worktree path used by both
 /// `worker_status` and `sync_all_workers`.
 ///
@@ -4610,6 +4656,61 @@ fn collect_worker_worktree_status(
             }
         }
     }
+}
+
+/// Gather the live dirty-worktree floor for `worker_activity`.
+///
+/// This uses the same clone resolution and git-status collector as
+/// `worker_status`. It intentionally returns no row for a clean or unavailable
+/// worktree; absence is not manufactured into activity.
+fn collect_worker_activity_worktree_snapshot(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> Option<WorkerActivityWorktreeSnapshot> {
+    let WorkerClonePathResolve::Ready(path) = resolve_worker_clone_path(cas_root, agent) else {
+        return None;
+    };
+    let git_status = collect_worker_git_status(&path);
+    if !git_status.dirty {
+        return None;
+    }
+
+    let dirty_file_count = worker_scope_paths(&path).ok()?.len();
+    if dirty_file_count == 0 {
+        return None;
+    }
+
+    let diffstat = run_git(&path, &["diff", "--stat", "HEAD"])
+        .ok()
+        .filter(|stat| !stat.is_empty())
+        .unwrap_or_else(|| "no tracked diffstat (untracked files may be present)".to_string());
+    let last_commit = run_git(&path, &["log", "-1", "--format=%h %s"])
+        .ok()
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or_else(|| head_sha_for_display(&git_status.head_sha).to_string());
+
+    Some(WorkerActivityWorktreeSnapshot {
+        worker_name: agent.name.clone(),
+        dirty_file_count,
+        diffstat,
+        last_commit,
+    })
+}
+
+fn format_worker_activity_worktree_snapshot(snapshot: &WorkerActivityWorktreeSnapshot) -> String {
+    let diffstat = snapshot.diffstat.replace('\n', "\n    ");
+    format!(
+        "• {} - live worktree: {} dirty file{} (query-time snapshot; no event required)\n    diffstat: {}\n    last commit: {}\n",
+        snapshot.worker_name,
+        snapshot.dirty_file_count,
+        if snapshot.dirty_file_count == 1 {
+            ""
+        } else {
+            "s"
+        },
+        diffstat,
+        snapshot.last_commit,
+    )
 }
 
 /// Resolve a registered worker's concrete harness artifact using the same
@@ -11583,6 +11684,57 @@ effort = "high"
             }
             other => panic!("expected NotOnDisk, got {other:?}"),
         }
+    }
+
+    /// GH #255 round 2: a Codex edit can leave no WorkerFileEdited event at
+    /// all. The query-time snapshot is therefore an activity floor, not a
+    /// decoration for an already-live event row.
+    #[test]
+    fn worker_activity_dirty_worktree_floor_is_non_idle_without_events() {
+        let (_tmp, project) = setup_factory_project_with_worker_worktrees(&["codex-editor"]);
+        let cas_root = project.join(".cas");
+        let worktree = cas_root.join("worktrees/codex-editor");
+        std::fs::write(worktree.join("README"), "edited without an event\n").unwrap();
+
+        let agent = cas_types::Agent::new_with_role(
+            "codex-session".to_string(),
+            "codex-editor".to_string(),
+            AgentRole::Worker,
+        );
+        let worker_events: Vec<cas_types::Event> = Vec::new();
+        assert!(
+            worker_events.is_empty(),
+            "fixture intentionally has no events"
+        );
+
+        let snapshot = collect_worker_activity_worktree_snapshot(&cas_root, &agent)
+            .expect("dirty worktree must floor activity when there are no events");
+        let rendered = format_worker_activity_worktree_snapshot(&snapshot);
+
+        assert!(
+            !worker_activity_has_no_rows(0, 0, 1, 0),
+            "the live floor must bypass worker_activity's empty response"
+        );
+        assert!(
+            !rendered.contains("No recent worker activity"),
+            "a dirty zero-event worker must render as non-idle: {rendered}"
+        );
+        assert!(
+            rendered.contains("1 dirty file"),
+            "missing dirty count: {rendered}"
+        );
+        assert!(
+            rendered.contains("diffstat:"),
+            "missing diffstat: {rendered}"
+        );
+        assert!(
+            rendered.contains("README"),
+            "diffstat must name changed file: {rendered}"
+        );
+        assert!(
+            rendered.contains("last commit:"),
+            "missing last commit: {rendered}"
+        );
     }
 
     #[test]

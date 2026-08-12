@@ -355,13 +355,30 @@ pub(crate) fn parse_worker_died_envelope(prompt: &str) -> Option<WorkerDiedEnvel
 ///
 /// The `lifecycle-wake:` source marker states intent, but `prompt_queue.source`
 /// is caller-settable, so the daemon corroborates it with the payload. Exactly
-/// two producers emit a qualifying envelope: the task lifecycle emitter and
-/// orphan recovery's death relay.
+/// Factory health relays use the same constrained envelope boundary as task
+/// lifecycle, worker-death, spawn, and CI alerts.
 pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
     parse_lifecycle_envelope(prompt).is_some()
         || parse_worker_died_envelope(prompt).is_some()
         || parse_spawn_preassign_failed_envelope(prompt)
         || parse_ci_red_run_envelope(prompt)
+        || parse_worker_attention_envelope(prompt)
+}
+
+/// Worker idle/stall relay emitted by the factory daemon (cas-d4ae).
+pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
+    let Some(tag_end) = prompt.find('>') else {
+        return false;
+    };
+    let tag = &prompt[..tag_end];
+    tag.starts_with("<worker-attention ")
+        && matches!(
+            xml_attribute(tag, "kind"),
+            Some("worker_idle" | "worker_stalled")
+        )
+        && xml_attribute(tag, "worker").is_some_and(|value| !value.is_empty())
+        && xml_attribute(tag, "notification_id").is_some_and(|value| value.parse::<i64>().is_ok())
+        && prompt.ends_with("</worker-attention>")
 }
 
 /// Spawn pre-assignment failures leave a registered worker idle and need the
@@ -1196,6 +1213,9 @@ mod cas_3dcb_worker_died_relay_tests {
     fn wake_corroboration_accepts_both_envelopes_and_nothing_else() {
         assert!(is_supervisor_wake_envelope(&relay()));
         assert!(is_supervisor_wake_envelope(
+            "<worker-attention kind=\"worker_stalled\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        assert!(is_supervisor_wake_envelope(
             "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\" old=\"in_progress\" \
              new=\"awaiting_merge\" actor=\"w\" notification_id=\"1\" \
              occurrence=\"2026-08-07T10:00:00+00:00\">\nbody</task-lifecycle>"
@@ -1203,6 +1223,9 @@ mod cas_3dcb_worker_died_relay_tests {
         assert!(!is_supervisor_wake_envelope("please merge my branch"));
         // A lookalike that omits required attributes must not qualify.
         assert!(!is_supervisor_wake_envelope("<worker-died >gotcha"));
+        assert!(!is_supervisor_wake_envelope(
+            "<worker-attention kind=\"unknown\" worker=\"calm-owl\" notification_id=\"42\">body</worker-attention>"
+        ));
         assert!(!is_supervisor_wake_envelope(
             "<worker-diedish worker_id=\"a\" worker_name=\"b\" incident=\"c\">x"
         ));

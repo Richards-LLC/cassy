@@ -255,6 +255,9 @@ pub(crate) struct RecallRequest {
 pub(crate) struct RecallQuery {
     pub(crate) canonical: String,
     pub(crate) role: RecallRole,
+    /// Conversational prompts have no explicit task, code, or file reference.
+    /// Their lexical overlaps are too weak to justify ambient injection alone.
+    pub(crate) conversational: bool,
     pub(crate) task_id: Option<String>,
     pub(crate) files: Vec<String>,
     pub(crate) symbols: Vec<String>,
@@ -323,6 +326,7 @@ impl RecallQuery {
         Some(Self {
             canonical,
             role: identity.role,
+            conversational: is_conversational_prompt(&request.prompt),
             task_id: request.task_id.clone(),
             files,
             symbols,
@@ -1430,6 +1434,60 @@ fn meaningful_transition(prompt: &str) -> bool {
     )
 }
 
+/// Conversational/meta prompts ask for status or explanation without naming a
+/// task, a code symbol, or a file. Keep this deliberately conservative: a
+/// false negative only preserves the existing fallback, while a false positive
+/// would hide useful local context from an ordinary work request.
+fn is_conversational_prompt(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    let asks_meta_question = [
+        "how ",
+        "what ",
+        "why ",
+        "when ",
+        "where ",
+        "who ",
+        "tell me",
+        "explain ",
+        "summarize ",
+        "status ",
+        "are we ",
+        "is the ",
+        "do we ",
+    ]
+    .iter()
+    .any(|prefix| lower.trim_start().starts_with(prefix));
+    if !asks_meta_question {
+        return false;
+    }
+    let names_task = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+        .any(|token| {
+            token.strip_prefix("cas-").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_alphanumeric())
+            })
+        });
+    let names_code = lower.contains("::")
+        || prompt.contains('`')
+        || prompt.contains("```")
+        || prompt
+            .split_whitespace()
+            .any(|token| token.ends_with("()") || token.ends_with("(...)"));
+    let names_file = lower.split_whitespace().any(|token| {
+        let token = token.trim_matches(|ch: char| {
+            !ch.is_ascii_alphanumeric() && ch != '/' && ch != '.' && ch != '_' && ch != '-'
+        });
+        token.contains('/')
+            || [
+                ".rs", ".toml", ".md", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".py",
+                ".go", ".java", ".rb", ".sh", ".sql",
+            ]
+            .iter()
+            .any(|extension| token.ends_with(extension))
+    });
+    !names_task && !names_code && !names_file
+}
+
 fn hook_request(
     input: &cas_core::hooks::types::HookInput,
     cas_root: &Path,
@@ -2021,6 +2079,9 @@ pub(crate) fn render_packet(
             if injected.len() == cap {
                 break;
             }
+            if query.conversational && is_weak_lexical_only(candidate) {
+                continue;
+            }
             let independently_semantic = candidate
                 .semantic_score
                 .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR);
@@ -2091,6 +2152,23 @@ pub(crate) fn render_packet(
     ))
 }
 
+/// Outcome feedback adjusts rank but does not turn a weak match into new
+/// retrieval evidence. On a conversational prompt, admit lexical candidates
+/// only when they have independently useful semantic evidence or a binding.
+fn is_weak_lexical_only(candidate: &EvidenceCandidate) -> bool {
+    if candidate.binding
+        || candidate
+            .semantic_score
+            .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR)
+    {
+        return false;
+    }
+    let why = candidate.why_relevant.trim();
+    why.starts_with("lexical(weak) match:")
+        || why.starts_with("lexical match:")
+        || why.starts_with("lexical + semantic match")
+}
+
 /// Every displayed card needs a truthful, non-empty selection reason. A
 /// lexical label without matched terms is neither: preserve stronger selector
 /// evidence when available, otherwise leave the row out of the injection.
@@ -2111,7 +2189,13 @@ fn injection_reason(candidate: &EvidenceCandidate) -> Option<String> {
 fn render_card(candidate: &EvidenceCandidate) -> String {
     let flags = [
         candidate.binding.then_some("binding"),
-        candidate.stale.then_some("STALE"),
+        candidate
+            .stale
+            .then_some(if candidate.surface == EvidenceSurface::Memory {
+                "EXPIRED"
+            } else {
+                "STALE"
+            }),
         candidate.conflict_key.as_deref().map(|_| "CONFLICT"),
     ]
     .into_iter()
@@ -2578,7 +2662,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_cards_are_deltas_and_changed_revisions_reappear() {
+    fn cas_4caa_expired_memory_cards_are_labeled_expired() {
         let identity = identity(RecallRole::Supervisor);
         let query = RecallQuery::build(
             &identity,
@@ -2612,7 +2696,7 @@ mod tests {
         };
         let (packet, _) = render_packet(&identity, &query, &changed, &mut ledger).unwrap();
         assert!(packet.full.contains("@r2"));
-        assert!(packet.full.contains("STALE"));
+        assert!(packet.full.contains("EXPIRED"));
     }
 
     #[test]
@@ -2939,7 +3023,10 @@ mod tests {
             },
         )
         .unwrap();
-        let mut stopword = candidate("live-stopword-what", EvidenceScope::Project("project-a".into()));
+        let mut stopword = candidate(
+            "live-stopword-what",
+            EvidenceScope::Project("project-a".into()),
+        );
         stopword.lexical_eligible = false;
         stopword.lexical_weak = true;
         stopword.why_relevant = "lexical(weak) match: what".into();
@@ -2965,11 +3052,17 @@ mod tests {
         assert!(slug_rows[..3].iter().all(|row| !row.lexical_eligible));
         assert!(slug_rows[3].lexical_eligible);
 
-        let mut semantic_noise = candidate("live-semantic-noise", EvidenceScope::Project("project-a".into()));
+        let mut semantic_noise = candidate(
+            "live-semantic-noise",
+            EvidenceScope::Project("project-a".into()),
+        );
         semantic_noise.lexical_eligible = false;
         semantic_noise.semantic_score = Some(0.467);
         semantic_noise.why_relevant = "semantic match 0.467".into();
-        let mut semantic_useful = candidate("live-semantic-useful", EvidenceScope::Project("project-a".into()));
+        let mut semantic_useful = candidate(
+            "live-semantic-useful",
+            EvidenceScope::Project("project-a".into()),
+        );
         semantic_useful.lexical_eligible = false;
         semantic_useful.semantic_score = Some(SEMANTIC_INJECTION_FLOOR);
         semantic_useful.why_relevant = format!("semantic match {SEMANTIC_INJECTION_FLOOR:.3}");
@@ -2986,12 +3079,18 @@ mod tests {
         let (packet, injected) =
             render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
         assert_eq!(
-            injected.iter().map(|row| row.evidence_id.as_str()).collect::<Vec<_>>(),
+            injected
+                .iter()
+                .map(|row| row.evidence_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["live-semantic-useful"],
             "the supervisor one-card cap may omit eligible lexical evidence, but it must never
              select a stopword, ubiquitous slug, or sub-floor semantic card"
         );
-        assert_eq!(packet.omitted, 6, "every excluded live-shape card is omitted");
+        assert_eq!(
+            packet.omitted, 6,
+            "every excluded live-shape card is omitted"
+        );
         assert!(packet.full.contains("injected=1 omitted=6"));
         assert!(!packet.full.contains("live-stopword-what"));
         assert!(!packet.full.contains("live-slug-"));
@@ -3093,6 +3192,79 @@ mod tests {
         assert!(
             render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).is_none()
         );
+    }
+
+    #[test]
+    fn conversational_prompts_omit_weak_lexical_cards_but_keep_bindings() {
+        let identity = identity(RecallRole::Supervisor);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "How is the memory system performing?".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(query.conversational);
+
+        let mut weak = candidate("weak", EvidenceScope::Project("project-a".into()));
+        weak.lexical_weak = true;
+        weak.why_relevant = "lexical(weak) match: memory + outcome history +0.050".into();
+
+        let mut bare = candidate("bare", EvidenceScope::Project("project-a".into()));
+        bare.why_relevant = "lexical match: regen,churn".into();
+
+        let mut low_semantic =
+            candidate("low-semantic", EvidenceScope::Project("project-a".into()));
+        low_semantic.semantic_score = Some(SEMANTIC_INJECTION_FLOOR - 0.001);
+        low_semantic.why_relevant = "lexical + semantic match 0.469".into();
+
+        let mut binding = candidate("binding", EvidenceScope::Project("project-a".into()));
+        binding.binding = true;
+        binding.why_relevant = "exact task/file/symbol binding".into();
+
+        let candidates = RecallCandidates {
+            candidates: vec![weak, bare, low_semantic, binding],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
+
+        assert_eq!(
+            injected
+                .iter()
+                .map(|candidate| candidate.evidence_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["binding"]
+        );
+        assert!(
+            packet
+                .full
+                .contains("[recall disclosure: injected=1 omitted=3")
+        );
+    }
+
+    #[test]
+    fn task_or_code_references_are_not_conversational() {
+        let identity = identity(RecallRole::Worker);
+        for prompt in [
+            "Investigate cas-40a2",
+            "Inspect src/ambient_recall.rs",
+            "Trace ambient_recall::render_packet",
+            "Please repair the parser cache failure",
+        ] {
+            let query = RecallQuery::build(
+                &identity,
+                &RecallRequest {
+                    prompt: prompt.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!query.conversational, "{prompt}");
+        }
     }
 
     /// GH #213: the post-cas-8284 release still admitted three unrelated

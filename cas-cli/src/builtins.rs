@@ -3601,6 +3601,8 @@ This is the body content."#;
                 "Was → Now",
                 "Live on production",
                 "Staging",
+                "## POSTED",
+                "UTC timestamp",
             ] {
                 assert!(
                     skill.content.contains(required),
@@ -3621,6 +3623,8 @@ This is the body content."#;
                 "Was → Now",
                 "no internal ticket labels",
                 "docs/release-notes/<date>-<topic>-slack.md",
+                "## POSTED",
+                "UTC timestamp",
             ] {
                 assert!(
                     template.content.to_lowercase().contains(&required.to_lowercase()),

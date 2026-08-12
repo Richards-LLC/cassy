@@ -76,7 +76,9 @@ async fn legacy_repository_proof_rejects_drift(isolated: bool) {
         .expect("create reviewed task");
     let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
     service
-        .cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
         .await
         .expect("start reviewed task");
 
@@ -141,7 +143,10 @@ async fn legacy_repository_proof_rejects_drift(isolated: bool) {
     let mut supervisor =
         cas::types::Agent::new(supervisor_id.to_string(), supervisor_id.to_string());
     supervisor.role = AgentRole::Supervisor;
-    open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+    open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&supervisor)
+        .unwrap();
     let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor_core.set_agent_id_for_testing(supervisor_id.to_string());
     let verdict = |dispatch_id: String| VerificationAddRequest {
@@ -1059,10 +1064,8 @@ fn add_exact_supervisor_fixture_verdict(
 ) -> cas::types::VerificationDispatch {
     const SUPERVISOR_ID: &str = "fixture-durable-supervisor";
     let agent_store = open_agent_store(cas_dir).expect("agent store");
-    let mut supervisor = cas::types::Agent::new(
-        SUPERVISOR_ID.to_string(),
-        "fixture-supervisor".to_string(),
-    );
+    let mut supervisor =
+        cas::types::Agent::new(SUPERVISOR_ID.to_string(), "fixture-supervisor".to_string());
     supervisor.role = AgentRole::Supervisor;
     agent_store
         .register(&supervisor)
@@ -1639,6 +1642,188 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
 /// in a non-worker-actionable state and release the worker lease. The worker can
 /// then start unrelated assigned work without a supervisor manually flipping the
 /// first task to Blocked.
+#[tokio::test]
+async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipts_cas_6c50() {
+    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let artifacts_root = temp.path().join("durable-artifacts");
+    std::fs::create_dir_all(&artifacts_root).unwrap();
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n",
+            artifacts_root.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let repo = temp.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "measurement worker")
+            .env("GIT_AUTHOR_EMAIL", "measurement@example.test")
+            .env("GIT_COMMITTER_NAME", "measurement worker")
+            .env("GIT_COMMITTER_EMAIL", "measurement@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+
+    let task_id = "cas-negative-result";
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new(
+        task_id.to_string(),
+        "Measure an experiment that must not land".to_string(),
+    );
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("measurement-worker".to_string());
+    task_store.add(&task).unwrap();
+
+    git(&["checkout", "-q", "-b", "factory/measurement-worker"]);
+    std::fs::write(repo.join("experiment.yml"), "slower: true\n").unwrap();
+    git(&["add", "experiment.yml"]);
+    git(&["commit", "-q", "-m", "experiment: measured regression"]);
+
+    let agent_store = open_agent_store(&cas_dir).unwrap();
+    let mut caller = agent_store.get(&supervisor_id).unwrap();
+    caller.role = AgentRole::Worker;
+    agent_store.update(&caller).unwrap();
+    let unauthorized = extract_text(
+        service
+            .cas_task_close_with_completion(
+                Parameters(TaskCloseRequest {
+                    id: task_id.to_string(),
+                    reason: Some("worker tries to discard its own delivery".to_string()),
+                    bypass_code_review: None,
+                    code_review_findings: None,
+                    search_manifest: None,
+                    commit_receipt: None,
+                }),
+                None,
+                Some(NegativeResultCloseRequest {
+                    artifact_path: None,
+                    reference: None,
+                }),
+            )
+            .await
+            .unwrap(),
+    );
+    assert!(unauthorized.contains("only a live registered supervisor"));
+    assert_eq!(
+        task_store.get(task_id).unwrap().status,
+        TaskStatus::InProgress
+    );
+    caller.role = AgentRole::Supervisor;
+    agent_store.update(&caller).unwrap();
+
+    let ordinary = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: task_id.to_string(),
+                reason: Some("measurement complete".to_string()),
+                bypass_code_review: Some(true),
+                code_review_findings: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(ordinary.contains("MERGE REQUIRED"), "{ordinary}");
+    assert!(ordinary.contains("negative_result=true"), "{ordinary}");
+    assert_eq!(
+        task_store.get(task_id).unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "ordinary delivery path must retain the existing merge gate"
+    );
+
+    let missing = extract_text(
+        service
+            .cas_task_close_with_completion(
+                Parameters(TaskCloseRequest {
+                    id: task_id.to_string(),
+                    reason: None,
+                    bypass_code_review: None,
+                    code_review_findings: None,
+                    search_manifest: None,
+                    commit_receipt: None,
+                }),
+                None,
+                Some(NegativeResultCloseRequest {
+                    artifact_path: None,
+                    reference: None,
+                }),
+            )
+            .await
+            .unwrap(),
+    );
+    for field in [
+        "negative_result_artifact_path",
+        "negative_result_reference",
+        "reason (the supervisor decision rationale)",
+    ] {
+        assert!(missing.contains(field), "missing `{field}` in: {missing}");
+    }
+    assert_eq!(
+        task_store.get(task_id).unwrap().status,
+        TaskStatus::AwaitingMerge
+    );
+
+    let task_artifacts = artifacts_root.join(task_id);
+    std::fs::create_dir_all(&task_artifacts).unwrap();
+    let proof = task_artifacts.join("measurement.json");
+    std::fs::write(&proof, r#"{"baseline_seconds":10,"experiment_seconds":25}"#).unwrap();
+    let reference = "https://github.com/pippenz/cas/pull/242";
+    let closed = extract_text(
+        service
+            .cas_task_close_with_completion(
+                Parameters(TaskCloseRequest {
+                    id: task_id.to_string(),
+                    reason: Some("experiment regressed the dominant path; do not ship".to_string()),
+                    bypass_code_review: None,
+                    code_review_findings: None,
+                    search_manifest: None,
+                    commit_receipt: None,
+                }),
+                None,
+                Some(NegativeResultCloseRequest {
+                    artifact_path: Some(proof.display().to_string()),
+                    reference: Some(reference.to_string()),
+                }),
+            )
+            .await
+            .unwrap(),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+    assert!(closed.contains("measured negative result"), "{closed}");
+
+    let closed_task = task_store.get(task_id).unwrap();
+    assert_eq!(closed_task.status, TaskStatus::Closed);
+    let receipt = closed_task
+        .deliverables
+        .negative_result
+        .as_ref()
+        .expect("structured negative-result evidence");
+    assert_eq!(receipt.artifact_path, proof.display().to_string());
+    assert_eq!(receipt.reference, reference);
+    assert_eq!(receipt.supervisor_id, supervisor_id);
+    assert!(closed_task.notes.contains("DECISION: supervisor"));
+    assert!(closed_task.notes.contains("intentionally not merged"));
+}
+
 #[tokio::test]
 async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d5b() {
     use std::process::Command;

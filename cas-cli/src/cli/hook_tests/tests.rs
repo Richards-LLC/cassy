@@ -1206,29 +1206,27 @@ fn configure_does_not_strip_existing_project_hooks_for_alt_config_dir() {
     );
 }
 
-/// AC3/AC4: when every known config dir has global hooks, dedup still strips the
-/// project-level copies (single-config-dir behavior unchanged).
+/// cas-ce22: project hook generation is independent of whichever config dirs a
+/// session exposes. Running sync under both config dirs back-to-back must leave
+/// the tracked project settings byte-identical.
 #[test]
-fn configure_strips_project_hooks_when_all_config_dirs_covered() {
+fn configure_project_hooks_converge_across_config_dirs() {
     let home = isolated_home();
     let default_dir = home.path().join(".claude");
     let alt_dir = home.path().join(".claude-alt");
 
-    let project = TempDir::new().unwrap();
-    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir.clone()]).unwrap();
-    assert!(project_has_cas_hooks(project.path()));
-
     write_global_hooks(&default_dir);
     write_global_hooks(&alt_dir);
-    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir.clone(), alt_dir])
+    let project = TempDir::new().unwrap();
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir.clone()])
         .unwrap();
+    let first = std::fs::read(project.path().join(".claude/settings.json")).unwrap();
     assert!(
-        !project_has_cas_hooks(project.path()),
-        "with every config dir covered, project hooks are duplicates and must be stripped"
+        project_has_cas_hooks(project.path()),
+        "project settings always own the canonical CAS hook block"
     );
-
-    // Single config dir populated → same strip behavior as before cas-5b96.
-    let project2 = TempDir::new().unwrap();
-    configure_claude_hooks_with_config_dirs(project2.path(), false, &[default_dir]).unwrap();
-    assert!(!project_has_cas_hooks(project2.path()));
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir, alt_dir])
+        .unwrap();
+    let second = std::fs::read(project.path().join(".claude/settings.json")).unwrap();
+    assert_eq!(first, second, "config-dir changes must not churn project settings");
 }

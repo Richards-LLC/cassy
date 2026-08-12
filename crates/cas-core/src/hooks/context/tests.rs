@@ -481,3 +481,37 @@ fn no_raw_memory_bodies_are_injected_alongside_the_knowledge_index() {
         "a non-pinned memory body was injected verbatim:\n{context}"
     );
 }
+
+#[test]
+fn cas_4caa_expired_memories_are_excluded_from_session_start_surfacing() {
+    let expired = Entry {
+        id: "expired-memory".to_string(),
+        content: "Do not surface after its deadline".to_string(),
+        entry_type: EntryType::Learning,
+        created: chrono::Utc::now(),
+        valid_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        ..Default::default()
+    };
+    let active = Entry {
+        id: "active-memory".to_string(),
+        content: "This current fact should surface".to_string(),
+        entry_type: EntryType::Learning,
+        created: chrono::Utc::now(),
+        ..Default::default()
+    };
+    let (_temp, ks) = knowledge_fixture(&[]);
+    let store = SqliteStore::open(_temp.path()).expect("open entry store");
+    store.init().expect("init entry store");
+    store.add(&expired).expect("add expired memory");
+    store.add(&active).expect("add active memory");
+
+    let context = build_with_knowledge(&ks, Some(&store));
+    assert!(
+        context.contains("active-memory"),
+        "active memory missing: {context}"
+    );
+    assert!(
+        !context.contains("expired-memory"),
+        "expired memory leaked into SessionStart: {context}"
+    );
+}

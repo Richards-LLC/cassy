@@ -100,7 +100,7 @@ fn test_task_depth_roundtrip() {
 }
 
 #[test]
-fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
+fn closed_to_non_closed_update_clears_close_cycle_authority() {
     let (_temp, store) = create_test_store();
     let mut task = Task::new(
         store.generate_id().unwrap(),
@@ -119,6 +119,13 @@ fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
         worktree_branch: Some("factory/worker".to_string()),
         task_tip: Some("old-close-sha".to_string()),
     });
+    task.deliverables.negative_result = Some(cas_types::NegativeResultEvidence {
+        artifact_path: "/durable/task/proof.json".to_string(),
+        reference: "https://github.com/pippenz/cas/pull/242".to_string(),
+        rationale: "experiment regressed".to_string(),
+        supervisor_id: "supervisor-1".to_string(),
+        supervisor_name: "supervisor".to_string(),
+    });
     store.add(&task).unwrap();
 
     task.status = TaskStatus::Blocked;
@@ -129,6 +136,10 @@ fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
     assert!(
         reopened.deliverables.factory_branch_anchor.is_none(),
         "the prior close cycle's commit receipt must be invalidated"
+    );
+    assert!(
+        reopened.deliverables.negative_result.is_none(),
+        "reopening must not let a prior negative-result decision exempt fresh work from delivery gates"
     );
     assert_eq!(
         reopened.deliverables.parked_branch.as_deref(),
@@ -355,7 +366,10 @@ fn test_delete_rolls_back_on_missing_task() {
 
     // Dependencies referencing task1 should also be gone
     let deps = store.get_dependents(&task2.id).unwrap();
-    assert!(deps.is_empty(), "Dependencies should be cleaned up atomically with task delete");
+    assert!(
+        deps.is_empty(),
+        "Dependencies should be cleaned up atomically with task delete"
+    );
 
     // Deleting non-existent task should error (and not corrupt anything)
     let result = store.delete("non-existent");

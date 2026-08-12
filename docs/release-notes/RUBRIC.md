@@ -54,3 +54,8 @@ Post order: user top-level → capture `ts` → user reply → dev top-level →
 
 Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`
 (date `YYYY-MM-DD`, topic kebab-case) before posting.
+
+Immediately after posting, before ending the task or turn, annotate that saved
+draft with a `## POSTED` block containing the UTC timestamp, channel, and a
+permalink for every top-level post and reply. This is the searchable receipt
+that the announcement happened.

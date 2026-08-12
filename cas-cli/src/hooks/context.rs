@@ -264,6 +264,7 @@ fn build_host_constraints_section_for_tag(
     let mut host_entries: Vec<Entry> = entries
         .into_iter()
         .filter(|entry| entry_has_host_tag(entry, host_tag))
+        .filter(|entry| !entry.is_expired())
         .collect();
     host_entries.sort_by(|a, b| {
         b.importance

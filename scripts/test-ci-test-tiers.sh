@@ -93,6 +93,32 @@ for job in "${required_jobs[@]}"; do
     require_absent "$block" 'refs/heads/factory/' "$job is absent from factory pushes"
 done
 
+# Required contexts must always be emitted. The expensive work in each lane is
+# gated only after a shared, fail-closed diff classification step succeeds.
+for job in fast-validation-preflight fast-validation-suite fast-validation-docs macos-check; do
+    block="$(job_block "$job")"
+    require_text "$block" 'id: classify-diff' "$job classifies before expensive work"
+    require_text "$block" './.github/actions/classify-required-diff' "$job uses the shared classifier"
+    require_text "$block" 'fetch-depth: 0' "$job computes a real merge base"
+    require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job classifies the PR head rather than its synthetic merge commit"
+    require_text "$block" "steps.classify-diff.outputs.fast-pass != 'true'" "$job skips expensive work only after a safe classification"
+done
+
+classifier="$repo_root/scripts/classify-ci-diff.sh"
+if [[ -x "$classifier" ]]; then
+    # These committed fixtures pin both directions: the three explicitly safe
+    # classes fast-pass, while a real mixed code/release change remains full.
+    require_text "$("$classifier" 967e85c7^ 967e85c7)" 'empty' 'empty ancestry merge fast-passes'
+    require_text "$("$classifier" c6c4122f^ c6c4122f)" 'docs-only' 'docs-only change fast-passes'
+    require_text "$("$classifier" 15edf2ef^ 15edf2ef)" 'version-bump' 'two-file package version bump fast-passes'
+    require_text "$("$classifier" 15edf2ef^ eab3901c)" 'version-bump' 'workspace-wide seven-file version bump fast-passes'
+    require_text "$("$classifier" 66b059b4^ 66b059b4)" 'full' 'version bump plus changelog does not fast-pass'
+    require_text "$("$classifier" bb7417ef^ bb7417ef)" 'full' 'code diff does not fast-pass'
+else
+    printf 'FAIL CI diff classifier is executable\n'
+    fail=$((fail + 1))
+fi
+
 for job in fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check; do
     block="$(job_block "$job")"
     require_text "$block" "refs/tags/" "$job runs on release tags"

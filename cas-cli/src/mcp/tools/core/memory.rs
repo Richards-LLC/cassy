@@ -10,6 +10,77 @@ use cas_core::memory::{
 };
 use cas_store::Store;
 use cas_types::Entry;
+#[cfg(test)]
+use chrono::Timelike;
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
+use regex::Regex;
+
+/// Best-effort extraction of an English `until <date>` deadline from memory
+/// prose. Explicit `valid_until` input always wins; this only gives otherwise
+/// prose-only expiry a machine-readable representation.
+fn derive_valid_until(content: &str) -> Option<DateTime<Utc>> {
+    let deadline = Regex::new(
+        r"(?ix)\buntil\s+(?P<deadline>(?:\d{4}-\d{1,2}-\d{1,2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2})(?:,?\s+\d{4})?(?:\s+(?:at\s+)?\d{1,2}(?::\d{2})?(?:\s*(?:a\.?m\.?|p\.?m\.?))?)?)",
+    )
+    .ok()?
+    .captures(content)?
+    .name("deadline")?
+    .as_str()
+    .trim()
+    .to_string();
+
+    let normalized = deadline
+        .replace(',', "")
+        .replace(" at ", " ")
+        .replace("a.m.", "AM")
+        .replace("p.m.", "PM")
+        .replace("a.m", "AM")
+        .replace("p.m", "PM");
+    let has_year = normalized
+        .split_whitespace()
+        .any(|part| part.len() == 4 && part.as_bytes().iter().all(u8::is_ascii_digit));
+    let with_year = if has_year {
+        normalized
+    } else if normalized.contains('-') {
+        // ISO dates carry their year by definition; this is defensive for a
+        // malformed partial match rather than a supported no-year ISO form.
+        normalized
+    } else {
+        let mut parts = normalized.split_whitespace();
+        let month = parts.next()?;
+        let day = parts.next()?;
+        let remainder = parts.collect::<Vec<_>>().join(" ");
+        format!("{month} {day} {} {remainder}", Utc::now().year())
+            .trim()
+            .to_string()
+    };
+
+    for format in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H",
+        "%b %e %Y %H:%M",
+        "%B %e %Y %H:%M",
+        "%b %e %Y %H",
+        "%B %e %Y %H",
+        "%b %e %Y %I:%M %p",
+        "%B %e %Y %I:%M %p",
+    ] {
+        if let Ok(value) = NaiveDateTime::parse_from_str(&with_year, format) {
+            return Some(DateTime::from_naive_utc_and_offset(value, Utc));
+        }
+    }
+
+    for format in ["%Y-%m-%d", "%b %e %Y", "%B %e %Y"] {
+        if let Ok(date) = NaiveDate::parse_from_str(&with_year, format) {
+            // A date-only deadline stays active through that calendar day.
+            return date
+                .and_hms_opt(23, 59, 59)
+                .map(|value| DateTime::from_naive_utc_and_offset(value, Utc));
+        }
+    }
+    None
+}
 
 impl From<&OverlapMatch> for DimensionBreakdown {
     fn from(m: &OverlapMatch) -> Self {
@@ -29,7 +100,9 @@ impl From<OverlapRecommendation> for RecommendedAction {
     fn from(r: OverlapRecommendation) -> Self {
         match r {
             OverlapRecommendation::UpdateExisting => RecommendedAction::UpdateExisting,
-            OverlapRecommendation::SurfaceForUserDecision => RecommendedAction::SurfaceForUserDecision,
+            OverlapRecommendation::SurfaceForUserDecision => {
+                RecommendedAction::SurfaceForUserDecision
+            }
         }
     }
 }
@@ -352,7 +425,7 @@ impl CasCore {
                         message: Cow::from("expected_updated_at must be an RFC3339 timestamp"),
                         data: None,
                     })
-                })
+            })
             .transpose()?;
 
         let entry_type: EntryType = req.entry_type.parse().unwrap_or(EntryType::Learning);
@@ -381,11 +454,14 @@ impl CasCore {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .ok()
         });
-        let valid_until = req.valid_until.and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .ok()
-        });
+        let valid_until = req
+            .valid_until
+            .and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .ok()
+            })
+            .or_else(|| derive_valid_until(&req.content));
 
         // ====================================================================
         // Pre-insert overlap detection (cas-4721)
@@ -1115,5 +1191,25 @@ impl CasCore {
             req.id,
             changes.join(", ")
         )))
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    #[test]
+    fn cas_4caa_derives_timestamp_from_until_date_and_time() {
+        let deadline = derive_valid_until("No workers until Aug 8 10:07").expect("deadline");
+        assert_eq!(deadline.month(), 8);
+        assert_eq!(deadline.day(), 8);
+        assert_eq!(deadline.hour(), 10);
+        assert_eq!(deadline.minute(), 7);
+    }
+
+    #[test]
+    fn cas_4caa_derives_date_only_deadline_at_end_of_day() {
+        let deadline = derive_valid_until("Use this only until 2026-08-08.").expect("deadline");
+        assert_eq!(deadline.to_rfc3339(), "2026-08-08T23:59:59+00:00");
     }
 }

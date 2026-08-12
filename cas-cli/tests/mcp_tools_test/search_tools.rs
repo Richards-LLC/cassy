@@ -139,6 +139,42 @@ async fn test_search_with_content() {
 }
 
 #[tokio::test]
+async fn cas_4caa_expired_memory_is_excluded_from_search_recall() {
+    let (_temp, service) = setup_cas();
+    let request = RememberRequest {
+        scope: "project".to_string(),
+        content: "expired search recall marker cas4caa".to_string(),
+        entry_type: "learning".to_string(),
+        tags: None,
+        title: None,
+        importance: 0.5,
+        valid_from: None,
+        valid_until: Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
+        team_id: None,
+        bypass_overlap: None,
+        mode: None,
+        expected_updated_at: None,
+        personal: None,
+    };
+    service
+        .cas_remember(Parameters(request))
+        .await
+        .expect("remember should succeed");
+
+    let result = service
+        .cas_search(Parameters(SearchRequest {
+            scope: "all".to_string(),
+            query: "expired search recall marker cas4caa".to_string(),
+            doc_type: Some("entry".to_string()),
+            limit: 10,
+            tags: None,
+        }))
+        .await
+        .expect("search should succeed");
+    assert_eq!(extract_text(result), "No results found");
+}
+
+#[tokio::test]
 async fn test_search_filter_by_type() {
     let (_temp, service) = setup_cas();
 

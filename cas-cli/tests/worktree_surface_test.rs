@@ -212,6 +212,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         remind_filter: None,
         remind_id: None,
         remind_ttl_secs: None,
+        cross_session: None,
         all: None,
         status: None,
         orphans: None,

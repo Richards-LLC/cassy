@@ -610,6 +610,9 @@ impl TaskStore for SqliteTaskStore {
                 // cas-5054 extends that invariant to conflict rework: the parked
                 // anchor must not satisfy or false-reject the eventual re-close.
                 persisted_deliverables.factory_branch_anchor = None;
+                if reopening_closed {
+                    persisted_deliverables.negative_result = None;
+                }
             }
             if resuming_merge_conflict {
                 // The decision note written by the lifecycle layer preserves the

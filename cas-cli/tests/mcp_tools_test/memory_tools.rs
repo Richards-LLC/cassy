@@ -22,7 +22,6 @@ async fn test_remember_basic() {
         personal: None,
     };
 
-
     let result = service
         .cas_remember(Parameters(req))
         .await
@@ -53,7 +52,6 @@ async fn test_remember_with_defaults() {
         personal: None,
     };
 
-
     let result = service
         .cas_remember(Parameters(req))
         .await
@@ -61,6 +59,43 @@ async fn test_remember_with_defaults() {
 
     let text = extract_text(result);
     assert!(text.contains("Created entry"));
+}
+
+#[tokio::test]
+async fn cas_4caa_remember_derives_valid_until_from_until_deadline() {
+    use cas::store::open_store;
+    use chrono::{Datelike, Timelike};
+
+    let (_temp, service) = setup_cas();
+    let cas_dir = service.project_path().to_path_buf();
+
+    let result = service
+        .cas_remember(Parameters(RememberRequest {
+            scope: "project".to_string(),
+            content: "Do not schedule Codex workers until Aug 8 10:07".to_string(),
+            entry_type: "context".to_string(),
+            tags: None,
+            title: Some("temporary worker restriction".to_string()),
+            importance: 0.8,
+            valid_from: None,
+            valid_until: None,
+            team_id: None,
+            bypass_overlap: None,
+            mode: None,
+            expected_updated_at: None,
+            personal: None,
+        }))
+        .await
+        .expect("remember should succeed");
+
+    let text = extract_text(result);
+    let store = open_store(&cas_dir).expect("open store");
+    let entry = store
+        .get(extract_entry_id(&text).expect("entry id"))
+        .expect("stored entry");
+    let valid_until = entry.valid_until.expect("derived valid_until");
+    assert_eq!((valid_until.month(), valid_until.day()), (8, 8));
+    assert_eq!((valid_until.hour(), valid_until.minute()), (10, 7));
 }
 
 #[tokio::test]
@@ -84,7 +119,6 @@ async fn test_get_entry() {
         personal: None,
     };
 
-
     let result = service
         .cas_remember(Parameters(req))
         .await
@@ -95,6 +129,7 @@ async fn test_get_entry() {
 
     // Now get the entry
     let get_req = IdRequest { id: id.to_string() };
+
     let result = service
         .cas_get(Parameters(get_req))
         .await
@@ -138,7 +173,6 @@ async fn test_update_entry() {
         personal: None,
     };
 
-
     let result = service
         .cas_remember(Parameters(req))
         .await
@@ -166,6 +200,7 @@ async fn test_update_entry() {
 
     // Verify update
     let get_req = IdRequest { id: id.to_string() };
+
     let result = service
         .cas_get(Parameters(get_req))
         .await
@@ -195,7 +230,6 @@ async fn test_archive_and_unarchive() {
         expected_updated_at: None,
         personal: None,
     };
-
 
     let result = service
         .cas_remember(Parameters(req))
@@ -247,7 +281,6 @@ async fn test_helpful_and_harmful() {
         personal: None,
     };
 
-
     let result = service
         .cas_remember(Parameters(req))
         .await
@@ -294,9 +327,9 @@ async fn test_list_entries() {
             valid_until: None,
             team_id: None,
             bypass_overlap: None,
-        mode: None,
-        expected_updated_at: None,
-        personal: None,
+            mode: None,
+            expected_updated_at: None,
+            personal: None,
         };
         service
             .cas_remember(Parameters(req))
@@ -339,9 +372,9 @@ async fn test_recent_entries() {
             valid_until: None,
             team_id: None,
             bypass_overlap: None,
-        mode: None,
-        expected_updated_at: None,
-        personal: None,
+            mode: None,
+            expected_updated_at: None,
+            personal: None,
         };
         service
             .cas_remember(Parameters(req))
@@ -380,7 +413,6 @@ async fn test_delete_entry() {
         expected_updated_at: None,
         personal: None,
     };
-
 
     let result = service
         .cas_remember(Parameters(req))
@@ -427,7 +459,6 @@ async fn test_set_tier() {
         personal: None,
     };
 
-
     let result = service
         .cas_remember(Parameters(req))
         .await
@@ -464,7 +495,8 @@ fn frontmatter_memory(title: &str, module: &str, body: &str) -> String {
 async fn test_overlap_blocks_duplicate_insert() {
     let (_temp, service) = setup_cas();
 
-    let body = "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs due to posix_lock incompatibility";
+    let body =
+        "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs due to posix_lock incompatibility";
     let content = frontmatter_memory("sqlite wal ntfs3 timeout", "cas-mcp", body);
 
     let first = RememberRequest {
@@ -521,8 +553,14 @@ async fn test_overlap_blocks_duplicate_insert() {
     assert!(structured["existing_slug"].as_str().is_some());
     assert!(structured["dimension_scores"]["net"].as_u64().unwrap() >= 4);
     let text = extract_text(result);
-    assert!(text.contains("Overlap detected"), "text fallback preserved: {text}");
-    assert!(text.contains("Existing slug:"), "text fallback preserved: {text}");
+    assert!(
+        text.contains("Overlap detected"),
+        "text fallback preserved: {text}"
+    );
+    assert!(
+        text.contains("Existing slug:"),
+        "text fallback preserved: {text}"
+    );
 }
 
 #[tokio::test]
@@ -547,9 +585,9 @@ async fn test_bypass_overlap_allows_duplicate() {
             valid_until: None,
             team_id: None,
             bypass_overlap: Some(true),
-        mode: None,
-        expected_updated_at: None,
-        personal: None,
+            mode: None,
+            expected_updated_at: None,
+            personal: None,
         };
         service
             .cas_remember(Parameters(req))
@@ -610,7 +648,10 @@ async fn test_unrelated_memory_inserts_normally() {
         .await
         .expect("unrelated insert should succeed");
     let text = extract_text(result);
-    assert!(text.contains("Created entry"), "expected success, got: {text}");
+    assert!(
+        text.contains("Created entry"),
+        "expected success, got: {text}"
+    );
 }
 
 // ============================================================================
@@ -708,7 +749,9 @@ async fn test_moderate_overlap_creates_with_crossref() {
         "moderate overlap must record at least one cross-reference (got: {structured:?})"
     );
     assert!(
-        related.iter().any(|v| v.as_str() == Some(first_slug.as_str())),
+        related
+            .iter()
+            .any(|v| v.as_str() == Some(first_slug.as_str())),
         "cross-ref should include the first memory's slug {first_slug}"
     );
 }
@@ -735,7 +778,9 @@ async fn test_remember_team_linked_project_auto_promotes_to_team() {
     // Write a CloudConfig with a team_id into .cas/cloud.json
     let mut cloud_cfg = CloudConfig::default();
     cloud_cfg.set_team(TEAM_ID, "auto-promote-squad");
-    cloud_cfg.save_to_cas_dir(&cas_dir).expect("save cloud config");
+    cloud_cfg
+        .save_to_cas_dir(&cas_dir)
+        .expect("save cloud config");
 
     // Remember without explicit team_id — should auto-promote.
     let req = RememberRequest {
@@ -791,7 +836,9 @@ async fn test_remember_personal_flag_opts_out_of_team_auto_promote() {
 
     let mut cloud_cfg = CloudConfig::default();
     cloud_cfg.set_team(TEAM_ID, "opt-out-squad");
-    cloud_cfg.save_to_cas_dir(&cas_dir).expect("save cloud config");
+    cloud_cfg
+        .save_to_cas_dir(&cas_dir)
+        .expect("save cloud config");
 
     // Remember with personal=true — must NOT auto-promote.
     let req = RememberRequest {
@@ -823,8 +870,7 @@ async fn test_remember_personal_flag_opts_out_of_team_auto_promote() {
     let entry = store.get(slug).expect("entry must exist");
 
     assert_eq!(
-        entry.team_id,
-        None,
+        entry.team_id, None,
         "personal=true must keep team_id=None even in a team-linked project"
     );
 
@@ -845,7 +891,9 @@ async fn test_remember_explicit_team_id_wins_over_auto_promote() {
 
     let mut cloud_cfg = CloudConfig::default();
     cloud_cfg.set_team(AUTO_TEAM, "auto-squad");
-    cloud_cfg.save_to_cas_dir(&cas_dir).expect("save cloud config");
+    cloud_cfg
+        .save_to_cas_dir(&cas_dir)
+        .expect("save cloud config");
 
     let req = RememberRequest {
         scope: "project".to_string(),

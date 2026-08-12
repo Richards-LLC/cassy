@@ -1427,6 +1427,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// Returns the linked prompt ID when present.
     fn ack_by_dedupe_key(&self, dedupe_key: &str) -> Result<Option<i64>>;
 
+    /// Acknowledge a terminal lifecycle relay by the ID embedded in its
+    /// `lifecycle-wake:<id>` source marker. These IDs are not prompt IDs.
+    fn ack_lifecycle_wake(&self, lifecycle_wake_id: i64) -> Result<Option<i64>>;
+
     /// Rewrite a not-yet-terminal prompt before its first bounded delivery.
     ///
     /// Used to replace a family of task-free duplicate worker-death relays
@@ -3667,6 +3671,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(out)
     }
 
+    fn ack_lifecycle_wake(&self, lifecycle_wake_id: i64) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let prompt_id = conn
+            .query_row(
+                "SELECT id FROM prompt_queue WHERE source = ? ORDER BY id DESC LIMIT 1",
+                params![format!("lifecycle-wake:{lifecycle_wake_id}")],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(prompt_id) = prompt_id {
+            drop(conn);
+            self.ack(prompt_id)?;
+        }
+        Ok(prompt_id)
+    }
+
     fn pending_count(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
 
@@ -3803,8 +3823,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let conn = self.conn.lock().unwrap();
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // CI red-run rows are durable receipts keyed by branch + SHA.  They
+            // must outlive ordinary delivered-prompt retention: removing one
+            // would also remove its unique dedupe key and let a later watcher
+            // cycle relay the already-dispositioned failure again.
             let rows = tx.execute(
-                "DELETE FROM prompt_queue WHERE processed_at IS NOT NULL AND processed_at < ?",
+                "DELETE FROM prompt_queue
+                 WHERE processed_at IS NOT NULL
+                   AND processed_at < ?
+                   AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'ci-red-run:%')",
                 params![cutoff],
             )?;
             tx.execute(
@@ -4238,6 +4265,25 @@ mod tests {
                 .is_empty(),
             "an acknowledged stale relay must stay forensic in SQLite without replaying into worker_status"
         );
+    }
+
+    #[test]
+    fn lifecycle_wake_id_acknowledges_the_distinct_prompt_row() {
+        let (_temp, store) = create_test_store();
+        let prompt_id = store
+            .enqueue(
+                "lifecycle-wake:4401",
+                "supervisor",
+                "historical terminal relay",
+            )
+            .unwrap();
+        assert_eq!(store.ack_lifecycle_wake(4401).unwrap(), Some(prompt_id));
+        assert!(store
+            .message_delivery_report(prompt_id)
+            .unwrap()
+            .unwrap()
+            .confirmed_at
+            .is_some());
     }
 
     /// cas-0147 (GH #167): a withdrawal is not idle-noise suppression.

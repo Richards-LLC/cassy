@@ -819,6 +819,20 @@ pub fn handle_session_end(
     // Clean up agent leases and reset task status - ALWAYS do this regardless of observation count
     cleanup_agent_leases(cas_root, &input.session_id);
 
+    // A default reminder is a one-shot thought attached to this exact session.
+    // Cancel it synchronously at SessionEnd so a later session never receives
+    // stale monitoring instructions. Explicit cross-session reminders remain
+    // pending and disclose their origin and creation time on delivery.
+    if let Ok(reminders) = crate::store::open_reminder_store(cas_root) {
+        match reminders.cancel_pending_for_origin_session(&input.session_id) {
+            Ok(cancelled) if cancelled > 0 => {
+                eprintln!("cas: Cancelled {cancelled} session-scoped reminder(s)");
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("cas: Failed to cancel session reminders: {error}"),
+        }
+    }
+
     // Factory session hygiene (task cas-a9ab): append a durable manifest of
     // the main worktree's uncommitted state so the next supervisor can see
     // what was left behind if this session died mid-task. Best-effort —
@@ -833,6 +847,11 @@ pub fn handle_session_end(
             agent_role.as_deref(),
         ) {
             eprintln!("cas: Wrote session-end manifest to {}", path.display());
+        }
+        if let Err(error) =
+            crate::hooks::handlers::session_hygiene::write_current_state_snapshot(cas_root)
+        {
+            eprintln!("cas: Failed to write current-state snapshot: {error}");
         }
     }
 
@@ -977,6 +996,60 @@ pub fn handle_session_end(
     }
 
     Ok(HookOutput::empty())
+}
+
+#[cfg(test)]
+mod session_end_reminder_tests {
+    use super::*;
+    use crate::store::{init_cas_dir, open_reminder_store};
+    use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
+
+    #[test]
+    fn session_end_cancels_default_reminders_but_not_cross_session_opt_in() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = init_cas_dir(project.path()).unwrap();
+        let reminders = open_reminder_store(&cas_root).unwrap();
+        for cross_session in [false, true] {
+            reminders
+                .create_with_scope(
+                    "session-end-owner",
+                    None,
+                    "must not become stale",
+                    cas_store::ReminderTriggerType::Time,
+                    Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+                    None,
+                    None,
+                    3600,
+                    Some("factory-a"),
+                    Some("session-ending"),
+                    cross_session,
+                )
+                .unwrap();
+        }
+
+        handle_session_end(
+            &HookInput {
+                session_id: "session-ending".to_string(),
+                cwd: project.path().to_string_lossy().into_owned(),
+                hook_event_name: "SessionEnd".to_string(),
+                ..HookInput::default()
+            },
+            Some(&cas_root),
+        )
+        .unwrap();
+
+        let pending = reminders.list_pending("session-end-owner").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].cross_session);
+        assert!(
+            SqliteKnowledgeStore::open(&cas_root)
+                .unwrap()
+                .get_page_by_rel_path("current-state.md")
+                .unwrap()
+                .is_some(),
+            "SessionEnd must write the deterministic current-state snapshot"
+        );
+    }
 }
 
 /// Generate session summary using AI (synchronous wrapper with timeout)

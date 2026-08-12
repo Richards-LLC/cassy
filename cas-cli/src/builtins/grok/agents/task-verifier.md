@@ -216,6 +216,8 @@ Read the `execution_note` field from `cas__task action=show id=<task-id>`. If se
 
 - **`execution_note=additive-only`** — SKIP this advisory check. `additive-only` is hard-enforced by `close_ops.rs` (cas-e235). If the worker got this far with additive-only, the close-gate already verified no M/D/R files in the diff. Nothing to do here.
 
+- **`execution_note=no-code`** — SKIP this advisory check. `no-code` is hard-enforced by `close_ops.rs`: close requires a portable `external_ref` proof and rejects task-attributed reviewable code changes.
+
 - **`execution_note=null` or missing** — SKIP this check. No posture was declared, no posture applies.
 
 Cite the posture name explicitly in any rejection message so the worker can immediately tell which check fired.

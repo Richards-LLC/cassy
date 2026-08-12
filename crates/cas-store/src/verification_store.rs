@@ -1681,6 +1681,160 @@ pub struct RequestChangesOutcome {
     pub branch_handling: String,
 }
 
+/// Result of a supervisor correction to delivery-proof scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofScopeCorrectionOutcome {
+    pub delivery_transaction_id: Option<String>,
+    pub dispatch_id: Option<String>,
+}
+
+/// Atomically invalidate a parked task's stale proof after a supervisor fixes
+/// its repository/branch scope. Unlike `request_changes`, this is an
+/// administrative correction: it records no failed-review verdict and keeps
+/// the task's branch anchor/assignee intact for a fresh close cycle.
+pub fn correct_parked_delivery_proof_scope(
+    cas_dir: &Path,
+    corrected_task: &Task,
+    expected_updated_at: DateTime<Utc>,
+    supervisor_agent_id: &str,
+    reason: &str,
+) -> Result<ProofScopeCorrectionOutcome> {
+    if reason.trim().is_empty() || supervisor_agent_id.trim().is_empty() {
+        return Err(StoreError::Parse(
+            "proof-scope correction requires an authenticated supervisor and non-empty reason"
+                .to_string(),
+        ));
+    }
+    SqliteTaskStore::open(cas_dir)?.init()?;
+    SqliteEventStore::open(cas_dir)?;
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
+    let tx = ImmediateTx::new(&conn)?;
+
+    let dispatch = get_latest_verification_dispatch_with_conn(&tx, &corrected_task.id)?
+        .filter(|dispatch| dispatch.task_id == corrected_task.id);
+    let delivery: Option<(String, WorkerDeliveryState)> = tx
+        .query_row(
+            "SELECT state, id FROM worker_delivery_transactions
+             WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![corrected_task.id],
+            |row| {
+                let state: String = row.get(0)?;
+                let id: String = row.get(1)?;
+                Ok((id, state))
+            },
+        )
+        .optional()?
+        .map(|(id, state)| {
+            WorkerDeliveryState::from_str(&state)
+                .map(|state| (id, state))
+                .map_err(|error| {
+                    StoreError::Parse(format!("invalid worker delivery state: {error}"))
+                })
+        })
+        .transpose()?;
+
+    if let Some(active) = dispatch.as_ref() {
+        let invalidated = match active.state {
+            VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut => {
+                invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, &active.id)?.state
+                    == VerificationDispatchState::Invalidated
+            }
+            VerificationDispatchState::Pending | VerificationDispatchState::Claimed => {
+                tx.execute(
+                    "UPDATE verification_dispatches SET state = 'invalidated', resolved_at = ?2
+                     WHERE id = ?1 AND state IN ('pending', 'claimed')",
+                    params![active.id, Utc::now().to_rfc3339()],
+                )? == 1
+            }
+            VerificationDispatchState::Invalidated => true,
+        };
+        if !invalidated {
+            return Err(StoreError::Parse(
+                "proof-scope correction could not invalidate the stale dispatch".to_string(),
+            ));
+        }
+    }
+
+    let now = corrected_task.updated_at;
+    if let Some((transaction_id, state)) = delivery.as_ref() {
+        if *state == WorkerDeliveryState::Delivered {
+            return Err(StoreError::Parse(
+                "proof-scope correction cannot rewrite a delivered transaction".to_string(),
+            ));
+        }
+        if *state != WorkerDeliveryState::Stale {
+            let changed = tx.execute(
+                "UPDATE worker_delivery_transactions
+                 SET state = 'stale', supervisor_agent_id = ?2,
+                     last_error_code = 'proof_scope_corrected', last_error_detail = ?3,
+                     updated_at = ?4 WHERE id = ?1 AND task_id = ?5 AND state = ?6",
+                params![
+                    transaction_id,
+                    supervisor_agent_id,
+                    reason.trim(),
+                    now.to_rfc3339(),
+                    corrected_task.id,
+                    state.to_string(),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::Parse(
+                    "proof-scope correction delivery transition raced".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO worker_delivery_events
+                 (id, transaction_id, state, actor_agent_id, detail, created_at)
+                 VALUES (?1, ?2, 'stale', ?3, ?4, ?5)",
+                params![
+                    format!("wde-{:032x}", rand::random::<u128>()),
+                    transaction_id,
+                    supervisor_agent_id,
+                    format!("proof scope corrected: {}", reason.trim()),
+                    now.to_rfc3339(),
+                ],
+            )?;
+        }
+    }
+
+    let changed = tx.execute(
+        "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
+         pending_verification = 0, pending_worktree_merge = 0, updated_at = ?4
+         WHERE id = ?1 AND status = 'awaiting_merge' AND updated_at = ?5",
+        params![
+            corrected_task.id,
+            corrected_task.notes,
+            serde_json::to_string(&corrected_task.deliverables).map_err(|error| {
+                StoreError::Parse(format!(
+                    "failed to serialize corrected deliverables: {error}"
+                ))
+            })?,
+            now.to_rfc3339(),
+            expected_updated_at.to_rfc3339(),
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "proof-scope correction requires the unchanged AwaitingMerge task".to_string(),
+        ));
+    }
+    let event = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        &corrected_task.id,
+        corrected_task.notes.clone(),
+    );
+    record_event_with_conn(&tx, &event)?;
+    let _ = capture_task_event(&tx, RecordingEventType::Custom, &corrected_task.id, None);
+    tx.commit()?;
+    Ok(ProofScopeCorrectionOutcome {
+        delivery_transaction_id: delivery.map(|(id, _)| id),
+        dispatch_id: dispatch.map(|dispatch| dispatch.id),
+    })
+}
+
 /// Record a supervisor's negative review of a parked AwaitingMerge delivery.
 ///
 /// This is deliberately separate from generic task updates: the delivery proof

@@ -5320,6 +5320,7 @@ mod tests {
         reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
         spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
+        timeout_pane_tail,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -5386,6 +5387,19 @@ mod tests {
         );
         assert!(detail.contains("Last worker pane output:"), "{detail}");
         assert!(detail.contains("failed to load settings.json"), "{detail}");
+    }
+
+    #[test]
+    fn registration_timeout_extracts_a_plain_bounded_pane_tail() {
+        let mut pane = super::super::relay::PaneBuffer::default();
+        let output = format!("\x1b[31m{}tail from Claude\x1b[0m", "x".repeat(2_100));
+        pane.append(output.as_bytes());
+
+        let tail = timeout_pane_tail(Some(&pane)).expect("non-empty pane has a tail");
+
+        assert_eq!(tail.chars().count(), 2_000, "tail must remain bounded");
+        assert!(tail.ends_with("tail from Claude"), "tail: {tail}");
+        assert!(!tail.contains("\x1b["), "ANSI must be stripped: {tail}");
     }
 
     #[test]

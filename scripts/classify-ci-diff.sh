@@ -13,7 +13,10 @@ usage() {
 base="$1"
 head="$2"
 
-mapfile -t files < <(git diff --name-only "$base" "$head")
+files=()
+while IFS= read -r file; do
+    files[${#files[@]}]="$file"
+done < <(git diff --name-only "$base" "$head")
 if [[ ${#files[@]} == 0 ]]; then
     echo empty
     exit 0
@@ -35,9 +38,31 @@ fi
 # matching package entries in Cargo.lock. Every manifest must change exactly
 # one version line; Cargo.lock may change only version lines for those same
 # packages. Keep this conservative contract pinned in test-ci-test-tiers.sh.
-declare -A manifest_versions lock_old_versions lock_new_versions lock_changes
+package_names=()
+manifest_versions=()
+lock_old_versions=()
+lock_new_versions=()
+lock_changes=()
 has_lock=false
 valid_version_bump=true
+
+# Bash 3.2 has indexed arrays but not associative arrays. Keep package metadata
+# in parallel indexed arrays and use this lookup helper to retain the same
+# uniqueness and matching checks as the associative-array implementation.
+package_index() {
+    local wanted="$1"
+    local index
+
+    for index in "${!package_names[@]}"; do
+        if [[ "${package_names[$index]}" == "$wanted" ]]; then
+            package_index_result="$index"
+            return 0
+        fi
+    done
+
+    package_index_result=""
+    return 1
+}
 
 for file in "${files[@]}"; do
     if [[ "$file" == Cargo.lock ]]; then
@@ -53,10 +78,20 @@ for file in "${files[@]}"; do
     fi
 
     manifest_diff="$(git diff --unified=0 "$base" "$head" -- "$file")"
-    mapfile -t manifest_changes < <(grep -E '^[+-]' <<<"$manifest_diff" | grep -vE '^(---|\+\+\+)' || true)
-    if [[ ${#manifest_changes[@]} != 2 ]] \
-        || [[ ! "${manifest_changes[0]}" =~ ^-version\ =\ \"([^\"]+)\"$ ]] \
-        || [[ ! "${manifest_changes[1]}" =~ ^\+version\ =\ \"([^\"]+)\"$ ]]; then
+    manifest_change_count=0
+    manifest_old_change=""
+    manifest_new_change=""
+    while IFS= read -r manifest_change; do
+        manifest_change_count=$((manifest_change_count + 1))
+        if [[ "$manifest_change_count" == 1 ]]; then
+            manifest_old_change="$manifest_change"
+        elif [[ "$manifest_change_count" == 2 ]]; then
+            manifest_new_change="$manifest_change"
+        fi
+    done < <(grep -E '^[+-]' <<<"$manifest_diff" | grep -vE '^(---|\+\+\+)' || true)
+    if [[ "$manifest_change_count" != 2 ]] \
+        || [[ ! "$manifest_old_change" =~ ^-version\ =\ \"([^\"]+)\"$ ]] \
+        || [[ ! "$manifest_new_change" =~ ^\+version\ =\ \"([^\"]+)\"$ ]]; then
         valid_version_bump=false
         break
     fi
@@ -72,14 +107,19 @@ for file in "${files[@]}"; do
             exit
         }
     ')"
-    if [[ -z "$package_name" || -n "${manifest_versions[$package_name]+x}" ]]; then
+    if [[ -z "$package_name" ]] || package_index "$package_name"; then
         valid_version_bump=false
         break
     fi
-    manifest_versions["$package_name"]="$manifest_new_version"
+    package_index_result=${#package_names[@]}
+    package_names[$package_index_result]="$package_name"
+    manifest_versions[$package_index_result]="$manifest_new_version"
+    lock_old_versions[$package_index_result]=""
+    lock_new_versions[$package_index_result]=""
+    lock_changes[$package_index_result]=0
 done
 
-if "$valid_version_bump" && "$has_lock" && [[ ${#manifest_versions[@]} -gt 0 ]]; then
+if "$valid_version_bump" && "$has_lock" && [[ ${#package_names[@]} -gt 0 ]]; then
     lock_diff="$(git diff --unified=0 "$base" "$head" -- Cargo.lock)"
     lock_package=""
     while IFS= read -r line; do
@@ -88,31 +128,32 @@ if "$valid_version_bump" && "$has_lock" && [[ ${#manifest_versions[@]} -gt 0 ]];
         elif [[ "$line" =~ ^@@.*name\ =\ \"([^\"]+)\"$ ]]; then
             lock_package="${BASH_REMATCH[1]}"
         elif [[ "$line" == -* || "$line" == +* ]]; then
-            if [[ -z "$lock_package" || -z "${manifest_versions[$lock_package]+x}" ]] \
+            if [[ -z "$lock_package" ]] || ! package_index "$lock_package" \
                 || [[ ! "$line" =~ ^[-+]version\ =\ \"([^\"]+)\"$ ]]; then
                 valid_version_bump=false
                 break
             fi
-            lock_changes["$lock_package"]=$(( ${lock_changes[$lock_package]:-0} + 1 ))
+            package_slot="$package_index_result"
+            lock_changes[$package_slot]=$(( ${lock_changes[$package_slot]} + 1 ))
             if [[ "$line" == -* ]]; then
-                lock_old_versions["$lock_package"]="${BASH_REMATCH[1]}"
+                lock_old_versions[$package_slot]="${BASH_REMATCH[1]}"
             else
-                lock_new_versions["$lock_package"]="${BASH_REMATCH[1]}"
+                lock_new_versions[$package_slot]="${BASH_REMATCH[1]}"
             fi
         fi
     done <<<"$lock_diff"
 
-    for package_name in "${!manifest_versions[@]}"; do
-        if [[ "${lock_changes[$package_name]:-0}" != 2 ]] \
-            || [[ -z "${lock_old_versions[$package_name]+x}" ]] \
-            || [[ "${lock_new_versions[$package_name]:-}" != "${manifest_versions[$package_name]}" ]]; then
+    for package_slot in "${!package_names[@]}"; do
+        if [[ "${lock_changes[$package_slot]}" != 2 ]] \
+            || [[ -z "${lock_old_versions[$package_slot]}" ]] \
+            || [[ "${lock_new_versions[$package_slot]}" != "${manifest_versions[$package_slot]}" ]]; then
             valid_version_bump=false
             break
         fi
     done
 fi
 
-if "$valid_version_bump" && "$has_lock" && [[ ${#manifest_versions[@]} -gt 0 ]]; then
+if "$valid_version_bump" && "$has_lock" && [[ ${#package_names[@]} -gt 0 ]]; then
     echo version-bump
     exit 0
 fi

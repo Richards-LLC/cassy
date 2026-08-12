@@ -403,7 +403,7 @@ pub(crate) fn get_exit_blockers(
             for lease in &leases {
                 if let Ok(task) = task_store.get(&lease.task_id) {
                     // Only include open tasks as blockers
-                    if task.status != TaskStatus::Closed {
+                    if !task.is_terminal() {
                         // Track epics for subtask check (directly claimed epics)
                         if task.task_type == TaskType::Epic {
                             epic_ids.insert(task.id.clone());
@@ -438,7 +438,7 @@ pub(crate) fn get_exit_blockers(
     for epic_id in &epic_ids {
         // Skip epics that are already closed
         if let Ok(epic) = task_store.get(epic_id) {
-            if epic.status == TaskStatus::Closed {
+            if epic.is_terminal() {
                 // Clean up stale working_epics entry
                 if let Some(ref agent) = agent {
                     let _ = agent_store.remove_working_epic(&agent.id, epic_id);
@@ -450,9 +450,7 @@ pub(crate) fn get_exit_blockers(
         if let Ok(subtasks) = task_store.get_subtasks(epic_id) {
             for subtask in subtasks {
                 // Include all non-closed subtasks - agent must complete the entire epic
-                if subtask.status != TaskStatus::Closed
-                    && !claimed_ids.contains(subtask.id.as_str())
-                {
+                if !subtask.is_terminal() && !claimed_ids.contains(subtask.id.as_str()) {
                     blockers.epic_subtasks.push(subtask);
                 }
             }

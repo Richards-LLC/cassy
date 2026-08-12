@@ -4741,7 +4741,7 @@ impl CasCore {
         // occurrence is correct for them. The plain `update()` path re-stamps
         // from the store clock, so that branch refreshes both below.
         let mut occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
-        let lifecycle_outbox = if old_status == TaskStatus::Closed {
+        let lifecycle_outbox = if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             let agent_store = self.open_agent_store().map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to prepare reopen lifecycle: {error}")),
@@ -4792,10 +4792,11 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-        } else if old_status == TaskStatus::Closed {
-            cas_store::reopen_closed_task_atomic(
+        } else if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
+            cas_store::reopen_terminal_task_atomic(
                 &self.cas_root,
                 &task,
+                old_status,
                 original_updated_at,
                 cas_store::ParentDependencyUpdate::Unchanged,
                 lifecycle_outbox.as_ref(),

@@ -196,7 +196,7 @@ fn shutdown_worker_snapshot(
             task.assignee
                 .as_deref()
                 .is_some_and(|assignee| assignee == worker.name || assignee == worker.id)
-                && task.status != cas_types::TaskStatus::Closed
+                && !task.is_terminal()
         })
         .collect();
     let has_in_progress_task = assigned
@@ -792,7 +792,7 @@ fn resolve_sync_all_workers_target(
     req: &FactoryRequest,
 ) -> std::result::Result<String, String> {
     use crate::store::open_task_store;
-    use cas_types::{TaskStatus, TaskType};
+    use cas_types::TaskType;
 
     fn epic_branch(
         task_store: &dyn crate::store::TaskStore,
@@ -808,7 +808,7 @@ fn resolve_sync_all_workers_target(
                 epic.task_type
             ));
         }
-        if epic.status == TaskStatus::Closed {
+        if epic.is_terminal() {
             return Err(format!(
                 "sync_all_workers: {source} epic {epic_id} is Closed"
             ));
@@ -998,11 +998,12 @@ impl CasService {
                     ),
                 )
             })?;
-            if task.status == TaskStatus::Closed {
+            if task.is_terminal() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "task_id {task_id} is already closed — cannot pre-assign it to a spawned worker."
+                        "task_id {task_id} is terminal ({}) — cannot pre-assign it to a spawned worker.",
+                        task.status
                     ),
                 ));
             }
@@ -1136,7 +1137,7 @@ impl CasService {
                     )
                 })?
                 .into_iter()
-                .any(|t| t.task_type == TaskType::Epic && t.status != TaskStatus::Closed);
+                .any(|t| t.task_type == TaskType::Epic && !t.is_terminal());
 
             if !has_open_epic {
                 let why = match task_id_authorization {

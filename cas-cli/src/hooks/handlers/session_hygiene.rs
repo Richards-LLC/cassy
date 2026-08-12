@@ -269,7 +269,7 @@ pub fn write_current_state_snapshot(cas_root: &Path) -> Result<(), String> {
 
     let mut open_epics: Vec<_> = tasks
         .iter()
-        .filter(|task| task.task_type == TaskType::Epic && task.status != TaskStatus::Closed)
+        .filter(|task| task.task_type == TaskType::Epic && !task.is_terminal())
         .collect();
     open_epics.sort_by(|left, right| left.id.cmp(&right.id));
 
@@ -280,7 +280,7 @@ pub fn write_current_state_snapshot(cas_root: &Path) -> Result<(), String> {
             .map_err(|error| format!("could not list subtasks for {}: {error}", epic.id))?;
         let remaining = subtasks
             .iter()
-            .filter(|task| task.status != TaskStatus::Closed)
+            .filter(|task| !task.is_terminal())
             .count();
         epic_lines.push(format!(
             "- {} — {} ({} subtasks; {} open)",

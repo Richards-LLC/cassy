@@ -4,7 +4,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::{AnnotateAble, ErrorCode, RawResource, Resource};
 
 use crate::mcp::server::CasCore;
-use crate::types::{RuleStatus, SkillStatus, TaskStatus};
+use crate::types::{RuleStatus, SkillStatus};
 
 impl CasCore {
     /// Build list of available resources
@@ -33,11 +33,7 @@ impl CasCore {
 
         if let Ok(store) = self.open_task_store() {
             if let Ok(tasks) = store.list(None) {
-                for task in tasks
-                    .iter()
-                    .filter(|t| t.status != TaskStatus::Closed)
-                    .take(50)
-                {
+                for task in tasks.iter().filter(|t| !t.is_terminal()).take(50) {
                     resources.push(
                         RawResource {
                             uri: format!("cas://task/{}", task.id),

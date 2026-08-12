@@ -1,5 +1,9 @@
 use crate::support::*;
-use cas::mcp::tools::{TaskCancelRequest, TaskListRequest, TaskReopenRequest, TaskShowRequest};
+use cas::mcp::CasService;
+use cas::mcp::tools::{
+    IdRequest, LimitRequest, TaskCancelRequest, TaskListRequest, TaskReopenRequest,
+    TaskShowRequest, TaskUpdateRequest,
+};
 use cas::store::{open_agent_store, open_task_store};
 use cas::types::{
     AgentRole, Dependency, DependencyType, Task, TaskStatus, TaskTerminalOutcome, TaskType,
@@ -21,18 +25,19 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
     let cas_dir = temp.path().join(".cas");
     promote_test_agent(&cas_dir);
     let store = open_task_store(&cas_dir).unwrap();
-    let task = Task::new("cas-cancel-pointer".into(), "superseded work".into());
+    let mut task = Task::new("cas-cancel-pointer".into(), "superseded work".into());
+    task.assignee = Some("test-agent".into());
     store.add(&task).unwrap();
 
-    let result = extract_text(
-        core.cas_task_cancel(Parameters(TaskCancelRequest {
-            id: task.id.clone(),
-            reason: "requester delivered the same change".into(),
-            superseded_by: Some("https://github.com/example/repo/pull/258".into()),
-        }))
-        .await
-        .unwrap(),
-    );
+    let service = CasService::new(core.clone(), None);
+    let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "cancel",
+        "id": task.id.clone(),
+        "reason": "requester delivered the same change",
+        "superseded_by": "https://github.com/example/repo/pull/258"
+    }))
+    .unwrap();
+    let result = extract_text(service.task(Parameters(request)).await.unwrap());
     assert!(
         result.contains("Cancelled task without delivery"),
         "{result}"
@@ -67,7 +72,7 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
 
     let shown = extract_text(
         core.cas_task_show(Parameters(TaskShowRequest {
-            id: task.id,
+            id: task.id.clone(),
             with_deps: false,
         }))
         .await
@@ -78,6 +83,34 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
         "{shown}"
     );
     assert!(shown.contains("Superseded by: https://github.com/example/repo/pull/258"));
+
+    assert!(
+        !store
+            .list_ready()
+            .unwrap()
+            .iter()
+            .any(|ready| ready.id == task.id),
+        "cancelled work must not re-enter the ready queue"
+    );
+
+    let mine_request: LimitRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    let mine = extract_text(core.cas_tasks_mine(Parameters(mine_request)).await.unwrap());
+    assert!(
+        !mine.contains(&task.id),
+        "cancelled work leaked into mine: {mine}"
+    );
+
+    let start_error = core
+        .cas_task_start(Parameters(IdRequest {
+            id: task.id.clone(),
+        }))
+        .await
+        .expect_err("cancelled work must not be startable");
+    assert!(
+        start_error.message.contains("terminal task"),
+        "{}",
+        start_error.message
+    );
 }
 
 #[tokio::test]
@@ -103,6 +136,56 @@ async fn cancel_refuses_blank_reason_without_mutation() {
         .expect_err("blank cancellation reason must be rejected");
     assert!(error.message.contains("reason is required"));
     assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
+}
+
+#[tokio::test]
+async fn direct_status_updates_cannot_cancel_or_reopen_cancelled_work() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    promote_test_agent(&cas_dir);
+    let store = open_task_store(&cas_dir).unwrap();
+    let task = Task::new(
+        "cas-cancel-update-bypass".into(),
+        "guard cancellation verb".into(),
+    );
+    store.add(&task).unwrap();
+
+    let direct_cancel: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task.id,
+        "status": "cancelled"
+    }))
+    .unwrap();
+    let error = core
+        .cas_task_update(Parameters(direct_cancel))
+        .await
+        .expect_err("direct cancellation must not bypass supervisor authority and reason");
+    assert!(error.message.contains("action=cancel"), "{}", error.message);
+    assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
+
+    core.cas_task_cancel(Parameters(TaskCancelRequest {
+        id: task.id.clone(),
+        reason: "replacement landed".into(),
+        superseded_by: Some("cas-replacement".into()),
+    }))
+    .await
+    .unwrap();
+    let direct_reopen: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": task.id,
+        "status": "open"
+    }))
+    .unwrap();
+    let error = core
+        .cas_task_update(Parameters(direct_reopen))
+        .await
+        .expect_err("direct reopen must not bypass supervisor-authorized reopen");
+    assert!(error.message.contains("action=reopen"), "{}", error.message);
+    let persisted = store.get(&task.id).unwrap();
+    assert_eq!(persisted.status, TaskStatus::Cancelled);
+    assert!(matches!(
+        persisted.terminal_outcome,
+        Some(TaskTerminalOutcome::Cancelled { .. })
+    ));
 }
 
 #[tokio::test]

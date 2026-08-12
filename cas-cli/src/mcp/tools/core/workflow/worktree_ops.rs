@@ -264,7 +264,7 @@ fn reject_closed_epic_merge_target(
         .into_iter()
         .filter(|task| {
             task.task_type == cas_types::TaskType::Epic
-                && task.status == cas_types::TaskStatus::Closed
+                && task.is_terminal()
                 && task.branch.as_deref() == Some(target_branch)
         })
         .map(|task| task.id)
@@ -852,7 +852,7 @@ fn resolve_system_b_merge_target(
             data: None,
         })?;
         if let Some(epic) = epic {
-            if epic.status == cas_types::TaskStatus::Closed {
+            if epic.is_terminal() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -930,7 +930,7 @@ fn resolve_system_b_merge_target(
         // never silently fall through to trunk/focus (cas-0b32 review).
         match task_store.get_parent_epic(&task.id) {
             Ok(Some(epic)) => {
-                if epic.status == cas_types::TaskStatus::Closed {
+                if epic.is_terminal() {
                     closed_parent_epics.push((task.id.clone(), epic.id.clone()));
                     continue;
                 }

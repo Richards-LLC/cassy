@@ -179,6 +179,7 @@ impl CasCore {
             updated_at: now,
             closed_at: None,
             close_reason: None,
+            terminal_outcome: None,
             external_ref: req.external_ref,
             content_hash: None,
             branch: None,
@@ -512,8 +513,7 @@ impl CasCore {
                          that merge fails with a genuine \
                          git conflict, CAS marks the parked task conflicted and its assigned \
                          worker can then start task {} to resolve it.",
-                        req.id,
-                        req.id
+                        req.id, req.id
                     ),
                 ));
             }
@@ -969,10 +969,7 @@ impl CasCore {
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 claim_info.unwrap_or_default(),
-                crate::mcp::tools::truncate_str(
-                    &unanchored_warning.unwrap_or_default(),
-                    765,
-                ),
+                crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 own_notes,
                 push_note,
             );

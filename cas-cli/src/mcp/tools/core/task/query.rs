@@ -152,7 +152,35 @@ impl CasCore {
         ));
 
         if let Some(closed) = task.closed_at {
-            output.push_str(&format!("\nClosed: {}", closed.format("%Y-%m-%d %H:%M")));
+            let label = if task.status == TaskStatus::Cancelled {
+                "Cancelled"
+            } else {
+                "Closed"
+            };
+            output.push_str(&format!("\n{label}: {}", closed.format("%Y-%m-%d %H:%M")));
+        }
+
+        if let Some(outcome) = task.effective_terminal_outcome() {
+            match outcome {
+                cas_types::TaskTerminalOutcome::Delivered => {
+                    output.push_str("\nOutcome: delivered");
+                }
+                cas_types::TaskTerminalOutcome::NegativeResult => {
+                    output.push_str("\nOutcome: measured negative result (no delivery)");
+                }
+                cas_types::TaskTerminalOutcome::Decision => {
+                    output.push_str("\nOutcome: recorded decision (no delivery)");
+                }
+                cas_types::TaskTerminalOutcome::Cancelled { superseded_by } => {
+                    output.push_str("\nOutcome: cancelled without delivery");
+                    if let Some(pointer) = superseded_by {
+                        output.push_str(&format!("\nSuperseded by: {pointer}"));
+                    }
+                }
+            }
+            if let Some(reason) = task.close_reason.as_deref() {
+                output.push_str(&format!("\nTerminal reason: {reason}"));
+            }
         }
 
         // Show deliverables for closed tasks
@@ -237,15 +265,19 @@ impl CasCore {
             if task.task_type == TaskType::Epic {
                 if let Ok(subtasks) = task_store.get_subtasks(&req.id) {
                     if !subtasks.is_empty() {
-                        let open_count = subtasks
+                        let terminal_count = subtasks.iter().filter(|t| t.is_terminal()).count();
+                        let delivered_count =
+                            subtasks.iter().filter(|t| t.counts_as_delivered()).count();
+                        let cancelled_count = subtasks
                             .iter()
-                            .filter(|t| t.status != TaskStatus::Closed)
+                            .filter(|t| t.status == TaskStatus::Cancelled)
                             .count();
-                        let closed_count = subtasks.len() - open_count;
                         output.push_str(&format!(
-                            "\n\nSubtasks ({}/{} complete):\n",
-                            closed_count,
-                            subtasks.len()
+                            "\n\nSubtasks ({}/{} terminal; {} delivered; {} cancelled):\n",
+                            terminal_count,
+                            subtasks.len(),
+                            delivered_count,
+                            cancelled_count
                         ));
                         for subtask in &subtasks {
                             let status_icon = match subtask.status {
@@ -253,6 +285,7 @@ impl CasCore {
                                 TaskStatus::InProgress => "●",
                                 TaskStatus::Blocked => "◉",
                                 TaskStatus::Closed => "✓",
+                                TaskStatus::Cancelled => "⊘",
                                 // cas-b51a: awaiting supervisor code-review
                                 TaskStatus::PendingSupervisorReview => "⏳",
                                 TaskStatus::AwaitingMerge => "⇄",
@@ -493,9 +526,20 @@ impl CasCore {
                 } else {
                     ""
                 };
+            let outcome_marker = if task.status == TaskStatus::Cancelled {
+                " [NO DELIVERY]"
+            } else {
+                ""
+            };
             output.push_str(&format!(
-                "- [{}] {:?}{} P{} {} - {}\n",
-                task.id, task.status, conflict_marker, task.priority.0, task.task_type, task.title
+                "- [{}] {:?}{}{} P{} {} - {}\n",
+                task.id,
+                task.status,
+                conflict_marker,
+                outcome_marker,
+                task.priority.0,
+                task.task_type,
+                task.title
             ));
         }
 

@@ -356,6 +356,23 @@ impl CasService {
         self.inner.cas_task_reopen(Parameters(inner_req)).await
     }
 
+    pub(super) async fn task_cancel(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::TaskCancelRequest;
+        let inner_req = TaskCancelRequest {
+            id: req
+                .id
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for cancel"))?,
+            reason: req.reason.ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "reason required for cancel — explain why no delivery will be produced",
+                )
+            })?,
+            superseded_by: req.superseded_by,
+        };
+        self.inner.cas_task_cancel(Parameters(inner_req)).await
+    }
+
     pub(super) async fn task_request_changes(
         &self,
         req: TaskRequest,

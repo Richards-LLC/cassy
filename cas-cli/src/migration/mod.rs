@@ -736,8 +736,8 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
                 }
                 Ok(false) => {
                     conn.execute("ROLLBACK", [])?;
-                    let reason = "schema was detected but its ledger row could not be recorded"
-                        .to_string();
+                    let reason =
+                        "schema was detected but its ledger row could not be recorded".to_string();
                     result
                         .errors
                         .push((migration.name.to_string(), reason.clone()));
@@ -930,7 +930,7 @@ mod tests {
 
     fn assert_repaired_v225_knowledge_gap(cas_dir: &Path, expected_m226_ledger: &str) {
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [225, 226, 227, 228, 229, 230, 231, 232] {
+        for id in [225, 226, 227, 228, 229, 230, 231, 232, 233] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
@@ -997,7 +997,7 @@ mod tests {
         assert_eq!(pages[0].origin_project_id, None);
 
         let status = check_migrations(cas_dir).unwrap();
-        assert_eq!(status.current_version, 232);
+        assert_eq!(status.current_version, 233);
         assert!(status.pending.is_empty());
         let second = run_migrations(cas_dir, false).unwrap();
         assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
@@ -1019,7 +1019,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229, 230, 231, 232],
+                vec![225, 226, 227, 228, 229, 230, 231, 232, 233],
                 "recorded m225 and missing m226 must order all later work behind them"
             );
 
@@ -1038,10 +1038,7 @@ mod tests {
 
             let first = run_migrations(&cas_dir, false).unwrap();
             assert_eq!(first.applied_count, 1);
-            assert_eq!(
-                first.applied_names,
-                ["commit_links_link_method"]
-            );
+            assert_eq!(first.applied_names, ["commit_links_link_method"]);
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
             for id in [227, 228, 229] {
@@ -1106,15 +1103,12 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 230, 231, 232]
+                vec![225, 226, 230, 231, 232, 233]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
             assert_eq!(first.applied_count, 1);
-            assert_eq!(
-                first.applied_names,
-                ["commit_links_link_method"]
-            );
+            assert_eq!(first.applied_names, ["commit_links_link_method"]);
             assert_repaired_v225_knowledge_gap(&cas_dir, "DETECTED");
         });
     }
@@ -1148,17 +1142,14 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 227, 228, 229, 230, 231, 232]
+                vec![225, 227, 228, 229, 230, 231, 232, 233]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
             assert_eq!(first.applied_count, 2);
             assert_eq!(
                 first.applied_names,
-                [
-                    "commit_links_link_method",
-                    "knowledge_page_tombstones"
-                ]
+                ["commit_links_link_method", "knowledge_page_tombstones"]
             );
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
@@ -1422,7 +1413,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(exists, 1, "expected table `{table}` to exist after bootstrap");
+            assert_eq!(
+                exists, 1,
+                "expected table `{table}` to exist after bootstrap"
+            );
         }
 
         // Negative invariant: migration-driven subsystems (Worktrees, Code,
@@ -1705,9 +1699,11 @@ mod tests {
 
         // Pre-existing data is untouched.
         let task_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'cas-old1'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE id = 'cas-old1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(task_count, 1);
     }
@@ -1740,8 +1736,7 @@ mod tests {
             }
 
             // Run migrations again — should not error, sentinel row must survive.
-            let result =
-                run_migrations(&cas_dir, false).expect("run_migrations should succeed");
+            let result = run_migrations(&cas_dir, false).expect("run_migrations should succeed");
             assert!(result.errors.is_empty());
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
@@ -1752,7 +1747,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(sentinel_count, 1, "pre-existing data must survive bootstrap");
+            assert_eq!(
+                sentinel_count, 1,
+                "pre-existing data must survive bootstrap"
+            );
         });
     }
 

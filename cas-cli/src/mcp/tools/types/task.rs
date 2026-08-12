@@ -13,8 +13,12 @@ use crate::mcp::tools::types::defaults::{
 /// Allowed values for `execution_note` (cas-7fc1). Validated at the MCP
 /// tool layer rather than via a SQL CHECK constraint so new values can be
 /// added without a schema migration.
-pub const EXECUTION_NOTE_VALUES: &[&str] =
-    &["test-first", "characterization-first", "additive-only"];
+pub const EXECUTION_NOTE_VALUES: &[&str] = &[
+    "test-first",
+    "characterization-first",
+    "additive-only",
+    "no-code",
+];
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskStartRequest {
@@ -130,7 +134,7 @@ pub struct TaskCreateRequest {
 
     /// Execution methodology note
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only. Omit or leave null if no methodology is declared."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, no-code. no-code declares an operations/artifact task and requires an external_ref proof reference at close. Omit or leave null if no methodology is declared."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
@@ -348,7 +352,7 @@ pub struct TaskUpdateRequest {
 
     /// Update execution note
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only. Pass an empty string to clear."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, no-code. no-code declares an operations/artifact task and requires an external_ref proof reference at close. Pass an empty string to clear."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,

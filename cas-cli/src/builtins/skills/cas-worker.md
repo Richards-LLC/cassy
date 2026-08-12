@@ -40,11 +40,12 @@ Read `depth` in `task show`: **`light`** ships the minimal requested diff and sk
 
 ## Execution Posture
 
-Tasks may carry an `execution_note` posture. Three values, or null:
+Tasks may carry an `execution_note` posture. Four values, or null:
 
 - **`test-first`** — Write a failing test before any implementation, commit it, then implement until it passes. Verifier checks for new test files in the diff.
 - **`characterization-first`** — Before modifying existing behavior, write tests that capture the **current** behavior. Lock in the baseline before refactoring under-tested code. Not mechanically enforced; verifier inspects notes and committed evidence.
 - **`additive-only`** — New files only. You may **not** modify or delete any existing file. **Hard-enforced at close**: any `M`/`D`/`R` line in your staged diff fails the gate (renames count as modifications). Need to modify something? Message the supervisor — never work around the gate.
+- **`no-code`** — Operations/artifact work with intentionally zero code commits. Record a portable proof reference in `external_ref`; close rejects missing proof and any task-attributed reviewable code changes.
 
 Null = use your judgment. No other posture keywords exist.
 

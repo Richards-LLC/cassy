@@ -246,7 +246,8 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskUpdateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_update_with_target(req, None, None).await
+        self.cas_task_update_with_target(req, None, None, false, None)
+            .await
     }
 
     pub(crate) async fn cas_task_update_with_target(
@@ -254,6 +255,8 @@ impl CasCore {
         req: TaskUpdateRequest,
         target_repo: Option<&str>,
         target_branch: Option<&str>,
+        proof_scope_fix: bool,
+        proof_scope_fix_reason: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -263,6 +266,177 @@ impl CasCore {
             data: None,
         })?;
         let original_updated_at = task.updated_at;
+        if proof_scope_fix {
+            let reason = proof_scope_fix_reason.map(str::trim).unwrap_or_default();
+            if reason.is_empty() {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "PROOF-SCOPE FIX REJECTED: proof_scope_fix=true requires a non-empty reason for the decision audit trail."
+                            .to_string(),
+                    ),
+                    data: None,
+                });
+            }
+            if target_repo.is_none() && target_branch.is_none() {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "PROOF-SCOPE FIX REJECTED: supply target_repo and/or target_branch to correct the stale delivery scope."
+                            .to_string(),
+                    ),
+                    data: None,
+                });
+            }
+            let unrelated = [
+                ("title", req.title.is_some()),
+                ("notes", req.notes.is_some()),
+                ("priority", req.priority.is_some()),
+                ("labels", req.labels.is_some()),
+                ("blocked_by", req.blocked_by.is_some()),
+                ("description", req.description.is_some()),
+                ("design", req.design.is_some()),
+                ("acceptance_criteria", req.acceptance_criteria.is_some()),
+                ("demo_statement", req.demo_statement.is_some()),
+                ("execution_note", req.execution_note.is_some()),
+                ("external_ref", req.external_ref.is_some()),
+                ("assignee", req.assignee.is_some()),
+                ("status", req.status.is_some()),
+                ("epic", req.epic.is_some()),
+                (
+                    "epic_verification_owner",
+                    req.epic_verification_owner.is_some(),
+                ),
+                ("depth", req.depth.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(name, supplied)| supplied.then_some(name))
+            .collect::<Vec<_>>();
+            if !unrelated.is_empty() {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only target_repo/target_branch; unrelated field(s) supplied: {}.",
+                        unrelated.join(", ")
+                    )),
+                    data: None,
+                });
+            }
+            if task.status != TaskStatus::AwaitingMerge {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "PROOF-SCOPE FIX REJECTED: task {} is {} rather than awaiting_merge; the ordinary update path remains available outside a parked proof cycle.",
+                        task.id, task.status
+                    )),
+                    data: None,
+                });
+            }
+            let supervisor = self.resolve_live_supervisor_authority().map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "PROOF-SCOPE FIX REJECTED: only a live registered supervisor may invalidate a parked delivery proof."
+                        .to_string(),
+                ),
+                data: None,
+            })?;
+
+            let corrected_target = if let Some(repo) = target_repo {
+                super::repo_context::declare_work_target(&self.cas_root, Some(repo), target_branch)
+                    .map_err(|message| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(message),
+                        data: None,
+                    })?
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "PROOF-SCOPE FIX REJECTED: target_repo resolved to no work target."
+                                .to_string(),
+                        ),
+                        data: None,
+                    })?
+            } else {
+                let existing = task.deliverables.work_target.as_ref().ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding"
+                            .to_string(),
+                    ),
+                    data: None,
+                })?;
+                let context = super::repo_context::resolve_repo_context(&self.cas_root, existing)
+                    .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
+                let branch = super::repo_context::validate_target_branch(
+                    &context.repo_root,
+                    target_branch.expect("checked above"),
+                )
+                .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
+                cas_types::WorkTarget {
+                    repo_selector: existing.repo_selector.clone(),
+                    target_branch: branch,
+                }
+            };
+            if task.deliverables.work_target.as_ref() == Some(&corrected_target) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "PROOF-SCOPE FIX REJECTED: corrected work target is unchanged; no proof cycle was invalidated."
+                            .to_string(),
+                    ),
+                    data: None,
+                });
+            }
+
+            task.deliverables.work_target = Some(corrected_target.clone());
+            task.deliverables.review_envelope = None;
+            task.deliverables.pre_close_hook = None;
+            task.status = TaskStatus::Open;
+            task.pending_verification = false;
+            task.pending_worktree_merge = false;
+            task.updated_at = chrono::Utc::now();
+            let note = format!(
+                "[{}] DECISION: proof scope corrected by supervisor {} ({}): {} Work target is now {} @ {}. The prior exact proof cycle was invalidated; no failed-review verdict was recorded.",
+                task.updated_at.format("%Y-%m-%d %H:%M"),
+                supervisor.name,
+                supervisor.id,
+                reason,
+                corrected_target.repo_selector,
+                corrected_target.target_branch,
+            );
+            task.notes = if task.notes.is_empty() {
+                note
+            } else {
+                format!("{}\n\n{}", task.notes, note)
+            };
+            cas_store::correct_parked_delivery_proof_scope(
+                &self.cas_root,
+                &task,
+                original_updated_at,
+                &supervisor.id,
+                reason,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
+                data: None,
+            })?;
+            return Ok(Self::success(format!(
+                "Corrected proof scope for task {}. The task is Open with assignee {} preserved; the stale proof cycle was invalidated without recording review failure. New work target: {} @ {}.",
+                task.id,
+                task.assignee.as_deref().unwrap_or("unassigned"),
+                corrected_target.repo_selector,
+                corrected_target.target_branch,
+            )));
+        }
         if req.status.as_deref().is_some_and(|status| {
             status.eq_ignore_ascii_case("cancelled") || status.eq_ignore_ascii_case("canceled")
         }) {
@@ -836,12 +1010,12 @@ impl CasCore {
                             | cas_types::VerificationStatus::Skipped
                     ) && row.verification_type == required_verification_type
                         && match dispatch.as_ref() {
-                        Some(dispatch) => {
-                            !matches!(row.provenance, cas_types::VerificationProvenance::Legacy)
-                                && row.dispatch_id.as_deref() == Some(dispatch.id.as_str())
+                            Some(dispatch) => {
+                                !matches!(row.provenance, cas_types::VerificationProvenance::Legacy)
+                                    && row.dispatch_id.as_deref() == Some(dispatch.id.as_str())
+                            }
+                            None => row.dispatch_id.is_none(),
                         }
-                        None => row.dispatch_id.is_none(),
-                    }
                 });
                 if !authorized {
                     return Err(McpError {
@@ -874,10 +1048,10 @@ impl CasCore {
                     let worker_worktree = self
                         .resolve_worker_worktree_path(&task, Some(context))
                         .map_err(|message| McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(message),
-                            data: None,
-                        })?;
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(message),
+                        data: None,
+                    })?;
                     direct_close_hook_evidence = Some(
                         super::lifecycle::close_ops::run_declared_pre_close_hook(
                             &task,

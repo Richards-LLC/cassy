@@ -301,6 +301,8 @@ impl CasService {
                 inner_req,
                 target_repo.as_deref(),
                 target_branch.as_deref(),
+                req.proof_scope_fix.unwrap_or(false),
+                req.reason.as_deref(),
             )
             .await
     }

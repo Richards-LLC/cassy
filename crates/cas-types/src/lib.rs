@@ -65,9 +65,8 @@ pub use agent::{
 pub use code_review::{
     AutofixClass, FINDING_OPTIONAL_FIELDS, FINDING_REQUIRED_FIELDS, Finding,
     FindingValidationError, MAX_TITLE_LEN, Owner, ReviewExecution, ReviewExecutionStatus,
-    ReviewOutcome, ReviewOutcomeParseError,
-    ReviewerOutput, Severity as FindingSeverity, parse_review_outcome, parse_reviewer_output,
-    review_outcome_shape_hint,
+    ReviewOutcome, ReviewOutcomeParseError, ReviewerOutput, Severity as FindingSeverity,
+    parse_review_outcome, parse_reviewer_output, review_outcome_shape_hint,
 };
 pub use commit_link::{CommitLink, LINK_METHOD_HOOK_OBSERVED};
 pub use delivery::{
@@ -104,12 +103,13 @@ pub use sort::{
 pub use spec::{Spec, SpecStatus, SpecType};
 pub use task::{
     NegativeResultEvidence, PreCloseHookEvidence, Priority, Task, TaskDeliverables, TaskDepth,
-    TaskStatus, TaskType, WorkTarget,
+    TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget,
 };
 pub use verification::{
-    IssueSeverity, Verification, VerificationDispatch, VerificationDispatchState,
-    RepositoryProofBoundary, VerificationIssue, VerificationProofBoundary, VerificationProvenance,
-    VerificationRecoveryAction, VerificationStatus, VerificationType, VerifierCapability,
+    IssueSeverity, RepositoryProofBoundary, Verification, VerificationDispatch,
+    VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
+    VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
+    VerifierCapability,
 };
 pub use worktree::{GitContext, Worktree, WorktreeStatus};
 

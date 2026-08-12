@@ -196,7 +196,7 @@ fn shutdown_worker_snapshot(
             task.assignee
                 .as_deref()
                 .is_some_and(|assignee| assignee == worker.name || assignee == worker.id)
-                && task.status != cas_types::TaskStatus::Closed
+                && !task.is_terminal()
         })
         .collect();
     let has_in_progress_task = assigned
@@ -572,6 +572,10 @@ fn format_assigned_task_info(
                 cas_types::TaskStatus::Open
                 | cas_types::TaskStatus::InProgress
                 | cas_types::TaskStatus::Closed => ("parked", "check the task"),
+                cas_types::TaskStatus::Cancelled => (
+                    "cancelled without delivery",
+                    "no delivery or merge action is pending",
+                ),
             };
             format!(
                 "\n    task: {id} ({label}) — {} → WAITING ON YOU: {action}",
@@ -788,7 +792,7 @@ fn resolve_sync_all_workers_target(
     req: &FactoryRequest,
 ) -> std::result::Result<String, String> {
     use crate::store::open_task_store;
-    use cas_types::{TaskStatus, TaskType};
+    use cas_types::TaskType;
 
     fn epic_branch(
         task_store: &dyn crate::store::TaskStore,
@@ -804,7 +808,7 @@ fn resolve_sync_all_workers_target(
                 epic.task_type
             ));
         }
-        if epic.status == TaskStatus::Closed {
+        if epic.is_terminal() {
             return Err(format!(
                 "sync_all_workers: {source} epic {epic_id} is Closed"
             ));
@@ -994,11 +998,12 @@ impl CasService {
                     ),
                 )
             })?;
-            if task.status == TaskStatus::Closed {
+            if task.is_terminal() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "task_id {task_id} is already closed — cannot pre-assign it to a spawned worker."
+                        "task_id {task_id} is terminal ({}) — cannot pre-assign it to a spawned worker.",
+                        task.status
                     ),
                 ));
             }
@@ -1132,7 +1137,7 @@ impl CasService {
                     )
                 })?
                 .into_iter()
-                .any(|t| t.task_type == TaskType::Epic && t.status != TaskStatus::Closed);
+                .any(|t| t.task_type == TaskType::Epic && !t.is_terminal());
 
             if !has_open_epic {
                 let why = match task_id_authorization {
@@ -1278,14 +1283,30 @@ impl CasService {
              to resolve request {request_id} to a worker and a state (registered / FAILED); \
              do not report dispatch complete until it shows registered."
         );
+        // Recall is response-only: use the active epic as the task-planning
+        // query and add nothing when the shared BM25 index has no useful
+        // project-local memory/epic result.
+        let related_context = task_store
+            .list(None)
+            .ok()
+            .and_then(|tasks| {
+                tasks.into_iter().find(|task| {
+                    task.task_type == TaskType::Epic && task.status != TaskStatus::Closed
+                })
+            })
+            .and_then(|epic| {
+                self.inner
+                    .related_recall(&format!("{} {}", epic.title, epic.description))
+            })
+            .unwrap_or_default();
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -2657,9 +2678,26 @@ impl CasService {
             })
             .collect();
 
-        if worker_events.is_empty() && transcript_activity.is_empty() && terminal_event_count == 0 {
+        // GH #255 round 2: hooks do not reliably observe Codex file edits, so
+        // the event/transcript view above must never make a dirty worker look
+        // idle. Snapshot each visible worktree at query time as a floor under
+        // those asynchronous signals. This deliberately reuses worker_status's
+        // resolver and collector rather than inventing a third git path.
+        let worktree_activity: Vec<_> = visible_workers
+            .iter()
+            .filter_map(|agent| {
+                collect_worker_activity_worktree_snapshot(&self.inner.cas_root, agent)
+            })
+            .collect();
+
+        if worker_activity_has_no_rows(
+            worker_events.len(),
+            transcript_activity.len(),
+            worktree_activity.len(),
+            terminal_event_count,
+        ) {
             return Ok(Self::success(
-                "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
+                "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness and a query-time dirty-worktree floor. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
         }
 
@@ -2698,6 +2736,9 @@ impl CasService {
             output.push_str(&format!(
                 "• {worker_name} - {activity} ({age_secs}s ago; transcript-backed)\n"
             ));
+        }
+        for snapshot in &worktree_activity {
+            output.push_str(&format_worker_activity_worktree_snapshot(snapshot));
         }
 
         Ok(Self::success(output))
@@ -4388,21 +4429,47 @@ fn scan_orphan_processes(
             })
             .map(|record| record.pgid)
             .collect();
-    crate::ui::factory::orphan_gc::scan(cas_root, &live_factory_sessions(), &protected_pgids, &deregistered_worker_worktrees(cas_root, live_workers))
+    crate::ui::factory::orphan_gc::scan(
+        cas_root,
+        &live_factory_sessions(),
+        &protected_pgids,
+        &deregistered_worker_worktrees(cas_root, live_workers),
+    )
 }
 
-fn deregistered_worker_worktrees(cas_root: &std::path::Path, live_workers: &LiveFactoryWorkers) -> std::collections::HashSet<std::path::PathBuf> {
+fn deregistered_worker_worktrees(
+    cas_root: &std::path::Path,
+    live_workers: &LiveFactoryWorkers,
+) -> std::collections::HashSet<std::path::PathBuf> {
     let repo_root = cas_root.parent().unwrap_or(cas_root);
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let default_root = config.worktrees().resolve_base_path(repo_root);
-    crate::ui::factory::SessionManager::new().list_sessions().unwrap_or_default().into_iter().filter(|session| session.is_running).flat_map(|session| {
-        let session_name = session.name;
-        let worktree_root = default_root.clone();
-        session.metadata.workers.into_iter().filter_map(move |worker| {
-            let live = live_workers.contains(&(worker.name.clone(), Some(session_name.clone()))) || live_workers.contains(&(worker.name.clone(), None));
-            (!live).then(|| worker.worktree_path.map(std::path::PathBuf::from).unwrap_or_else(|| worktree_root.join(worker.name)))
+    crate::ui::factory::SessionManager::new()
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .flat_map(|session| {
+            let session_name = session.name;
+            let worktree_root = default_root.clone();
+            session
+                .metadata
+                .workers
+                .into_iter()
+                .filter_map(move |worker| {
+                    let live = live_workers
+                        .contains(&(worker.name.clone(), Some(session_name.clone())))
+                        || live_workers.contains(&(worker.name.clone(), None));
+                    (!live).then(|| {
+                        worker
+                            .worktree_path
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| worktree_root.join(worker.name))
+                    })
+                })
         })
-    }).filter(|path| path.is_dir()).collect()
+        .filter(|path| path.is_dir())
+        .collect()
 }
 
 fn orphan_process_groups(
@@ -4514,6 +4581,32 @@ struct WorkerWorktreeStatus {
     git_info: String,
 }
 
+/// Query-time worktree evidence that floors `worker_activity` underneath the
+/// event and transcript feeds. A dirty snapshot is live evidence even when a
+/// harness did not emit a corresponding `WorkerFileEdited` event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerActivityWorktreeSnapshot {
+    worker_name: String,
+    dirty_file_count: usize,
+    diffstat: String,
+    last_commit: String,
+}
+
+/// Whether `worker_activity` has no evidence to render at all. Kept pure so
+/// the zero-event worktree floor cannot accidentally be omitted from the
+/// early-empty branch during a future response refactor.
+fn worker_activity_has_no_rows(
+    worker_event_count: usize,
+    transcript_activity_count: usize,
+    worktree_activity_count: usize,
+    terminal_event_count: usize,
+) -> bool {
+    worker_event_count == 0
+        && transcript_activity_count == 0
+        && worktree_activity_count == 0
+        && terminal_event_count == 0
+}
+
 /// cas-f53c: shared resolution for worker clone/worktree path used by both
 /// `worker_status` and `sync_all_workers`.
 ///
@@ -4610,6 +4703,61 @@ fn collect_worker_worktree_status(
             }
         }
     }
+}
+
+/// Gather the live dirty-worktree floor for `worker_activity`.
+///
+/// This uses the same clone resolution and git-status collector as
+/// `worker_status`. It intentionally returns no row for a clean or unavailable
+/// worktree; absence is not manufactured into activity.
+fn collect_worker_activity_worktree_snapshot(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> Option<WorkerActivityWorktreeSnapshot> {
+    let WorkerClonePathResolve::Ready(path) = resolve_worker_clone_path(cas_root, agent) else {
+        return None;
+    };
+    let git_status = collect_worker_git_status(&path);
+    if !git_status.dirty {
+        return None;
+    }
+
+    let dirty_file_count = worker_scope_paths(&path).ok()?.len();
+    if dirty_file_count == 0 {
+        return None;
+    }
+
+    let diffstat = run_git(&path, &["diff", "--stat", "HEAD"])
+        .ok()
+        .filter(|stat| !stat.is_empty())
+        .unwrap_or_else(|| "no tracked diffstat (untracked files may be present)".to_string());
+    let last_commit = run_git(&path, &["log", "-1", "--format=%h %s"])
+        .ok()
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or_else(|| head_sha_for_display(&git_status.head_sha).to_string());
+
+    Some(WorkerActivityWorktreeSnapshot {
+        worker_name: agent.name.clone(),
+        dirty_file_count,
+        diffstat,
+        last_commit,
+    })
+}
+
+fn format_worker_activity_worktree_snapshot(snapshot: &WorkerActivityWorktreeSnapshot) -> String {
+    let diffstat = snapshot.diffstat.replace('\n', "\n    ");
+    format!(
+        "• {} - live worktree: {} dirty file{} (query-time snapshot; no event required)\n    diffstat: {}\n    last commit: {}\n",
+        snapshot.worker_name,
+        snapshot.dirty_file_count,
+        if snapshot.dirty_file_count == 1 {
+            ""
+        } else {
+            "s"
+        },
+        diffstat,
+        snapshot.last_commit,
+    )
 }
 
 /// Resolve a registered worker's concrete harness artifact using the same
@@ -7215,9 +7363,12 @@ mod spawn_lifecycle_tests {
     /// read the absence of a message as "nothing needs me".
     #[test]
     fn an_undelivered_relay_is_named_in_worker_status() {
-        let out = format_undelivered_relay_section(&[lost_relay(
-            "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
-        )], 0);
+        let out = format_undelivered_relay_section(
+            &[lost_relay(
+                "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
+            )],
+            0,
+        );
         assert!(
             out.contains("UNDELIVERED SUPERVISOR RELAY"),
             "the banner must state the failure outright: {out}"
@@ -7486,6 +7637,74 @@ mod spawn_lifecycle_tests {
             "row must stay scannable, got {} chars",
             out.len()
         );
+    }
+
+    /// GH #257: spawning is another planning write moment. Its ordinary queue
+    /// receipt must carry a matching project memory, not require a separate
+    /// pull/search after the worker request was already made.
+    #[tokio::test]
+    async fn spawn_response_surfaces_related_recall_for_active_epic() {
+        use cas_types::{Entry, Task, TaskType};
+
+        let temp = tempfile::tempdir().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("open task store");
+        task_store.init().expect("init task store");
+
+        let mut epic = Task::new(
+            "cas-spawn-recall".to_string(),
+            "Deploy timeline work".to_string(),
+        );
+        epic.task_type = TaskType::Epic;
+        epic.description = "Coordinate the timeline deployment milestone.".to_string();
+        task_store.add(&epic).expect("add epic");
+        core.open_search_index()
+            .expect("open search index")
+            .index_task(&epic)
+            .expect("index epic");
+
+        let mut memory = Entry::new(
+            "m-spawn-recall".to_string(),
+            "Timeline deployment already has a verified rollout plan.".to_string(),
+        );
+        memory.title = Some("Reuse timeline rollout plan".to_string());
+        core.open_store()
+            .expect("open memory store")
+            .add(&memory)
+            .expect("add memory");
+        core.open_search_index()
+            .expect("open search index")
+            .index_entry(&memory)
+            .expect("index memory");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude"
+        }))
+        .expect("valid spawn request");
+
+        let response = service
+            .factory_spawn_workers(request)
+            .await
+            .expect("queue worker spawn");
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Related prior context:"), "{text}");
+        assert!(text.contains("m-spawn-recall"), "{text}");
+        assert!(text.contains("Reuse timeline rollout plan"), "{text}");
     }
 }
 
@@ -11583,6 +11802,57 @@ effort = "high"
             }
             other => panic!("expected NotOnDisk, got {other:?}"),
         }
+    }
+
+    /// GH #255 round 2: a Codex edit can leave no WorkerFileEdited event at
+    /// all. The query-time snapshot is therefore an activity floor, not a
+    /// decoration for an already-live event row.
+    #[test]
+    fn worker_activity_dirty_worktree_floor_is_non_idle_without_events() {
+        let (_tmp, project) = setup_factory_project_with_worker_worktrees(&["codex-editor"]);
+        let cas_root = project.join(".cas");
+        let worktree = cas_root.join("worktrees/codex-editor");
+        std::fs::write(worktree.join("README"), "edited without an event\n").unwrap();
+
+        let agent = cas_types::Agent::new_with_role(
+            "codex-session".to_string(),
+            "codex-editor".to_string(),
+            AgentRole::Worker,
+        );
+        let worker_events: Vec<cas_types::Event> = Vec::new();
+        assert!(
+            worker_events.is_empty(),
+            "fixture intentionally has no events"
+        );
+
+        let snapshot = collect_worker_activity_worktree_snapshot(&cas_root, &agent)
+            .expect("dirty worktree must floor activity when there are no events");
+        let rendered = format_worker_activity_worktree_snapshot(&snapshot);
+
+        assert!(
+            !worker_activity_has_no_rows(0, 0, 1, 0),
+            "the live floor must bypass worker_activity's empty response"
+        );
+        assert!(
+            !rendered.contains("No recent worker activity"),
+            "a dirty zero-event worker must render as non-idle: {rendered}"
+        );
+        assert!(
+            rendered.contains("1 dirty file"),
+            "missing dirty count: {rendered}"
+        );
+        assert!(
+            rendered.contains("diffstat:"),
+            "missing diffstat: {rendered}"
+        );
+        assert!(
+            rendered.contains("README"),
+            "diffstat must name changed file: {rendered}"
+        );
+        assert!(
+            rendered.contains("last commit:"),
+            "missing last commit: {rendered}"
+        );
     }
 
     #[test]

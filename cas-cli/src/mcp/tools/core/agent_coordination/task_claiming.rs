@@ -16,10 +16,10 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status == TaskStatus::Closed {
+        if task.is_terminal() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Cannot claim a closed task"),
+                message: Cow::from("Cannot claim a terminal task (closed or cancelled)"),
                 data: None,
             });
         }
@@ -372,7 +372,7 @@ impl CasCore {
                         // pending. Resetting a PSR task to Open would silently erase
                         // the worker's completed close and remove it from the
                         // supervisor review queue.
-                        if task.status != TaskStatus::Closed
+                        if !task.is_terminal()
                             && task.status != TaskStatus::Open
                             && task.status != TaskStatus::PendingSupervisorReview
                             && task.status != TaskStatus::AwaitingMerge
@@ -459,11 +459,11 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status == TaskStatus::Closed {
+        if task.is_terminal() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
-                    "Cannot reset closed task {} — use `action=reopen` instead",
+                    "Cannot reset terminal task {} — use `action=reopen` instead",
                     req.task_id
                 )),
                 data: None,
@@ -922,7 +922,7 @@ impl CasCore {
             .unwrap_or_default()
             .into_iter()
             .filter(|t| {
-                if t.status == TaskStatus::Closed {
+                if t.is_terminal() {
                     return false;
                 }
                 match t.assignee.as_deref() {

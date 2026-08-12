@@ -208,6 +208,7 @@ mod m229_code_vector_state;
 mod m230_verification_repository_proof;
 mod m231_sync_conflicts_create_table;
 mod m232_worker_completion_receipts_add_artifact_path;
+mod m233_tasks_add_terminal_outcome;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -449,6 +450,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m230_verification_repository_proof::MIGRATION,
     m231_sync_conflicts_create_table::MIGRATION,
     m232_worker_completion_receipts_add_artifact_path::MIGRATION,
+    m233_tasks_add_terminal_outcome::MIGRATION,
 ];
 
 #[cfg(test)]
@@ -487,7 +489,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Duplicate migration ID 1 registered by entries_add_session_id and synthetic_duplicate")]
+    #[should_panic(
+        expected = "Duplicate migration ID 1 registered by entries_add_session_id and synthetic_duplicate"
+    )]
     fn migration_registry_duplicate_id_names_both_migrations() {
         let first = MIGRATIONS[0].clone();
         let duplicate = Migration {

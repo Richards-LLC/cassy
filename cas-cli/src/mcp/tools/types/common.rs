@@ -90,7 +90,7 @@ pub struct TaskListRequest {
 
     /// Task type filter
     #[schemars(
-        description = "Filter by task type: 'task', 'bug', 'feature', 'epic', 'chore', 'spike'"
+        description = "Filter by task type: 'task', 'bug', 'feature', 'epic', 'chore', 'spike', 'gate'"
     )]
     #[serde(default)]
     pub task_type: Option<String>,

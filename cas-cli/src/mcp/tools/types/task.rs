@@ -80,7 +80,9 @@ pub struct TaskCreateRequest {
     pub priority: u8,
 
     /// Task type
-    #[schemars(description = "Type: 'task' (default), 'bug', 'feature', 'epic', 'chore', 'spike'")]
+    #[schemars(
+        description = "Type: 'task' (default), 'bug', 'feature', 'epic', 'chore', 'spike', 'gate'"
+    )]
     #[serde(default = "default_task_type")]
     pub task_type: String,
 
@@ -168,11 +170,9 @@ pub struct TaskCloseRequest {
     /// this flag get an explicit rejection. The override is logged as a
     /// decision note on the task so the audit trail captures who
     /// downgraded a P0 block and why.
-    #[schemars(
-        description = "Supervisor override for the code-review P0 gate. \
+    #[schemars(description = "Supervisor override for the code-review P0 gate. \
                        Only honored when the caller is a supervisor; other \
-                       roles are rejected. Logs a decision note on the task."
-    )]
+                       roles are rejected. Logs a decision note on the task.")]
     #[serde(default)]
     pub bypass_code_review: Option<bool>,
 
@@ -214,22 +214,19 @@ pub struct TaskCloseRequest {
                        Each Finding requires: title, severity, file, line, \
                        why_it_matters, autofix_class, owner, confidence, \
                        evidence, pre_existing (optional: suggested_fix, \
-                       requires_verification)."
-    )]
+                       requires_verification).")]
     #[serde(default)]
     pub code_review_findings: Option<String>,
 
     /// Search manifest for investigation-task (`Spike`) closes (cas-49f1).
     /// This is the per-action mirror of the unified `TaskRequest` field of
     /// the same name (`crates/cas-mcp/src/types.rs`).
-    #[schemars(
-        description = "Serialized JSON array of search steps run during an \
+    #[schemars(description = "Serialized JSON array of search steps run during an \
                        investigation (Spike) task, e.g. \
                        [{\"command\": \"grep -c foo file\", \"hits\": 3}]. \
                        Optional; when present on a Spike-type close, any \
                        entry with hits=0 is surfaced as a warning note \
-                       instead of a silent pass."
-    )]
+                       instead of a silent pass.")]
     #[serde(default)]
     pub search_manifest: Option<String>,
 
@@ -248,6 +245,17 @@ pub struct TaskCloseRequest {
 pub struct NegativeResultCloseRequest {
     pub artifact_path: Option<String>,
     pub reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskCancelRequest {
+    /// Task ID to cancel without delivery.
+    pub id: String,
+    /// Required explanation preserved in the task timeline.
+    pub reason: String,
+    /// Optional portable pointer to the task, commit, or PR that superseded it.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

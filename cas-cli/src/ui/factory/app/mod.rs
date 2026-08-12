@@ -1965,7 +1965,12 @@ fn non_closed_task_ids(data: &DirectorData) -> HashSet<&str> {
         .chain(
             data.epic_tasks
                 .iter()
-                .filter(|e| e.status != cas_types::TaskStatus::Closed),
+                .filter(|e| {
+                    !matches!(
+                        e.status,
+                        cas_types::TaskStatus::Closed | cas_types::TaskStatus::Cancelled
+                    )
+                }),
         )
         .map(|t| t.id.as_str())
         .collect()

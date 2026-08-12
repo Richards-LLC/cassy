@@ -39,6 +39,75 @@ pub(crate) fn resolve_factory_epic_owner(
         })
 }
 
+const RELATED_RECALL_LIMIT: usize = 3;
+const RELATED_RECALL_CHAR_CAP: usize = 1_200;
+
+/// Best-effort, response-only recall for write moments that establish work.
+/// Uses the same unified BM25 index as `search`; failures deliberately add no
+/// noise or friction to task creation/spawning.
+impl CasCore {
+    pub(crate) fn related_recall(&self, query: &str) -> Option<String> {
+        use cas_core::search::{DocType, SearchOptions};
+
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let search = self.open_search_index().ok()?;
+        let results = search
+            .search_unified(&SearchOptions {
+                query: query.chars().take(600).collect(),
+                limit: RELATED_RECALL_LIMIT * 3,
+                doc_types: vec![DocType::Entry, DocType::Task],
+                ..Default::default()
+            })
+            .ok()?;
+        let store = self.open_store().ok();
+        let tasks = self.open_task_store().ok();
+        let mut lines = Vec::new();
+
+        for hit in results {
+            if lines.len() == RELATED_RECALL_LIMIT {
+                break;
+            }
+            let line = match hit.doc_type {
+                DocType::Entry => store.as_ref().and_then(|store| {
+                    store.get(&hit.id).ok().map(|entry| {
+                        let title = entry.title.as_deref().unwrap_or("untitled memory");
+                        format!(
+                            "- Memory [{}]: {} — {}",
+                            entry.id,
+                            title,
+                            entry.preview(140)
+                        )
+                    })
+                }),
+                DocType::Task => tasks.as_ref().and_then(|tasks| {
+                    tasks.get(&hit.id).ok().and_then(|task| {
+                        (task.task_type == crate::types::TaskType::Epic).then(|| {
+                            let detail = task.description.lines().next().unwrap_or_default();
+                            format!(
+                                "- Past epic [{}]: {} — {}",
+                                task.id,
+                                task.title,
+                                truncate_str(detail, 140)
+                            )
+                        })
+                    })
+                }),
+                _ => None,
+            };
+            if let Some(line) = line
+                && lines.iter().map(String::len).sum::<usize>() + line.len()
+                    <= RELATED_RECALL_CHAR_CAP
+            {
+                lines.push(line);
+            }
+        }
+        (!lines.is_empty()).then(|| format!("\n\nRelated prior context:\n{}", lines.join("\n")))
+    }
+}
+
 impl CasCore {
     pub async fn cas_task_create(
         &self,
@@ -179,6 +248,7 @@ impl CasCore {
             updated_at: now,
             closed_at: None,
             close_reason: None,
+            terminal_outcome: None,
             external_ref: req.external_ref,
             content_hash: None,
             branch: None,
@@ -236,6 +306,13 @@ impl CasCore {
                     data: None,
                 }
             })?;
+
+        // Recall before indexing this task so an epic cannot surface itself as
+        // "prior context" and turn an otherwise clean create receipt noisy.
+        let related_context = (task.task_type == crate::types::TaskType::Epic)
+            .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
+            .flatten()
+            .unwrap_or_default();
 
         if let Ok(search) = self.open_search_index() {
             let _ = search.index_task(&task);
@@ -342,7 +419,7 @@ impl CasCore {
             id,
             task.title,
             task.priority.0,
-            branch_info.unwrap_or_default()
+            branch_info.unwrap_or_default() + &related_context
         )))
     }
 
@@ -442,7 +519,7 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status == TaskStatus::Closed {
+        if task.is_terminal() {
             // cas-3c23: this message used to tell EVERY caller "Use reopen
             // first" — a factory worker follows that verbatim, reopens an
             // already-merged task, re-verifies already-shipped code, and
@@ -455,15 +532,15 @@ impl CasCore {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 if crate::harness_policy::is_supervisor_from_env() {
-                    "Cannot start a closed task. Use reopen first if this task \
+                    "Cannot start a terminal task. Use reopen first if this task \
                      genuinely needs rework."
                         .to_string()
                 } else {
                     format!(
-                        "Cannot start a closed task. Task {} is closed — do not \
+                        "Cannot start a terminal task. Task {} is {} — do not \
                          reopen it; report to your supervisor if you believe \
                          this task needs rework.",
-                        req.id
+                        req.id, task.status
                     )
                 },
             ));
@@ -512,8 +589,7 @@ impl CasCore {
                          that merge fails with a genuine \
                          git conflict, CAS marks the parked task conflicted and its assigned \
                          worker can then start task {} to resolve it.",
-                        req.id,
-                        req.id
+                        req.id, req.id
                     ),
                 ));
             }
@@ -542,6 +618,18 @@ impl CasCore {
         let agent_id = self.get_agent_id()?;
 
         let agent_store = self.open_agent_store()?;
+
+        // cas-7844 / GH #259: Gate tasks are supervisor-owned decisions,
+        // not worker execution. Reuse the same live registered-supervisor
+        // resolver as the other non-delivery terminal outcomes so env-role
+        // spoofing cannot authorize the start.
+        if task.task_type == crate::types::TaskType::Gate {
+            self.resolve_live_supervisor_authority()
+                .map_err(|error| Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    close_ops::gate_supervisor_authority_error("START", error),
+                ))?;
+        }
 
         // Check agent role for supervisor/worker-specific logic
         let is_worker = agent_store
@@ -575,10 +663,15 @@ impl CasCore {
             }
         }
 
-        // Check if supervisor is trying to start a non-epic task
+        // Check if supervisor is trying to start an ordinary non-epic task.
+        // Gate is the deliberate narrow exception: the authority check above
+        // already proved the caller is a live registered supervisor.
         if let Ok(agent) = agent_store.get(&agent_id) {
             if agent.role == cas_types::AgentRole::Supervisor
-                && task.task_type != crate::types::TaskType::Epic
+                && !matches!(
+                    task.task_type,
+                    crate::types::TaskType::Epic | crate::types::TaskType::Gate
+                )
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -969,10 +1062,7 @@ impl CasCore {
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 claim_info.unwrap_or_default(),
-                crate::mcp::tools::truncate_str(
-                    &unanchored_warning.unwrap_or_default(),
-                    765,
-                ),
+                crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 own_notes,
                 push_note,
             );
@@ -1049,6 +1139,140 @@ mod factory_epic_owner_tests {
             resolve_factory_epic_owner(Some("  agent-uuid  ".into()), Some("display".into()), None)
                 .unwrap();
         assert_eq!(owner, "agent-uuid");
+    }
+}
+
+/// Response-level regression coverage for GH #257. Recall must be useful at
+/// the decision point, but a project with no prior context must receive the
+/// exact legacy create receipt rather than a permanent empty heading.
+#[cfg(test)]
+mod related_recall_response_tests {
+    use super::*;
+    use cas_types::Entry;
+    use tempfile::TempDir;
+
+    fn text(result: CallToolResult) -> String {
+        result
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn epic_request(title: &str, description: &str) -> TaskCreateRequest {
+        TaskCreateRequest {
+            title: title.to_string(),
+            description: Some(description.to_string()),
+            priority: 2,
+            task_type: "epic".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
+            depth: None,
+        }
+    }
+
+    fn add_memory(core: &CasCore, id: &str, title: &str, content: &str) {
+        let mut entry = Entry::new(id.to_string(), content.to_string());
+        entry.title = Some(title.to_string());
+        let store = core.open_store().expect("open memory store");
+        store.add(&entry).expect("add memory");
+        core.open_search_index()
+            .expect("open search index")
+            .index_entry(&entry)
+            .expect("index memory");
+    }
+
+    #[tokio::test]
+    async fn epic_create_surfaces_matching_memory_in_its_response() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        add_memory(
+            &core,
+            "m-recall-memory",
+            "Avoid duplicate timeline work",
+            "The timeline import plan is already implemented; verify it before creating work.",
+        );
+
+        let response = text(
+            core.cas_task_create(Parameters(epic_request(
+                "Timeline import follow-up",
+                "Plan timeline import work for the next release.",
+            )))
+            .await
+            .expect("create epic"),
+        );
+
+        assert!(response.contains("Related prior context:"), "{response}");
+        assert!(response.contains("m-recall-memory"), "{response}");
+        assert!(
+            response.contains("Avoid duplicate timeline work"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn epic_create_with_no_prior_match_preserves_legacy_response_shape() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+
+        let response = text(
+            core.cas_task_create(Parameters(epic_request(
+                "Unique no-match epic",
+                "This phrase has no prior matching context.",
+            )))
+            .await
+            .expect("create epic"),
+        );
+
+        let task = core
+            .open_task_store()
+            .expect("open task store")
+            .list(None)
+            .expect("list created task")
+            .into_iter()
+            .find(|task| task.title == "Unique no-match epic")
+            .expect("created epic");
+        assert_eq!(
+            response,
+            format!("Created task: {} - Unique no-match epic (P2)", task.id),
+            "no-match receipt must remain byte-identical to the legacy response"
+        );
+    }
+
+    #[test]
+    fn related_recall_is_bounded_by_result_count_and_character_cap() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        for index in 0..6 {
+            add_memory(
+                &core,
+                &format!("m-recall-bound-{index}"),
+                &format!("Recall bound result {index}"),
+                &format!("bounded recall shared keyword {}", "x".repeat(700)),
+            );
+        }
+
+        let response = core
+            .related_recall("bounded recall shared keyword")
+            .expect("matching recall");
+        assert!(response.len() <= RELATED_RECALL_CHAR_CAP + 32, "{response}");
+        assert_eq!(
+            response.matches("- Memory [").count(),
+            RELATED_RECALL_LIMIT,
+            "{response}"
+        );
     }
 }
 

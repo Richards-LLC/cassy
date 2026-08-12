@@ -155,7 +155,7 @@ impl TaskStore for MockTaskStore {
             .filter(|dependency| {
                 tasks
                     .get(&dependency.to_id)
-                    .map(|task| task.status != TaskStatus::Closed)
+                    .map(|task| !task.is_terminal())
                     .unwrap_or(false)
             })
             .map(|dependency| dependency.from_id.clone())
@@ -185,7 +185,7 @@ impl TaskStore for MockTaskStore {
 
         let mut result = Vec::new();
         for task in tasks.values() {
-            if task.status == TaskStatus::Closed {
+            if task.is_terminal() {
                 continue;
             }
 
@@ -197,7 +197,7 @@ impl TaskStore for MockTaskStore {
                 .filter_map(|dependency| {
                     tasks
                         .get(&dependency.to_id)
-                        .filter(|candidate| candidate.status != TaskStatus::Closed)
+                        .filter(|candidate| !candidate.is_terminal())
                         .cloned()
                 })
                 .collect();

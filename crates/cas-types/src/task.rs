@@ -25,6 +25,10 @@ pub enum TaskStatus {
     Blocked,
     /// Completed
     Closed,
+    /// Ended without a delivered result. The task record and audit history are
+    /// preserved; `terminal_outcome` records whether this was a cancellation
+    /// or a supersession and carries the optional superseding pointer.
+    Cancelled,
     /// Worker close ran the lightweight gate successfully; awaiting
     /// supervisor code-review dispatch. Only reachable when
     /// `[code_review] owner = "supervisor"` is set (cas-b51a).
@@ -59,6 +63,7 @@ impl fmt::Display for TaskStatus {
             TaskStatus::InProgress => write!(f, "in_progress"),
             TaskStatus::Blocked => write!(f, "blocked"),
             TaskStatus::Closed => write!(f, "closed"),
+            TaskStatus::Cancelled => write!(f, "cancelled"),
             TaskStatus::PendingSupervisorReview => write!(f, "pending_supervisor_review"),
             TaskStatus::AwaitingMerge => write!(f, "awaiting_merge"),
         }
@@ -80,6 +85,8 @@ impl FromStr for TaskStatus {
             Ok(TaskStatus::Blocked)
         } else if s.eq_ignore_ascii_case("closed") {
             Ok(TaskStatus::Closed)
+        } else if s.eq_ignore_ascii_case("cancelled") || s.eq_ignore_ascii_case("canceled") {
+            Ok(TaskStatus::Cancelled)
         } else if s.eq_ignore_ascii_case("pending_supervisor_review")
             || s.eq_ignore_ascii_case("pending-supervisor-review")
         {
@@ -92,6 +99,31 @@ impl FromStr for TaskStatus {
             Err(TypeError::InvalidTaskStatus(s.to_string()))
         }
     }
+}
+
+/// Why a task reached a terminal state.
+///
+/// This is deliberately separate from [`TaskStatus`]: `Closed` answers
+/// whether the lifecycle completed, while this value answers whether there is
+/// a delivery to count or integrate. The nullable database column preserves
+/// legacy rows; [`Task::effective_terminal_outcome`] derives their meaning at
+/// read time without backfilling them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskTerminalOutcome {
+    /// Ordinary work delivered through the commit/review/merge close gates.
+    Delivered,
+    /// A measured experiment completed negatively and was intentionally not
+    /// merged under the structured supervisor receipt.
+    NegativeResult,
+    /// A human/supervisor decision completed the task without code delivery.
+    Decision,
+    /// Planned work ended without delivery. `superseded_by` may identify the
+    /// PR, commit, or task that made this work unnecessary.
+    Cancelled {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        superseded_by: Option<String>,
+    },
 }
 
 /// Type of task
@@ -111,6 +143,8 @@ pub enum TaskType {
     Chore,
     /// Investigation or research (produces understanding, not code)
     Spike,
+    /// Supervisor-owned promotion, rollout, or sign-off decision
+    Gate,
 }
 
 impl fmt::Display for TaskType {
@@ -122,6 +156,7 @@ impl fmt::Display for TaskType {
             TaskType::Epic => write!(f, "epic"),
             TaskType::Chore => write!(f, "chore"),
             TaskType::Spike => write!(f, "spike"),
+            TaskType::Gate => write!(f, "gate"),
         }
     }
 }
@@ -142,6 +177,8 @@ impl FromStr for TaskType {
             Ok(TaskType::Chore)
         } else if s.eq_ignore_ascii_case("spike") {
             Ok(TaskType::Spike)
+        } else if s.eq_ignore_ascii_case("gate") {
+            Ok(TaskType::Gate)
         } else {
             Err(TypeError::Parse(format!("invalid task type: {s}")))
         }
@@ -414,6 +451,11 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_reason: Option<String>,
 
+    /// Typed terminal disposition. Legacy rows remain NULL and are interpreted
+    /// read-side by `effective_terminal_outcome`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_outcome: Option<TaskTerminalOutcome>,
+
     /// Link to external tracker (GitHub, JIRA, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
@@ -499,6 +541,7 @@ impl Task {
             updated_at: now,
             closed_at: None,
             close_reason: None,
+            terminal_outcome: None,
             external_ref: None,
             content_hash: None,
             branch: None,
@@ -522,9 +565,53 @@ impl Task {
         task
     }
 
-    /// Check if the task is open (not closed)
+    /// Check if the task is open (not terminal)
     pub fn is_open(&self) -> bool {
-        self.status != TaskStatus::Closed
+        !self.is_terminal()
+    }
+
+    /// Whether no further work is expected for this lifecycle record.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.status, TaskStatus::Closed | TaskStatus::Cancelled)
+    }
+
+    /// Effective terminal outcome, including read-side interpretation of
+    /// legacy NULL rows. This never mutates or backfills persistence.
+    pub fn effective_terminal_outcome(&self) -> Option<TaskTerminalOutcome> {
+        self.terminal_outcome.clone().or_else(|| match self.status {
+            TaskStatus::Closed if self.deliverables.negative_result.is_some() => {
+                Some(TaskTerminalOutcome::NegativeResult)
+            }
+            TaskStatus::Closed => Some(TaskTerminalOutcome::Delivered),
+            TaskStatus::Cancelled => Some(TaskTerminalOutcome::Cancelled {
+                superseded_by: None,
+            }),
+            _ => None,
+        })
+    }
+
+    /// Whether this terminal row represents delivered work.
+    pub fn counts_as_delivered(&self) -> bool {
+        self.is_terminal()
+            && matches!(
+                self.effective_terminal_outcome(),
+                Some(TaskTerminalOutcome::Delivered)
+            )
+    }
+
+    /// Whether parent-epic branch accounting must find integrated delivery for
+    /// this task. Active work and Delivered terminal work both retain branch
+    /// reachability obligations; only an explicit terminal non-delivery
+    /// outcome removes the child from integration accounting.
+    pub fn has_delivery_to_integrate(&self) -> bool {
+        !matches!(
+            self.effective_terminal_outcome(),
+            Some(
+                TaskTerminalOutcome::NegativeResult
+                    | TaskTerminalOutcome::Decision
+                    | TaskTerminalOutcome::Cancelled { .. }
+            )
+        )
     }
 
     /// Check if the task is ready to work on. Waiting states like
@@ -566,6 +653,7 @@ impl Default for Task {
             updated_at: DateTime::<Utc>::default(),
             closed_at: None,
             close_reason: None,
+            terminal_outcome: None,
             external_ref: None,
             content_hash: None,
             branch: None,
@@ -672,6 +760,7 @@ mod tests {
         assert_eq!(TaskType::from_str("epic").unwrap(), TaskType::Epic);
         assert_eq!(TaskType::from_str("chore").unwrap(), TaskType::Chore);
         assert_eq!(TaskType::from_str("spike").unwrap(), TaskType::Spike);
+        assert_eq!(TaskType::from_str("gate").unwrap(), TaskType::Gate);
     }
 
     #[test]
@@ -683,6 +772,13 @@ mod tests {
         // Verify round-trip
         let s = spike.to_string();
         assert_eq!(TaskType::from_str(&s).unwrap(), TaskType::Spike);
+    }
+
+    #[test]
+    fn test_gate_task_type() {
+        let gate = TaskType::Gate;
+        assert_eq!(gate.to_string(), "gate");
+        assert_eq!(TaskType::from_str(&gate.to_string()).unwrap(), gate);
     }
 
     #[test]

@@ -161,8 +161,9 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     pend_task_for_supervisor_review_with_dispatch, reopen_closed_task_atomic,
-    request_changes_for_parked_delivery, resolve_verification_dispatch_with_conn,
-    save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
+    reopen_terminal_task_atomic, request_changes_for_parked_delivery,
+    resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
+    timeout_verification_dispatch, update_system_verification,
 };
 
 // Worktree store for git worktree tracking
@@ -200,8 +201,7 @@ pub use prompt_queue_store::{
 pub use reminder_store::{
     Reminder, ReminderExpiryOutcome, ReminderStatus, ReminderStore, ReminderTriggerType,
     SqliteReminderStore, expire_stale_bounded, format_cross_session_reminder_delivery,
-    format_reminder_delivery,
-    parse_reminder_delivery_id,
+    format_reminder_delivery, parse_reminder_delivery_id,
 };
 
 // Retrieval provenance and explicit outcome feedback

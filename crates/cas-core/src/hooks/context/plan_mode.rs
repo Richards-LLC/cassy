@@ -86,6 +86,9 @@ pub fn build_plan_context_with_stores(
             if let Ok(closed) = ts.list(Some(TaskStatus::Closed)) {
                 all_tasks.extend(closed.into_iter().take(5));
             }
+            if let Ok(cancelled) = ts.list(Some(TaskStatus::Cancelled)) {
+                all_tasks.extend(cancelled.into_iter().take(5));
+            }
         }
 
         all_tasks.sort_by(|a, b| {
@@ -94,6 +97,7 @@ pub fn build_plan_context_with_stores(
                 TaskStatus::Blocked => 1,
                 TaskStatus::Open => 2,
                 TaskStatus::Closed => 3,
+                TaskStatus::Cancelled => 3,
                 // cas-b51a: tasks awaiting supervisor review sort after
                 // closed tasks — they are logically "done" from the worker's
                 // perspective, just not yet approved by the supervisor.

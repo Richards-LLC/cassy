@@ -441,6 +441,22 @@ pub(crate) fn attach_merge_request_envelope(
     format!("{message}\n\n{MERGE_ENVELOPE_OPEN}{encoded}{MERGE_ENVELOPE_CLOSE}")
 }
 
+/// Rewrite the opaque merge-request envelope with the target tip observed at
+/// delivery time.
+///
+/// The human body is the worker's original merge request and must remain
+/// byte-for-byte intact. Only the machine-readable receipt is refreshed: a
+/// queue delay can span several supervisor merges, so the tip captured when
+/// the worker enqueued the request is evidence about then, not now.
+pub(crate) fn refresh_merge_request_target_tip(prompt: &str, target_tip: &str) -> Option<String> {
+    let start = prompt.rfind(MERGE_ENVELOPE_OPEN)? + MERGE_ENVELOPE_OPEN.len();
+    let end = prompt[start..].find(MERGE_ENVELOPE_CLOSE)? + start;
+    let mut envelope: MergeRequestEnvelope = serde_json::from_str(&prompt[start..end]).ok()?;
+    envelope.target_branch_tip = target_tip.to_string();
+    let encoded = serde_json::to_string(&envelope).ok()?;
+    Some(format!("{}{}{}", &prompt[..start], encoded, &prompt[end..]))
+}
+
 pub(crate) fn merge_landed_guidance(
     task_id: &str,
     branch_tip: &str,
@@ -911,6 +927,68 @@ mod tests {
         assert_eq!(
             revalidate_merge_request(repo.path(), &worker_tip, "main"),
             MergeRequestDecision::Pending { target_tip }
+        );
+    }
+
+    /// cas-e3be (GH #260): a merge request can wait in the queue while the
+    /// target branch advances. The body sent at pop time must retain the
+    /// worker's request but name the tip resolved then, rather than the
+    /// enqueue-time snapshot.
+    #[test]
+    fn queued_merge_request_refreshes_target_tip_at_delivery() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "cas-test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "CAS Test"]);
+        std::fs::write(repo.path().join("base"), "base\n").expect("base file");
+        git(repo.path(), &["add", "base"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let enqueue_target_tip = git(repo.path(), &["rev-parse", "main"]);
+
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("work"), "work\n").expect("work file");
+        git(repo.path(), &["add", "work"]);
+        git(repo.path(), &["commit", "-m", "work"]);
+        let worker_tip = git(repo.path(), &["rev-parse", "factory/test-worker"]);
+        let queued = attach_merge_request_envelope(
+            "Please merge my conflict fix.",
+            &MergeRequestEnvelope {
+                task_id: "cas-e3be".to_string(),
+                branch_tip: worker_tip.clone(),
+                target_branch: "main".to_string(),
+                target_branch_tip: enqueue_target_tip.clone(),
+            },
+        );
+
+        // The task is still awaiting merge, but unrelated work landed before
+        // this queue row reaches the supervisor.
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("later"), "later\n").expect("later file");
+        git(repo.path(), &["add", "later"]);
+        git(repo.path(), &["commit", "-m", "advance target"]);
+        let delivery_target_tip = git(repo.path(), &["rev-parse", "main"]);
+        assert_ne!(enqueue_target_tip, delivery_target_tip);
+
+        assert_eq!(
+            revalidate_merge_request(repo.path(), &worker_tip, "main"),
+            MergeRequestDecision::Pending {
+                target_tip: delivery_target_tip.clone(),
+            }
+        );
+        let injected = refresh_merge_request_target_tip(&queued, &delivery_target_tip)
+            .expect("structured queued merge request refreshes at pop");
+        assert!(injected.starts_with("Please merge my conflict fix."));
+        assert_eq!(
+            parse_merge_request_envelope(&injected),
+            Some(MergeRequestEnvelope {
+                task_id: "cas-e3be".to_string(),
+                branch_tip: worker_tip,
+                target_branch: "main".to_string(),
+                target_branch_tip: delivery_target_tip,
+            })
         );
     }
 

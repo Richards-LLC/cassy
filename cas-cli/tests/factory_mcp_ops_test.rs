@@ -1288,8 +1288,8 @@ async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
         .await
         .expect_err("a closed task must not authorize a spawn");
     assert!(
-        err.message.contains("already closed"),
-        "error should name the closed task: {}",
+        err.message.contains(&closed_id) && err.message.contains("terminal (closed)"),
+        "error should name the closed terminal task and status: {}",
         err.message
     );
 

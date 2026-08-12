@@ -2521,14 +2521,20 @@ impl FactoryDaemon {
             // still be retracted from the supervisor's inbox if the merge
             // lands after this delivery. `None` for every other message.
             let mut merge_request_task: Option<String> = None;
+            // cas-e3be (GH #260): the target branch can move while a merge
+            // request waits in the durable queue. Keep the worker's prose,
+            // but replace the envelope's enqueue-time target tip with the
+            // ref resolved at this pop/injection point.
+            let mut prompt_with_instructions = queued.prompt.clone();
 
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)
             {
                 use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
                 use crate::prompt_revalidation::{
-                    MergeRequestDelivery, merge_landed_guidance, merge_request_delivery_decision,
-                    merge_request_moot_guidance, revalidate_merge_request,
+                    MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
+                    merge_request_delivery_decision, merge_request_moot_guidance,
+                    revalidate_merge_request,
                 };
 
                 let task = crate::store::open_task_store_local(self.app.cas_dir())
@@ -2570,6 +2576,15 @@ impl FactoryDaemon {
                     &git,
                 ) {
                     MergeRequestDelivery::Deliver => {
+                        if let MergeRequestDecision::Pending { target_tip } = &git
+                            && let Some(refreshed) =
+                                crate::prompt_revalidation::refresh_merge_request_target_tip(
+                                    &queued.prompt,
+                                    target_tip,
+                                )
+                        {
+                            prompt_with_instructions = refreshed;
+                        }
                         merge_request_task = Some(envelope.task_id.clone());
                         (None, None, "")
                     }
@@ -2733,8 +2748,6 @@ impl FactoryDaemon {
                     }
                 }
             }
-
-            let prompt_with_instructions = queued.prompt.clone();
 
             // Resolve the queue source to a valid team member name for inbox writes.
             // The source must be a registered team member name for Claude Code to

@@ -1,5 +1,45 @@
 use crate::mcp::tools::service::imports::*;
 
+/// Resolve and validate an explicit Claude config directory before its spawn
+/// request reaches the daemon.  A partial profile otherwise starts a PTY that
+/// cannot load CAS' worker contract, then fails sixty seconds later with no
+/// actionable cause (GH #270).
+fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("config_dir is empty; expected a Claude configuration directory".to_string());
+    }
+    let path = trimmed.strip_prefix('~').map_or_else(
+        || std::path::PathBuf::from(trimmed),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| home.join(suffix.trim_start_matches('/')))
+                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
+        },
+    );
+    let required_files = [
+        ("settings.json", path.join("settings.json")),
+        (".credentials.json", path.join(".credentials.json")),
+    ];
+    for (name, candidate) in required_files {
+        std::fs::File::open(&candidate).map_err(|error| {
+            format!("config_dir preflight failed: missing or unreadable {name}: {error}")
+        })?;
+    }
+    for name in ["agents", "skills"] {
+        let candidate = path.join(name);
+        let resolved = candidate.canonicalize().map_err(|error| {
+            format!("config_dir preflight failed: missing or unresolved {name}: {error}")
+        })?;
+        if !resolved.is_dir() {
+            return Err(format!(
+                "config_dir preflight failed: {name} must resolve to a directory"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Heartbeat age at which a worker is considered **stale** and becomes
 /// eligible for the opportunistic prune in `factory_worker_status`.
 ///
@@ -1205,6 +1245,12 @@ impl CasService {
                 // reflect what will ACTUALLY spawn, not the pre-fallback request.
             }
             spec.config_dir = req.config_dir.clone();
+            if spec.cli == cas_mux::SupervisorCli::Claude
+                && let Some(config_dir) = spec.config_dir.as_deref()
+            {
+                preflight_claude_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
             let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
             if (spec.config_dir.is_some() || requester_config_dir.is_some())
                 && spec.cli != cas_mux::SupervisorCli::Claude
@@ -7711,6 +7757,37 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_claude_config(dir: &std::path::Path) {
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        std::fs::write(dir.join(".credentials.json"), "credential").unwrap();
+        std::fs::create_dir(dir.join("agents")).unwrap();
+        std::fs::create_dir(dir.join("skills")).unwrap();
+    }
+
+    #[test]
+    fn config_dir_preflight_names_each_missing_requirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let cases = [
+            ("settings.json", "settings.json"),
+            (".credentials.json", ".credentials.json"),
+            ("agents", "agents"),
+            ("skills", "skills"),
+        ];
+        for (missing, expected) in cases {
+            let profile = temp.path().join(missing.replace('.', "_"));
+            std::fs::create_dir(&profile).unwrap();
+            valid_claude_config(&profile);
+            let target = profile.join(missing);
+            if target.is_dir() {
+                std::fs::remove_dir(target).unwrap();
+            } else {
+                std::fs::remove_file(target).unwrap();
+            }
+            let error = preflight_claude_config_dir(profile.to_str().unwrap()).unwrap_err();
+            assert!(error.contains(expected), "expected {expected} in {error}");
+        }
+    }
 
     #[test]
     fn worker_status_dedupe_prefers_freshest_heartbeat_across_factory_sessions() {

@@ -470,7 +470,7 @@ impl FactoryDaemon {
                 // A successful PTY spawn is not a verified worker. Confirm the
                 // harness reached CAS registration (or surface a bounded
                 // timeout) on the existing two-second lifecycle cadence.
-                self.reconcile_spawn_verifications();
+                self.reconcile_spawn_verifications().await;
                 // cas-f9e8 telemetry: the gap between the previous refresh
                 // and this one is Channel C's worst-case delivery latency
                 // for director-generated events. Logged at debug; enable

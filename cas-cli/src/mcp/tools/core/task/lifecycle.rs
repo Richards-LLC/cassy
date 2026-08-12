@@ -39,6 +39,64 @@ pub(crate) fn resolve_factory_epic_owner(
         })
 }
 
+const RELATED_RECALL_LIMIT: usize = 3;
+const RELATED_RECALL_CHAR_CAP: usize = 1_200;
+
+/// Best-effort, response-only recall for write moments that establish work.
+/// Uses the same unified BM25 index as `search`; failures deliberately add no
+/// noise or friction to task creation/spawning.
+impl CasCore {
+pub(crate) fn related_recall(&self, query: &str) -> Option<String> {
+        use cas_core::search::{DocType, SearchOptions};
+
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let search = self.open_search_index().ok()?;
+    let results = search
+        .search_unified(&SearchOptions {
+            query: query.chars().take(600).collect(),
+            limit: RELATED_RECALL_LIMIT * 3,
+            doc_types: vec![DocType::Entry, DocType::Task],
+            ..Default::default()
+        })
+        .ok()?;
+    let store = self.open_store().ok();
+    let tasks = self.open_task_store().ok();
+    let mut lines = Vec::new();
+
+    for hit in results {
+        if lines.len() == RELATED_RECALL_LIMIT {
+            break;
+        }
+        let line = match hit.doc_type {
+            DocType::Entry => store.as_ref().and_then(|store| {
+                store.get(&hit.id).ok().map(|entry| {
+                    let title = entry.title.as_deref().unwrap_or("untitled memory");
+                    format!("- Memory [{}]: {} — {}", entry.id, title, entry.preview(140))
+                })
+            }),
+            DocType::Task => tasks.as_ref().and_then(|tasks| {
+                tasks.get(&hit.id).ok().and_then(|task| {
+                    (task.task_type == crate::types::TaskType::Epic).then(|| {
+                        let detail = task.description.lines().next().unwrap_or_default();
+                        format!("- Past epic [{}]: {} — {}", task.id, task.title, truncate_str(detail, 140))
+                    })
+                })
+            }),
+            _ => None,
+        };
+        if let Some(line) = line
+            && lines.iter().map(String::len).sum::<usize>() + line.len() <= RELATED_RECALL_CHAR_CAP
+        {
+            lines.push(line);
+        }
+    }
+    (!lines.is_empty()).then(|| format!("\n\nRelated prior context:\n{}", lines.join("\n")))
+}
+}
+
 impl CasCore {
     pub async fn cas_task_create(
         &self,
@@ -337,12 +395,17 @@ impl CasCore {
             None
         };
 
+        let related_context = (task.task_type == crate::types::TaskType::Epic)
+            .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
+            .flatten()
+            .unwrap_or_default();
+
         Ok(Self::success(format!(
             "Created task: {} - {} (P{}){}",
             id,
             task.title,
             task.priority.0,
-            branch_info.unwrap_or_default()
+            branch_info.unwrap_or_default() + &related_context
         )))
     }
 

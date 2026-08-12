@@ -1278,14 +1278,30 @@ impl CasService {
              to resolve request {request_id} to a worker and a state (registered / FAILED); \
              do not report dispatch complete until it shows registered."
         );
+        // Recall is response-only: use the active epic as the task-planning
+        // query and add nothing when the shared BM25 index has no useful
+        // project-local memory/epic result.
+        let related_context = task_store
+            .list(None)
+            .ok()
+            .and_then(|tasks| {
+                tasks.into_iter().find(|task| {
+                    task.task_type == TaskType::Epic && task.status != TaskStatus::Closed
+                })
+            })
+            .and_then(|epic| {
+                self.inner
+                    .related_recall(&format!("{} {}", epic.title, epic.description))
+            })
+            .unwrap_or_default();
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )

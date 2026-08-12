@@ -1424,9 +1424,37 @@ pub fn reopen_closed_task_atomic(
     parent_dependency: ParentDependencyUpdate,
     lifecycle_outbox: Option<&TaskReopenLifecycleOutbox>,
 ) -> Result<Option<VerificationDispatch>> {
+    reopen_terminal_task_atomic(
+        cas_dir,
+        task,
+        TaskStatus::Closed,
+        expected_updated_at,
+        parent_dependency,
+        lifecycle_outbox,
+    )
+}
+
+/// Reopen a closed or cancelled task as one optimistic durable mutation.
+///
+/// `expected_status` keeps the compare-and-swap explicit: callers cannot use
+/// this as a generic status rewrite, and a concurrent terminal-state mutation
+/// leaves the original row and lifecycle outbox untouched.
+pub fn reopen_terminal_task_atomic(
+    cas_dir: &Path,
+    task: &Task,
+    expected_status: TaskStatus,
+    expected_updated_at: DateTime<Utc>,
+    parent_dependency: ParentDependencyUpdate,
+    lifecycle_outbox: Option<&TaskReopenLifecycleOutbox>,
+) -> Result<Option<VerificationDispatch>> {
+    if !matches!(expected_status, TaskStatus::Closed | TaskStatus::Cancelled) {
+        return Err(StoreError::Parse(
+            "atomic terminal-task reopen requires closed or cancelled expected status".to_string(),
+        ));
+    }
     if task.status != TaskStatus::Open || task.closed_at.is_some() {
         return Err(StoreError::Parse(
-            "atomic closed-task reopen requires the complete proposed Open task".to_string(),
+            "atomic terminal-task reopen requires the complete proposed Open task".to_string(),
         ));
     }
 
@@ -1454,7 +1482,7 @@ pub fn reopen_closed_task_atomic(
         _ => None,
     };
 
-    SqliteTaskStore::reopen_exact_with_conn(&tx, task, TaskStatus::Closed, expected_updated_at)?;
+    SqliteTaskStore::reopen_exact_with_conn(&tx, task, expected_status, expected_updated_at)?;
 
     if let ParentDependencyUpdate::Replace(replacement) = parent_dependency {
         if let Some(dep) = replacement.as_ref() {

@@ -196,7 +196,7 @@ fn shutdown_worker_snapshot(
             task.assignee
                 .as_deref()
                 .is_some_and(|assignee| assignee == worker.name || assignee == worker.id)
-                && task.status != cas_types::TaskStatus::Closed
+                && !task.is_terminal()
         })
         .collect();
     let has_in_progress_task = assigned
@@ -572,6 +572,10 @@ fn format_assigned_task_info(
                 cas_types::TaskStatus::Open
                 | cas_types::TaskStatus::InProgress
                 | cas_types::TaskStatus::Closed => ("parked", "check the task"),
+                cas_types::TaskStatus::Cancelled => (
+                    "cancelled without delivery",
+                    "no delivery or merge action is pending",
+                ),
             };
             format!(
                 "\n    task: {id} ({label}) — {} → WAITING ON YOU: {action}",
@@ -788,7 +792,7 @@ fn resolve_sync_all_workers_target(
     req: &FactoryRequest,
 ) -> std::result::Result<String, String> {
     use crate::store::open_task_store;
-    use cas_types::{TaskStatus, TaskType};
+    use cas_types::TaskType;
 
     fn epic_branch(
         task_store: &dyn crate::store::TaskStore,
@@ -804,7 +808,7 @@ fn resolve_sync_all_workers_target(
                 epic.task_type
             ));
         }
-        if epic.status == TaskStatus::Closed {
+        if epic.is_terminal() {
             return Err(format!(
                 "sync_all_workers: {source} epic {epic_id} is Closed"
             ));
@@ -994,11 +998,12 @@ impl CasService {
                     ),
                 )
             })?;
-            if task.status == TaskStatus::Closed {
+            if task.is_terminal() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "task_id {task_id} is already closed — cannot pre-assign it to a spawned worker."
+                        "task_id {task_id} is terminal ({}) — cannot pre-assign it to a spawned worker.",
+                        task.status
                     ),
                 ));
             }
@@ -1132,7 +1137,7 @@ impl CasService {
                     )
                 })?
                 .into_iter()
-                .any(|t| t.task_type == TaskType::Epic && t.status != TaskStatus::Closed);
+                .any(|t| t.task_type == TaskType::Epic && !t.is_terminal());
 
             if !has_open_epic {
                 let why = match task_id_authorization {
@@ -4424,21 +4429,47 @@ fn scan_orphan_processes(
             })
             .map(|record| record.pgid)
             .collect();
-    crate::ui::factory::orphan_gc::scan(cas_root, &live_factory_sessions(), &protected_pgids, &deregistered_worker_worktrees(cas_root, live_workers))
+    crate::ui::factory::orphan_gc::scan(
+        cas_root,
+        &live_factory_sessions(),
+        &protected_pgids,
+        &deregistered_worker_worktrees(cas_root, live_workers),
+    )
 }
 
-fn deregistered_worker_worktrees(cas_root: &std::path::Path, live_workers: &LiveFactoryWorkers) -> std::collections::HashSet<std::path::PathBuf> {
+fn deregistered_worker_worktrees(
+    cas_root: &std::path::Path,
+    live_workers: &LiveFactoryWorkers,
+) -> std::collections::HashSet<std::path::PathBuf> {
     let repo_root = cas_root.parent().unwrap_or(cas_root);
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let default_root = config.worktrees().resolve_base_path(repo_root);
-    crate::ui::factory::SessionManager::new().list_sessions().unwrap_or_default().into_iter().filter(|session| session.is_running).flat_map(|session| {
-        let session_name = session.name;
-        let worktree_root = default_root.clone();
-        session.metadata.workers.into_iter().filter_map(move |worker| {
-            let live = live_workers.contains(&(worker.name.clone(), Some(session_name.clone()))) || live_workers.contains(&(worker.name.clone(), None));
-            (!live).then(|| worker.worktree_path.map(std::path::PathBuf::from).unwrap_or_else(|| worktree_root.join(worker.name)))
+    crate::ui::factory::SessionManager::new()
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .flat_map(|session| {
+            let session_name = session.name;
+            let worktree_root = default_root.clone();
+            session
+                .metadata
+                .workers
+                .into_iter()
+                .filter_map(move |worker| {
+                    let live = live_workers
+                        .contains(&(worker.name.clone(), Some(session_name.clone())))
+                        || live_workers.contains(&(worker.name.clone(), None));
+                    (!live).then(|| {
+                        worker
+                            .worktree_path
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| worktree_root.join(worker.name))
+                    })
+                })
         })
-    }).filter(|path| path.is_dir()).collect()
+        .filter(|path| path.is_dir())
+        .collect()
 }
 
 fn orphan_process_groups(
@@ -7332,9 +7363,12 @@ mod spawn_lifecycle_tests {
     /// read the absence of a message as "nothing needs me".
     #[test]
     fn an_undelivered_relay_is_named_in_worker_status() {
-        let out = format_undelivered_relay_section(&[lost_relay(
-            "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
-        )], 0);
+        let out = format_undelivered_relay_section(
+            &[lost_relay(
+                "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
+            )],
+            0,
+        );
         assert!(
             out.contains("UNDELIVERED SUPERVISOR RELAY"),
             "the banner must state the failure outright: {out}"

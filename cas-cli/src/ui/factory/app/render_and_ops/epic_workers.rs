@@ -644,7 +644,7 @@ fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
     match open_task_store(cas_dir) {
         Ok(store) => match store.list(None) {
             Ok(tasks) => tasks.iter().any(|t| {
-                t.assignee.as_deref() == Some(agent_id) && t.status != cas_types::TaskStatus::Closed
+                t.assignee.as_deref() == Some(agent_id) && !t.is_terminal()
             }),
             Err(e) => {
                 tracing::warn!(

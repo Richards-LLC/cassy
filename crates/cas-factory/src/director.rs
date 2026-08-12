@@ -304,9 +304,15 @@ impl DirectorData {
                         in_progress_tasks.push(to_summary(task));
                     }
                     TaskStatus::Closed => {
-                        if let Some(epic_id) = child_to_epic.get(&task.id) {
+                        if task.counts_as_delivered()
+                            && let Some(epic_id) = child_to_epic.get(&task.id)
+                        {
                             *epic_closed_counts.entry(epic_id.clone()).or_insert(0) += 1;
                         }
+                    }
+                    TaskStatus::Cancelled => {
+                        // Terminal but intentionally not delivered. Keep it out
+                        // of both active queues and delivered child counts.
                     }
                     // cas-b51a: show tasks awaiting supervisor review as a
                     // separate in-progress bucket so the TUI surfaces them
@@ -487,8 +493,7 @@ impl DirectorData {
                 let pending_messages = pending_counts.get(&a.name).copied().unwrap_or(0);
                 let pending_supervisor_messages =
                     pending_supervisor_counts.get(&a.name).copied().unwrap_or(0);
-                let latest_supervisor_message_at =
-                    latest_supervisor_messages.get(&a.name).copied();
+                let latest_supervisor_message_at = latest_supervisor_messages.get(&a.name).copied();
                 let effort = a
                     .metadata
                     .get("worker_effort")
@@ -532,13 +537,12 @@ impl DirectorData {
                     });
                 // Surface process-alive Stale rows as Active so icons/counts
                 // match worker_status dual-signal (cas-e98e).
-                let display_status = if a.status == AgentStatus::Stale
-                    && agent_pid_looks_alive(a.pid)
-                {
-                    AgentStatus::Active
-                } else {
-                    a.status
-                };
+                let display_status =
+                    if a.status == AgentStatus::Stale && agent_pid_looks_alive(a.pid) {
+                        AgentStatus::Active
+                    } else {
+                        a.status
+                    };
                 AgentSummary {
                     id: a.id,
                     name: a.name,

@@ -248,6 +248,7 @@ impl CasCore {
             updated_at: now,
             closed_at: None,
             close_reason: None,
+            terminal_outcome: None,
             external_ref: req.external_ref,
             content_hash: None,
             branch: None,
@@ -518,7 +519,7 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status == TaskStatus::Closed {
+        if task.is_terminal() {
             // cas-3c23: this message used to tell EVERY caller "Use reopen
             // first" — a factory worker follows that verbatim, reopens an
             // already-merged task, re-verifies already-shipped code, and
@@ -531,15 +532,15 @@ impl CasCore {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 if crate::harness_policy::is_supervisor_from_env() {
-                    "Cannot start a closed task. Use reopen first if this task \
+                    "Cannot start a terminal task. Use reopen first if this task \
                      genuinely needs rework."
                         .to_string()
                 } else {
                     format!(
-                        "Cannot start a closed task. Task {} is closed — do not \
+                        "Cannot start a terminal task. Task {} is {} — do not \
                          reopen it; report to your supervisor if you believe \
                          this task needs rework.",
-                        req.id
+                        req.id, task.status
                     )
                 },
             ));
@@ -588,8 +589,7 @@ impl CasCore {
                          that merge fails with a genuine \
                          git conflict, CAS marks the parked task conflicted and its assigned \
                          worker can then start task {} to resolve it.",
-                        req.id,
-                        req.id
+                        req.id, req.id
                     ),
                 ));
             }
@@ -1045,10 +1045,7 @@ impl CasCore {
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 claim_info.unwrap_or_default(),
-                crate::mcp::tools::truncate_str(
-                    &unanchored_warning.unwrap_or_default(),
-                    765,
-                ),
+                crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 own_notes,
                 push_note,
             );

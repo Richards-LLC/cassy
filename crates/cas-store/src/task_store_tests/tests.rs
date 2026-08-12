@@ -503,3 +503,54 @@ fn reopen_exact_rejects_a_mismatched_expected_updated_at() {
          it is an optimistic-concurrency key, not a general write path"
     );
 }
+
+#[test]
+fn cancelled_reopen_is_atomic_and_clears_terminal_outcome() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteTaskStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let id = store.generate_id().unwrap();
+    let mut task = Task::new(id.clone(), "Cancelled optimistic lock".to_string());
+    store.add(&task).unwrap();
+    task.status = TaskStatus::Cancelled;
+    task.closed_at = Some(chrono::Utc::now());
+    task.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Cancelled {
+        superseded_by: Some("cas-replacement".to_string()),
+    });
+    let cancelled_at = store.update(&task).unwrap();
+
+    let mut reopened = task.clone();
+    reopened.status = TaskStatus::Open;
+    reopened.closed_at = None;
+    reopened.terminal_outcome = None;
+    reopened.updated_at = chrono::Utc::now();
+
+    let stale = crate::reopen_terminal_task_atomic(
+        temp.path(),
+        &reopened,
+        TaskStatus::Cancelled,
+        cancelled_at - chrono::Duration::seconds(1),
+        crate::ParentDependencyUpdate::Unchanged,
+        None,
+    );
+    assert!(stale.is_err(), "a stale cancelled reopen must be refused");
+    let unchanged = store.get(&id).unwrap();
+    assert_eq!(unchanged.status, TaskStatus::Cancelled);
+    assert!(unchanged.terminal_outcome.is_some());
+
+    crate::reopen_terminal_task_atomic(
+        temp.path(),
+        &reopened,
+        TaskStatus::Cancelled,
+        cancelled_at,
+        crate::ParentDependencyUpdate::Unchanged,
+        None,
+    )
+    .expect("matching cancelled outcome should reopen atomically");
+
+    let after = store.get(&id).unwrap();
+    assert_eq!(after.status, TaskStatus::Open);
+    assert_eq!(after.terminal_outcome, None);
+    assert_eq!(after.updated_at, reopened.updated_at);
+}

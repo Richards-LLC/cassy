@@ -140,7 +140,7 @@ pub struct MemoryRequest {
 pub struct TaskRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'start', 'close', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
+        description = "Action: 'create', 'show', 'update', 'start', 'close', 'cancel', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
     )]
     pub action: String,
 
@@ -206,17 +206,23 @@ pub struct TaskRequest {
     #[serde(default)]
     pub reason: Option<String>,
 
+    /// Portable task/commit/PR pointer for `action=cancel` when another result
+    /// superseded this task.
+    #[schemars(
+        description = "Optional portable task, commit, or PR pointer that superseded cancelled work"
+    )]
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+
     /// Supervisor override for the cas-code-review P0 close gate (cas-b39f, Unit 9).
     ///
     /// When `true`, the close path skips the multi-persona code-review
     /// gate that would otherwise hard-block on P0 findings. Only honored
     /// when the caller runs under a supervisor role; other callers get
     /// an explicit rejection. Logs a decision note on the task.
-    #[schemars(
-        description = "Supervisor override for the code-review P0 gate. \
+    #[schemars(description = "Supervisor override for the code-review P0 gate. \
                        Only honored when the caller is a supervisor; other \
-                       roles are rejected. Logs a decision note on the task."
-    )]
+                       roles are rejected. Logs a decision note on the task.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub bypass_code_review: Option<bool>,
 
@@ -275,8 +281,7 @@ pub struct TaskRequest {
                        Each Finding requires: title, severity, file, line, \
                        why_it_matters, autofix_class, owner, confidence, \
                        evidence, pre_existing (optional: suggested_fix, \
-                       requires_verification)."
-    )]
+                       requires_verification).")]
     #[serde(default)]
     pub code_review_findings: Option<String>,
 
@@ -288,14 +293,12 @@ pub struct TaskRequest {
     /// entry reports `hits == 0`, a warning note is appended rather than
     /// letting the close proceed silently. Ordinary code tasks and tasks
     /// that omit this field are entirely unaffected.
-    #[schemars(
-        description = "Serialized JSON array of search steps run during an \
+    #[schemars(description = "Serialized JSON array of search steps run during an \
                        investigation (Spike) task, e.g. \
                        [{\"command\": \"grep -c foo file\", \"hits\": 3}]. \
                        Optional; when present on a Spike-type close, any \
                        entry with hits=0 is surfaced as a warning note \
-                       instead of a silent pass."
-    )]
+                       instead of a silent pass.")]
     #[serde(default)]
     pub search_manifest: Option<String>,
 
@@ -445,7 +448,9 @@ pub struct TaskRequest {
     pub depth: Option<String>,
 
     /// Explicit repository containing this task's code changes.
-    #[schemars(description = "Repository path containing this task's code changes (create/update).")]
+    #[schemars(
+        description = "Repository path containing this task's code changes (create/update)."
+    )]
     #[serde(default)]
     pub target_repo: Option<String>,
 
@@ -629,7 +634,9 @@ pub struct SkillRequest {
     pub allowed_tools: Option<String>,
 
     /// Disallowed tools (comma-separated) — harness-enforced bans (Claude Code 2.1.152+)
-    #[schemars(description = "Disallowed tools (comma-separated). Harness-enforced at runtime (Claude Code 2.1.152+).")]
+    #[schemars(
+        description = "Disallowed tools (comma-separated). Harness-enforced at runtime (Claude Code 2.1.152+)."
+    )]
     #[serde(default)]
     pub disallowed_tools: Option<String>,
 

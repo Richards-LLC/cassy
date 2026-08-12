@@ -114,7 +114,7 @@ pub(crate) fn epic_completion_is_current(data: &DirectorData, epic_id: &str) -> 
     let Some(epic) = data.epic_tasks.iter().find(|epic| epic.id == epic_id) else {
         return true;
     };
-    if epic.status == TaskStatus::Closed {
+    if matches!(epic.status, TaskStatus::Closed | TaskStatus::Cancelled) {
         return false;
     }
 
@@ -123,7 +123,8 @@ pub(crate) fn epic_completion_is_current(data: &DirectorData, epic_id: &str) -> 
         .iter()
         .chain(data.in_progress_tasks.iter())
         .any(|task| {
-            task.epic.as_deref() == Some(epic_id) && task.status != TaskStatus::Closed
+            task.epic.as_deref() == Some(epic_id)
+                && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
         })
 }
 

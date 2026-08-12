@@ -47,6 +47,7 @@ fn is_protected_status(status: TaskStatus) -> bool {
     matches!(
         status,
         TaskStatus::Closed
+            | TaskStatus::Cancelled
             | TaskStatus::Open
             | TaskStatus::PendingSupervisorReview
             | TaskStatus::AwaitingMerge

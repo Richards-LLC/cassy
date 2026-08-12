@@ -263,6 +263,32 @@ impl CasCore {
             data: None,
         })?;
         let original_updated_at = task.updated_at;
+        if req.status.as_deref().is_some_and(|status| {
+            status.eq_ignore_ascii_case("cancelled") || status.eq_ignore_ascii_case("canceled")
+        }) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "TASK UPDATE REJECTED: status=cancelled cannot be set directly. Use task \
+                     action=cancel with a non-empty reason so supervisor authority and the \
+                     no-delivery audit outcome are recorded."
+                        .to_string(),
+                ),
+                data: None,
+            });
+        }
+        if task.status == TaskStatus::Cancelled && req.status.is_some() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "TASK UPDATE REJECTED: cancelled task {} may change status only through task \
+                     action=reopen so supervisor authority is checked and terminal outcome state \
+                     is cleared atomically.",
+                    task.id
+                )),
+                data: None,
+            });
+        }
         let reopening_closed = task.status == TaskStatus::Closed
             && req
                 .status

@@ -498,6 +498,7 @@ impl FactoryApp {
                     cas_types::TaskStatus::Open => palette.task_open,
                     cas_types::TaskStatus::InProgress => palette.task_in_progress,
                     cas_types::TaskStatus::Closed => palette.task_closed,
+                    cas_types::TaskStatus::Cancelled => palette.task_closed,
                     cas_types::TaskStatus::Blocked => palette.task_blocked,
                     // cas-b51a: reuse warning color — task awaits supervisor review
                     cas_types::TaskStatus::PendingSupervisorReview => palette.task_blocked,

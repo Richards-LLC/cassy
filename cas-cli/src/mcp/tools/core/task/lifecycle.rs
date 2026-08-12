@@ -619,6 +619,18 @@ impl CasCore {
 
         let agent_store = self.open_agent_store()?;
 
+        // cas-7844 / GH #259: Gate tasks are supervisor-owned decisions,
+        // not worker execution. Reuse the same live registered-supervisor
+        // resolver as the other non-delivery terminal outcomes so env-role
+        // spoofing cannot authorize the start.
+        if task.task_type == crate::types::TaskType::Gate {
+            self.resolve_live_supervisor_authority()
+                .map_err(|error| Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    close_ops::gate_supervisor_authority_error("START", error),
+                ))?;
+        }
+
         // Check agent role for supervisor/worker-specific logic
         let is_worker = agent_store
             .get(&agent_id)
@@ -651,10 +663,15 @@ impl CasCore {
             }
         }
 
-        // Check if supervisor is trying to start a non-epic task
+        // Check if supervisor is trying to start an ordinary non-epic task.
+        // Gate is the deliberate narrow exception: the authority check above
+        // already proved the caller is a live registered supervisor.
         if let Ok(agent) = agent_store.get(&agent_id) {
             if agent.role == cas_types::AgentRole::Supervisor
-                && task.task_type != crate::types::TaskType::Epic
+                && !matches!(
+                    task.task_type,
+                    crate::types::TaskType::Epic | crate::types::TaskType::Gate
+                )
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,

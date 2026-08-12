@@ -177,8 +177,10 @@ pub struct TaskRequest {
     #[serde(default, deserialize_with = "deser::option_priority")]
     pub priority: Option<u8>,
 
-    /// Task type (for create): task, bug, feature, epic, chore
-    #[schemars(description = "Task type: 'task', 'bug', 'feature', 'epic', 'chore'")]
+    /// Task type (for create): task, bug, feature, epic, chore, spike, gate
+    #[schemars(
+        description = "Task type: 'task', 'bug', 'feature', 'epic', 'chore', 'spike', 'gate'"
+    )]
     #[serde(default)]
     pub task_type: Option<String>,
 

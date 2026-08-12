@@ -299,6 +299,22 @@ impl CasCore {
             .as_deref()
             .is_some_and(|status| status.eq_ignore_ascii_case("closed"))
             && task.status != TaskStatus::Closed
+            && task.task_type == TaskType::Gate
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "GATE UPDATE REJECTED: task {} may close only through task action=close so live supervisor authority and a non-empty recorded DECISION note are checked atomically.",
+                    task.id
+                )),
+                data: None,
+            });
+        }
+        if req
+            .status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("closed"))
+            && task.status != TaskStatus::Closed
             && let Err(message) = self.guard_direct_update_close_delivery_state(&task)
         {
             return Err(McpError {

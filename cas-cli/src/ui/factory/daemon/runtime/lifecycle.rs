@@ -1,5 +1,176 @@
 use crate::ui::factory::daemon::imports::*;
 
+/// Persist one worker-health incident and hand it to the supervisor's durable
+/// prompt queue. The detector has already debounced the episode and the event
+/// has already been delivery-revalidated when this runs.
+fn enqueue_worker_attention_relay(
+    cas_dir: &std::path::Path,
+    event: &crate::ui::factory::director::DirectorEvent,
+) {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+    };
+    use cas_store::{NotificationPriority, NotifyIdempotentResult};
+
+    let (kind, worker, task_id, elapsed_secs) = match event {
+        crate::ui::factory::director::DirectorEvent::WorkerIdle {
+            worker,
+            active_task: None,
+        } => ("worker_idle", worker.as_str(), None, None),
+        crate::ui::factory::director::DirectorEvent::WorkerStalled {
+            worker,
+            task_id,
+            elapsed_secs,
+            escalate: true,
+        } => (
+            "worker_stalled",
+            worker.as_str(),
+            Some(task_id.as_str()),
+            Some(*elapsed_secs),
+        ),
+        _ => return,
+    };
+    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
+        tracing::warn!("worker attention relay skipped: agent store unavailable");
+        return;
+    };
+    let Some(supervisor) =
+        resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
+    else {
+        return;
+    };
+    let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
+        tracing::warn!(worker = %worker, kind, "worker attention relay skipped: supervisor queue unavailable");
+        return;
+    };
+    // The event detector emits once per episode. The timestamp distinguishes a
+    // later recovered-and-stalled episode while the queue dedupes retries of
+    // this exact durable occurrence.
+    let occurrence = chrono::Utc::now().to_rfc3339();
+    let key = format!(
+        "worker-attention:{}:{kind}:{worker}:{}:{occurrence}",
+        factory_session.as_deref().unwrap_or(""),
+        task_id.unwrap_or("")
+    );
+    let payload = serde_json::json!({
+        "kind": kind,
+        "worker": worker,
+        "task_id": task_id,
+        "elapsed_secs": elapsed_secs,
+        "factory_session": factory_session,
+        "occurrence": occurrence,
+    })
+    .to_string();
+    let notification_id = match supervisor_queue.notify_idempotent(
+        &supervisor.agent_id,
+        kind,
+        &payload,
+        NotificationPriority::High,
+        &key,
+    ) {
+        Ok(NotifyIdempotentResult::Created(id)) => id,
+        Ok(NotifyIdempotentResult::AlreadyExists {
+            id: _,
+            prompt_delivered: true,
+        }) => return,
+        Ok(NotifyIdempotentResult::AlreadyExists {
+            id,
+            prompt_delivered: false,
+        }) => id,
+        Err(error) => {
+            tracing::error!(worker = %worker, kind, %error, "worker attention relay durable enqueue failed");
+            return;
+        }
+    };
+    let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
+        tracing::error!(worker = %worker, kind, notification_id, "worker attention relay left pending: prompt queue unavailable");
+        return;
+    };
+    let detail = match (kind, task_id, elapsed_secs) {
+        ("worker_stalled", Some(task), Some(elapsed)) => format!(
+            "Worker {worker} is stalled on {task} after {}m without activity.",
+            elapsed / 60
+        ),
+        _ => format!("Worker {worker} is idle with no active task and needs supervisor attention."),
+    };
+    let body = format!(
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `coordination action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
+    );
+    let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
+    if let Err(error) = prompt_queue.enqueue_idempotent(
+        &source,
+        "supervisor",
+        &body,
+        factory_session.as_deref(),
+        Some(&format!("{kind}: {worker}")),
+        Some(NotificationPriority::High),
+        &format!("worker-attention-outbox:{notification_id}"),
+    ) {
+        tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
+        return;
+    }
+    if let Err(error) = supervisor_queue.mark_prompt_delivered(notification_id) {
+        tracing::warn!(notification_id, %error, "worker attention relay prompt stamp failed; idempotent replay remains safe");
+    }
+}
+
+#[cfg(test)]
+mod worker_attention_tests {
+    use super::*;
+    use cas_types::{Agent, AgentRole, AgentStatus};
+
+    fn register_supervisor(cas_dir: &std::path::Path, session: &str) {
+        let agents = crate::store::open_agent_store(cas_dir).unwrap();
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.status = AgentStatus::Active;
+        supervisor.factory_session = Some(session.to_string());
+        agents.register(&supervisor).unwrap();
+    }
+
+    #[test]
+    fn taskless_idle_and_escalated_stall_use_durable_wake_relay() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "worker-attention-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "worker-attention-test");
+
+        enqueue_worker_attention_relay(
+            &cas_dir,
+            &crate::ui::factory::director::DirectorEvent::WorkerIdle {
+                worker: "calm-owl".to_string(),
+                active_task: None,
+            },
+        );
+        enqueue_worker_attention_relay(
+            &cas_dir,
+            &crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                worker: "steady-otter".to_string(),
+                task_id: "cas-d4ae".to_string(),
+                elapsed_secs: 300,
+                escalate: true,
+            },
+        );
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| {
+            row.target == "supervisor"
+                && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
+                && crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt)
+        }));
+        assert!(rows.iter().any(|row| row.prompt.contains("kind=\"worker_idle\"")));
+        assert!(rows.iter().any(|row| {
+            row.prompt.contains("kind=\"worker_stalled\"") && row.prompt.contains("cas-d4ae")
+        }));
+    }
+}
+
 impl FactoryDaemon {
     pub fn new(config: DaemonConfig) -> anyhow::Result<Self> {
         // Get initial terminal size (default for daemon without terminal)
@@ -220,13 +391,14 @@ impl FactoryDaemon {
                             self.ws_listener = Some(tl);
                             // Update session metadata with ws_port
                             if let Some(port) = port {
-                                let meta_path = crate::ui::factory::session::metadata_path(
-                                    &self.session_name,
-                                );
+                                let meta_path =
+                                    crate::ui::factory::session::metadata_path(&self.session_name);
                                 if let Ok(data) = std::fs::read_to_string(&meta_path) {
-                                    if let Ok(mut meta) = serde_json::from_str::<
-                                        crate::ui::factory::protocol::SessionMetadata,
-                                    >(&data) {
+                                    if let Ok(mut meta) =
+                                        serde_json::from_str::<
+                                            crate::ui::factory::protocol::SessionMetadata,
+                                        >(&data)
+                                    {
                                         meta.ws_port = Some(port);
                                         let _ = self.session_manager.save_metadata(&meta);
                                     }
@@ -341,9 +513,7 @@ impl FactoryDaemon {
                 // cas-ecff: auto-drain pending lifecycle outbox (durable
                 // task_lifecycle rows with prompt_delivered_at unset) so
                 // partial failures recover without re-running task mutations.
-                if let Ok(sq) =
-                    crate::store::open_supervisor_queue_store(self.app.cas_dir())
-                {
+                if let Ok(sq) = crate::store::open_supervisor_queue_store(self.app.cas_dir()) {
                     if let Ok(pq) = crate::store::open_prompt_queue_store(self.app.cas_dir()) {
                         match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox(
                             sq.as_ref(),
@@ -504,6 +674,15 @@ impl FactoryDaemon {
                     // Send notifications for detected events
                     self.app.notify_events(&delivery_events);
 
+                    // cas-d4ae: the detector has already emitted exactly one
+                    // event for this idle/stall episode and the app just
+                    // revalidated it against current task/worker state. Send
+                    // the actionable cases through the durable supervisor
+                    // wake lane before ordinary prompt injection.
+                    for event in &delivery_events {
+                        enqueue_worker_attention_relay(self.app.cas_dir(), event);
+                    }
+
                     // Handle epic state transitions
                     let changes = self.app.handle_epic_events(&delivery_events);
                     for change in changes {
@@ -566,8 +745,12 @@ impl FactoryDaemon {
                         // exact live incident this closes: an alert quoting
                         // "checked against epic tip 811377c" delivered after
                         // the epic had already advanced past that tip.
-                        let repo_root =
-                            self.app.cas_dir().parent().unwrap_or(self.app.cas_dir()).to_path_buf();
+                        let repo_root = self
+                            .app
+                            .cas_dir()
+                            .parent()
+                            .unwrap_or(self.app.cas_dir())
+                            .to_path_buf();
                         match teams.prune_stale_merge_alerts("supervisor", |task_id| {
                             matches!(
                                 crate::ui::factory::director::check_merge_alert_freshness_for_task(
@@ -600,15 +783,12 @@ impl FactoryDaemon {
                         // predicate used before transport. This block only runs
                         // with an authoritative store snapshot; missing state is
                         // uncertainty and preserves the row.
-                        match teams.prune_stale_epic_completion_alerts(
-                            "supervisor",
-                            |epic_id| {
-                                !crate::ui::factory::director::epic_completion_is_current(
-                                    unfiltered_data,
-                                    epic_id,
-                                )
-                            },
-                        ) {
+                        match teams.prune_stale_epic_completion_alerts("supervisor", |epic_id| {
+                            !crate::ui::factory::director::epic_completion_is_current(
+                                unfiltered_data,
+                                epic_id,
+                            )
+                        }) {
                             Ok(0) => {}
                             Ok(n) => tracing::info!(
                                 target: "cas::coordination",

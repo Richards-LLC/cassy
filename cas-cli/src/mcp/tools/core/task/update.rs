@@ -1379,6 +1379,7 @@ mod status_transition_tests {
 
         let mut task = Task::new("cas-anchor".into(), "Anchored closed task".into());
         task.status = TaskStatus::Closed;
+        task.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Delivered);
         task.assignee = Some("worker".into());
         task.deliverables.factory_branch_anchor = Some(already_merged_anchor);
         task.deliverables.parked_branch = Some("factory/worker".into());
@@ -1396,6 +1397,10 @@ mod status_transition_tests {
         assert!(
             updated.deliverables.factory_branch_anchor.is_none(),
             "a Closed -> non-Closed transition must invalidate the prior close cycle's anchor"
+        );
+        assert_eq!(
+            updated.terminal_outcome, None,
+            "active work must not retain the prior terminal disposition"
         );
 
         git(repo, &["checkout", "-q", "factory/worker"]);

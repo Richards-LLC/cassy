@@ -595,9 +595,18 @@ impl Task {
     }
 
     /// Whether parent-epic branch accounting must find integrated delivery for
-    /// this task. Non-delivery outcomes never contribute a branch.
+    /// this task. Active work and Delivered terminal work both retain branch
+    /// reachability obligations; only an explicit terminal non-delivery
+    /// outcome removes the child from integration accounting.
     pub fn has_delivery_to_integrate(&self) -> bool {
-        self.counts_as_delivered()
+        !matches!(
+            self.effective_terminal_outcome(),
+            Some(
+                TaskTerminalOutcome::NegativeResult
+                    | TaskTerminalOutcome::Decision
+                    | TaskTerminalOutcome::Cancelled { .. }
+            )
+        )
     }
 
     /// Check if the task is ready to work on. Waiting states like

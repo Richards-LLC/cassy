@@ -613,6 +613,7 @@ impl TaskStore for SqliteTaskStore {
                 )
                 .optional()?;
             let mut persisted_deliverables = task.deliverables.clone();
+            let mut persisted_terminal_outcome = task.terminal_outcome.clone();
             let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
                 && !task.is_terminal();
             let resuming_merge_conflict = prev_status.as_deref() == Some("awaiting_merge")
@@ -627,6 +628,7 @@ impl TaskStore for SqliteTaskStore {
                 persisted_deliverables.factory_branch_anchor = None;
                 if reopening_terminal {
                     persisted_deliverables.negative_result = None;
+                    persisted_terminal_outcome = None;
                 }
             }
             if resuming_merge_conflict {
@@ -674,7 +676,7 @@ impl TaskStore for SqliteTaskStore {
                 task.execution_note,
                 task.share.as_ref().map(|s| s.to_string()),
                 task.depth.to_string(),
-                Self::terminal_outcome_to_string(&task.terminal_outcome),
+                Self::terminal_outcome_to_string(&persisted_terminal_outcome),
                 task.id,
             ],
         )?;

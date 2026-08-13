@@ -91,6 +91,10 @@ mod tests {
         std::fs::write(task_root.join("SEND-LOG.md"), "MessageId: readable").unwrap();
         std::fs::write(task_root.join("binary.txt"), b"\0not text").unwrap();
         std::fs::write(task_root.join("image.png"), "not indexed").unwrap();
+        std::fs::File::create(task_root.join("oversize.json"))
+            .unwrap()
+            .set_len(MAX_ARTIFACT_BYTES + 1)
+            .unwrap();
 
         let documents = discover_task_artifacts(temp.path(), "cas-artifacts");
         assert_eq!(documents.len(), 1);

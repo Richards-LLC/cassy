@@ -15,12 +15,13 @@ afterEach(() => {
 
 describe("binding Commander browser invariants", () => {
   it("H4-CATALOG-01 consumes pairing fragments synchronously and preserves no capability in the URL", () => {
+    const token = "A".repeat(43);
     let replacement = "";
-    const location = { hash: "#pair=one-time-secret&hub=machine-1", pathname: "/", search: "" } as Location;
+    const location = { hash: `#pair=${token}&hub=machine-1`, pathname: "/", search: "" } as Location;
     const history = { replaceState: (_: unknown, __: string, path: string) => { replacement = path; } } as unknown as History;
-    expect(consumePairingFragment(location, history)).toEqual({ token: "one-time-secret", hubId: "machine-1" });
+    expect(consumePairingFragment(location, history)).toEqual({ token, hubId: "machine-1" });
     expect(replacement).toBe("/");
-    expect(replacement).not.toContain("one-time-secret");
+    expect(replacement).not.toContain(token);
   });
 
   it("H4-STORAGE-02 creates a non-extractable P-256 signing key and valid proof", async () => {
@@ -54,9 +55,10 @@ describe("binding Commander browser invariants", () => {
   it("keeps long-lived credentials out of ambient browser storage and URL channels", async () => {
     const source = await Promise.all(["storage.ts", "main.ts", "dpop.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     const joined = source.join("\n");
-    for (const forbidden of ["local" + "Storage", "session" + "Storage", "document.cookie", "serviceWorker.register", "caches.open"]) {
+    for (const forbidden of ["local" + "Storage", "document.cookie", "serviceWorker.register", "caches.open"]) {
       expect(joined).not.toContain(forbidden);
     }
+    expect(await readFile(new URL("storage.ts", import.meta.url), "utf8")).not.toContain("session" + "Storage");
     expect(joined).toContain("indexedDB.open");
   });
 

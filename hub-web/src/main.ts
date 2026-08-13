@@ -2,11 +2,16 @@ import "./styles.css";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
+import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
+import { PendingPairingStore, type PendingInvitation, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
+import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionState, StoredMachine } from "./types";
 
-const pendingPairing = consumePairingFragment(window.location, window.history);
+const pendingPairingStore = new PendingPairingStore(window.sessionStorage);
+let pendingPairing: PendingPairing | null = consumePairingFragment(window.location, window.history, pendingPairingStore) as PendingInvitation | null;
+pendingPairing ??= pendingPairingStore.load();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const machines = new Map<string, StoredMachine>();
 const sessions = new Map<string, HubSession[]>();
@@ -24,6 +29,9 @@ const leaseExpiryTimers = new Map<string, number>();
 let attention: AttentionItem[] = [];
 let selectedMachineId: string | undefined;
 let selectedSession: string | undefined;
+let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
+let pairingPollTimer: number | undefined;
+let pairingCountdownTimer: number | undefined;
 
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
@@ -35,6 +43,7 @@ async function boot(): Promise<void> {
   selectedMachineId = machines.keys().next().value;
   render();
   for (const machine of machines.values()) ensureConnection(machine);
+  resumePairingPoll();
 }
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
@@ -90,44 +99,122 @@ async function acknowledgeAttention(id: string): Promise<void> {
 }
 
 async function pairMachine(form: HTMLFormElement): Promise<void> {
-  if (!pendingPairing) throw new Error("Open the one-time pairing link first");
+  const invitation = pendingPairing?.kind === "invitation" ? pendingPairing : null;
+  if (!invitation) throw new Error("Create a pairing request or open a one-time pairing link first.");
   const values = new FormData(form);
-  const baseUrl = new URL(String(values.get("url"))).origin;
-  const { privateKey, publicKey } = await createDeviceKey();
-  const scopes = values.getAll("scope") as Scope[];
-  const response = await fetch(new URL("/v1/auth/pairing/exchange", baseUrl), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "omit",
-    body: JSON.stringify({
-      token: pendingPairing.token,
-      hub_id: pendingPairing.hubId,
-      controller_origin: location.origin,
-      public_key_jwk: publicKey,
-      device_label: String(values.get("device")),
-      operator_label: String(values.get("operator")),
-      requested_scopes: scopes,
-    }),
-  });
-  if (!response.ok) throw new Error("Pairing was refused; create a fresh invitation and verify the hub URL");
-  const credential = await response.json() as { device_id: string; credential_id: string; credential: string; expires_at: string; scopes: Scope[] };
-  const machine: StoredMachine = {
-    id: pendingPairing.hubId,
-    label: String(values.get("label")) || pendingPairing.hubId.slice(0, 8),
-    baseUrl,
-    deviceId: credential.device_id,
-    credentialId: credential.credential_id,
-    credential: credential.credential,
-    expiresAt: credential.expires_at,
-    scopes: credential.scopes,
-    publicKey,
-    privateKey,
-  };
-  await catalog.put(machine);
+  let machine: StoredMachine;
+  try {
+    machine = await exchangePendingPairing({
+      invitation,
+      controllerOrigin: location.origin,
+      legacyHubUrl: invitation.hubUrl ? undefined : String(values.get("url")),
+      machineLabel: String(values.get("label")),
+      deviceLabel: String(values.get("device")),
+      operatorLabel: String(values.get("operator")),
+      requestedScopes: values.getAll("scope") as Scope[],
+      fetcher: fetch,
+      createKey: createDeviceKey,
+      persist: (candidate) => catalog.put(candidate),
+      acknowledge: (relay) => acknowledgePairing(fetch, relay),
+    });
+  } catch (error) {
+    if (error instanceof PairingExchangeError) {
+      pendingPairingStore.clear();
+      pendingPairing = null;
+      pairingStatus = error.message;
+      render();
+    }
+    throw error;
+  }
+  pendingPairingStore.clear();
+  pendingPairing = null;
+  stopPairingTimers();
   machines.set(machine.id, machine);
   selectedMachineId = machine.id;
   ensureConnection(machine);
   render();
+}
+
+async function startRelayPairing(email: string): Promise<void> {
+  const created = await createPairingRequest(fetch, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined);
+  pendingPairing = created;
+  pendingPairingStore.save(created);
+  pairingStatus = "Waiting for a machine to claim the code…";
+  render();
+  resumePairingPoll();
+}
+
+function resumePairingPoll(): void {
+  if (pairingPollTimer !== undefined || pendingPairing?.kind !== "relay-request") return;
+  const request = pendingPairing;
+  pairingPollTimer = window.setTimeout(() => void pollRelay(request), request.interval * 1000);
+}
+
+async function pollRelay(request: PendingRelayRequest): Promise<void> {
+  pairingPollTimer = undefined;
+  if (pendingPairing?.kind !== "relay-request" || pendingPairing.pairingRequestId !== request.pairingRequestId) return;
+  try {
+    const result = await pollPairingRequest(fetch, request);
+    if (result.kind === "authorized") {
+      pendingPairing = result.invitation;
+      pendingPairingStore.save(result.invitation);
+      pairingStatus = "Machine authorized. Confirm the exact details and finish pairing.";
+      render();
+      return;
+    }
+    request.interval = result.interval;
+    if (result.kind !== "slow-down") request.expiresAt = result.expiresAt;
+    pendingPairingStore.save(request);
+    pairingStatus = result.kind === "claimed" ? "Machine claimed the code. Waiting for local approval…" : result.kind === "slow-down" ? `Polling slowed to ${result.interval} seconds.` : "Waiting for a machine to claim the code…";
+    render();
+    resumePairingPoll();
+  } catch (error) {
+    const terminal = error instanceof PairingRelayError && ["request_mismatch", "expired_request"].includes(error.code);
+    if (terminal) {
+      pendingPairingStore.clear();
+      pendingPairing = null;
+    }
+    pairingStatus = error instanceof PairingRelayError ? error.message : "The pairing service is unavailable. Retrying without discarding this request.";
+    render();
+    if (!terminal) resumePairingPoll();
+  }
+}
+
+function cancelPendingPairing(): void {
+  document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
+  pendingPairingStore.clear();
+  pendingPairing = null;
+  pairingStatus = "Pairing cancelled.";
+  stopPairingTimers();
+  render();
+}
+
+function stopPairingTimers(): void {
+  if (pairingPollTimer !== undefined) window.clearTimeout(pairingPollTimer);
+  if (pairingCountdownTimer !== undefined) window.clearInterval(pairingCountdownTimer);
+  pairingPollTimer = undefined;
+  pairingCountdownTimer = undefined;
+}
+
+function syncPairingCountdown(): void {
+  if (pairingCountdownTimer !== undefined) window.clearInterval(pairingCountdownTimer);
+  pairingCountdownTimer = undefined;
+  const expiresAt = pendingPairing?.expiresAt;
+  if (!expiresAt) return;
+  const update = () => {
+    const output = document.querySelector<HTMLElement>("#pair-countdown");
+    const remaining = Math.max(0, Date.parse(expiresAt) - Date.now());
+    if (output) output.textContent = `${Math.floor(remaining / 60_000)}:${String(Math.floor(remaining / 1000) % 60).padStart(2, "0")}`;
+    if (remaining === 0) {
+      pendingPairingStore.clear();
+      pendingPairing = null;
+      pairingStatus = "This pairing request has expired.";
+      stopPairingTimers();
+      render();
+    }
+  };
+  update();
+  pairingCountdownTimer = window.setInterval(update, 1000);
 }
 
 async function openSession(machineId: string, session: string): Promise<void> {
@@ -288,6 +375,24 @@ function toast(message: string): void {
   window.setTimeout(() => output.classList.remove("visible"), 3200);
 }
 
+function pairingDetails(origin: string, scopes: readonly Scope[]): string {
+  return `<dl class="pair-details"><div><dt>Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl>`;
+}
+
+function pairDialogMarkup(): string {
+  if (pendingPairing?.kind === "relay-request") {
+    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Run <code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code> on the machine you want to pair.</p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+  }
+  if (pendingPairing?.kind === "invitation") {
+    const relay = Boolean(pendingPairing.relay);
+    const hubUrl = pendingPairing.hubUrl;
+    const origin = pendingPairing.controllerOrigin;
+    const scopes = pendingPairing.scopes;
+    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && scopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required value="${escapeAttr(location.origin)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac"></label><fieldset><legend>Scopes requested</legend>${scopeChecks()}</fieldset>`}<label>Device label<input name="device" required value="Commander browser"></label><label>Operator label<input name="operator" required placeholder="Your name"></label><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary">Pair</button></div></form></dialog>`;
+  }
+  return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Create a ten-minute code, then approve the exact origin and read-only scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">Close</button><button id="pair-create" type="button" class="primary">Create pairing code</button></div></section></dialog>`;
+}
+
 function render(): void {
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const machineSessions = selected ? sessions.get(selected.id) ?? [] : [];
@@ -296,6 +401,7 @@ function render(): void {
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
+  const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
   if (preservedGrid) {
     preservedGrid.remove();
@@ -305,11 +411,11 @@ function render(): void {
   }
   app.innerHTML = `
     <div class="shell">
-      <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair machine</button><nav id="machine-list"></nav></aside>
+      <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair this machine</button><nav id="machine-list"></nav></aside>
       <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
       <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div></header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
       <aside class="context"><section><h2>Attention <span class="badge">${attention.filter((item) => !item.acknowledgedAt).length}</span></h2><div id="attention-list"></div></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea><button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
-    </div><dialog id="pair-dialog"><form id="pair-form"><h2>Pair a machine</h2><p>${pendingPairing ? "One-time invitation ready. Confirm the target hub." : "Open a pairing URL generated by cas hub pair."}</p><label>Hub URL<input name="url" type="url" required value="${escapeAttr(location.origin)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac"></label><label>Device label<input name="device" required placeholder="My phone"></label><label>Operator label<input name="operator" required placeholder="Your name"></label><fieldset><legend>Scopes requested</legend>${scopeChecks()}</fieldset><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pendingPairing ? "" : "disabled"}>Pair</button></div></form></dialog><div id="toast" role="status"></div>`;
+    </div>${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
   const machineList = document.querySelector("#machine-list")!;
   for (const machine of machines.values()) machineList.append(machineButton(machine));
@@ -317,10 +423,12 @@ function render(): void {
   for (const session of machineSessions) sessionList.append(sessionButton(selected!.id, session));
   renderAttention(); renderStatus(status);
   bindEvents(selected, lease);
+  if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
   if (selected && selectedSession) {
     const state = sessionStates.get(sessionKey(selected.id, selectedSession));
     if (state) queueMicrotask(() => void renderSessionState(selected.id, selectedSession!, state));
   }
+  syncPairingCountdown();
 }
 
 function compatibilityWarning(machineId: string): string | undefined {
@@ -369,9 +477,27 @@ function renderStatus(status?: Record<string, unknown>): void {
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
-  const pairForm = document.querySelector<HTMLFormElement>("#pair-form")!;
-  document.querySelector<HTMLButtonElement>("#pair-cancel")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close();
-  pairForm.onsubmit = (event) => { event.preventDefault(); void pairMachine(pairForm).then(() => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close()).catch((error) => toast(String(error))); };
+  const pairForm = document.querySelector<HTMLFormElement>("#pair-form");
+  const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
+  const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
+  const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
+  if (pairCancel) pairCancel.onclick = cancelPendingPairing;
+  if (pairClose) pairClose.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close();
+  if (pairCreate) pairCreate.onclick = () => {
+    pairCreate.disabled = true;
+    const email = document.querySelector<HTMLInputElement>("#pair-email")?.value.trim() ?? "";
+    void startRelayPairing(email).then(() => {
+      const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+      if (dialog && !dialog.open) dialog.showModal();
+    }).catch((error) => {
+      pairCreate.disabled = false;
+      pairingStatus = error instanceof PairingRelayError ? error.message : "The pairing service is unavailable.";
+      render();
+      const dialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+      if (dialog && !dialog.open) dialog.showModal();
+    });
+  };
+  if (pairForm) pairForm.onsubmit = (event) => { event.preventDefault(); void pairMachine(pairForm).then(() => document.querySelector<HTMLDialogElement>("#pair-dialog")?.close()).catch((error) => toast(error instanceof Error ? error.message : "Pairing failed")); };
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {
     connections.get(selected.id)?.stop();

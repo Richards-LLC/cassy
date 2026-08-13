@@ -5112,6 +5112,7 @@ impl FactoryDaemon {
                 &self.session_name,
                 agent_id_to_name,
                 None,
+                self.app.cas_dir(),
             );
         }
 
@@ -5142,6 +5143,7 @@ impl FactoryDaemon {
                         &self.session_name,
                         agent_id_to_name,
                         Some(event),
+                        self.app.cas_dir(),
                     );
                 }
             }
@@ -5271,6 +5273,7 @@ fn fire_reminder(
     session_name: &str,
     agent_id_to_name: &std::collections::HashMap<String, String>,
     triggering_event: Option<&crate::ui::factory::director::DirectorEvent>,
+    cas_dir: &std::path::Path,
 ) {
     // Build event JSON for persistence
     let event_json = triggering_event.map(|e| {
@@ -5329,13 +5332,23 @@ fn fire_reminder(
         // mail to avoid accusing a healthy waiting worker of being wedged,
         // parses exactly what is written here.
         let event_context = triggering_event.map(|event| event.description());
+        let task_status = reminder.task_id.as_deref().and_then(|task_id| {
+            crate::store::open_task_store(cas_dir)
+                .ok()
+                .and_then(|store| store.get(task_id).ok())
+                .map(|task| task.status.to_string())
+        });
         let prompt = if reminder.cross_session {
-            cas_store::format_cross_session_reminder_delivery(reminder, event_context.as_deref())
-        } else {
-            cas_store::format_reminder_delivery(
-                reminder.id,
-                &reminder.message,
+            cas_store::format_cross_session_reminder_delivery(
+                reminder,
                 event_context.as_deref(),
+                task_status.as_deref(),
+            )
+        } else {
+            cas_store::format_reminder_delivery_with_provenance(
+                reminder,
+                event_context.as_deref(),
+                task_status.as_deref(),
             )
         };
 
@@ -8343,6 +8356,7 @@ mod tests {
             session_id: Some("session-a".into()),
             origin_session_id: Some("creator-session".into()),
             cross_session: false,
+            task_id: None,
         };
         let match_event = DirectorEvent::TaskCompleted {
             task_id: "cas-keep".into(),

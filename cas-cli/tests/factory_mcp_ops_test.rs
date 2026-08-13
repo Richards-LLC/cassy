@@ -19,11 +19,12 @@ use std::sync::Arc;
 use cas::mcp::{CasCore, CasService};
 use cas::store::{
     AgentStore, EventStore, PromptQueueStore, SpawnQueueStore, TaskStore, init_cas_dir,
-    open_agent_store, open_event_store, open_prompt_queue_store, open_spawn_queue_store,
-    open_task_store,
+    open_agent_store, open_event_store, open_prompt_queue_store, open_reminder_store,
+    open_spawn_queue_store, open_task_store,
 };
 use cas::types::{
-    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType, WorkTarget,
+    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskDepth, TaskStatus, TaskType,
+    WorkTarget,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
@@ -535,6 +536,48 @@ fn coord_req(action: &str) -> CoordinationRequest {
         port: None,
         shared: None,
     }
+}
+
+/// GH #276: existing callers did not supply task_id. With exactly one active
+/// issuer task, remind must infer that context so close quarantines it.
+#[tokio::test]
+async fn remind_auto_binds_issuer_single_in_progress_task_and_close_quarantines_it() {
+    let env = FactoryTestEnv::new();
+    env.register_worker_with_id("test-agent-id", "reminder-worker", None);
+
+    let task_store = env.task_store();
+    let task_id = task_store.generate_id().unwrap();
+    let mut task = Task::new(task_id.clone(), "reminder context".to_string());
+    task.assignee = Some("test-agent-id".to_string());
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Light;
+    task_store.add(&task).unwrap();
+
+    let mut remind = factory_req("remind");
+    remind.remind_message = Some("follow up on discarded draft".to_string());
+    remind.remind_delay_secs = Some(300);
+    env.service
+        .factory(Parameters(remind))
+        .await
+        .expect("remind should infer the issuer task");
+
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    let pending = reminders.list_pending("test-agent-id").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].task_id.as_deref(), Some(task_id.as_str()));
+
+    let close: cas_mcp::types::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "close", "id": task_id, "reason": "done"
+    }))
+    .unwrap();
+    env.service
+        .task(Parameters(close))
+        .await
+        .expect("light task close should succeed");
+    assert!(
+        reminders.list_pending("test-agent-id").unwrap().is_empty(),
+        "task close must quarantine the inferred reminder"
+    );
 }
 
 fn get_text(result: &rmcp::model::CallToolResult) -> String {

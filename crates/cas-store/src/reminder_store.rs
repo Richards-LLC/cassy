@@ -137,9 +137,15 @@ pub struct Reminder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_session_id: Option<String>,
     /// Explicit opt-in for a reminder to survive its creator's SessionEnd.
-    /// Such deliveries carry origin and age context for stale-context triage.
+    /// It also keeps a task-linked reminder alive when that task closes. Such
+    /// deliveries carry origin and age context for stale-context triage.
     #[serde(default)]
     pub cross_session: bool,
+    /// Task context active when this reminder was issued, if supplied by the
+    /// caller. Task closure cancels linked reminders unless `cross_session` is
+    /// explicitly set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// Wire prefix that marks a prompt-queue row as a fired-reminder delivery.
@@ -166,13 +172,36 @@ pub fn format_reminder_delivery(id: i64, message: &str, event_context: Option<&s
     }
 }
 
+/// Add issue-time and task-state provenance to every fired reminder. This is
+/// deliberately rendered at fire time: a reminder that was valid when armed
+/// may no longer be actionable after its task changes state.
+pub fn format_reminder_delivery_with_provenance(
+    reminder: &Reminder,
+    event_context: Option<&str>,
+    task_status: Option<&str>,
+) -> String {
+    let mut delivery = format_reminder_delivery(reminder.id, &reminder.message, event_context);
+    let age_minutes = (Utc::now() - reminder.created_at).num_minutes().max(0);
+    let task_context = match (reminder.task_id.as_deref(), task_status) {
+        (Some(task_id), Some(status)) => format!("task {task_id} ({status})"),
+        (Some(task_id), None) => format!("task {task_id} (missing)"),
+        (None, _) => "no task context".to_string(),
+    };
+    delivery.push_str(&format!(
+        "\n\nProvenance: issued {age_minutes} min ago under {task_context}."
+    ));
+    delivery
+}
+
 /// Render an explicitly cross-session delivery without losing the durable
 /// `Reminder #<id>:` prefix that downstream status logic parses.
 pub fn format_cross_session_reminder_delivery(
     reminder: &Reminder,
     event_context: Option<&str>,
+    task_status: Option<&str>,
 ) -> String {
-    let mut delivery = format_reminder_delivery(reminder.id, &reminder.message, event_context);
+    let mut delivery =
+        format_reminder_delivery_with_provenance(reminder, event_context, task_status);
     let origin = reminder
         .origin_session_id
         .as_deref()
@@ -234,6 +263,8 @@ const MIGRATION_SESSION_ID: &str = "ALTER TABLE reminders ADD COLUMN session_id 
 const MIGRATION_ORIGIN_SESSION_ID: &str = "ALTER TABLE reminders ADD COLUMN origin_session_id TEXT";
 const MIGRATION_CROSS_SESSION: &str =
     "ALTER TABLE reminders ADD COLUMN cross_session INTEGER NOT NULL DEFAULT 0";
+/// Migration: task context lets task-close quarantine stale reminders.
+const MIGRATION_TASK_ID: &str = "ALTER TABLE reminders ADD COLUMN task_id TEXT";
 
 /// Trait for reminder storage operations
 #[allow(clippy::too_many_arguments)]
@@ -275,6 +306,7 @@ pub trait ReminderStore: Send + Sync {
         session_id: Option<&str>,
         origin_session_id: Option<&str>,
         cross_session: bool,
+        task_id: Option<&str>,
     ) -> Result<i64>;
 
     /// List pending reminders owned by a specific agent
@@ -311,6 +343,11 @@ pub trait ReminderStore: Send + Sync {
     /// Cancel pending default-scoped reminders created by a completed session.
     /// Explicit cross-session reminders are deliberately retained.
     fn cancel_pending_for_origin_session(&self, origin_session_id: &str) -> Result<usize>;
+
+    /// Cancel pending reminders issued under a task that has just closed.
+    /// Explicit cross-session opt-in keeps a reminder alive across this
+    /// boundary, but its delivery is stamped with task status and age.
+    fn cancel_pending_for_task(&self, task_id: &str) -> Result<usize>;
 
     /// Expire reminders past their TTL, returns count expired
     fn expire_stale(&self) -> Result<usize>;
@@ -398,6 +435,7 @@ impl SqliteReminderStore {
             }
         });
         let cross_session: bool = row.get::<_, i64>(16)? != 0;
+        let task_id: Option<String> = row.get(17)?;
 
         Ok(Reminder {
             id: row.get(0)?,
@@ -417,6 +455,7 @@ impl SqliteReminderStore {
             session_id,
             origin_session_id,
             cross_session,
+            task_id,
         })
     }
 
@@ -457,10 +496,17 @@ impl SqliteReminderStore {
             conn.execute_batch(MIGRATION_CROSS_SESSION)?;
         }
 
+        if conn
+            .prepare_cached("SELECT task_id FROM reminders LIMIT 0")
+            .is_err()
+        {
+            conn.execute_batch(MIGRATION_TASK_ID)?;
+        }
+
         Ok(())
     }
 
-    const SELECT_COLUMNS: &str = "id, supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, status, ttl_secs, created_at, fired_at, cancelled_at, target_id, fired_event, session_id, origin_session_id, cross_session";
+    const SELECT_COLUMNS: &str = "id, supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, status, ttl_secs, created_at, fired_at, cancelled_at, target_id, fired_event, session_id, origin_session_id, cross_session, task_id";
 }
 
 fn expire_stale_with_conn(conn: &Connection) -> Result<usize> {
@@ -540,6 +586,7 @@ impl ReminderStore for SqliteReminderStore {
             session_id,
             None,
             false,
+            None,
         )
     }
 
@@ -556,6 +603,7 @@ impl ReminderStore for SqliteReminderStore {
         session_id: Option<&str>,
         origin_session_id: Option<&str>,
         cross_session: bool,
+        task_id: Option<&str>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
@@ -570,10 +618,14 @@ impl ReminderStore for SqliteReminderStore {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let task_id = task_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
         conn.execute(
-            "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reminders (supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, ttl_secs, created_at, target_id, session_id, origin_session_id, cross_session, task_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 owner_id,
                 message,
@@ -587,6 +639,7 @@ impl ReminderStore for SqliteReminderStore {
                 session_id,
                 origin_session_id,
                 cross_session,
+                task_id,
             ],
         )?;
 
@@ -745,6 +798,18 @@ impl ReminderStore for SqliteReminderStore {
         Ok(rows)
     }
 
+    fn cancel_pending_for_task(&self, task_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
+             WHERE status = 'pending' AND task_id = ?2 \
+             AND COALESCE(cross_session, 0) = 0",
+            params![now, task_id],
+        )?;
+        Ok(rows)
+    }
+
     fn expire_stale(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         expire_stale_with_conn(&conn)
@@ -844,11 +909,12 @@ mod tests {
                 Some("factory-a"),
                 Some("origin-session"),
                 true,
+                None,
             )
             .unwrap();
         let reminder = store.list_pending("supervisor-1").unwrap().pop().unwrap();
         assert_eq!(reminder.id, id);
-        let delivery = format_cross_session_reminder_delivery(&reminder, None);
+        let delivery = format_cross_session_reminder_delivery(&reminder, None, None);
         assert!(delivery.contains("Cross-session reminder"));
         assert!(delivery.contains("Origin session: origin-session"));
         assert!(delivery.contains("Created at:"));
@@ -872,6 +938,7 @@ mod tests {
                     Some("factory-a"),
                     Some("origin-session"),
                     cross_session,
+                    None,
                 )
                 .unwrap();
         }
@@ -888,6 +955,41 @@ mod tests {
         assert_eq!(
             pending[0].origin_session_id.as_deref(),
             Some("origin-session")
+        );
+    }
+
+    #[test]
+    fn closing_task_quarantines_default_reminders_but_keeps_explicit_opt_in() {
+        let (_temp, store) = create_test_store();
+        for cross_session in [false, true] {
+            store
+                .create_with_scope(
+                    "worker-1",
+                    None,
+                    "recheck discarded draft",
+                    ReminderTriggerType::Time,
+                    Some(Utc::now() + chrono::Duration::minutes(5)),
+                    None,
+                    None,
+                    3600,
+                    Some("factory-a"),
+                    Some("worker-session"),
+                    cross_session,
+                    Some("cas-issue-276"),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(store.cancel_pending_for_task("cas-issue-276").unwrap(), 1);
+        let pending = store.list_pending("worker-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].cross_session);
+        assert_eq!(pending[0].task_id.as_deref(), Some("cas-issue-276"));
+
+        let delivery = format_reminder_delivery_with_provenance(&pending[0], None, Some("closed"));
+        assert!(
+            delivery.contains("issued 0 min ago under task cas-issue-276 (closed)"),
+            "delivery must make closed task staleness visible: {delivery}"
         );
     }
 

@@ -32,10 +32,12 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   matrix passed on 2026-07-30 after `cas-8c80` projected `mcp__cs` as a direct-only code-mode
   namespace and pinned Codex's restricted MCP subprocess to the pane's `CAS_ROOT`. The typed
   receipt is `crates/cas-pty/conformance/codex-cli-0.146.0-2026-07-30.json`.
-- **Locally installed:** **0.146.0** (`codex-cli 0.146.0`, checked 2026-07-30).
-- **Latest stable:** **0.146.0** (2026-07-29). **0.147.0** remains prerelease-only (alpha.2 as of
-  2026-07-30) — untracked under this diary's stable-only policy.
-- **Gap:** none: the validated pin, local installation, and latest stable are all 0.146.0.
+- **Locally installed:** **0.147.0** (`codex-cli 0.147.0`, checked 2026-08-13).
+- **Latest stable:** **0.147.0** (2026-08-07). 0.148.0 remains prerelease-only and is untracked
+  under this diary's stable-only policy.
+- **Gap:** the validated pin remains 0.146.0 while the local installation and latest stable are
+  0.147.0. This review found no documented launch-contract rename, but a fresh `PtyConfig::codex`
+  matrix remains required before calling 0.147.0 validated.
   The older entries below are a *triage pass* against the touchpoints, not a per-item code audit —
   upgrade-time re-verification is the trigger for promoting any 👀 to a task. (Contrast the Claude
   Code diary's .166/.162 entries, which were deep-verified for specific user questions.) The
@@ -73,7 +75,9 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 
 | Codex version | Headline | CAS verdict | Pointer |
 |---------------|----------|-------------|---------|
-| 0.147.0-alpha | (pre-release; alpha.2 as of 2026-07-30 — untracked until stable) | — | — |
+| 0.148.0-alpha | Pre-release as of 2026-08-13 — untracked under stable-only policy | — | — |
+| 0.147.0 | MCP 2026-07-28 discovery/non-blocking startup · Agent Plugins · trust/approval hardening | 👀 upgrade validation | this doc |
+| 0.146.1 | Safer cyber-model auto-review defaults | ✅ no action | this doc |
 | 0.146.0 | **Live MCP refresh/reconnect** · executor skills and Agent Plugins · approval-state preservation | 🔧 validated/fix shipped | receipt + cas-8c80 |
 | 0.145.0 | **Multi-agent V2 stable** · broader `/import` · MCP startup hardening · concurrent skill discovery · approval tightening | 👀 watch | this doc |
 | 0.144.1–.4 | Installer/code-mode reliability · Guardian auto-review prompt revert · two empty patch releases | ✅ no action | this doc |
@@ -92,6 +96,38 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 ---
 
 ## Entries
+
+### 0.147.0 — MCP 2026-07-28, portable plugins, and approval/trust boundaries
+
+Reviewed 2026-08-13. Triage pass vs touchpoints. Source: official
+[`rust-v0.147.0` release](https://github.com/openai/codex/releases/tag/rust-v0.147.0)
+(published 2026-08-07).
+
+- **Codex supports the opt-in MCP 2026-07-28 protocol, paginated discovery, multi-round requests,
+  cached tools before optional server startup, and non-blocking startup.** → 👀 **touchpoint: MCP
+  (`cs`).** These are direct client-runtime changes. Upgrade validation must prove that the local
+  stdio `cs` server is discovered under `mcp__cs__*`, is ready before required lifecycle calls, and
+  never leaves a stale or partially paginated tool catalog.
+- **Portable Agent Plugins and imported Cursor skills expand the plugin/skill sources, while host
+  skill budgets and isolation were hardened.** → 👀 **touchpoint: `.codex/skills/`,
+  `.codex/agents/`, and `AGENTS.md`.** CAS does not use plugins as its authority path; confirm its
+  synced mirror remains discoverable and cannot be shadowed by an imported or plugin-provided skill.
+- **`--approve-for-me`, explicit trust for unfamiliar projects, managed-auth enforcement, and
+  fail-closed network/plugin policy behavior change approval and sandbox boundaries.** → 👀
+  **touchpoint: `--yolo`, `CAS_AGENT_ROLE`, and `CAS_FACTORY_MODE`.** No documented removal or
+  rename affects CAS, but a factory resume and fresh-worktree smoke is required before promotion.
+- **Thread organization, rendering, remote compaction, and installer/package changes** are
+  ⏭ **n/a** to the CAS PTY launch contract. **Source gaps:** none for the stable release.
+
+### 0.146.1 — safer automatic-review defaults
+
+Reviewed 2026-08-13. Source: official
+[`rust-v0.146.1` release](https://github.com/openai/codex/releases/tag/rust-v0.146.1)
+(published 2026-08-05).
+
+- **Cyber-capable model automatic-review defaults and terminal permission explanation were made
+  safer.** → ✅ **no action.** CAS starts factory workers with the explicit `--yolo` contract;
+  no CLI spelling or MCP/skill/instruction behavior changed. **Source gaps:** none.
 
 ### 0.146.0 — live MCP refresh/reconnect · executor skills and Agent Plugins · approval continuity
 

@@ -1,6 +1,18 @@
 use crate::hooks::handlers::*;
 use crate::hooks::handlers::session_budget::SessionContextAssembler;
 
+fn registered_role_mismatch_banner(
+    configured_role: Option<AgentRole>,
+    registered_role: Option<AgentRole>,
+) -> Option<String> {
+    let (configured, registered) = configured_role.zip(registered_role)?;
+    (configured != registered).then(|| {
+        format!(
+            "\u{26a0}\u{fe0f} CAS AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. CAS attempted to repair the row; run `mcp__cs__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
+        )
+    })
+}
+
 pub fn handle_session_start(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -10,6 +22,7 @@ pub fn handle_session_start(
     // Computed inside the inner `cas_root` block and applied to the output
     // after context building (cas-ae09). None for non-factory sessions.
     let mut factory_session_title: Option<String> = None;
+    let mut registration_role_warning: Option<String> = None;
 
     // Record session start for analytics and register agent
     if let Some(cas_root) = cas_root {
@@ -37,6 +50,16 @@ pub fn handle_session_start(
         let agent_name = std::env::var("CAS_AGENT_NAME").ok();
         let agent_role = std::env::var("CAS_AGENT_ROLE").ok();
         let clone_path = std::env::var("CAS_CLONE_PATH").ok();
+
+        // Capture disagreement before re-registration repairs it so a
+        // supervisor does not begin factory work with a silently broken row.
+        let configured_role = crate::mcp::daemon::parse_agent_role_hint(agent_role.as_deref());
+        let registered_role = stores
+            .agents()
+            .and_then(|store| store.get(&input.session_id).ok())
+            .map(|agent| agent.role);
+        registration_role_warning =
+            registered_role_mismatch_banner(configured_role, registered_role);
 
         // Helper to register agent directly in database
         let register_directly = |stores: &mut HookStores| {
@@ -176,6 +199,10 @@ pub fn handle_session_start(
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + CAS header + memories/tasks) is protected.
     let mut assembler = SessionContextAssembler::new(context);
+
+    if let Some(warning) = registration_role_warning {
+        assembler.append_protected(warning);
+    }
 
     // Planning is a shared write surface: two live supervisors can otherwise
     // decompose the same epic before either sees the other's task set. Put
@@ -532,6 +559,34 @@ mod large_artifact_staging_tests {
         assert!(context.contains(
             "Stage large artifacts (>1GB) in /mnt/datacube/staging — /tmp is tmpfs on this host."
         ));
+    }
+
+    #[test]
+    fn supervisor_session_start_warns_and_repairs_registered_role_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_store = crate::store::open_agent_store(tmp.path()).unwrap();
+        agent_store.init().unwrap();
+        let standard = Agent::new(
+            "staging-session".to_string(),
+            "supervisor-before-repair".to_string(),
+        );
+        agent_store.register(&standard).unwrap();
+
+        let mut env = staging_env("supervisor");
+        env.set("CAS_AGENT_NAME", "supervisor-after-repair");
+        env.set("CAS_FACTORY_SESSION", "factory-role-warning");
+        let input = session_input(tmp.path().to_str().unwrap());
+        let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+
+        assert!(
+            context.contains("CAS AGENT ROLE MISMATCH"),
+            "session start must expose the env/row disagreement: {context}"
+        );
+        assert!(context.contains("CAS_AGENT_ROLE=supervisor"));
+        assert!(context.contains("registered as `standard`"));
+        let repaired = agent_store.get("staging-session").unwrap();
+        assert_eq!(repaired.role, AgentRole::Supervisor);
+        assert_eq!(repaired.agent_type, crate::types::AgentType::Primary);
     }
 
     #[test]
@@ -1084,6 +1139,7 @@ mod session_end_reminder_tests {
                     Some("factory-a"),
                     Some("session-ending"),
                     cross_session,
+                    None,
                 )
                 .unwrap();
         }

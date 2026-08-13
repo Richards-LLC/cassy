@@ -111,7 +111,9 @@ impl CasCore {
             matches!(
                 agent.role,
                 crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director
-            )
+            ) && crate::mcp::daemon::parse_agent_role_hint(
+                std::env::var("CAS_AGENT_ROLE").ok().as_deref(),
+            ) != Some(agent.role)
         }) && !self.has_server_internal_identity(agent_id)
         {
             return Err(McpError {
@@ -595,21 +597,28 @@ impl CasCore {
                 }
                 agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-                // Environment is a worker bootstrap hint, never a source of
-                // Supervisor/Director authority.
-                if std::env::var("CAS_AGENT_ROLE")
-                    .ok()
-                    .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
-                {
-                    agent.role = crate::types::AgentRole::Worker;
-                }
-                if agent.role == crate::types::AgentRole::Worker {
-                    agent.agent_type = crate::types::AgentType::Worker;
+                let configured_role = crate::mcp::daemon::parse_agent_role_hint(
+                    std::env::var("CAS_AGENT_ROLE").ok().as_deref(),
+                );
+                if let Some(role) = configured_role {
+                    agent.role = role;
+                    agent.agent_type = match role {
+                        crate::types::AgentRole::Worker => crate::types::AgentType::Worker,
+                        crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director => {
+                            crate::types::AgentType::Primary
+                        }
+                        crate::types::AgentRole::Standard => agent.agent_type,
+                    };
                 }
 
                 crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
 
-                agent_store.register(&agent).map_err(|e| McpError {
+                crate::mcp::daemon::register_with_role_reconciliation(
+                    agent_store.as_ref(),
+                    &agent,
+                    configured_role,
+                )
+                .map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!("Failed to re-register agent: {e}")),
                     data: None,
@@ -687,19 +696,23 @@ impl CasCore {
         }
         agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-        // Only a typed server-internal call may carry a privileged role.
-        // Public/env registration can establish Standard or Worker only.
-        if source == AgentIdentitySource::ServerInternal {
-            if let Some(role) = role_hint {
-                agent.role = role;
-            } else if std::env::var("CAS_AGENT_ROLE")
-                .ok()
-                .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
-            {
-                agent.role = crate::types::AgentRole::Worker;
-            }
-        }
-        if agent.agent_type == crate::types::AgentType::Worker {
+        let environment_role = crate::mcp::daemon::parse_agent_role_hint(
+            std::env::var("CAS_AGENT_ROLE").ok().as_deref(),
+        );
+        let configured_role = match source {
+            AgentIdentitySource::ServerInternal => role_hint.or(environment_role),
+            AgentIdentitySource::PublicRegistration => environment_role.or(role_hint),
+        };
+        if let Some(role) = configured_role {
+            agent.role = role;
+            agent.agent_type = match role {
+                crate::types::AgentRole::Worker => crate::types::AgentType::Worker,
+                crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director => {
+                    crate::types::AgentType::Primary
+                }
+                crate::types::AgentRole::Standard => agent.agent_type,
+            };
+        } else if agent.agent_type == crate::types::AgentType::Worker {
             agent.role = crate::types::AgentRole::Worker;
         }
 
@@ -717,7 +730,12 @@ impl CasCore {
 
         crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
 
-        agent_store.register(&agent).map_err(|e| McpError {
+        crate::mcp::daemon::register_with_role_reconciliation(
+            agent_store.as_ref(),
+            &agent,
+            configured_role,
+        )
+        .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to register agent: {e}")),
             data: None,
@@ -879,3 +897,67 @@ pub use runtime::{
     write_proxy_catalog_cache, write_proxy_health_cache, write_proxy_snapshot_cache,
     write_proxy_snapshot_cache_for_config, write_unavailable_proxy_snapshot_cache,
 };
+
+#[cfg(test)]
+mod role_registration_tests {
+    use super::*;
+    use crate::store::{init_cas_dir, open_agent_store};
+    use crate::test_support::TestEnvGuard;
+    use crate::types::{AgentRole, AgentType};
+
+    #[test]
+    fn eager_environment_registration_persists_supervisor_role() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_SESSION", Some("factory-eager-supervisor")),
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+
+        core.register_agent(
+            "eager-supervisor-session".to_string(),
+            "eager-supervisor".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let agent = open_agent_store(&cas_root)
+            .unwrap()
+            .get("eager-supervisor-session")
+            .unwrap();
+        assert_eq!(agent.role, AgentRole::Supervisor);
+        assert_eq!(agent.agent_type, AgentType::Primary);
+        assert_eq!(
+            agent.factory_session.as_deref(),
+            Some("factory-eager-supervisor")
+        );
+    }
+
+    #[test]
+    fn missing_cached_agent_reregisters_as_supervisor() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_SESSION", Some("factory-reregister-supervisor")),
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        core.register_agent(
+            "cached-supervisor-session".to_string(),
+            "original-supervisor".to_string(),
+            None,
+        )
+        .unwrap();
+        let store = open_agent_store(&cas_root).unwrap();
+        store.unregister("cached-supervisor-session").unwrap();
+
+        core.ensure_agent_active("cached-supervisor-session")
+            .unwrap();
+
+        let agent = store.get("cached-supervisor-session").unwrap();
+        assert_eq!(agent.name, "Primary (re-registered)");
+        assert_eq!(agent.role, AgentRole::Supervisor);
+        assert_eq!(agent.agent_type, AgentType::Primary);
+    }
+}

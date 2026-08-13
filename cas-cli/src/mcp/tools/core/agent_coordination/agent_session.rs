@@ -10,10 +10,13 @@ fn public_registration_hints(
     McpError,
 > {
     let requested_role = agent_type.and_then(|value| value.parse().ok());
+    let environment_role =
+        crate::mcp::daemon::parse_agent_role_hint(std::env::var("CAS_AGENT_ROLE").ok().as_deref());
     if matches!(
         requested_role,
         Some(crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director)
-    ) {
+    ) && requested_role != environment_role
+    {
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(
@@ -23,8 +26,10 @@ fn public_registration_hints(
         });
     }
     let requested_type = agent_type.and_then(|value| value.parse().ok());
-    let safe_role = (requested_type == Some(crate::types::AgentType::Worker))
-        .then_some(crate::types::AgentRole::Worker);
+    let safe_role = environment_role.or_else(|| {
+        (requested_type == Some(crate::types::AgentType::Worker))
+            .then_some(crate::types::AgentRole::Worker)
+    });
     Ok((requested_type, safe_role))
 }
 

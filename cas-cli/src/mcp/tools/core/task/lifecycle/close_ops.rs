@@ -4087,6 +4087,32 @@ impl CasCore {
             data: None,
         })?;
 
+        // GH #276: reminders armed while working a task carry frozen context.
+        // Once the task closes, default reminders must not wake a successor
+        // with obsolete draft IDs or decisions. `cross_session` is the explicit
+        // opt-in to retain a reminder across this boundary; retained deliveries
+        // are stamped at fire time with this task's current status and age.
+        match crate::store::open_reminder_store(&self.cas_root) {
+            Ok(store) => match store.cancel_pending_for_task(&req.id) {
+                Ok(cancelled) if cancelled > 0 => tracing::info!(
+                    task_id = %req.id,
+                    cancelled,
+                    "quarantined task-scoped reminders on task close"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::error!(
+                    task_id = %req.id,
+                    error = %error,
+                    "task closed but reminder quarantine failed"
+                ),
+            },
+            Err(error) => tracing::error!(
+                task_id = %req.id,
+                error = %error,
+                "task closed but reminder store could not open for quarantine"
+            ),
+        }
+
         // cas-062d / cas-17e4: durable Closed outbox push after successful close.
         {
             let actor = self

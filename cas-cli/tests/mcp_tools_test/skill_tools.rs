@@ -1,6 +1,37 @@
 use crate::support::*;
 use cas::mcp::tools::*;
 use rmcp::handler::server::wrapper::Parameters;
+use std::process::Command;
+
+fn git(root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit(root: &std::path::Path, message: &str) {
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=CAS Test",
+            "-c",
+            "user.email=cas-test@example.invalid",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
 
 #[tokio::test]
 async fn test_skill_create() {
@@ -81,6 +112,66 @@ async fn test_skill_show() {
 
     let text = extract_text(result);
     assert!(text.contains("Show Skill") || text.contains("show-skill"));
+}
+
+#[tokio::test]
+async fn project_skill_show_marks_a_checkout_behind_its_sync_ref() {
+    let (temp, service) = setup_cas();
+    let root = temp.path();
+    git(root, &["init", "--initial-branch=main"]);
+    std::fs::create_dir_all(root.join(".claude/skills/stale-skill")).unwrap();
+    std::fs::write(
+        root.join(".claude/skills/stale-skill/SKILL.md"),
+        "---\nname: stale-skill\ndescription: stale test\n---\n\nOld guidance\n",
+    )
+    .unwrap();
+    commit(root, "add project skill");
+
+    git(root, &["checkout", "-b", "factory/stale-skill"]);
+    git(root, &["checkout", "main"]);
+    std::fs::write(root.join("new-guidance.md"), "new guidance\n").unwrap();
+    commit(root, "new project guidance");
+    git(root, &["checkout", "factory/stale-skill"]);
+
+    let result = service
+        .cas_skill_show(Parameters(IdRequest {
+            id: "stale-skill".to_string(),
+        }))
+        .await
+        .expect("file-backed skill should be served");
+    let text = extract_text(result);
+
+    assert!(
+        text.starts_with(
+            "WARNING: STALE PROJECT SKILL\nServed from checkout ref `factory/stale-skill`, which is 1 commit(s) behind `main`. The file may omit newer project guidance; run `cas factory sync` before relying on it.\n\n"
+        ),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn project_skill_show_is_quiet_when_checkout_is_current() {
+    let (temp, service) = setup_cas();
+    let root = temp.path();
+    git(root, &["init", "--initial-branch=main"]);
+    std::fs::create_dir_all(root.join(".claude/skills/current-skill")).unwrap();
+    std::fs::write(
+        root.join(".claude/skills/current-skill/SKILL.md"),
+        "---\nname: current-skill\ndescription: current test\n---\n\nCurrent guidance\n",
+    )
+    .unwrap();
+    commit(root, "add current project skill");
+
+    let result = service
+        .cas_skill_show(Parameters(IdRequest {
+            id: "current-skill".to_string(),
+        }))
+        .await
+        .expect("file-backed skill should be served");
+    let text = extract_text(result);
+
+    assert!(!text.contains("STALE PROJECT SKILL"), "{text}");
+    assert!(text.starts_with("Skill: current-skill"), "{text}");
 }
 
 #[tokio::test]

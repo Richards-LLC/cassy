@@ -44,6 +44,17 @@ When a new Claude Code version ships:
 
 | CC version | Headline | CAS verdict | Pointer |
 |------------|----------|-------------|---------|
+| 2.1.231 | MCP OAuth redirect-URI repair | ✅ no action | this doc |
+| 2.1.230 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.229 | Self-hosted hook/MCP startup fixes · workflow fan-out · sandbox hardening | 👀 / 🟢 | this doc |
+| 2.1.228 | Worktree/session cleanup · skill shadowing hardening · deferred-tool correctness | 🟢 direct wins | this doc |
+| 2.1.227 | Generic reliability and UI rollup | ✅ no action | this doc |
+| 2.1.226 | Generic bug-fix and reliability rollup | ⏭ source-limited | this doc |
+| 2.1.225 | Headless message delivery · agent workspace trust · MCP OAuth recovery | 👀 / 🟢 | this doc |
+| 2.1.224 | Cross-session message controls · worktree/session isolation · MCP discovery | 👀 / 🟢 | this doc |
+| 2.1.223 | Permission/workflow sandbox hardening · bounded context and review behavior | 🟢 direct wins | this doc |
+| 2.1.222 | Worktree and background-hook isolation · MCP error visibility | 🟢 direct wins | this doc |
+| 2.1.221 | Print-mode MCP startup · background commits/worktrees · permission hardening | 👀 / 🟢 | this doc |
 | 2.1.220 | Generic bug-fix and reliability rollup; no component detail in the official note | ⏭ source-limited | this doc |
 | 2.1.219 | **Opus 5 default** · bounded dynamic/nested agent changes · MCP startup/connection diagnostics | 👀 config watch / 🟢 / ✅ | this doc |
 | 2.1.218 | Built-in `/code-review` backgrounds · **tool/transcript evidence-loss fixes** | ✅ no action / 🟢 win | this doc |
@@ -95,6 +106,34 @@ When a new Claude Code version ships:
 ---
 
 ## Entries
+
+### 2.1.231–2.1.221 — MCP, worktree, hook, and lifecycle reliability sweep
+
+Reviewed 2026-08-13. Host on **2.1.231**. Source: [Anthropic's official
+changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md),
+covering 2.1.221–2.1.229 and 2.1.231; the official changelog has no 2.1.230
+section.
+
+- **2.1.231 repairs an MCP OAuth redirect-URI mismatch; 2.1.229 fixes strict OAuth redirects,
+  remote-session startup with managed MCP, and adds server-supplied hooks for self-hosted runners.**
+  → ✅ / 👀 **no direct CAS change; retain MCP startup watch.** CAS's local `cs` stdio server has no
+  OAuth, but the new behavior remains relevant when a workspace also configures remote MCP servers.
+  CAS's SessionStart/PreToolUse contracts remain configuration-owned; do not treat runner-provided
+  hooks as a substitute for them.
+- **2.1.229 fixes CPU-limited dynamic-workflow fan-out; 2.1.225–2.1.224 improve headless and
+  cross-session message delivery; 2.1.221 makes background sessions commit/push and gives forked
+  sessions their own worktree.** → 🟢 **lifecycle and isolation wins.** CAS keeps task ownership,
+  its explicit factory concurrency limit, and worktree records as the authority. The host changes
+  reduce stalled or misplaced work without changing that contract.
+- **2.1.228 hardens cloud-synced skills against shadowing local commands/MCP prompts and fixes
+  deferred-tool duplication; 2.1.229 refreshes command-source plugins per session.** → 👀 **watch
+  skill precedence.** On a Claude upgrade, verify the CAS-synced skill/agent mirror still wins
+  predictably in a worktree and that required worker instructions are not silently displaced.
+- **2.1.224–2.1.221 close destructive-git/worktree, permission-check, background-hook, print-mode
+  MCP-startup, and MCP-error-visibility gaps.** → 🟢 **direct safety and evidence wins.** CAS's
+  own clone-path, hook, and verifier boundaries remain defense in depth; no runtime change follows.
+- **2.1.227 is UI/reliability-only and 2.1.226 is a generic rollup.** → ✅ / ⏭ **no action.**
+  **Source gap:** 2.1.230 has no official section, so no behavior or verdict is inferred for it.
 
 ### 2.1.220 — generic bug-fix and reliability rollup
 

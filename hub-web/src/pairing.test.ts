@@ -469,6 +469,36 @@ describe("wire-v1 reverse pairing", () => {
     expect(current.status).toBe("Waiting for the replacement machine…");
   });
 
+  it("applies a cleanup failure only to its current pending invitation", () => {
+    const operations = new PairingOperationCoordinator();
+    const operation = operations.begin(operations.replace());
+    const invitation = {
+      kind: "invitation" as const,
+      token: "one-time-token",
+      hubId: "machine-uuid",
+    };
+    const current = {
+      pendingPairing: invitation,
+      pairingDraft: { ...createPairingDraft(request.controllerOrigin), email: "current@example.com" },
+      exchangeInFlight: true,
+      status: "Creating this browser credential…",
+    };
+
+    expect(pairingCleanupFailureUpdate({
+      coordinator: operations,
+      operation,
+      expectedPending: invitation,
+      current,
+      cleanupMessage: "durable cleanup is pending",
+      resetDraft: () => createPairingDraft(request.controllerOrigin),
+    })).toEqual({
+      pendingPairing: null,
+      pairingDraft: createPairingDraft(request.controllerOrigin),
+      exchangeInFlight: false,
+      status: "durable cleanup is pending",
+    });
+  });
+
   it("does not persist a credential when a deferred exchange response arrives after cancellation", async () => {
     const operations = new PairingOperationCoordinator();
     const generation = operations.replace();

@@ -2416,13 +2416,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         normal_threshold_secs: i64,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
+        let now = Utc::now();
+        let cutoff = |label: &str, threshold_secs: i64| -> Result<String> {
+            let threshold_secs = threshold_secs.max(0);
+            let duration = chrono::Duration::try_seconds(threshold_secs).ok_or_else(|| {
+                StoreError::Parse(format!(
+                    "delivery-stalled {label} threshold {threshold_secs}s exceeds chrono's supported duration"
+                ))
+            })?;
+            now.checked_sub_signed(duration)
+                .map(|value| value.to_rfc3339())
+                .ok_or_else(|| {
+                    StoreError::Parse(format!(
+                        "delivery-stalled {label} threshold {threshold_secs}s exceeds the supported timestamp range"
+                    ))
+                })
+        };
+        // Validate both thresholds before taking the queue mutex. An invalid
+        // operator value must return a normal store error, never panic while
+        // holding the lock and poison every later coordination operation.
+        let priority_cutoff = cutoff("priority", priority_threshold_secs)?;
+        let normal_cutoff = cutoff("normal", normal_threshold_secs)?;
+        let stale_cutoff = cutoff("stale TTL", PROMPT_QUEUE_STALE_TTL_SECS)?;
         let conn = self.conn.lock().unwrap();
-        let priority_cutoff =
-            (Utc::now() - chrono::Duration::seconds(priority_threshold_secs.max(0))).to_rfc3339();
-        let normal_cutoff =
-            (Utc::now() - chrono::Duration::seconds(normal_threshold_secs.max(0))).to_rfc3339();
-        let stale_cutoff =
-            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
         let mut stmt = conn.prepare(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
              FROM prompt_queue q
@@ -6659,6 +6675,28 @@ mod tests {
             None,
             "a genuine row still bounces exactly once"
         );
+    }
+
+    #[test]
+    fn casb123_delivery_stalled_threshold_overflow_returns_error_without_poisoning_queue() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        store
+            .delivery_stalled_candidates("session", 10_i64.pow(12), 10_i64.pow(12), 10)
+            .expect("a trillion-second threshold must not panic");
+        let error = store
+            .delivery_stalled_candidates("session", i64::MAX, 30 * 60, 10)
+            .expect_err("an unrepresentable threshold must be rejected without a panic");
+        assert!(
+            error
+                .to_string()
+                .contains("delivery-stalled priority threshold"),
+            "unexpected error: {error}"
+        );
+
+        store
+            .enqueue("supervisor", "worker", "queue remains usable")
+            .expect("threshold validation must happen before and not poison the queue mutex");
     }
 
     // ---- cas-c931: urgent (interrupt-and-redirect) flag ----

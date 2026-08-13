@@ -1246,11 +1246,11 @@ impl CasService {
                 // reflect what will ACTUALLY spawn, not the pre-fallback request.
             }
             spec.config_dir = req.config_dir.clone();
-            if spec.cli == cas_mux::SupervisorCli::Claude
-                && let Some(config_dir) = spec.config_dir.as_deref()
-            {
-                preflight_claude_config_dir(config_dir)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            if spec.cli == cas_mux::SupervisorCli::Claude {
+                if let Some(config_dir) = spec.config_dir.as_deref() {
+                    preflight_claude_config_dir(config_dir)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                }
             }
             let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
             if (spec.config_dir.is_some() || requester_config_dir.is_some())
@@ -3874,16 +3874,21 @@ impl CasService {
             GitOperations::new(close_project_root.clone())
                 .unlanded_epic_ancestry(parent_branch, &trunk)
         };
-        if let Ok(agent_store) = crate::store::open_agent_store(&self.inner.cas_root)
-            && let Ok(agents) = agent_store.list(None)
-        {
-            for status in &mut statuses {
-                status.dead_or_stale_assignee = status.assignee.as_ref().is_some_and(|assignee| {
-                    agents.iter().any(|agent| {
-                        (agent.name == *assignee || agent.id == *assignee)
-                            && matches!(agent.status, cas_types::AgentStatus::Stale | cas_types::AgentStatus::Shutdown)
-                    })
-                });
+        if let Ok(agent_store) = crate::store::open_agent_store(&self.inner.cas_root) {
+            if let Ok(agents) = agent_store.list(None) {
+                for status in &mut statuses {
+                    status.dead_or_stale_assignee =
+                        status.assignee.as_ref().is_some_and(|assignee| {
+                            agents.iter().any(|agent| {
+                                (agent.name == *assignee || agent.id == *assignee)
+                                    && matches!(
+                                        agent.status,
+                                        cas_types::AgentStatus::Stale
+                                            | cas_types::AgentStatus::Shutdown
+                                    )
+                            })
+                        });
+                }
             }
         }
         let report =

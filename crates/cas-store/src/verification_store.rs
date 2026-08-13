@@ -1735,6 +1735,16 @@ pub fn correct_parked_delivery_proof_scope(
         })
         .transpose()?;
 
+    if delivery
+        .as_ref()
+        .is_some_and(|(_, state)| *state == WorkerDeliveryState::Merged)
+    {
+        return Err(StoreError::Parse(
+            "proof-scope correction cannot rewrite a merged delivery transaction; the merge is an immutable delivery fact"
+                .to_string(),
+        ));
+    }
+
     if let Some(active) = dispatch.as_ref() {
         let invalidated = match active.state {
             VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut => {

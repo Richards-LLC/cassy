@@ -11199,6 +11199,18 @@ pub(crate) enum LightweightLintOutcome {
     Fail(String),
 }
 
+fn target_only_receipt_lint_parent(
+    repo: &std::path::Path,
+    receipt: &str,
+) -> Result<String, String> {
+    resolve_branch_sha(repo, &format!("{receipt}^1")).ok_or_else(|| {
+        format!(
+            "PRE-CLOSE HOOK CONTEXT REJECTED: target-only receipt {receipt} has no resolvable \
+             first parent, so structural lint cannot establish a non-empty delivery range."
+        )
+    })
+}
+
 pub(crate) fn run_declared_pre_close_hook(
     task: &cas_types::Task,
     repo_context: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -11218,7 +11230,7 @@ pub(crate) fn run_declared_pre_close_hook(
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
         .map_err(|error| format!("PRE-CLOSE HOOK CONTEXT REJECTED: commit_receipt {error}"))?;
-    let (execution_root, worktree_branch, task_tip) = match worker_worktree_path {
+    let (execution_root, worktree_branch, task_tip, lint_parent) = match worker_worktree_path {
         Some(path) => {
             let branch = git_branch_name(path).ok_or_else(|| {
                 "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
@@ -11252,7 +11264,16 @@ pub(crate) fn run_declared_pre_close_hook(
                         .to_string(),
                 );
             }
-            (path, Some(branch), tip)
+            let lint_parent = if !reachable_from_worktree && receipt_reachable_from_target {
+                // A squash/cherry-pick receipt that exists only on the target
+                // is itself the merge-base with that target. Diffing target
+                // vs receipt is therefore empty and silently disables lint.
+                // Measure the delivered commit against its first parent.
+                target_only_receipt_lint_parent(path, &tip)?
+            } else {
+                repo_context.target_branch.clone()
+            };
+            (path, Some(branch), tip, lint_parent)
         }
         None => {
             let tip = normalized_receipt
@@ -11282,14 +11303,20 @@ pub(crate) fn run_declared_pre_close_hook(
                         .to_string(),
                 );
             }
-            (repo_context.repo_root.as_path(), None, tip.to_string())
+            let lint_parent = if normalized_receipt.is_some() {
+                target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
+            } else {
+                repo_context.target_branch.clone()
+            };
+            (
+                repo_context.repo_root.as_path(),
+                None,
+                tip.to_string(),
+                lint_parent,
+            )
         }
     };
-    match run_lightweight_structural_lint_at_tip(
-        execution_root,
-        Some(&repo_context.target_branch),
-        &task_tip,
-    ) {
+    match run_lightweight_structural_lint_at_tip(execution_root, Some(&lint_parent), &task_tip) {
         LightweightLintOutcome::Pass => Ok(cas_types::PreCloseHookEvidence {
             repo_selector: repo_context.repo_selector.clone(),
             target_branch: repo_context.target_branch.clone(),
@@ -18956,7 +18983,10 @@ mod zero_change_close_tests {
             &["remote", "add", "origin", origin.path().to_str().unwrap()],
         );
         git(dir.path(), &["push", "-q", "origin", "main"]);
-        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
+        git(
+            dir.path(),
+            &["push", "-q", "origin", "factory/test-worker"],
+        );
         git(dir.path(), &["fetch", "-q", "origin"]);
         (dir, origin)
     }
@@ -18982,10 +19012,7 @@ mod zero_change_close_tests {
         .unwrap();
         git(dir.path(), &["add", "delivered.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "worker delivery"]);
-        git(
-            dir.path(),
-            &["push", "-q", "origin", "factory/test-worker"],
-        );
+        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
 
         let publisher_root = tempfile::tempdir().unwrap();
         git(
@@ -19030,6 +19057,53 @@ mod zero_change_close_tests {
             .expect(
                 "accepted location must still satisfy non-empty-diff and target ancestry proof",
             );
+    }
+
+    #[test]
+    fn casb123_target_only_squash_receipt_runs_lint_on_non_empty_delivery_range() {
+        let (dir, origin) = init_worker_repo_with_origin();
+        std::fs::write(
+            dir.path().join("unfinished.rs"),
+            "pub fn unfinished() { todo!() }\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "unfinished.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "worker delivery"]);
+        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
+
+        let publisher_root = tempfile::tempdir().unwrap();
+        git(
+            publisher_root.path(),
+            &["clone", "-q", origin.path().to_str().unwrap(), "publisher"],
+        );
+        let publisher = publisher_root.path().join("publisher");
+        git(
+            &publisher,
+            &["merge", "-q", "--squash", "origin/factory/test-worker"],
+        );
+        git(
+            &publisher,
+            &["commit", "-q", "-m", "supervisor squash delivery"],
+        );
+        let squash_receipt = head_sha(&publisher);
+        git(&publisher, &["push", "-q", "origin", "HEAD:main"]);
+
+        let task = Task::new(
+            "cas-b123".to_string(),
+            "lint target-only receipt".to_string(),
+        );
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&squash_receipt),
+        )
+        .expect_err("todo! in a target-only squash delivery must still fail structural lint");
+        assert!(error.contains("todo!()"), "unexpected lint result: {error}");
+        assert!(
+            !git_commit_is_ancestor(dir.path(), &squash_receipt, "HEAD"),
+            "precondition: receipt is target-only, not worktree-reachable"
+        );
     }
 
     #[test]

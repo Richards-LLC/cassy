@@ -236,6 +236,20 @@ describe("wire-v1 reverse pairing", () => {
     expect(replacement).toBe("/commander?view=fleet");
   });
 
+  it.each([
+    ["missing hub", `#pair=${"A".repeat(43)}`],
+    ["empty-first duplicate pair", `#pair=&pair=${"A".repeat(43)}&hub=machine-uuid`],
+    ["truncated pair", `#pair=${"A".repeat(42)}&hub=machine-uuid`],
+    ["empty pair", "#pair=&hub=machine-uuid"],
+  ])("scrubs a pair-present %s fragment before boot", (_case, hash) => {
+    let replacement = "";
+    const location = { hash, pathname: "/commander", search: "?view=fleet" } as Location;
+    const history = { replaceState: (_: unknown, __: string, path: string) => { replacement = path; } } as unknown as History;
+
+    expect(consumePairingFragment(location, history)).toBeNull();
+    expect(replacement).toBe("/commander?view=fleet");
+  });
+
   it("scrubs a valid fragment and boots with an in-memory fallback when the sessionStorage getter throws", () => {
     const token = "A".repeat(43);
     let replacement = "";

@@ -50,26 +50,21 @@ CLAUDE_CONFIG_DIR="$HOME/.claude-alt" \
   claude auth status --json < /dev/null | jq '{loggedIn, authMethod, apiProvider, email, subscriptionType}'
 ```
 
-The probe itself is verified on this machine (Claude Code 2.1.226). The gate
-passes only when JSON has `loggedIn: true`, `authMethod: "claude.ai"`, and
-`email: "daniel@petrastella.io"`. A pass would include this decisive shape:
-
-```json
-{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"daniel@petrastella.io"}
-```
-
-That Daniel success is not currently present on this machine, so it is the
-gate's expected condition rather than a fabricated observed receipt. The actual
-wrong-account result for `CLAUDE_CONFIG_DIR="$HOME/.claude-alt"` was:
+The probe is verified on this machine with Claude Code 2.1.231. The explicit
+allowlist contains exactly one email: `pippenz@gmail.com`. The gate passes only
+when JSON has `loggedIn: true`, `authMethod: "claude.ai"`, `apiProvider:
+"firstParty"`, and that exact email. The live approved-profile probe on
+2026-08-13 produced this decisive, credential-free shape:
 
 ```json
 {"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"pippenz@gmail.com","subscriptionType":"max"}
 ```
 
-`CLAUDE_CONFIG_DIR="$HOME/.claude"` currently reports a missing
-`~/.claude/.claude.json` and then `loggedIn: false`. Both results hard-fail the
-gate. Do not inspect or copy credential tokens from config files; the status
-command is the account authority.
+Any email outside that one-entry allowlist is an unapproved account and
+hard-fails the gate even when `loggedIn` is true. A missing profile, false
+`loggedIn`, wrong auth method or provider, malformed JSON, or a failed probe
+also fails closed. Do not inspect or copy credential tokens from config files;
+the status command is the account authority.
 
 Only after a passing probe may a one-shot run:
 

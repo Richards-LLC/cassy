@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
+import { consumePairingFragment } from "./fragment";
 import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
 import { PendingPairingStore } from "./pending-pairing";
 import {
@@ -108,6 +109,22 @@ describe("wire-v1 reverse pairing", () => {
     }
   });
 
+  it("rejects an authorized payload for the wrong origin, port, or unsafe hub URL", async () => {
+    const base = {
+      wire_version: 1, status: "authorized", delivery_id: "75128f2d-845b-4d2b-9d42-ffdb74661ca2",
+      invitation: { token: "one-time-token", hub_id: "machine-uuid", hub_url: "https://workstation.tail.example", machine_label: "Studio workstation", controller_origin: request.controllerOrigin, scopes: request.requestedScopes, expires_at: "2026-08-11T20:11:30Z" },
+    };
+    for (const invitation of [
+      { ...base.invitation, controller_origin: `${request.controllerOrigin}:444` },
+      { ...base.invitation, controller_origin: "https://evil.example" },
+      { ...base.invitation, hub_url: "http://workstation.example" },
+      { ...base.invitation, hub_url: "https://workstation.tail.example/path" },
+    ]) {
+      const fetcher = vi.fn(async () => response(200, { ...base, invitation }));
+      await expect(pollPairingRequest(fetcher, request)).rejects.toBeInstanceOf(PairingRelayError);
+    }
+  });
+
   it("restores a pending request after refresh and removes it at authoritative expiry", () => {
     const storage = new MemoryStorage();
     const firstPage = new PendingPairingStore(storage, () => Date.parse("2026-08-11T20:09:00Z"));
@@ -119,9 +136,30 @@ describe("wire-v1 reverse pairing", () => {
     expect(storage.length).toBe(0);
   });
 
+  it("persists a legacy fragment before scrubbing it and restores it after refresh", () => {
+    const token = "A".repeat(43);
+    const storage = new MemoryStorage();
+    const store = new PendingPairingStore(storage);
+    let replacement = "";
+    const location = { hash: `#pair=${token}&hub=machine-uuid`, pathname: "/", search: "" } as Location;
+    const history = { replaceState: (_: unknown, __: string, path: string) => { replacement = path; } } as unknown as History;
+    expect(consumePairingFragment(location, history, store)).toMatchObject({ kind: "invitation", token, hubId: "machine-uuid" });
+    expect(replacement).toBe("/");
+    expect(replacement).not.toContain(token);
+    expect(new PendingPairingStore(storage).load()).toMatchObject({ token, hubId: "machine-uuid" });
+  });
+
+  it("scrubs a malformed legacy capability even when it cannot be persisted", () => {
+    let replacement = "";
+    const location = { hash: "#pair=malformed-secret&hub=machine-uuid", pathname: "/commander", search: "?view=fleet" } as Location;
+    const history = { replaceState: (_: unknown, __: string, path: string) => { replacement = path; } } as unknown as History;
+    expect(consumePairingFragment(location, history)).toBeNull();
+    expect(replacement).toBe("/commander?view=fleet");
+  });
+
   it("persists before acknowledgement and keeps local success when acknowledgement fails", async () => {
     const events: string[] = [];
-    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       if (String(input).includes("acknowledge")) { events.push("ack"); throw new Error("relay unavailable"); }
       return response(200, { device_id: "device", credential_id: "credential", credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] });
     });
@@ -143,6 +181,9 @@ describe("wire-v1 reverse pairing", () => {
       acknowledge: (relay) => acknowledgePairing(fetcher, relay),
     })).resolves.toMatchObject({ id: invitation.hubId, baseUrl: invitation.hubUrl });
     expect(events).toEqual(["persist", "ack"]);
+    const [hubTarget, hubInit] = fetcher.mock.calls[0];
+    expect(String(hubTarget)).toBe("https://workstation.tail.example/v1/auth/pairing/exchange");
+    expect(JSON.parse(String(hubInit?.body))).toMatchObject({ controller_origin: request.controllerOrigin, requested_scopes: ["machine-read"] });
   });
 
   it("lets the hub's one-time exchange choose one winner across two tabs", async () => {

@@ -1039,7 +1039,9 @@ fn merge_required_idle_prompt_text(
     } else {
         match epic_id.as_deref() {
             Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
-            None => format!("`{supervisor_prefix}task action=show id={}`", task.task_id),
+            None => {
+                format!("`{supervisor_prefix}coordination action=epic_status id=<focused-epic>")
+            }
         }
     };
     let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");

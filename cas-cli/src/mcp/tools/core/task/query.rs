@@ -13,15 +13,23 @@ impl CasCore {
             data: None,
         })?;
 
+        let target = task
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| format!("{} @ {}", target.repo_selector, target.target_branch))
+            .unwrap_or_else(|| "(none — trunk fallback)".to_string());
+
         let mut output = format!(
-            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\n",
+            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\nTarget: {}\n",
             task.id,
             "=".repeat(task.id.len() + 6),
             task.title,
             task.status,
             task.priority.0,
             task.task_type,
-            task.depth
+            task.depth,
+            target
         );
 
         match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id) {

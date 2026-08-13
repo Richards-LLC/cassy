@@ -591,6 +591,98 @@ fn prefer_fresher_base_ref(
     }
 }
 
+/// Fast-forward an epic's local base ref from the parent branch it recorded
+/// when the two histories are cleanly aligned.  A spawned worker merges back
+/// into the epic ref, so updating that ref (rather than merely checking out
+/// the parent commit) keeps both the new worker and later sync operations on
+/// the same integration history.
+///
+/// A non-fast-forward relationship is intentionally a no-op.  The caller
+/// retains `stale_spawn_base_notice` for that unsafe shape rather than
+/// replacing local epic work with the parent branch.
+fn fast_forward_epic_base_from_parent(
+    repo_root: &std::path::Path,
+    epic_branch: &str,
+    parent_branch: &str,
+) -> Result<Option<String>, String> {
+    if epic_branch == parent_branch
+        || !ref_exists(repo_root, epic_branch)
+        || !ref_exists(repo_root, parent_branch)
+    {
+        return Ok(None);
+    }
+
+    let epic_sha = full_sha(repo_root, epic_branch)
+        .ok_or_else(|| format!("could not resolve epic base '{epic_branch}'"))?;
+    let parent_sha = full_sha(repo_root, parent_branch)
+        .ok_or_else(|| format!("could not resolve recorded parent '{parent_branch}'"))?;
+    if epic_sha == parent_sha {
+        return Ok(None);
+    }
+
+    let is_ancestor = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", epic_branch, parent_branch])
+        .current_dir(repo_root)
+        .status()
+        .map_err(|error| {
+            format!(
+                "could not check whether epic base '{epic_branch}' can fast-forward from '{parent_branch}': {error}"
+            )
+        })?;
+    if !is_ancestor.success() {
+        return Ok(None);
+    }
+
+    let refname = if epic_branch.starts_with("refs/heads/") {
+        epic_branch.to_string()
+    } else if epic_branch.starts_with("refs/") || epic_branch.starts_with("origin/") {
+        return Err(format!(
+            "epic base '{epic_branch}' is not a local branch ref eligible for fast-forward"
+        ));
+    } else {
+        format!("refs/heads/{epic_branch}")
+    };
+    let update = std::process::Command::new("git")
+        .args(["update-ref", &refname, &parent_sha, &epic_sha])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| format!("could not fast-forward epic base '{epic_branch}': {error}"))?;
+    if !update.status.success() {
+        return Err(format!(
+            "could not fast-forward epic base '{epic_branch}' from recorded parent '{parent_branch}': {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        ));
+    }
+
+    Ok(Some(format!(
+        "EPIC BASE FAST-FORWARDED: local epic base '{epic_branch}' ({}) advanced to its recorded parent '{parent_branch}' ({}) before cutting the worker worktree.",
+        &epic_sha[..epic_sha.len().min(8)],
+        &parent_sha[..parent_sha.len().min(8)],
+    )))
+}
+
+/// Return an epic branch and its explicitly declared integration parent. An
+/// epic without a `WorkTarget` retains the legacy branch-only behaviour.
+fn recorded_epic_parent_branch(
+    cas_dir: &std::path::Path,
+    epic_id: &str,
+) -> Option<(String, String)> {
+    let store = open_task_store(cas_dir).ok()?;
+    let epic = store.get(epic_id).ok()?;
+    let epic_branch = epic
+        .branch
+        .filter(|branch| !branch.trim().is_empty())
+        .unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
+    let parent_branch = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|branch| !branch.is_empty())?
+        .to_string();
+    Some((epic_branch, parent_branch))
+}
+
 fn cleanup_cancelled_spawn_worktree_with_manager(
     manager: Option<&mut WorktreeManager>,
     result: &mut WorkerSpawnResult,
@@ -1218,6 +1310,27 @@ impl FactoryApp {
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
+                let base_epic_id = match &base_source {
+                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
+                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
+                    SpawnBaseSource::TaskWithoutEpic { .. } | SpawnBaseSource::Trunk => None,
+                };
+                if let Some((epic_branch, recorded_parent)) = base_epic_id
+                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
+                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
+                {
+                    match fast_forward_epic_base_from_parent(
+                        manager.repo_root(),
+                        &epic_branch,
+                        &recorded_parent,
+                    ) {
+                        Ok(Some(notice)) => notices.push(notice),
+                        Ok(None) => {}
+                        Err(error) => notices.push(format!(
+                            "EPIC BASE REFRESH SKIPPED: {error}. Keeping the existing stale-base warning fallback."
+                        )),
+                    }
+                }
                 // cas-d897 (GH #146): the winning branch name still has to be
                 // resolved to the fresher of its local and origin refs — a
                 // stale local ref silently backdates every worker cut from it.
@@ -2900,6 +3013,91 @@ mod spawn_base_tests {
         assert!(
             notice.contains("2 commit(s) behind 'main'"),
             "notice must quantify the gap against trunk: {notice}"
+        );
+    }
+
+    #[test]
+    fn fast_forwardable_epic_base_is_refreshed_before_a_worker_is_cut() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["branch", "epic/behind", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "parent-advance.txt", "parent branch advanced");
+        let parent_tip = head_sha(&repo, "main");
+
+        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .expect("clean ancestry must be safe to fast-forward")
+            .expect("the stale epic base must be refreshed");
+        assert!(notice.contains("EPIC BASE FAST-FORWARDED"), "{notice}");
+        assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
+        assert_eq!(
+            stale_spawn_base_notice(&repo, "epic/behind", "main"),
+            None,
+            "a refreshed epic base must no longer emit the stale-base warning"
+        );
+
+        let worker_path = repo.join(".cas/worktrees/refreshed-worker");
+        WorkerSpawnPrep {
+            worker_name: "refreshed-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/refreshed-worker".to_string(),
+                parent_branch: "epic/behind".to_string(),
+                base_ref: None,
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+        .run()
+        .expect("worker provisioning after the refresh");
+        assert!(
+            worker_path.join("parent-advance.txt").exists(),
+            "the spawned worktree must include the parent branch advance"
+        );
+    }
+
+    #[test]
+    fn diverged_epic_base_is_not_forced_and_keeps_stale_warning_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/diverged"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "epic-only.txt", "epic-only work");
+        let epic_tip = head_sha(&repo, "epic/diverged");
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "parent-only.txt", "parent-only work");
+
+        assert_eq!(
+            fast_forward_epic_base_from_parent(&repo, "epic/diverged", "main")
+                .expect("divergence is an expected non-mutating shape"),
+            None
+        );
+        assert_eq!(
+            head_sha(&repo, "epic/diverged"),
+            epic_tip,
+            "non-fast-forward parent histories must not overwrite epic work"
+        );
+        assert!(
+            stale_spawn_base_notice(&repo, "epic/diverged", "main").is_some(),
+            "the existing stale-base warning remains the operator fallback"
         );
     }
 

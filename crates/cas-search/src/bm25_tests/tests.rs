@@ -81,6 +81,46 @@ fn test_index_and_search() {
 }
 
 #[test]
+fn unknown_field_like_tokens_are_literal_search_terms() {
+    let index = Bm25Index::in_memory().unwrap();
+    let doc = TestDoc::new(
+        "001",
+        "test colon handling 12:49 https://example.invalid/path foo::bar",
+    );
+    index.index(&doc).unwrap();
+
+    for query in [
+        "test colon handling 12:49",
+        "https://example.invalid/path",
+        "foo::bar",
+    ] {
+        let results = index
+            .search(query, 10)
+            .unwrap_or_else(|error| panic!("{query:?} must be searchable literal text: {error}"));
+        assert!(
+            results.iter().any(|(id, _)| id == "001"),
+            "expected literal query {query:?} to match the indexed document"
+        );
+    }
+}
+
+#[test]
+fn registered_field_queries_remain_strict() {
+    let index = Bm25Index::in_memory().unwrap();
+    let doc = TestDoc::new("001", "a searchable document").with_type("entry");
+    index.index(&doc).unwrap();
+
+    let results = index.search("doc_type:entry", 10).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "001");
+
+    assert!(
+        index.search("doc_type:", 10).is_err(),
+        "registered fields must retain Tantivy's strict syntax validation"
+    );
+}
+
+#[test]
 fn test_search_with_type_filter() {
     let index = Bm25Index::in_memory().unwrap();
 

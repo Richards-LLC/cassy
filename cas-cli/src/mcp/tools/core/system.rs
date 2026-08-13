@@ -465,6 +465,22 @@ impl CasCore {
                             indexed += 1;
                         }
                     }
+                    let config = crate::config::Config::load(&self.cas_root).ok();
+                    let configured_artifacts_root = config
+                        .as_ref()
+                        .and_then(|config| config.factory().artifacts_root);
+                    let artifacts_root = crate::config::resolved_factory_artifacts_root(
+                        configured_artifacts_root.as_deref(),
+                    );
+                    let artifacts = crate::hybrid_search::artifacts::discover_all_task_artifacts(
+                        &artifacts_root,
+                    );
+                    match search.index_artifacts(&artifacts) {
+                        Ok(count) => indexed += count,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "artifact backfill indexing failed")
+                        }
+                    }
                     results.push(format!("BM25: Indexed {indexed} documents"));
                 }
                 Err(e) => results.push(format!("BM25: Failed - {e}")),

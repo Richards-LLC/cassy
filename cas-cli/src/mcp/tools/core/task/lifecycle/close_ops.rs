@@ -4087,6 +4087,24 @@ impl CasCore {
             data: None,
         })?;
 
+        // Artifacts are validated under this task's configured durable root
+        // before they can become receipt evidence. Index every supported text
+        // artifact at the same close boundary; a search failure must never
+        // roll back a completed task close, and `system reindex` can recover it.
+        let artifact_config = crate::config::Config::load(&self.cas_root).ok();
+        let configured_artifacts_root = artifact_config
+            .as_ref()
+            .and_then(|config| config.factory().artifacts_root);
+        let artifacts_root =
+            crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref());
+        let artifacts =
+            crate::hybrid_search::artifacts::discover_task_artifacts(&artifacts_root, &task.id);
+        if let Ok(search) = self.open_search_index()
+            && let Err(error) = search.index_artifacts(&artifacts)
+        {
+            tracing::warn!(task_id = %task.id, error = %error, "close-time artifact indexing failed");
+        }
+
         // GH #276: reminders armed while working a task carry frozen context.
         // Once the task closes, default reminders must not wake a successor
         // with obsolete draft IDs or decisions. `cross_session` is the explicit
@@ -8832,8 +8850,8 @@ pub(crate) struct EpicChildBranchStatus {
     /// Unix epoch seconds of the most recent commit across the checked
     /// commit-ish values. `None` when none resolve or `git log` fails.
     pub last_commit_unix: Option<i64>,
-    /// Audit note emitted when a stranded recorded anchor is superseded by
-    /// live branch tips that are all known merged into the parent.
+    /// Audit note emitted when a non-ancestral recorded anchor is reconciled
+    /// by task-specific content proof on the parent.
     pub merge_evidence_note: Option<String>,
     /// cas-2a99 (GH #131): which ref each checked commit-ish was actually
     /// read from — the local ref, the `origin/` fallback, or neither.
@@ -9000,12 +9018,13 @@ fn live_branch_merge_evidence(
 /// avoids double-counting shared history while ensuring reassignment cannot
 /// hide either worker's stranded commits.
 ///
-/// A resolvable anchor that is not an ancestor of `parent_branch` may be
-/// reconciled as superseded only when every recorded/current live branch is
-/// present and known fully merged *and* the anchor has task-specific content
-/// proof on the parent (an identical tip tree or cherry-equivalent patches).
-/// A zero-ahead branch alone is never proof: the branch name may have been
-/// recycled or reset after discarding the recorded task's work.
+/// A resolvable anchor that is not an ancestor of `parent_branch` is
+/// reconciled when that anchor has task-specific content proof on the local or
+/// remote-tracking parent (an identical tip tree or cherry-equivalent patches).
+/// The live branch is supporting audit context, not an additional ancestry
+/// requirement: a normal squash merge deliberately leaves the source ref at
+/// its non-ancestral pre-squash tip. A zero-ahead live branch alone is never
+/// proof, so recycled/reset branches cannot hide genuinely absent content.
 ///
 /// cas-2a99 (GH #131) narrows what "cherry-equivalent patches" must cover:
 /// commits the anchor inherited from its spawn base (reachable from trunk) are
@@ -9093,11 +9112,11 @@ pub(crate) fn collect_epic_branch_statuses(
                 let read = read_ref_preferring_local(repo_path, commit);
                 if let Some(refname) = read.read_ref() {
                     any_ref_resolved = true;
-                    unmerged_count = unmerged_count.max(count_unmerged_factory_commits(
-                        repo_path,
-                        refname,
-                        parent_branch,
-                    ));
+                    let count = count_unmerged_against_targets(repo_path, refname, parent_branch)
+                        .unwrap_or_else(|| {
+                            count_unmerged_factory_commits(repo_path, refname, parent_branch)
+                        });
+                    unmerged_count = unmerged_count.max(count);
                     latest_commit_unix =
                         latest_commit_unix.max(last_commit_unix(repo_path, refname));
                 }
@@ -9108,55 +9127,49 @@ pub(crate) fn collect_epic_branch_statuses(
             if let Some(anchor) = resolved_anchor
                 && unmerged_count > 0
             {
-                let required_live_branch = live_factory_branch.as_ref().or(factory_branch.as_ref());
-                let mut required_branch_is_known = false;
-                let mut live_state_is_known = true;
-                let mut live_unmerged_count = 0;
                 let mut live_summaries = Vec::new();
                 for branch in &fallback_branches {
                     match live_branch_merge_evidence(repo_path, branch, parent_branch) {
-                        Some((KnownUnmergedCount::KnownZero, summaries)) => {
-                            required_branch_is_known |= required_live_branch == Some(branch);
-                            live_summaries.extend(summaries);
-                        }
-                        Some((KnownUnmergedCount::KnownPositive(count), summaries)) => {
-                            required_branch_is_known |= required_live_branch == Some(branch);
-                            live_unmerged_count = live_unmerged_count.max(count);
-                            live_summaries.extend(summaries);
-                        }
-                        Some((KnownUnmergedCount::Unknown, _)) => {
-                            live_state_is_known = false;
-                        }
-                        // Reassignment must not let a clean current branch
-                        // hide a vanished historical parked branch.
-                        None => live_state_is_known = false,
+                        Some((state, summaries)) => live_summaries.extend(
+                            summaries
+                                .into_iter()
+                                .map(|summary| format!("{summary} ({state:?})")),
+                        ),
+                        None => live_summaries.push(format!("{branch} unresolved")),
                     }
                 }
-                // cas-2a99 (GH #131): the cherry arm ignores commits the anchor
-                // merely inherited from its spawn base (trunk-reachable, so not
-                // this task's work). A dropped WORK commit is never
-                // trunk-reachable and still poisons the proof.
-                let anchor_has_task_specific_proof =
-                    commit_tip_tree_reachable_from(repo_path, anchor, parent_branch)
-                        || anchor_work_patches_equivalent_on_parent(
-                            repo_path,
-                            anchor,
-                            parent_branch,
-                        );
-                if required_branch_is_known
-                    && live_state_is_known
-                    && live_unmerged_count == 0
-                    && anchor_has_task_specific_proof
-                {
+                // cas-2a99 / cas-65e0 (GH #288): apply the existing
+                // task-specific content proof to every stranded anchor before
+                // emitting hard-block wording. A squash leaves the source ref
+                // non-ancestral by design, so requiring that ref to become
+                // KnownZero recreated ancestry loss after content was already
+                // proven. The cherry arm still excludes only inherited
+                // trunk-reachable commits; a dropped WORK commit remains a
+                // positive `+` and poisons the proof.
+                let origin_parent = format!("origin/{parent_branch}");
+                let content_parent = [parent_branch, origin_parent.as_str()]
+                    .into_iter()
+                    .filter(|candidate| git_ref_exists(repo_path, candidate))
+                    .find(|candidate| {
+                        commit_tip_tree_reachable_from(repo_path, anchor, candidate)
+                            || anchor_work_patches_equivalent_on_parent(
+                                repo_path, anchor, candidate,
+                            )
+                    });
+                if let Some(content_parent) = content_parent {
                     unmerged_count = 0;
                     merge_evidence_note = Some(format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
-                         is not an ancestor of `{parent_branch}`, but its task-specific content \
-                         is proven on the parent and the current live branch evidence is fully \
-                         merged ({}). Treated the recorded anchor as superseded rather than \
-                         requiring history pollution.",
+                         is merged (squash, ancestry lost): it is not an ancestor of \
+                         `{parent_branch}`, but its task-specific content is proven on \
+                         `{content_parent}`. Live branch evidence: {}. Treated the recorded \
+                         anchor as superseded rather than requiring history pollution.",
                         t.id,
-                        live_summaries.join("; "),
+                        if live_summaries.is_empty() {
+                            "none recorded".to_string()
+                        } else {
+                            live_summaries.join("; ")
+                        },
                     ));
                 }
             }
@@ -9249,7 +9262,9 @@ pub(crate) fn render_epic_status_report_with_stack(
         // cas-2a99 (GH #131): a row whose refs resolve nowhere has no
         // measurement to report. Saying so beats printing `0`, which reads as
         // "merged" and previously produced a false all-clear.
-        let unmerged = if s.refs_unresolved {
+        let unmerged = if s.merge_evidence_note.is_some() {
+            "merged (squash, ancestry lost)".to_string()
+        } else if s.refs_unresolved {
             "? (no ref)".to_string()
         } else if s.factory_branch.is_some() {
             s.unmerged_count.to_string()
@@ -9391,10 +9406,11 @@ pub(crate) enum EpicCloseGateOutcome {
 /// task's own recorded factory anchor is not merged into the epic branch.
 ///
 /// The sole non-ancestry exception is a rewritten/superseded anchor whose
-/// task-specific content is proven on the parent by an identical tip tree or
-/// cherry-equivalent patches, while all recorded/current live branch tips are
-/// present and known fully merged. A recycled or reset-to-parent branch being
-/// zero-ahead is not sufficient evidence.
+/// task-specific content is proven on the local or remote-tracking parent by
+/// an identical tip tree or cherry-equivalent patches. Live branch ancestry
+/// is not required after that affirmative proof because squash merges leave
+/// their source refs non-ancestral by design. A recycled or reset-to-parent
+/// branch being zero-ahead remains insufficient without anchor content proof.
 ///
 /// Runs IN ADDITION to (and AFTER) the existing
 /// [`check_unmerged_epic_branches`] which only validates the epic's
@@ -18261,6 +18277,114 @@ mod epic_status_gate_tests {
     }
 
     #[test]
+    fn squash_merged_child_anchors_reconcile_before_stranded_summary_cas_65e0() {
+        let dir = init_epic_repo(&[("alpha", 1), ("bravo", 1), ("charlie", 1)]);
+        let bare = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let local_parent_before_prs = epic_git_stdout(p, &["rev-parse", "main"]);
+        let alpha_anchor = epic_git_stdout(p, &["rev-parse", "factory/alpha"]);
+        let bravo_anchor = epic_git_stdout(p, &["rev-parse", "factory/bravo"]);
+        let charlie_anchor = epic_git_stdout(p, &["rev-parse", "factory/charlie"]);
+        add_origin(p, bare.path());
+
+        // GitHub's squash button leaves both factory refs and their recorded
+        // anchors non-ancestral even though their content is now on main.
+        for worker in ["alpha", "bravo"] {
+            git(
+                p,
+                &["merge", "-q", "--squash", &format!("factory/{worker}")],
+            );
+            git(p, &["commit", "-q", "-m", &format!("squash {worker}")]);
+        }
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["reset", "-q", "--hard", &local_parent_before_prs]);
+
+        assert!(count_unmerged_factory_commits(p, &alpha_anchor, "main") > 0);
+        assert!(count_unmerged_factory_commits(p, &bravo_anchor, "main") > 0);
+        assert!(
+            commit_tip_tree_reachable_from(p, &alpha_anchor, "origin/main"),
+            "the first squash preserves alpha's exact tip tree in remote parent history"
+        );
+        assert!(
+            anchor_work_patches_equivalent_on_parent(p, &bravo_anchor, "origin/main"),
+            "the later squash preserves bravo's patch even though main also carries alpha"
+        );
+        assert!(
+            !anchor_work_patches_equivalent_on_parent(p, &charlie_anchor, "origin/main"),
+            "charlie is the genuinely absent control"
+        );
+
+        let mut alpha = child("cas-alpha", TaskStatus::Closed, Some("alpha"));
+        alpha.deliverables.factory_branch_anchor = Some(alpha_anchor);
+        let mut bravo = child("cas-bravo", TaskStatus::Closed, Some("bravo"));
+        bravo.deliverables.factory_branch_anchor = Some(bravo_anchor);
+        let mut charlie = child("cas-charlie", TaskStatus::Closed, Some("charlie"));
+        charlie.deliverables.factory_branch_anchor = Some(charlie_anchor);
+        let children = vec![alpha, bravo, charlie];
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        let by_id: std::collections::HashMap<_, _> = statuses
+            .iter()
+            .map(|row| (row.task_id.as_str(), row))
+            .collect();
+        assert_eq!(
+            by_id["cas-alpha"].unmerged_count, 0,
+            "tree-identical squash content must reconcile even while the factory ref stays non-ancestral"
+        );
+        assert_eq!(
+            by_id["cas-bravo"].unmerged_count, 0,
+            "patch-equivalent squash content must reconcile independently for every child"
+        );
+        assert!(
+            by_id["cas-charlie"].unmerged_count > 0,
+            "affirmatively absent content must remain stranded"
+        );
+
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert_eq!(
+            report
+                .lines()
+                .filter(|line| {
+                    line.starts_with("| cas-") && line.contains("merged (squash, ancestry lost)")
+                })
+                .count(),
+            2,
+            "each proven squash merge must be named explicitly: {report}"
+        );
+        assert!(
+            report.contains("1 child task(s) carry stranded factory commits"),
+            "only the genuinely absent child may receive hard-block wording: {report}"
+        );
+
+        let squash_only = &children[..2];
+        assert!(matches!(
+            run_epic_close_merge_gate(
+                &epic("cas-epic-squash"),
+                &base_req("cas-epic-squash"),
+                "main",
+                p,
+                squash_only,
+            ),
+            EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+
+        match run_epic_close_merge_gate(
+            &epic("cas-epic-mixed"),
+            &base_req("cas-epic-mixed"),
+            "main",
+            p,
+            &children,
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(message.contains("cas-charlie"), "{message}");
+                assert!(!message.contains("cas-alpha"), "{message}");
+                assert!(!message.contains("cas-bravo"), "{message}");
+            }
+            other => panic!("the absent child must still block epic close, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn epic_close_rejects_recycled_worker_branch_that_does_not_prove_old_anchor() {
         let dir = init_epic_repo(&[("worker", 1)]);
         let p = dir.path();
@@ -18338,7 +18462,7 @@ mod epic_status_gate_tests {
     }
 
     #[test]
-    fn epic_close_surfaces_vanished_parked_branch_after_reassignment() {
+    fn epic_close_accepts_content_proof_when_parked_branch_vanished() {
         let dir = init_epic_repo(&[("alice", 1), ("bob", 0)]);
         let p = dir.path();
         let stranded_anchor = epic_git_stdout(p, &["rev-parse", "factory/alice"]);
@@ -18374,11 +18498,14 @@ mod epic_status_gate_tests {
         reassigned.deliverables.factory_branch_anchor = Some(stranded_anchor.clone());
         let task = epic("cas-epic-missing-parked");
         match run_epic_close_merge_gate(&task, &base_req(&task.id), "main", p, &[reassigned]) {
-            EpicCloseGateOutcome::Reject(message) => {
-                assert!(message.contains(&stranded_anchor), "{message}");
-                assert!(message.contains("factory/alice"), "{message}");
+            EpicCloseGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains(&stranded_anchor), "{note}");
+                assert!(note.contains("factory/alice unresolved"), "{note}");
+                assert!(note.contains("task-specific content is proven"), "{note}");
             }
-            other => panic!("a vanished parked branch must be surfaced; got {other:?}"),
+            other => panic!(
+                "affirmative anchor content proof must outrank a vanished historical branch; got {other:?}"
+            ),
         }
     }
 

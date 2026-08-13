@@ -106,6 +106,7 @@ pub enum DocType {
     Spec,
     CodeSymbol,
     CodeFile,
+    Artifact,
 }
 
 impl DocType {
@@ -118,6 +119,7 @@ impl DocType {
             DocType::Spec => "spec",
             DocType::CodeSymbol => "code_symbol",
             DocType::CodeFile => "code_file",
+            DocType::Artifact => "artifact",
         }
     }
 
@@ -132,9 +134,28 @@ impl DocType {
                 Some(DocType::CodeSymbol)
             }
             "code_file" | "codefile" | "file" | "files" => Some(DocType::CodeFile),
+            "artifact" | "artifacts" => Some(DocType::Artifact),
             _ => None,
         }
     }
+}
+
+/// Searchable text artifact owned by a task's durable artifact directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactDocument {
+    pub task_id: String,
+    pub path: String,
+    pub content: String,
+}
+
+/// Stable index identifier for one artifact path owned by one task.
+pub fn artifact_document_id(task_id: &str, path: &str) -> String {
+    format!("artifact::{task_id}::{path}")
+}
+
+/// Decode an artifact index identifier for user-facing search rendering.
+pub fn parse_artifact_document_id(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("artifact::")?.split_once("::")
 }
 
 /// Search index backed by Tantivy

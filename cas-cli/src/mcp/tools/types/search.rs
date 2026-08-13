@@ -16,7 +16,7 @@ pub struct SearchRequest {
 
     /// Document type filter
     #[schemars(
-        description = "Filter by type: 'entry', 'task', 'rule', 'skill', or 'all' (default)"
+        description = "Filter by type: 'entry', 'task', 'rule', 'skill', 'artifact', or 'all' (default)"
     )]
     #[serde(default)]
     pub doc_type: Option<String>,

@@ -815,7 +815,8 @@ fn collect_untracked_git_worktrees(
 ///
 /// Resolution order (cas-0b32 + cas-bd5f + cas-b86e):
 /// 1. Explicit `task_id` → **authorize worker ownership** (assignee/lease), then
-///    parent epic branch; if none, **reject** unless `allow_trunk`.
+///    parent epic branch or declared WorkTarget. Only a missing target falls
+///    back to trunk and requires `allow_trunk`.
 /// 2. Else resolve the assignee's non-closed tasks. A unique epic target wins;
 ///    a unique standalone task may use trunk only with `allow_trunk`; mixed or
 ///    multiple task targets reject as ambiguous.
@@ -826,6 +827,12 @@ fn collect_untracked_git_worktrees(
 /// not merge authority. Any closed parent epic is rejected before git mutation.
 ///
 /// Always returns a human-readable reason on success.
+struct ResolvedSystemBMergeTarget {
+    branch: String,
+    reason: String,
+    trunk_fallback: bool,
+}
+
 fn resolve_system_b_merge_target(
     task_store: &dyn cas_store::TaskStore,
     agent_store: &dyn cas_store::AgentStore,
@@ -833,7 +840,7 @@ fn resolve_system_b_merge_target(
     assignee: &str,
     allow_trunk: bool,
     trunk: impl FnOnce() -> String,
-) -> Result<(String, String), McpError> {
+) -> Result<ResolvedSystemBMergeTarget, McpError> {
     if let Some(task_id) = task_id {
         let task = task_store.get(task_id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
@@ -865,14 +872,15 @@ fn resolve_system_b_merge_target(
                 });
             }
             if let Some(branch) = epic.branch.clone() {
-                return Ok((
-                    branch.clone(),
-                    format!(
+                return Ok(ResolvedSystemBMergeTarget {
+                    branch: branch.clone(),
+                    reason: format!(
                         "epic branch {branch} (task {task_id}'s parent epic {}; \
                          authorized for worker {assignee})",
                         epic.id
                     ),
-                ));
+                    trunk_fallback: false,
+                });
             }
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -886,21 +894,41 @@ fn resolve_system_b_merge_target(
             });
         }
 
-        // Standalone task (no parent epic): trunk only with allow_trunk=true.
+        // A declared WorkTarget is already explicit merge authority. In
+        // particular, a standalone task targeting staging must not consume
+        // the trunk escape hatch merely because it has no parent epic.
+        if let Some(target) = task.deliverables.work_target.as_ref() {
+            return Ok(ResolvedSystemBMergeTarget {
+                branch: target.target_branch.clone(),
+                reason: format!(
+                    "task WorkTarget {} branch {} (task {task_id} has no parent epic; \
+                     allow_trunk is not required)",
+                    target.repo_selector, target.target_branch
+                ),
+                trunk_fallback: false,
+            });
+        }
+
+        // No WorkTarget and no parent epic: this is the genuine trunk
+        // fallback, so resolve and disclose the destination before requiring
+        // the dedicated authorization flag.
+        let trunk = trunk();
         if allow_trunk {
-            let trunk = trunk();
-            return Ok((
-                trunk.clone(),
-                format!(
+            return Ok(ResolvedSystemBMergeTarget {
+                branch: trunk.clone(),
+                reason: format!(
                     "trunk {trunk} (explicit allow_trunk=true; task {task_id} has no parent epic; \
                      authorized for worker {assignee})"
                 ),
-            ));
+                trunk_fallback: true,
+            });
         }
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!(
-                "task {task_id} has no parent epic — refusing silent trunk merge.\n\n{}",
+                "task {task_id} has no parent epic or WorkTarget — refusing trunk \
+                 fallback (would merge to: {trunk}). Pass allow_trunk=true only if \
+                 that exact destination is intended.\n\n{}",
                 merge_target_remediation(assignee)
             )),
             data: None,
@@ -1030,13 +1058,14 @@ fn resolve_system_b_merge_target(
             .map(|(_, _, task)| task.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        return Ok((
-            branch.clone(),
-            format!(
+        return Ok(ResolvedSystemBMergeTarget {
+            branch: branch.clone(),
+            reason: format!(
                 "epic branch {branch} (assignee {assignee}'s current task(s) [{task_ids}] \
                  resolve through parent epic {epic_id}; no task_id given)"
             ),
-        ));
+            trunk_fallback: false,
+        });
     }
 
     if unique_branches.len() > 1
@@ -1064,27 +1093,29 @@ fn resolve_system_b_merge_target(
         });
     }
 
+    let trunk = trunk();
     if allow_trunk {
-        let trunk = trunk();
         let task_context = standalone_tasks
             .first()
             .map(|task| format!("assignee {assignee}'s current standalone task {task}"))
             .unwrap_or_else(|| format!("no current task binding for assignee {assignee}"));
-        return Ok((
-            trunk.clone(),
-            format!(
+        return Ok(ResolvedSystemBMergeTarget {
+            branch: trunk.clone(),
+            reason: format!(
                 "trunk {trunk} (explicit allow_trunk=true; {task_context}; no task_id and \
                  no assignee epic binding; session focus is not merge authority)"
             ),
-        ));
+            trunk_fallback: true,
+        });
     }
 
     Err(McpError {
         code: ErrorCode::INVALID_PARAMS,
         message: Cow::from(format!(
-            "no merge target for worktree assignee {assignee}: no task_id, no assignee \
-             epic binding, and allow_trunk was not set — refusing silent trunk default \
-             (cas-0b32/cas-b86e). Session focus is not merge authority.\n\n{}",
+            "no declared merge target for worktree assignee {assignee}: no task_id or \
+             assignee epic binding. The fallback would merge to: {trunk}; allow_trunk \
+             was not set, so CAS is refusing (cas-0b32/cas-b86e). Session focus is not \
+             merge authority.\n\n{}",
             merge_target_remediation(assignee)
         )),
         data: None,
@@ -1941,10 +1972,16 @@ impl CasCore {
             })?,
         };
 
-        let (mut worktree, is_system_b, source_worktree_live, target_reason) = match system_a {
+        let (
+            mut worktree,
+            is_system_b,
+            source_worktree_live,
+            target_reason,
+            trunk_fallback,
+        ) = match system_a {
             Some(wt) => {
                 let source_worktree_live = is_git_worktree(&wt.path);
-                (wt, false, source_worktree_live, String::new())
+                (wt, false, source_worktree_live, String::new(), false)
             }
             None => {
                 let assignee = id.strip_prefix("factory/").unwrap_or(id);
@@ -1972,7 +2009,7 @@ impl CasCore {
                         )),
                         data: None,
                     })?;
-                let (resolved_parent_branch, mut target_reason) = resolve_system_b_merge_target(
+                let resolved_target = resolve_system_b_merge_target(
                     task_store.as_ref(),
                     agent_store.as_ref(),
                     task_id,
@@ -1983,6 +2020,7 @@ impl CasCore {
                             .unwrap_or_else(|| manager.git().detect_default_branch())
                     },
                 )?;
+                let mut target_reason = resolved_target.reason;
                 let parent_branch = match declared_repo_context.as_ref() {
                     Some(context) => {
                         target_reason = format!(
@@ -1991,7 +2029,7 @@ impl CasCore {
                         );
                         context.target_branch.clone()
                     }
-                    None => resolved_parent_branch,
+                    None => resolved_target.branch,
                 };
                 (
                     crate::types::Worktree::new(
@@ -2003,6 +2041,7 @@ impl CasCore {
                     true,
                     source_worktree_live,
                     target_reason,
+                    resolved_target.trunk_fallback,
                 )
             }
         };
@@ -2632,6 +2671,22 @@ impl CasCore {
             return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
         }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
+        let trunk_notice = if trunk_fallback {
+            if push_outcome.is_published() {
+                format!(
+                    "⚠️ TRUNK PUSH COMPLETE — allow_trunk=true authorized and published this \
+                     merge to {push_branch}. This may trigger a production deployment.\n\n"
+                )
+            } else {
+                format!(
+                    "⚠️ TRUNK FALLBACK MERGED LOCALLY — allow_trunk=true authorized this merge \
+                     to {push_branch}, but it was not published. Inspect Push state before \
+                     retrying.\n\n"
+                )
+            }
+        } else {
+            String::new()
+        };
 
         if !reconciled_delivery {
             let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
@@ -2657,9 +2712,10 @@ impl CasCore {
             // likely *why* the close gate fired — append the diagnosis rather
             // than letting the caller re-derive it. Appended as an extra
             // content block so the gate's own text stays verbatim.
-            close_result
-                .content
-                .insert(0, Content::text(ci_prefix.clone()));
+            close_result.content.insert(
+                0,
+                Content::text(format!("{ci_prefix}{trunk_notice}")),
+            );
             if !push_outcome.is_published() {
                 close_result.content.push(Content::text(push_note));
             }
@@ -2671,7 +2727,7 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "{ci_prefix}Merged worktree {} to {}.{} Commit: {}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}{trunk_notice}Merged worktree {} to {}.{} Commit: {}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
@@ -2685,7 +2741,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "{ci_prefix}Merged worktree {} to {}.{} Commit: {}{}{}",
+            "{ci_prefix}{trunk_notice}Merged worktree {} to {}.{} Commit: {}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,

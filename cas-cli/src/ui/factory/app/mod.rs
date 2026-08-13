@@ -2042,6 +2042,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
     supervisor_name: &str,
     supervisor_cli: cas_mux::SupervisorCli,
     worker_names: &[String],
+    session_id: Option<&str>,
     factory_session: Option<&str>,
 ) {
     let worker_list = if worker_names.is_empty() {
@@ -2049,7 +2050,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
     } else {
         worker_names.join(", ")
     };
-    let prompt = match supervisor_cli {
+    let mut prompt = match supervisor_cli {
         cas_mux::SupervisorCli::Codex => format!(
             "Codex supervisor startup:\n\
 - Use skills: cas-supervisor, cas-codex-supervisor-checklist\n\
@@ -2083,6 +2084,22 @@ pub(crate) fn queue_supervisor_intro_prompt(
         ),
     };
 
+    // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for
+    // a native-team supervisor launched under a non-default config dir, even
+    // when both the project settings and the per-team `--settings` file carry
+    // `cas hook SessionStart`. The launch intro is a guaranteed delivery seam,
+    // so attach the same core context bundle here for that launch shape. Keep
+    // direct/default-profile sessions on the ordinary hook path.
+    if supervisor_cli == cas_mux::SupervisorCli::Claude {
+        if let Some(context) =
+            claude_custom_config_context_fallback(cas_dir, session_id.unwrap_or(supervisor_name))
+        {
+            prompt.push_str("\n\n<cas-session-start-fallback>\n");
+            prompt.push_str(&context);
+            prompt.push_str("\n</cas-session-start-fallback>");
+        }
+    }
+
     if let Ok(queue) = open_prompt_queue_store(cas_dir) {
         if let Some(session) = factory_session {
             let _ = queue.enqueue_with_session("cas", supervisor_name, &prompt, session);
@@ -2090,6 +2107,33 @@ pub(crate) fn queue_supervisor_intro_prompt(
             let _ = queue.enqueue("cas", supervisor_name, &prompt);
         }
     }
+}
+
+fn claude_custom_config_context_fallback(
+    cas_dir: &std::path::Path,
+    session_id: &str,
+) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let configured = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let config_dir = crate::ui::factory::daemon::runtime::teams::claude_config_dir_from(
+        &home,
+        configured.as_deref(),
+    );
+    if config_dir == home.join(".claude") {
+        return None;
+    }
+
+    let input = cas_core::hooks::HookInput {
+        session_id: session_id.to_string(),
+        cwd: cas_dir.parent()?.to_string_lossy().into_owned(),
+        hook_event_name: "SessionStart".to_string(),
+        source: Some("startup".to_string()),
+        agent_role: Some("supervisor".to_string()),
+        ..Default::default()
+    };
+    crate::hooks::build_context(&input, 5, cas_dir)
+        .ok()
+        .filter(|context| !context.trim().is_empty())
 }
 
 pub(crate) fn queue_codex_worker_intro_prompt(
@@ -2456,7 +2500,7 @@ mod tests {
 
     use crate::test_support::TestEnvGuard;
     use cas_factory::{EpicState, FileChangeInfo, GitFileStatus, SourceChangesInfo, TaskSummary};
-    use cas_types::{Priority, TaskStatus, TaskType};
+    use cas_types::{Entry, Priority, TaskStatus, TaskType};
 
     use super::{
         DirectorData, DirectorEvent, merge_director_data_preserving_git, non_closed_task_ids,
@@ -2516,6 +2560,7 @@ mod tests {
             cas_mux::SupervisorCli::Claude,
             &["worker-a".to_string()],
             None,
+            None,
         );
         queue_codex_worker_intro_prompt(cas_dir, "worker-a", cas_mux::SupervisorCli::Claude);
 
@@ -2541,6 +2586,53 @@ mod tests {
                 .is_empty(),
             "Claude worker intro missing: {:?}",
             cas_mux::missing_contract_elements(&wrk[0].prompt, cas_mux::ContractRole::Worker)
+        );
+    }
+
+    /// cas-2085 / GH #290: Claude 2.1.231 did not dispatch SessionStart for a
+    /// live factory supervisor even though its custom config dir and per-team
+    /// `--settings` file both contained the hook. The guaranteed launch-time
+    /// intro prompt must therefore carry the context bundle as a fallback.
+    #[test]
+    fn claude_custom_config_supervisor_intro_carries_context_fallback() {
+        use crate::store::{detect::open_prompt_queue_store, init_cas_dir, open_store};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = init_cas_dir(project.path()).unwrap();
+        let custom_config = project.path().join(".claude-support@example.test");
+        let _guard = TestEnvGuard::with_vars(&[(
+            "CLAUDE_CONFIG_DIR",
+            custom_config.to_str().expect("UTF-8 config dir"),
+        )]);
+
+        open_store(&cas_dir)
+            .unwrap()
+            .add(&Entry::new(
+                "ambient-launch-shape".to_string(),
+                "custom profile ambient memory sentinel".to_string(),
+            ))
+            .unwrap();
+
+        queue_supervisor_intro_prompt(
+            &cas_dir,
+            "sup",
+            cas_mux::SupervisorCli::Claude,
+            &[],
+            Some("custom-config-factory"),
+            Some("custom-config-factory"),
+        );
+
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue
+            .peek_for_targets(&["sup"], Some("custom-config-factory"), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .prompt
+                .contains("custom profile ambient memory sentinel"),
+            "custom-config supervisor launch must receive ambient context even when Claude skips SessionStart: {}",
+            rows[0].prompt
         );
     }
 

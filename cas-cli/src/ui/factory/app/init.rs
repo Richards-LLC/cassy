@@ -9,9 +9,9 @@ use crate::config::Config;
 use crate::orchestration::names::generate_unique;
 use crate::store::find_cas_root;
 use crate::ui::factory::app::{
-    AutoPromptConfig, EpicFocusSource, EpicState, FactoryApp, FactoryConfig,
-    epic_branch_for_state, preferred_epic_focus_from_session_metadata,
-    queue_codex_worker_intro_prompt, queue_supervisor_intro_prompt, resolve_epic_state_for_focus,
+    AutoPromptConfig, EpicFocusSource, EpicState, FactoryApp, FactoryConfig, epic_branch_for_state,
+    preferred_epic_focus_from_session_metadata, queue_codex_worker_intro_prompt,
+    queue_supervisor_intro_prompt, resolve_epic_state_for_focus,
 };
 use crate::ui::factory::buffer_backend::new_hyperlink_map;
 use crate::ui::factory::director::DirectorStores;
@@ -326,6 +326,7 @@ impl FactoryApp {
             &supervisor_name_for_prompt,
             config.supervisor_cli,
             &app.worker_names,
+            app.lead_session_id(),
             None,
         );
         for worker in &app.worker_names {
@@ -498,6 +499,7 @@ impl FactoryApp {
             &supervisor_name,
             supervisor_cli,
             &worker_names,
+            app.lead_session_id(),
             None,
         );
         for worker in &worker_names {

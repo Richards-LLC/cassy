@@ -117,6 +117,46 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
     assert_eq!(same_worker_rows, 1, "worker identity must remain singular");
 }
 
+#[test]
+fn supervisor_hook_registration_persists_role_and_resolves_owner() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        (
+            "CAS_FACTORY_SESSION",
+            Some("factory-supervisor-registration"),
+        ),
+    ]);
+    let temp = TempDir::new().expect("temp project");
+    let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+    let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+
+    let (supervisor, reused) = register_session_start_agent(
+        agent_store.as_ref(),
+        "supervisor-hook-session",
+        Some("lively-supervisor-11"),
+        Some("supervisor"),
+        std::process::id(),
+        None,
+    )
+    .expect("register supervisor from SessionStart hook");
+
+    assert!(!reused);
+    assert_eq!(supervisor.role, AgentRole::Supervisor);
+    assert_eq!(supervisor.agent_type, cas_types::AgentType::Primary);
+    assert_eq!(
+        supervisor.factory_session.as_deref(),
+        Some("factory-supervisor-registration")
+    );
+    let owner =
+        crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_owning_supervisor(
+            agent_store.as_ref(),
+            Some("factory-supervisor-registration"),
+        )
+        .expect("registered supervisor resolves as factory owner");
+    assert_eq!(owner.agent_id, "supervisor-hook-session");
+    assert_eq!(owner.name, "lively-supervisor-11");
+}
+
 /// cas-921f (P1 fix-round): the real env→register→resolve chain for a
 /// worker's harness, end to end — from a REAL `CAS_FACTORY_WORKER_CLI` env
 /// var (not injected `Agent.metadata` directly, which is what the earlier

@@ -10,7 +10,9 @@ use crate::migration::{
     detector::{SchemaSummary, get_schema_summary},
     run_migrations,
 };
-use crate::store::{StoreType, detect_store_type, open_rule_store, open_store, open_task_store};
+use crate::store::{
+    StoreType, detect_store_type, open_agent_store, open_rule_store, open_store, open_task_store,
+};
 use crate::types::RuleStatus;
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
@@ -100,6 +102,54 @@ fn schema_tables_check(summary: &SchemaSummary) -> Check {
             ),
         }
     }
+}
+
+/// Report the routable supervisor population for every factory session that
+/// still has at least one live registered agent. Stale historical supervisor
+/// rows do not make an active session ambiguous.
+fn factory_supervisor_checks(agents: &[crate::types::Agent]) -> Vec<Check> {
+    use crate::types::AgentRole;
+
+    let mut sessions: BTreeMap<&str, Vec<&crate::types::Agent>> = BTreeMap::new();
+    for agent in agents.iter().filter(|agent| agent.is_alive()) {
+        if let Some(session) = agent.factory_session.as_deref() {
+            sessions.entry(session).or_default().push(agent);
+        }
+    }
+
+    sessions
+        .into_iter()
+        .map(|(session, members)| {
+            let supervisors: Vec<_> = members
+                .into_iter()
+                .filter(|agent| agent.role == AgentRole::Supervisor)
+                .collect();
+            let count = supervisors.len();
+            let status = if count == 1 {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Warning
+            };
+            let detail = match count {
+                0 => "expected exactly 1; `target=supervisor` cannot resolve in this session"
+                    .to_string(),
+                1 => format!("{} ({})", supervisors[0].name, supervisors[0].id),
+                _ => format!(
+                    "expected exactly 1; found {}",
+                    supervisors
+                        .iter()
+                        .map(|agent| format!("{} ({})", agent.name, agent.id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            Check {
+                name: format!("factory session {session}"),
+                status,
+                message: format!("supervisors: {count}; {detail}"),
+            }
+        })
+        .collect()
 }
 
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
@@ -308,6 +358,21 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 message: format!("cannot check undelivered lifecycle relays: {e}"),
             }),
         }
+    }
+
+    // Every active factory session needs exactly one live durable supervisor
+    // row. Otherwise logical handoffs and verification recovery have nowhere
+    // to route even while the supervisor pane itself exists.
+    match open_agent_store(&cas_root)
+        .and_then(|store| Ok(store.list(None)?))
+        .map(|agents| factory_supervisor_checks(&agents))
+    {
+        Ok(session_checks) => checks.extend(session_checks),
+        Err(error) => checks.push(Check {
+            name: "factory supervisors".to_string(),
+            status: CheckStatus::Warning,
+            message: format!("cannot inspect registered factory supervisors: {error}"),
+        }),
     }
 
     // Check 3a-ii: messages the factory keeps failing to hand over
@@ -1737,6 +1802,81 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn factory_agent(
+        id: &str,
+        name: &str,
+        session: &str,
+        role: crate::types::AgentRole,
+    ) -> crate::types::Agent {
+        let mut agent = crate::types::Agent::new(id.to_string(), name.to_string());
+        agent.factory_session = Some(session.to_string());
+        agent.role = role;
+        agent
+    }
+
+    #[test]
+    fn factory_supervisor_check_reports_one_per_active_session() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent("sup-a", "supervisor-a", "factory-a", AgentRole::Supervisor),
+            factory_agent("worker-a", "worker-a", "factory-a", AgentRole::Worker),
+        ];
+        let checks = factory_supervisor_checks(&agents);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, CheckStatus::Ok));
+        assert_eq!(checks[0].name, "factory session factory-a");
+        assert!(checks[0].message.contains("supervisors: 1"));
+        assert!(checks[0].message.contains("supervisor-a"));
+    }
+
+    #[test]
+    fn factory_supervisor_check_flags_zero_and_multiple() {
+        use crate::types::AgentRole;
+        let agents = vec![
+            factory_agent("worker-a", "worker-a", "factory-zero", AgentRole::Worker),
+            factory_agent(
+                "sup-b1",
+                "supervisor-b1",
+                "factory-many",
+                AgentRole::Supervisor,
+            ),
+            factory_agent(
+                "sup-b2",
+                "supervisor-b2",
+                "factory-many",
+                AgentRole::Supervisor,
+            ),
+        ];
+        let checks = factory_supervisor_checks(&agents);
+        assert_eq!(checks.len(), 2);
+        assert!(matches!(checks[0].status, CheckStatus::Warning));
+        assert!(checks[0].message.contains("supervisors: 2"));
+        assert!(matches!(checks[1].status, CheckStatus::Warning));
+        assert!(checks[1].message.contains("supervisors: 0"));
+    }
+
+    #[test]
+    fn factory_supervisor_check_ignores_stale_historical_rows() {
+        use crate::types::{AgentRole, AgentStatus};
+        let current = factory_agent(
+            "sup-current",
+            "supervisor-current",
+            "factory-restarted",
+            AgentRole::Supervisor,
+        );
+        let mut predecessor = factory_agent(
+            "sup-old",
+            "supervisor-old",
+            "factory-restarted",
+            AgentRole::Supervisor,
+        );
+        predecessor.status = AgentStatus::Stale;
+        let checks = factory_supervisor_checks(&[current, predecessor]);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, CheckStatus::Ok));
+        assert!(checks[0].message.contains("supervisors: 1"));
+    }
 
     // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────
 

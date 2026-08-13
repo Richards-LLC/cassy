@@ -360,6 +360,12 @@ impl CasService {
 
     pub(super) async fn task_update(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskUpdateRequest;
+        if req.task_type.is_some() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "TASK UPDATE REJECTED: task_type is create-only and cannot be changed after task creation. No requested fields were applied.",
+            ));
+        }
         let target_repo = req.target_repo.clone();
         let target_branch = req.target_branch.clone();
         let inner_req = TaskUpdateRequest {

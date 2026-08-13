@@ -306,6 +306,49 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
             .contains("no failed-review verdict was recorded")
     );
     assert!(!corrected.notes.contains("changes requested by supervisor"));
+
+    let no_code_created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "title": "Clear obsolete code anchor",
+            "execution_note": "no-code",
+            "target_repo": temp.path().to_str().unwrap(),
+            "target_branch": "main",
+            "confirm_warning": true
+        }),
+    )
+    .await;
+    let no_code_id = extract_task_id(&no_code_created).unwrap().to_string();
+    let mut no_code = store.get(&no_code_id).unwrap();
+    no_code.status = TaskStatus::AwaitingMerge;
+    store.update(&no_code).unwrap();
+
+    let cleared = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "update",
+            "id": no_code_id,
+            "target_repo": "",
+            "proof_scope_fix": true,
+            "reason": "This delivery produces an external report and no longer has code scope."
+        }),
+    )
+    .await;
+    assert!(cleared.contains("work target was cleared"), "{cleared}");
+    let cleared_task = store.get(&no_code_id).unwrap();
+    assert_eq!(cleared_task.status, TaskStatus::Open);
+    assert!(cleared_task.deliverables.work_target.is_none());
+    assert!(
+        cleared_task
+            .notes
+            .contains("stale code work target was cleared")
+    );
+    assert!(
+        !cleared_task
+            .notes
+            .contains("changes requested by supervisor")
+    );
 }
 
 #[tokio::test]

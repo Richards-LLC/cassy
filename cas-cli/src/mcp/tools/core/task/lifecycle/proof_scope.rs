@@ -228,7 +228,25 @@ pub(crate) fn guard_task_proof_scope(
         ));
     }
 
-    let locked_fields = operation.locked_fields();
+    let mut locked_fields = operation.locked_fields();
+    // cas-8a49 / GH #304: a no-code delivery cannot know its durable proof
+    // reference until the artifact/report has actually been produced. Parking
+    // the task must not freeze the one transition close still requires. This
+    // exemption is deliberately one-way: once a non-empty proof exists it is
+    // part of the reviewed scope and remains immutable under the ordinary
+    // update path.
+    if let ProofScopeOperation::TaskUpdate { request, .. } = operation
+        && task
+            .external_ref
+            .as_deref()
+            .is_none_or(|reference| reference.trim().is_empty())
+        && request
+            .external_ref
+            .as_deref()
+            .is_some_and(|reference| !reference.trim().is_empty())
+    {
+        locked_fields.retain(|field| *field != "external_ref");
+    }
     if locked_fields.is_empty() {
         return Ok(());
     }
@@ -635,6 +653,63 @@ mod tests {
             .contains("task action=reopen"),
             "an exact nonlegacy skipped verdict remains close-authoritative"
         );
+    }
+
+    #[test]
+    fn parked_task_allows_only_initial_external_ref_proof_write() {
+        let root = TempDir::new().unwrap();
+        let mut task = Task::new("cas-no-code-proof".into(), "no-code report".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.execution_note = Some("no-code".into());
+
+        let mut initial_proof = empty_update();
+        initial_proof.external_ref = Some("artifact:reports/cas-no-code-proof.html".into());
+        assert!(
+            guard_task_proof_scope(
+                root.path(),
+                &task,
+                ProofScopeOperation::TaskUpdate {
+                    request: &initial_proof,
+                    target_repo_supplied: false,
+                    target_branch_supplied: false,
+                },
+            )
+            .is_ok(),
+            "parking must not deadlock the first proof reference close requires"
+        );
+
+        task.external_ref = initial_proof.external_ref.clone();
+        let mut replacement = empty_update();
+        replacement.external_ref = Some("artifact:reports/replacement.html".into());
+        let error = guard_task_proof_scope(
+            root.path(),
+            &task,
+            ProofScopeOperation::TaskUpdate {
+                request: &replacement,
+                target_repo_supplied: false,
+                target_branch_supplied: false,
+            },
+        )
+        .expect_err("an existing approved proof reference remains scope-locked");
+        assert!(error.contains("DELIVERY PROOF SCOPE LOCKED"));
+        assert!(error.contains("external_ref"));
+
+        let mut proof_plus_scope_change = empty_update();
+        proof_plus_scope_change.external_ref = Some("artifact:reports/first.html".into());
+        proof_plus_scope_change.title = Some("changed reviewed scope".into());
+        task.external_ref = None;
+        let error = guard_task_proof_scope(
+            root.path(),
+            &task,
+            ProofScopeOperation::TaskUpdate {
+                request: &proof_plus_scope_change,
+                target_repo_supplied: false,
+                target_branch_supplied: false,
+            },
+        )
+        .expect_err("the proof exception must not unlock sibling scope fields");
+        assert!(error.contains("title"));
+        assert!(!error.contains("[external_ref"));
     }
 
     #[test]

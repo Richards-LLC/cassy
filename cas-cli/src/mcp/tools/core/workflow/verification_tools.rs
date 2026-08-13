@@ -1,5 +1,10 @@
 use crate::mcp::tools::core::imports::*;
 
+// Matches the close-time proof-cycle lifetime. A supervisor-direct recovery
+// creates the same short-lived, durable boundary that a normal worker close
+// would have created before an external merge left the task review-pending.
+const SUPERVISOR_DIRECT_RECOVERY_DISPATCH_TIMEOUT_SECS: i64 = 600;
+
 impl CasCore {
     pub async fn cas_verification_add(
         &self,
@@ -84,6 +89,17 @@ impl CasCore {
                 data: None,
             });
         }
+
+        // Parse all caller-selected verdict state before a missing-dispatch
+        // recovery can persist a new proof boundary. An invalid status must
+        // remain failure-atomic rather than leaving a fresh pending dispatch.
+        let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Invalid verification status. Expected: approved, rejected, error, or skipped.",
+            ),
+            data: None,
+        })?;
 
         // Resolve authority only from the server's registered caller identity.
         // Caller-supplied names, models, verifier types, task ownership, harness
@@ -292,12 +308,69 @@ impl CasCore {
             }
             bound_server_handoff = Some(capability);
             dispatch_id
+        } else if let Some(dispatch_id) = req.dispatch_id.clone() {
+            dispatch_id
         } else {
-            req.dispatch_id.clone().ok_or_else(|| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Registered supervisor-direct verification must name the exact dispatch_id it resolves.",
-                ),
+            // An external merge can leave the task in the same durable
+            // PendingSupervisorReview projection that normal close creates,
+            // but without its companion dispatch. Do not make a supervisor
+            // who has just completed that review invent an ID that does not
+            // exist. Recover exactly this missing boundary, and no broader
+            // no-dispatch supervisor authority.
+            if task.status != cas_types::TaskStatus::PendingSupervisorReview
+                || !task.pending_verification
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Registered supervisor-direct verification without dispatch_id is allowed only for a task that is pending supervisor review with a missing dispatch. Task {} is {}; retry task close to create an exact dispatch, then name it here.",
+                        req.task_id, task.status
+                    )),
+                    data: None,
+                });
+            }
+
+            match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id) {
+                Ok(Some(dispatch)) => {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Registered supervisor-direct verification must name the existing exact dispatch {} (state: {}).",
+                            dispatch.id, dispatch.state
+                        )),
+                        data: None,
+                    });
+                }
+                Err(error) => {
+                    return Err(McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Unable to inspect the pending supervisor-review dispatch for task {}: {error}",
+                            req.task_id
+                        )),
+                        data: None,
+                    });
+                }
+                Ok(None) => {}
+            }
+
+            cas_store::create_verification_dispatch_bound(
+                &self.cas_root,
+                &req.task_id,
+                &caller_id,
+                &caller_id,
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now()
+                    + chrono::Duration::seconds(SUPERVISOR_DIRECT_RECOVERY_DISPATCH_TIMEOUT_SECS),
+                false,
+            )
+            .map(|dispatch| dispatch.id)
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to create a missing supervisor-review dispatch for task {}: {error}",
+                    req.task_id
+                )),
                 data: None,
             })?
         };
@@ -337,19 +410,19 @@ impl CasCore {
         // worktree snapshot captured when close created this dispatch. A
         // mutation while the verifier is reviewing invalidates only this task's
         // proof cycle; unrelated MCP and other-task work remains available.
-        let proof_dispatch = cas_store::get_verification_dispatch(
-            &self.cas_root,
-            &requested_dispatch_id,
-        )
-        .map_err(|_| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from("Verification rejected: exact dispatch is unavailable."),
-            data: None,
-        })?;
+        let proof_dispatch =
+            cas_store::get_verification_dispatch(&self.cas_root, &requested_dispatch_id).map_err(
+                |_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("Verification rejected: exact dispatch is unavailable."),
+                    data: None,
+                },
+            )?;
         if let Some(repository) = proof_dispatch.repository.as_ref()
-            && let Err(error) = crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
-                repository,
-            )
+            && let Err(error) =
+                crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
+                    repository,
+                )
         {
             cas_store::invalidate_verification_dispatch_for_repository_drift(
                 &self.cas_root,
@@ -374,14 +447,6 @@ impl CasCore {
         let id = verification_store.generate_id().map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to generate ID: {e}")),
-            data: None,
-        })?;
-
-        let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(
-                "Invalid verification status. Expected: approved, rejected, error, or skipped.",
-            ),
             data: None,
         })?;
 
@@ -413,17 +478,16 @@ impl CasCore {
             verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
             verification.dispatch_id = Some(requested_dispatch_id.clone());
             verification.issuer_agent_id = Some(caller_id.clone());
-            if let Some(existing) = cas_store::get_verification_for_dispatch(
-                &self.cas_root,
-                &requested_dispatch_id,
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Failed to inspect exact verification dispatch result: {e}"
-                )),
-                data: None,
-            })? {
+            if let Some(existing) =
+                cas_store::get_verification_for_dispatch(&self.cas_root, &requested_dispatch_id)
+                    .map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to inspect exact verification dispatch result: {e}"
+                        )),
+                        data: None,
+                    })?
+            {
                 if supervisor_verification_retry_matches(&existing, &verification) {
                     return Ok(Self::success(format!(
                         "{} Verification {} for task {} - {}: {} (idempotent retry)",
@@ -595,7 +659,8 @@ impl CasCore {
                 verification.status,
                 VerificationStatus::Approved | VerificationStatus::Skipped
             );
-            let delivery_transitioned = if let Some(delivery_transaction_id) = dispatch.delivery_transaction_id.as_deref()
+            let delivery_transitioned = if let Some(delivery_transaction_id) =
+                dispatch.delivery_transaction_id.as_deref()
                 && cas_store::transition_worker_delivery_verification_with_conn(
                     &tx,
                     delivery_transaction_id,
@@ -638,11 +703,7 @@ impl CasCore {
                         "UPDATE tasks
                          SET status = 'open', pending_verification = 0, notes = ?2, updated_at = ?3
                          WHERE id = ?1 AND status = 'pending_supervisor_review'",
-                        rusqlite::params![
-                            req.task_id,
-                            notes,
-                            chrono::Utc::now().to_rfc3339(),
-                        ],
+                        rusqlite::params![req.task_id, notes, chrono::Utc::now().to_rfc3339(),],
                     )
                     .map_err(|e| McpError {
                         code: ErrorCode::INTERNAL_ERROR,

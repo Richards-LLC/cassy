@@ -108,7 +108,11 @@ fn contextual_overlap_bonus(entry: &Entry, query: &str) -> f32 {
         return 0.0;
     }
 
-    0.5 * matching_terms as f32 / query_terms.len() as f32
+    // Score the evidence itself rather than diluting it by the full query
+    // length. Task context commonly repeats title terms in the description and
+    // appends the cwd, neither of which should weaken a genuine lexical match.
+    // Cap the boost so preferences retain their stronger type weighting.
+    (0.2 * matching_terms as f32).min(1.0)
 }
 
 impl ContextScorer for HybridContextScorer {
@@ -225,18 +229,25 @@ mod tests {
     fn contextual_overlap_bonus_prioritizes_multi_term_task_matches() {
         let task_memory = Entry {
             content: "Gate restoration must preserve the dual identity report contract.".into(),
+            importance: 0.1,
             ..Default::default()
         };
         let generic_memory = Entry {
             content: "Generic historical process note with no report-specific guidance.".into(),
+            importance: 0.95,
             ..Default::default()
         };
-        let query = "Gate 2D restoration report with dual-identity checks";
+        let query = "Gate 2D restoration report with dual-identity checks Produce HTML report \
+                     deliverables covering Gate 2D restoration and dual-identity .tmp-project";
+
+        let task_score = BasicContextScorer::calculate_score(&task_memory)
+            + contextual_overlap_bonus(&task_memory, query);
+        let generic_score = BasicContextScorer::calculate_score(&generic_memory)
+            + contextual_overlap_bonus(&generic_memory, query);
 
         assert!(
-            contextual_overlap_bonus(&task_memory, query)
-                > contextual_overlap_bonus(&generic_memory, query),
-            "a multi-term task match must outrank a generic one-word overlap"
+            task_score > generic_score,
+            "a multi-term task match ({task_score}) must outrank a high-importance generic memory ({generic_score}) when hybrid search falls back"
         );
         assert_eq!(contextual_overlap_bonus(&generic_memory, query), 0.0);
     }

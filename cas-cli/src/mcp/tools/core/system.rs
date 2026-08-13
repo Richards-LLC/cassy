@@ -57,6 +57,70 @@ impl CasCore {
         Ok(Self::success(context))
     }
 
+    /// Get ambient context focused on a specific task.
+    ///
+    /// This keeps the normal session-context shape (including Helpful
+    /// Memories), while adding the focused task title and description to the
+    /// context query used by the memory scorer.
+    pub async fn cas_context_for_task(
+        &self,
+        task_id: &str,
+        limit: usize,
+        max_tokens: Option<usize>,
+    ) -> Result<CallToolResult, McpError> {
+        let task = self.open_task_store()?.get(task_id).map_err(|e| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Task not found: {e}")),
+            data: None,
+        })?;
+        let task_content = format!("{} {}", task.title, task.description);
+
+        let hook_input = HookInput {
+            session_id: "mcp".to_string(),
+            transcript_path: None,
+            cwd: self
+                .cas_root
+                .parent()
+                .unwrap_or(&self.cas_root)
+                .to_string_lossy()
+                .to_string(),
+            workspace_root: None,
+            permission_mode: None,
+            hook_event_name: "McpContext".to_string(),
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+            tool_use_id: None,
+            tool_input_truncated: None,
+            user_prompt: Some(task_content),
+            source: None,
+            reason: None,
+            subagent_type: None,
+            agent_id: None,
+            agent_type: None,
+            subagent_prompt: None,
+            agent_role: std::env::var("CAS_AGENT_ROLE").ok(),
+            message: None,
+            message_is_final: None,
+            index: None,
+            stop_hook_active: None,
+        };
+
+        let context =
+            build_context_with_token_budget(&hook_input, limit, &self.cas_root, max_tokens)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to build task-focused context: {e}")),
+                    data: None,
+                })?;
+
+        if context.is_empty() {
+            return Ok(Self::success("No context available"));
+        }
+
+        Ok(Self::success(context))
+    }
+
     /// Get memory statistics
     pub async fn cas_stats(&self) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;

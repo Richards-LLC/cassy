@@ -802,6 +802,93 @@ impl CasCore {
             }
         }
 
+        // cas-7a19 (GH #305): a pre-assigned worker's startup prompt runs
+        // `mine` -> `start` immediately after registration. A supervisor
+        // correction queued while the pane was still booting can therefore
+        // lose to this transition even though it predates registration. Gate
+        // the transition on unread messages from the live owning supervisor
+        // and surface those rows in this very tool result. This is a cheap
+        // indexed query, not a poll/sleep: the common empty-inbox path proceeds
+        // immediately, while a real correction gets one turn before work.
+        //
+        // Deliberately source-filtered: the daemon's own `director` task brief
+        // is also unread during this window and must not defer every spawn.
+        if is_worker
+            && task.status == TaskStatus::Open
+            && let Ok(worker) = agent_store.get(&agent_id)
+            && task
+                .assignee
+                .as_deref()
+                .is_some_and(|assignee| assignee.eq_ignore_ascii_case(&worker.name))
+            && let Some(factory_session) = worker.factory_session.as_deref()
+        {
+            let mut supervisor_sources = vec!["supervisor".to_string()];
+            if let Ok(agents) = agent_store.list(None) {
+                for agent in agents.into_iter().filter(|agent| {
+                    agent.role == cas_types::AgentRole::Supervisor
+                        && agent.visible_to_factory_session(Some(factory_session))
+                }) {
+                    for source in [agent.name, agent.id] {
+                        if !supervisor_sources
+                            .iter()
+                            .any(|known| known.eq_ignore_ascii_case(&source))
+                        {
+                            supervisor_sources.push(source);
+                        }
+                    }
+                }
+            }
+            let source_refs = supervisor_sources
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Could not inspect queued supervisor corrections before start: {error}"
+                    ),
+                )
+            })?;
+            let corrections = queue
+                .surface_unseen_from_sources_for_recipient(
+                    &worker.name,
+                    Some(factory_session),
+                    &source_refs,
+                    20,
+                )
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Could not surface queued supervisor corrections before start: {error}"
+                        ),
+                    )
+                })?;
+            if !corrections.is_empty() {
+                let rendered = corrections
+                    .iter()
+                    .map(|message| {
+                        format!(
+                            "Message from {} (notification {}):\n{}",
+                            message.source, message.id, message.prompt
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n");
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "TASK START DEFERRED: {} queued supervisor message(s) must be read before task {} starts. No lease or task status transition was applied. Act on the message(s) below, then retry the task start for {}.\n\n{}",
+                        corrections.len(),
+                        req.id,
+                        req.id,
+                        rendered
+                    ),
+                ));
+            }
+        }
+
         // Check if supervisor is trying to start an ordinary non-epic task.
         // Gate is the deliberate narrow exception: the authority check above
         // already proved the caller is a live registered supervisor.
@@ -1663,6 +1750,135 @@ mod related_recall_response_tests {
             response.matches("- Memory [").count(),
             RELATED_RECALL_LIMIT,
             "{response}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod preassigned_start_message_order_tests {
+    use crate::mcp::server::CasCore;
+    use crate::mcp::tools::types::TaskStartRequest;
+    use crate::store::AgentStore;
+    use crate::types::{Agent, AgentRole, AgentType, Task, TaskStatus};
+    use rmcp::handler::server::wrapper::Parameters;
+    use tempfile::TempDir;
+
+    fn register_agent(
+        store: &dyn AgentStore,
+        id: &str,
+        name: &str,
+        role: AgentRole,
+        factory_session: &str,
+    ) {
+        let mut agent = Agent::new(id.to_string(), name.to_string());
+        agent.role = role;
+        agent.agent_type = match role {
+            AgentRole::Worker => AgentType::Worker,
+            _ => AgentType::Primary,
+        };
+        agent.factory_session = Some(factory_session.to_string());
+        store.register(&agent).expect("register agent");
+    }
+
+    #[tokio::test]
+    async fn queued_spawn_time_supervisor_message_is_surfaced_before_preassigned_start() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("task store");
+        let agent_store = core.open_agent_store().expect("agent store");
+        let prompt_queue =
+            crate::store::open_prompt_queue_store(temp.path()).expect("prompt queue");
+        let factory_session = "factory-spawn-order";
+        let worker_name = "patient-otter-42";
+        let supervisor_name = "careful-supervisor-7";
+
+        register_agent(
+            agent_store.as_ref(),
+            "supervisor-agent",
+            supervisor_name,
+            AgentRole::Supervisor,
+            factory_session,
+        );
+
+        let correction_id = prompt_queue
+            .enqueue_with_session(
+                supervisor_name,
+                worker_name,
+                "Spawn-time correction: do not touch generated files.",
+                factory_session,
+            )
+            .expect("queue correction before worker registration");
+
+        let mut task = Task::new("cas-spawn-order".into(), "pre-assigned task".into());
+        task.assignee = Some(worker_name.into());
+        task_store.add(&task).expect("pre-assign task");
+
+        // Registration completes only after the correction is durable. The
+        // daemon-generated task brief arrives later and must not itself defer
+        // the normal start path.
+        register_agent(
+            agent_store.as_ref(),
+            "worker-agent",
+            worker_name,
+            AgentRole::Worker,
+            factory_session,
+        );
+        let brief_id = prompt_queue
+            .enqueue_with_session(
+                "director",
+                worker_name,
+                "You were spawned for cas-spawn-order; start it now.",
+                factory_session,
+            )
+            .expect("queue task brief after registration");
+        core.set_agent_id_for_testing("worker-agent".into());
+
+        let deferred = core
+            .cas_task_start_with_options(Parameters(TaskStartRequest {
+                id: task.id.clone(),
+                brief: Some(true),
+            }))
+            .await
+            .expect_err("the correction must win the race with start");
+        assert!(
+            deferred.message.contains("TASK START DEFERRED")
+                && deferred.message.contains("do not touch generated files")
+                && deferred.message.contains(&correction_id.to_string()),
+            "the first start response must deliver the exact queued correction: {}",
+            deferred.message
+        );
+        assert_eq!(
+            task_store.get(&task.id).unwrap().status,
+            TaskStatus::Open,
+            "the message must be delivered before the start transition"
+        );
+        assert!(
+            agent_store
+                .list_agent_leases("worker-agent")
+                .unwrap()
+                .is_empty(),
+            "a deferred start must not claim a lease"
+        );
+        assert_eq!(
+            prompt_queue
+                .peek_unseen_for_recipient(worker_name, Some(factory_session), 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![brief_id],
+            "only the supervisor correction is surfaced; the task brief stays on its normal path"
+        );
+
+        core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: task.id.clone(),
+            brief: Some(true),
+        }))
+        .await
+        .expect("the retry starts immediately once corrections are drained");
+        assert_eq!(
+            task_store.get(&task.id).unwrap().status,
+            TaskStatus::InProgress
         );
     }
 }

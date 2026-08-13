@@ -6,8 +6,8 @@ rust-version = "1.85"
 description = "Storage layer for CAS (Coding Agent System)"
 license = "MIT"
 
-[lints]
-workspace = true
+[lints.clippy]
+unwrap_used = "deny"
 
 [dependencies]
 # Core types

@@ -135,7 +135,9 @@ impl LoopStore for SqliteLoopStore {
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(|error| {
+                StoreError::Other(format!("system clock predates Unix epoch: {error}"))
+            })?
             .as_millis();
 
         // Generate a short hash from timestamp
@@ -266,10 +268,7 @@ impl LoopStore for SqliteLoopStore {
         let conn = self.conn.lock().map_err(lock_err)?;
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
 
-        let rows = conn.execute(
-            "DELETE FROM loops WHERE started_at < ?",
-            params![cutoff],
-        )?;
+        let rows = conn.execute("DELETE FROM loops WHERE started_at < ?", params![cutoff])?;
 
         Ok(rows)
     }

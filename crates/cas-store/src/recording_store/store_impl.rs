@@ -16,7 +16,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn add(&self, recording: &Recording) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO recordings (id, session_id, started_at, ended_at, duration_ms,
              file_path, file_size, title, description, created_at)
@@ -38,7 +38,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn get(&self, id: &str) -> Result<Recording> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, session_id, started_at, ended_at, duration_ms,
              file_path, file_size, title, description, created_at
@@ -51,7 +51,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn update(&self, recording: &Recording) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE recordings SET session_id = ?1, started_at = ?2, ended_at = ?3,
              duration_ms = ?4, file_path = ?5, file_size = ?6, title = ?7, description = ?8
@@ -78,7 +78,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM recordings WHERE id = ?", params![id])?;
         if rows == 0 {
             return Err(StoreError::Other(format!("Recording not found: {id}")));
@@ -87,7 +87,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn list(&self) -> Result<Vec<Recording>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, started_at, ended_at, duration_ms,
              file_path, file_size, title, description, created_at
@@ -102,7 +102,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn query(&self, query: &RecordingQuery) -> Result<Vec<Recording>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut sql = String::from(
             "SELECT r.id, r.session_id, r.started_at, r.ended_at, r.duration_ms,
@@ -158,7 +158,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn list_by_session(&self, session_id: &str) -> Result<Vec<Recording>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, started_at, ended_at, duration_ms,
              file_path, file_size, title, description, created_at
@@ -173,7 +173,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn list_by_date_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Recording>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, started_at, ended_at, duration_ms,
              file_path, file_size, title, description, created_at
@@ -192,7 +192,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn list_by_agent(&self, agent_name: &str) -> Result<Vec<Recording>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT r.id, r.session_id, r.started_at, r.ended_at, r.duration_ms,
              r.file_path, r.file_size, r.title, r.description, r.created_at
@@ -210,7 +210,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn add_agent(&self, agent: &RecordingAgent) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO recording_agents (recording_id, agent_name, agent_type, file_path, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -226,7 +226,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn get_agents(&self, recording_id: &str) -> Result<Vec<RecordingAgent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, recording_id, agent_name, agent_type, file_path, created_at
              FROM recording_agents WHERE recording_id = ?",
@@ -240,7 +240,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn delete_agents(&self, recording_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "DELETE FROM recording_agents WHERE recording_id = ?",
             params![recording_id],
@@ -249,7 +249,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn add_event(&self, event: &RecordingEvent) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO recording_events (recording_id, timestamp_ms, event_type,
              entity_type, entity_id, metadata)
@@ -267,7 +267,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn get_events(&self, recording_id: &str) -> Result<Vec<RecordingEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, recording_id, timestamp_ms, event_type, entity_type, entity_id, metadata
              FROM recording_events WHERE recording_id = ? ORDER BY timestamp_ms",
@@ -286,7 +286,7 @@ impl RecordingStore for SqliteRecordingStore {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<RecordingEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, recording_id, timestamp_ms, event_type, entity_type, entity_id, metadata
              FROM recording_events
@@ -310,7 +310,7 @@ impl RecordingStore for SqliteRecordingStore {
         entity_type: &str,
         entity_id: &str,
     ) -> Result<Vec<RecordingEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, recording_id, timestamp_ms, event_type, entity_type, entity_id, metadata
              FROM recording_events
@@ -329,7 +329,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn delete_events(&self, recording_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "DELETE FROM recording_events WHERE recording_id = ?",
             params![recording_id],
@@ -344,7 +344,7 @@ impl RecordingStore for SqliteRecordingStore {
         content_type: &str,
         timestamp_ms: i64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO recordings_fts (recording_id, content, content_type, timestamp_ms)
              VALUES (?1, ?2, ?3, ?4)",
@@ -359,7 +359,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT recording_id, CAST(timestamp_ms AS INTEGER)
              FROM recordings_fts
@@ -377,7 +377,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn delete_fts_content(&self, recording_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "DELETE FROM recordings_fts WHERE recording_id = ?",
             params![recording_id],
@@ -386,7 +386,7 @@ impl RecordingStore for SqliteRecordingStore {
     }
 
     fn prune(&self, older_than_days: i64) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Check if recordings table exists (schema comes from migrations)
         let table_exists: bool = conn

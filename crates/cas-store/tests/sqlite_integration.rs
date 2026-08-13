@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Integration tests for SQLite stores
 //!
 //! These tests use real SQLite databases to verify the stores work correctly.

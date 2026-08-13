@@ -210,19 +210,19 @@ impl SqliteEntityStore {
 
 impl EntityStore for SqliteEntityStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(ENTITY_SCHEMA)?;
         Ok(())
     }
 
     fn generate_entity_id(&self) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let next = crate::shared_db::next_sequence_val(&conn, "entity")?;
         Ok(format!("ent-{next:04}"))
     }
 
     fn add_entity(&self, entity: &Entity) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO entities (id, name, type, aliases, description, created, updated,
              mention_count, confidence, archived, metadata)
@@ -245,7 +245,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_entity(&self, id: &str) -> Result<Entity> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let entity = conn
             .query_row(
                 "SELECT id, name, type, aliases, description, created, updated,
@@ -264,7 +264,7 @@ impl EntityStore for SqliteEntityStore {
         name: &str,
         entity_type: Option<EntityType>,
     ) -> Result<Option<Entity>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let name_lower = name.to_lowercase();
 
         // First try exact name match
@@ -321,7 +321,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn update_entity(&self, entity: &Entity) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE entities SET name = ?1, type = ?2, aliases = ?3, description = ?4,
              updated = ?5, mention_count = ?6, confidence = ?7, archived = ?8, metadata = ?9
@@ -346,7 +346,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn delete_entity(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM entities WHERE id = ?", params![id])?;
         if rows == 0 {
             return Err(StoreError::EntityNotFound(id.to_string()));
@@ -355,7 +355,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn list_entities(&self, entity_type: Option<EntityType>) -> Result<Vec<Entity>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let (sql, type_param) = match &entity_type {
             Some(et) => (
@@ -387,7 +387,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn search_entities(&self, query: &str, entity_type: Option<EntityType>) -> Result<Vec<Entity>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let search_pattern = format!("%{}%", query.to_lowercase());
 
         let (sql, type_param) = match &entity_type {
@@ -432,13 +432,13 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn generate_relationship_id(&self) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let next = crate::shared_db::next_sequence_val(&conn, "relationship")?;
         Ok(format!("rel-{next:04}"))
     }
 
     fn add_relationship(&self, relationship: &Relationship) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO relationships (id, source_id, target_id, type, created,
              valid_from, valid_until, weight, observation_count, description, source_entries)
@@ -461,7 +461,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_relationship(&self, id: &str) -> Result<Relationship> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rel = conn
             .query_row(
                 "SELECT id, source_id, target_id, type, created, valid_from, valid_until,
@@ -481,7 +481,7 @@ impl EntityStore for SqliteEntityStore {
         target_id: &str,
         relation_type: Option<RelationType>,
     ) -> Result<Option<Relationship>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let rel = match relation_type {
             Some(rt) => conn
@@ -508,7 +508,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn update_relationship(&self, relationship: &Relationship) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE relationships SET source_id = ?1, target_id = ?2, type = ?3,
              valid_from = ?4, valid_until = ?5, weight = ?6, observation_count = ?7,
@@ -534,7 +534,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn delete_relationship(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM relationships WHERE id = ?", params![id])?;
         if rows == 0 {
             return Err(StoreError::RelationshipNotFound(id.to_string()));
@@ -543,7 +543,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn list_relationships(&self, relation_type: Option<RelationType>) -> Result<Vec<Relationship>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let (sql, type_param) = match &relation_type {
             Some(rt) => (
@@ -575,7 +575,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_entity_relationships(&self, entity_id: &str) -> Result<Vec<Relationship>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, source_id, target_id, type, created, valid_from, valid_until,
              weight, observation_count, description, source_entries
@@ -591,7 +591,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_outgoing_relationships(&self, entity_id: &str) -> Result<Vec<Relationship>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, source_id, target_id, type, created, valid_from, valid_until,
              weight, observation_count, description, source_entries
@@ -607,7 +607,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_incoming_relationships(&self, entity_id: &str) -> Result<Vec<Relationship>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, source_id, target_id, type, created, valid_from, valid_until,
              weight, observation_count, description, source_entries
@@ -623,7 +623,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn add_mention(&self, mention: &EntityMention) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO entity_mentions (entity_id, entry_id, position,
              matched_text, confidence, created)
@@ -641,7 +641,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_entity_mentions(&self, entity_id: &str) -> Result<Vec<EntityMention>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT entity_id, entry_id, position, matched_text, confidence, created
              FROM entity_mentions WHERE entity_id = ? ORDER BY created DESC",
@@ -656,7 +656,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_entry_mentions(&self, entry_id: &str) -> Result<Vec<EntityMention>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT entity_id, entry_id, position, matched_text, confidence, created
              FROM entity_mentions WHERE entry_id = ? ORDER BY position",
@@ -671,7 +671,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn delete_entry_mentions(&self, entry_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "DELETE FROM entity_mentions WHERE entry_id = ?",
             params![entry_id],
@@ -680,7 +680,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_connected_entities(&self, entity_id: &str) -> Result<Vec<(Entity, Relationship)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Get all relationships involving this entity
         let mut stmt = conn.prepare_cached(
@@ -729,7 +729,7 @@ impl EntityStore for SqliteEntityStore {
     }
 
     fn get_entity_entries(&self, entity_id: &str, limit: usize) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT entry_id FROM entity_mentions
              WHERE entity_id = ? ORDER BY created DESC LIMIT ?",

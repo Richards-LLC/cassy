@@ -418,7 +418,7 @@ impl SqliteSpawnQueueStore {
         requester_config_dir: Option<&str>,
     ) -> Result<i64> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             let names = if worker_names.is_empty() {
                 None
@@ -450,7 +450,7 @@ impl SqliteSpawnQueueStore {
 
 impl SpawnQueueStore for SqliteSpawnQueueStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(SPAWN_QUEUE_SCHEMA)?;
         // Note: force/isolate columns are now in SPAWN_QUEUE_SCHEMA inline.
         // Old DBs are upgraded via migration m193_spawn_queue_force_isolate.
@@ -541,7 +541,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     }
 
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
 
         let mut stmt = conn.prepare_cached(
@@ -584,7 +584,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     }
 
     fn peek(&self, limit: usize) -> Result<Vec<SpawnRequest>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at, processed_at
@@ -602,7 +602,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     }
 
     fn mark_processed(&self, request_id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
@@ -620,7 +620,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         worker_name: Option<&str>,
         detail: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
 
         // Monotonic guard lives in SQL so concurrent daemon writes cannot
@@ -664,7 +664,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         factory_session: &str,
         limit: usize,
     ) -> Result<Vec<SpawnLifecycle>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, worker_names, task_id, created_at, spawn_state, spawn_worker, spawn_detail, spawn_state_at
@@ -702,7 +702,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     }
 
     fn pending_count(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM spawn_queue WHERE processed_at IS NULL",
@@ -714,13 +714,13 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     }
 
     fn clear(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM spawn_queue", [])?;
         Ok(rows)
     }
 
     fn cleanup_old(&self, older_than_secs: i64) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
 
         let rows = conn.execute(

@@ -74,10 +74,7 @@ pub enum NotifyIdempotentResult {
     Created(i64),
     /// Existing row for the same transition_key (no duplicate insert).
     /// `prompt_delivered` is true when outbox prompt handoff already completed.
-    AlreadyExists {
-        id: i64,
-        prompt_delivered: bool,
-    },
+    AlreadyExists { id: i64, prompt_delivered: bool },
 }
 
 /// Schema for supervisor queue table
@@ -143,7 +140,8 @@ pub trait SupervisorQueueStore: Send + Sync {
     fn mark_prompt_delivered(&self, notification_id: i64) -> Result<()>;
 
     /// Look up a notification by transition_key (repair / tests).
-    fn get_by_transition_key(&self, transition_key: &str) -> Result<Option<SupervisorNotification>>;
+    fn get_by_transition_key(&self, transition_key: &str)
+    -> Result<Option<SupervisorNotification>>;
 
     /// Look up one durable notification by its public notification ID.
     ///
@@ -216,8 +214,7 @@ impl SqliteSupervisorQueueStore {
         let transition_key: Option<String> = row.get(7).unwrap_or(None);
         // Column 8 = prompt_delivered_at (cas-17e4); tolerate pre-migration.
         let prompt_delivered_at_str: Option<String> = row.get(8).unwrap_or(None);
-        let prompt_delivered_at =
-            prompt_delivered_at_str.and_then(|s| Self::parse_datetime(&s));
+        let prompt_delivered_at = prompt_delivered_at_str.and_then(|s| Self::parse_datetime(&s));
 
         Ok(SupervisorNotification {
             id: row.get(0)?,
@@ -240,7 +237,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         // (that leaves the transaction state inconsistent). Instead:
         // ensure_column + with_write_retry, and CREATE INDEX only after columns exist.
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(SUPERVISOR_QUEUE_SCHEMA)?;
             crate::shared_db::ensure_column(
                 &conn,
@@ -267,7 +264,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         priority: NotificationPriority,
     ) -> Result<i64> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
 
             conn.execute(
@@ -290,7 +287,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         transition_key: &str,
     ) -> Result<NotifyIdempotentResult> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
 
             // Atomic insert-or-ignore under unique transition_key.
@@ -326,7 +323,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
 
     fn mark_prompt_delivered(&self, notification_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             // Only stamp once — preserve original delivery time on replay.
             conn.execute(
@@ -343,7 +340,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         &self,
         transition_key: &str,
     ) -> Result<Option<SupervisorNotification>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
                     transition_key, prompt_delivered_at
@@ -359,7 +356,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
     }
 
     fn get(&self, notification_id: i64) -> Result<Option<SupervisorNotification>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
                     transition_key, prompt_delivered_at
@@ -375,7 +372,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
     }
 
     fn list_pending_lifecycle_outbox(&self, limit: usize) -> Result<Vec<SupervisorNotification>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
                     transition_key, prompt_delivered_at
@@ -394,7 +391,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
 
     fn poll(&self, supervisor_id: &str, limit: usize) -> Result<Vec<SupervisorNotification>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
 
             // Get pending notifications ordered by priority (ascending = critical first), then created_at
@@ -438,7 +435,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
     }
 
     fn peek(&self, supervisor_id: &str, limit: usize) -> Result<Vec<SupervisorNotification>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at, transition_key, prompt_delivered_at
@@ -460,7 +457,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
 
     fn ack(&self, notification_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
 
             let rows = conn.execute(
@@ -479,7 +476,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
     }
 
     fn pending_count(&self, supervisor_id: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM supervisor_queue WHERE supervisor_id = ? AND processed_at IS NULL",
@@ -491,7 +488,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
     }
 
     fn list_pending(&self, supervisor_id: &str) -> Result<Vec<SupervisorNotification>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at, transition_key, prompt_delivered_at
@@ -509,7 +506,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
 
     fn clear(&self, supervisor_id: &str) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
 
             let rows = conn.execute(
                 "DELETE FROM supervisor_queue WHERE supervisor_id = ?",
@@ -522,7 +519,7 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
 
     fn cleanup_old(&self, older_than_secs: i64) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
 
             let rows = conn.execute(

@@ -6,12 +6,19 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use rusqlite::Connection;
 
-use crate::SQLITE_BUSY_TIMEOUT;
+use crate::{Result, SQLITE_BUSY_TIMEOUT, StoreError};
+
+/// Acquire a shared SQLite connection, converting a poisoned mutex into a
+/// recoverable store error instead of panicking the caller.
+pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>> {
+    conn.lock()
+        .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()))
+}
 
 /// Process-global pool of shared SQLite connections, keyed by canonical DB path.
 ///
@@ -551,6 +558,21 @@ mod tests {
         guard.execute_batch("SELECT 1").unwrap();
     }
 
+    #[test]
+    fn lock_connection_returns_error_for_poisoned_mutex() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let poisoned = Arc::clone(&conn);
+
+        let _ = panic::catch_unwind(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("intentional poison");
+        });
+
+        assert!(
+            matches!(lock_connection(&conn), Err(StoreError::Other(message)) if message == "shared SQLite connection lock poisoned")
+        );
+    }
+
     // ── Concurrent access ───────────────────────────────────────────
 
     #[test]
@@ -872,7 +894,10 @@ mod tests {
         // must still succeed via recheck (race-loser path).
         match conn.execute_batch("ALTER TABLE t ADD COLUMN c1 TEXT;") {
             Err(e) => {
-                assert!(is_duplicate_column_error(&e), "expected duplicate column, got {e}");
+                assert!(
+                    is_duplicate_column_error(&e),
+                    "expected duplicate column, got {e}"
+                );
                 ensure_column(&conn, "t", "c1", "ALTER TABLE t ADD COLUMN c1 TEXT;").unwrap();
             }
             Ok(()) => {
@@ -912,10 +937,8 @@ mod tests {
         let db = temp.path().join("race.db");
         {
             let conn = Connection::open(&db).unwrap();
-            conn.execute_batch(
-                "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY);",
-            )
-            .unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY);")
+                .unwrap();
         }
 
         let barrier = Arc::new(Barrier::new(8));
@@ -940,7 +963,9 @@ mod tests {
             .collect();
 
         for h in handles {
-            h.join().unwrap().expect("concurrent ensure_column must succeed");
+            h.join()
+                .unwrap()
+                .expect("concurrent ensure_column must succeed");
         }
         let conn = Connection::open(&db).unwrap();
         assert!(conn.prepare("SELECT race_col FROM t LIMIT 0").is_ok());

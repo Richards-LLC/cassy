@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use cas_store::{
     DELIVERY_SCHEMA, SqliteVerificationStore, StoreError, VERIFICATION_SCHEMA, VerificationStore,
     transition_worker_delivery_verification_with_conn,
@@ -105,7 +107,9 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
     .unwrap();
 
     let event_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM worker_delivery_events", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM worker_delivery_events", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert!(
         transition_worker_delivery_verification_with_conn(
@@ -129,7 +133,7 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
         conn.query_row("SELECT COUNT(*) FROM worker_delivery_events", [], |row| {
             row.get::<_, i64>(0)
         })
-            .unwrap(),
+        .unwrap(),
         event_count
     );
 

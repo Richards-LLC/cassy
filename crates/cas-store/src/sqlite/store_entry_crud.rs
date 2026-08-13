@@ -10,7 +10,7 @@ use rusqlite::{OptionalExtension, params};
 
 impl SqliteStore {
     pub(crate) fn store_init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         // ENTRIES_RULES_SCHEMA covers entries, rules, metadata, sessions
         // (+ all indexes including the helpful-score expression index).
         // No additional inline DDL needed here — single source of truth.
@@ -21,7 +21,7 @@ impl SqliteStore {
     }
     pub(crate) fn store_generate_id(&self) -> Result<String> {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         // Use a per-day sequence key so IDs reset daily (e.g., "entry:2026-03-30")
         let seq_name = format!("entry:{today}");
         let id_pattern = format!("{today}-[0-9]*");
@@ -53,14 +53,17 @@ impl SqliteStore {
                         WHEN next_val < excluded.next_val THEN excluded.next_val
                         ELSE next_val
                     END",
-                params![&seq_name, max_existing.unwrap()],
+                params![
+                    &seq_name,
+                    max_existing.expect("max existing ID is present after collision check")
+                ],
             )?;
         }
     }
     pub(crate) fn store_add(&self, entry: &Entry) -> Result<()> {
         let timer = TraceTimer::new();
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
             let result = tx.execute(
@@ -165,7 +168,7 @@ impl SqliteStore {
         }) // with_write_retry
     }
     pub(crate) fn store_get(&self, id: &str) -> Result<Entry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let entry = conn
             .query_row(
                 "SELECT id, type, tags, created, content, title, helpful_count,
@@ -182,7 +185,7 @@ impl SqliteStore {
         Ok(entry)
     }
     pub(crate) fn store_get_archived(&self, id: &str) -> Result<Entry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let entry = conn
             .query_row(
                 "SELECT id, type, tags, created, content, title, helpful_count,
@@ -201,7 +204,7 @@ impl SqliteStore {
     pub(crate) fn store_update(&self, entry: &Entry) -> Result<()> {
         let timer = TraceTimer::new();
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
             let result = tx.execute(
@@ -285,7 +288,7 @@ impl SqliteStore {
         expected_updated_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let rows = tx.execute(
                 "UPDATE entries SET type = ?1, tags = ?2, content = ?3, title = ?4,
@@ -312,7 +315,7 @@ impl SqliteStore {
     }
     pub(crate) fn store_delete(&self, id: &str) -> Result<()> {
         let timer = TraceTimer::new();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.execute("DELETE FROM entries WHERE id = ?", params![id]);
 
         // Record trace (only if store ops tracing is enabled)
@@ -341,7 +344,7 @@ impl SqliteStore {
         Ok(())
     }
     pub(crate) fn store_list(&self) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -363,7 +366,7 @@ impl SqliteStore {
         scope: Scope,
         tag: &str,
     ) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -386,7 +389,7 @@ impl SqliteStore {
     }
 
     pub(crate) fn store_list_decayable(&self) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -405,7 +408,7 @@ impl SqliteStore {
     }
 
     pub(crate) fn store_list_prunable(&self, stability_threshold: f32) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -424,7 +427,7 @@ impl SqliteStore {
     }
 
     pub(crate) fn store_recent(&self, n: usize) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -445,7 +448,7 @@ impl SqliteStore {
     }
 
     pub(crate) fn store_recent_timestamp(&self, entry: &Entry) -> Result<chrono::DateTime<Utc>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let timestamp = conn.query_row(
             "SELECT MAX(created, COALESCE(updated_at, created)) FROM entries WHERE id = ?",
             params![entry.id],
@@ -455,7 +458,7 @@ impl SqliteStore {
     }
 
     pub(crate) fn store_archive(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE entries SET archived = 1 WHERE id = ? AND archived = 0",
             params![id],
@@ -466,7 +469,7 @@ impl SqliteStore {
         Ok(())
     }
     pub(crate) fn store_unarchive(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE entries SET archived = 0 WHERE id = ? AND archived = 1",
             params![id],
@@ -477,7 +480,7 @@ impl SqliteStore {
         Ok(())
     }
     pub(crate) fn store_list_archived(&self) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -495,7 +498,7 @@ impl SqliteStore {
     }
 
     pub(crate) fn store_list_by_branch(&self, branch: &str) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,

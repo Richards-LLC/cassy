@@ -159,7 +159,7 @@ impl SqliteKnownRepoStore {
 
 impl KnownRepoStore for SqliteKnownRepoStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS known_repos (\
                 path TEXT PRIMARY KEY,\
@@ -185,7 +185,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
     fn upsert(&self, path: &Path) -> Result<()> {
         let key = Self::canonical_key(path);
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO known_repos (path, first_seen_at, last_touched_at, touch_count) \
              VALUES (?1, ?2, ?2, 1) \
@@ -200,7 +200,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
     fn touch(&self, path: &Path) -> Result<usize> {
         let key = Self::canonical_key(path);
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE known_repos SET last_touched_at = ?1, touch_count = touch_count + 1 \
              WHERE path = ?2",
@@ -211,13 +211,13 @@ impl KnownRepoStore for SqliteKnownRepoStore {
 
     fn forget(&self, path: &Path) -> Result<usize> {
         let key = Self::canonical_key(path);
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM known_repos WHERE path = ?", params![key])?;
         Ok(rows)
     }
 
     fn list(&self) -> Result<Vec<KnownRepo>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT path, first_seen_at, last_touched_at, touch_count \
              FROM known_repos ORDER BY last_touched_at DESC",
@@ -229,7 +229,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
     }
 
     fn count(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM known_repos", [], |row| row.get(0))?;
         Ok(n.max(0) as usize)
     }
@@ -243,7 +243,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
         let repo_root = Self::canonical_key(repo_root);
         let git_common_dir = Self::canonical_key(git_common_dir);
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = crate::shared_db::lock_connection(&self.conn)?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let existing_selector = transaction
@@ -292,7 +292,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
     }
 
     fn get_binding(&self, selector: &str) -> Result<Option<KnownRepoBinding>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.query_row(
             "SELECT selector, repo_root, git_common_dir, created_at, updated_at
              FROM known_repo_bindings WHERE selector = ?1 COLLATE BINARY",
@@ -307,7 +307,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
     }
 
     fn list_bindings(&self) -> Result<Vec<KnownRepoBinding>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT selector, repo_root, git_common_dir, created_at, updated_at
              FROM known_repo_bindings ORDER BY updated_at DESC",
@@ -318,7 +318,7 @@ impl KnownRepoStore for SqliteKnownRepoStore {
     }
 
     fn unbind(&self, selector: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "DELETE FROM known_repo_bindings WHERE selector = ?1 COLLATE BINARY",
             [selector],

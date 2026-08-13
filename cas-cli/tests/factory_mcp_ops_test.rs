@@ -2784,7 +2784,14 @@ async fn test_worker_status_prune_skips_stale_workers_in_other_factory_sessions(
 /// fabricate a real time gap.
 #[tokio::test]
 async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
-    let _guard = EnvGuard::set(&[]);
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_SESSION", None),
+        (
+            "CODEX_HOME",
+            Some(codex_home.path().to_str().expect("utf-8 codex home")),
+        ),
+    ]);
     let env = FactoryTestEnv::new();
     std::fs::write(
         env.cas_root.join("config.toml"),
@@ -2796,8 +2803,36 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     // publish an authoritative turn-start artifact. Codex does, so this row
     // keeps the original contract verbatim; the Claude case is covered by
     // test_worker_status_reports_between_turns_not_stalled_for_claude_worker.
+    let clone_path = "/tmp/cas-9829-busy-badger";
+    let rollout = codex_home
+        .path()
+        .join("sessions/2026/08/13/rollout-2026-08-13T01-00-00-stalled.jsonl");
+    std::fs::create_dir_all(rollout.parent().expect("rollout parent"))
+        .expect("create rollout parent");
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "cwd": clone_path,
+                    "originator": "codex-tui",
+                    "source": "cli"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "stalled-turn"}
+            })
+        ),
+    )
+    .expect("write authoritative Codex turn artifact");
+
     let mut codex_meta = HashMap::new();
     codex_meta.insert("worker_cli".to_string(), "codex".to_string());
+    codex_meta.insert("clone_path".to_string(), clone_path.to_string());
     let busy_id = env.register_worker_with_metadata("busy-badger", codex_meta);
     let task_store = env.task_store();
     let task = Task::new("cas-0b7d".to_string(), "Stalled task".to_string());
@@ -4673,9 +4708,12 @@ async fn test_coordination_message_default_is_not_urgent() {
     assert!(!prompts[0].urgent, "default message must not be urgent");
 }
 
-/// `urgent=true` on the message action enqueues urgent + Critical priority and
-/// the response advertises interrupt-and-redirect delivery.
-#[tokio::test]
+/// `urgent=true` to a Claude teammate must not report success in a hermetic
+/// environment where no daemon can provide a recipient-side transport stamp.
+/// The urgent + Critical row remains durable for the daemon to retry later.
+/// Paused Tokio time keeps the production eight-second confirmation contract
+/// while making this negative-path integration test complete immediately.
+#[tokio::test(start_paused = true)]
 async fn test_coordination_message_urgent_flag_enqueues_urgent() {
     let _guard = EnvGuard::set(&[
         ("CAS_AGENT_ROLE", "supervisor"),
@@ -4686,11 +4724,27 @@ async fn test_coordination_message_urgent_flag_enqueues_urgent() {
 
     let req = coord_msg("message", "swift-fox", "STOP — wrong file", Some(true));
     let result = env.service.coordination(Parameters(req)).await;
-    assert!(result.is_ok(), "urgent message should succeed: {result:?}");
-    let text = get_text(&result.unwrap());
+    let error = result.expect_err("unobserved Claude interrupt must fail explicitly");
     assert!(
-        text.contains("URGENT"),
-        "response should mark URGENT: {text}"
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "error must name the unconfirmed interrupt: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains(
+            "within 8s (stage=enqueued, wake_attempt=nudge_not_attempted, recipient_transport=unobserved)"
+        ),
+        "error must expose the exact unobserved delivery state: {}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("queue row remains durable for retry"),
+        "error must explain the durable retry contract: {}",
+        error.message
     );
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
@@ -4706,10 +4760,61 @@ async fn test_coordination_message_urgent_flag_enqueues_urgent() {
     );
 }
 
+/// When the daemon records the recipient-side transport stamp inside the
+/// confirmation window, the same Claude urgent call succeeds.
+#[tokio::test]
+async fn test_coordination_message_urgent_succeeds_after_observed_delivery() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("swift-fox");
+
+    let queue = env.prompt_queue();
+    let observe_delivery = async {
+        for _ in 0..100 {
+            if let Some(prompt) = queue
+                .peek_all(10)
+                .expect("peek")
+                .into_iter()
+                .find(|prompt| prompt.target == "swift-fox")
+            {
+                queue
+                    .mark_transport_delivered(prompt.id)
+                    .expect("record recipient-side transport delivery");
+                return prompt.id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        panic!("urgent prompt was not enqueued for delivery observation");
+    };
+
+    let req = coord_msg("message", "swift-fox", "STOP — wrong file", Some(true));
+    let (result, message_id) =
+        tokio::join!(env.service.coordination(Parameters(req)), observe_delivery);
+    let result = result.expect("observed Claude interrupt should succeed");
+    let text = get_text(&result);
+    assert!(
+        text.contains("URGENT"),
+        "response should mark URGENT: {text}"
+    );
+
+    let report = queue
+        .message_delivery_report(message_id)
+        .expect("read delivery report")
+        .expect("delivery report exists");
+    assert_eq!(report.stage, cas_store::DeliveryStage::Delivered);
+    assert!(
+        report.recipient_transport_at.is_some(),
+        "success must be backed by recipient-side transport evidence"
+    );
+}
+
 /// cas-126b: an urgent "MERGE DONE → re-close now" hand-off to the worker that
 /// OWNS the parked task must NOT arm halt_task_work — otherwise the re-close it
 /// asks for deadlocks (WORK HALTED). The urgent is still enqueued (worker wakes).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
     let _guard = EnvGuard::set_optional(&[
         ("CAS_AGENT_ROLE", Some("supervisor")),
@@ -4727,7 +4832,14 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
     );
     let req = coord_msg("message", "swift-fox", &msg, Some(true));
     let result = env.service.coordination(Parameters(req)).await;
-    assert!(result.is_ok(), "urgent re-close should succeed: {result:?}");
+    let error = result.expect_err("unobserved Claude urgent must fail explicitly");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
 
     // Still enqueued as an urgent so the worker wakes.
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
@@ -4746,7 +4858,7 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
 /// cas-126b scope/authorization gate: an urgent close-guidance message to worker
 /// B that merely NAMES worker A's parked task must STILL halt B — the exemption
 /// binds to the target's OWN AwaitingMerge task, not any AwaitingMerge task.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_126b_other_workers_task_does_not_exempt_target() {
     let _guard = EnvGuard::set_optional(&[
         ("CAS_AGENT_ROLE", Some("supervisor")),
@@ -4762,7 +4874,14 @@ async fn test_126b_other_workers_task_does_not_exempt_target() {
     let msg = format!("MERGE DONE — task action=close id={a_task} reason=\"merged\"");
     let req = coord_msg("message", "swift-fox", &msg, Some(true));
     let result = env.service.coordination(Parameters(req)).await;
-    assert!(result.is_ok(), "urgent should succeed: {result:?}");
+    let error = result.expect_err("unobserved Claude urgent must fail explicitly");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
 
     assert!(
         env.worker_halted("swift-fox"),
@@ -4773,7 +4892,7 @@ async fn test_126b_other_workers_task_does_not_exempt_target() {
 
 /// cas-126b: an ordinary urgent stop/redirect (not close guidance) must STILL
 /// arm halt_task_work even if the target owns a parked AwaitingMerge task.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_126b_ordinary_urgent_still_halts_even_with_parked_task() {
     let _guard = EnvGuard::set_optional(&[
         ("CAS_AGENT_ROLE", Some("supervisor")),
@@ -4791,7 +4910,14 @@ async fn test_126b_ordinary_urgent_still_halts_even_with_parked_task() {
         Some(true),
     );
     let result = env.service.coordination(Parameters(req)).await;
-    assert!(result.is_ok(), "urgent stop should succeed: {result:?}");
+    let error = result.expect_err("unobserved Claude urgent must fail explicitly");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
 
     assert!(
         env.worker_halted("swift-fox"),
@@ -4803,7 +4929,7 @@ async fn test_126b_ordinary_urgent_still_halts_even_with_parked_task() {
 /// AwaitingMerge evidence for the target (no matching task in the store — the
 /// same net branch as a task-store read error) must STILL halt. The exemption
 /// only fires on positive, target-bound AwaitingMerge evidence.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_halt() {
     let _guard = EnvGuard::set_optional(&[
         ("CAS_AGENT_ROLE", Some("supervisor")),
@@ -4822,7 +4948,14 @@ async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_h
         Some(true),
     );
     let result = env.service.coordination(Parameters(req)).await;
-    assert!(result.is_ok(), "urgent should succeed: {result:?}");
+    let error = result.expect_err("unobserved Claude urgent must fail explicitly");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
 
     assert!(
         env.worker_halted("swift-fox"),
@@ -5444,7 +5577,7 @@ async fn test_agent_register_does_not_leak_other_agents_mail() {
 }
 
 /// `action=interrupt` is sugar for `message` with urgent=true.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_coordination_interrupt_action_is_urgent() {
     let _guard = EnvGuard::set(&[
         ("CAS_AGENT_ROLE", "supervisor"),
@@ -5461,9 +5594,13 @@ async fn test_coordination_interrupt_action_is_urgent() {
         None,
     );
     let result = env.service.coordination(Parameters(req)).await;
+    let error = result.expect_err("unobserved Claude interrupt action must fail explicitly");
     assert!(
-        result.is_ok(),
-        "interrupt action should succeed: {result:?}"
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected interrupt error: {}",
+        error.message
     );
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek");

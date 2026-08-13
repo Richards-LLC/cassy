@@ -24,7 +24,7 @@ mod tests {
     fn migration_adds_durable_suppression_marker() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE external_task_dependencies (origin_task_id TEXT, proposal_id TEXT)",
+            "CREATE TABLE external_task_dependencies (origin_task_id TEXT, proposal_id TEXT, suppressed_at TEXT)",
         )
         .unwrap();
         assert_eq!(
@@ -33,7 +33,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        conn.execute(super::MIGRATION.up[0], []).unwrap();
+        conn.execute(super::MIGRATION.up[1], []).unwrap();
         assert_eq!(
             conn.query_row(super::MIGRATION.detect.unwrap(), [], |row| row
                 .get::<_, i64>(0))

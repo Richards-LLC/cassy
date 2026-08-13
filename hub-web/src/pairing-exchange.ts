@@ -14,13 +14,22 @@ interface ExchangeOptions {
   fetcher: Fetcher;
   createKey: () => Promise<{ privateKey: CryptoKey; publicKey: JsonWebKey }>;
   persist: (machine: StoredMachine) => Promise<unknown>;
-  acknowledge?: (relay: PairingRelayDelivery) => Promise<void>;
+  removePersisted?: (machineId: string) => Promise<unknown>;
+  acknowledge?: (relay: PairingRelayDelivery, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
 }
 
 export class PairingExchangeError extends Error {
   constructor(message = "This pairing invitation has expired or was already used.") {
     super(message);
     this.name = "PairingExchangeError";
+  }
+}
+
+function ensureCurrent(options: ExchangeOptions): void {
+  if (options.signal?.aborted || options.isCurrent?.() === false) {
+    throw new PairingExchangeError("Pairing was cancelled before the credential could be installed.");
   }
 }
 
@@ -34,10 +43,12 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
   const scopes = invitation.scopes ? [...invitation.scopes] : options.requestedScopes;
   if (!scopes?.length) throw new PairingExchangeError("Choose at least one read-only scope.");
   const { privateKey, publicKey } = await options.createKey();
+  ensureCurrent(options);
   const response = await options.fetcher(new URL("/v1/auth/pairing/exchange", baseUrl), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "omit",
+    signal: options.signal,
     body: JSON.stringify({
       token: invitation.token,
       hub_id: invitation.hubId,
@@ -48,8 +59,10 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       requested_scopes: scopes,
     }),
   });
+  ensureCurrent(options);
   if (!response.ok) throw new PairingExchangeError();
   const credential = await response.json().catch(() => null) as Record<string, unknown> | null;
+  ensureCurrent(options);
   if (!credential || typeof credential.device_id !== "string" || typeof credential.credential_id !== "string" || typeof credential.credential !== "string" || typeof credential.expires_at !== "string" || !Array.isArray(credential.scopes)) {
     throw new PairingExchangeError("The paired hub returned an invalid credential.");
   }
@@ -69,9 +82,24 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     publicKey,
     privateKey,
   };
-  await options.persist(machine);
-  if (invitation.relay && options.acknowledge) {
-    await options.acknowledge(invitation.relay).catch(() => undefined);
+  let persisted = false;
+  try {
+    ensureCurrent(options);
+    await options.persist(machine);
+    persisted = true;
+    ensureCurrent(options);
+    if (invitation.relay && options.acknowledge) {
+      await options.acknowledge(invitation.relay, options.signal).catch((error) => {
+        ensureCurrent(options);
+        void error;
+      });
+      ensureCurrent(options);
+    }
+  } catch (error) {
+    if (persisted && (options.signal?.aborted || options.isCurrent?.() === false) && options.removePersisted) {
+      await options.removePersisted(machine.id).catch(() => undefined);
+    }
+    throw error;
   }
   return machine;
 }

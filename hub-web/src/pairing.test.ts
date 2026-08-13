@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
+import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
-import { PendingPairingStore } from "./pending-pairing";
+import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
+import { PendingPairingStore, pendingPairingStoreFor } from "./pending-pairing";
 import {
   DEFAULT_PAIRING_SCOPES,
   PairingRelayError,
@@ -47,6 +49,11 @@ async function fixture(name: string): Promise<Record<string, unknown>> {
 }
 
 const relayOrigin = "https://petra-stella-cloud.vercel.app";
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
+}
 
 describe("wire-v1 reverse pairing", () => {
   it("loads the seven shared section-4 vectors used by production serializers and parsers", async () => {
@@ -194,6 +201,136 @@ describe("wire-v1 reverse pairing", () => {
     const history = { replaceState: (_: unknown, __: string, path: string) => { replacement = path; } } as unknown as History;
     expect(consumePairingFragment(location, history)).toBeNull();
     expect(replacement).toBe("/commander?view=fleet");
+  });
+
+  it("scrubs a valid fragment and boots with an in-memory fallback when the sessionStorage getter throws", () => {
+    const token = "A".repeat(43);
+    let replacement = "";
+    const windowLike = Object.defineProperty({}, "sessionStorage", {
+      get: () => { throw new DOMException("denied", "SecurityError"); },
+    }) as { readonly sessionStorage: Storage };
+    const store = pendingPairingStoreFor(windowLike);
+    const location = { hash: `#pair=${token}&hub=machine-uuid`, pathname: "/commander", search: "?view=fleet" } as Location;
+    const history = { replaceState: (_: unknown, __: string, path: string) => { replacement = path; } } as unknown as History;
+
+    expect(() => consumePairingFragment(location, history, store)).not.toThrow();
+    expect(replacement).toBe("/commander?view=fleet");
+    expect(replacement).not.toContain(token);
+    expect(store.load()).toMatchObject({ kind: "invitation", token, hubId: "machine-uuid" });
+  });
+
+  it("tolerates throwing sessionStorage get, set, and remove methods", () => {
+    const storage = {
+      get length(): number { throw new DOMException("denied", "SecurityError"); },
+      clear(): void { throw new DOMException("denied", "SecurityError"); },
+      getItem(): string | null { throw new DOMException("denied", "SecurityError"); },
+      key(): string | null { throw new DOMException("denied", "SecurityError"); },
+      removeItem(): void { throw new DOMException("denied", "SecurityError"); },
+      setItem(): void { throw new DOMException("denied", "SecurityError"); },
+    } satisfies Storage;
+    const store = new PendingPairingStore(storage);
+
+    expect(() => store.save(request)).not.toThrow();
+    expect(() => store.clear()).not.toThrow();
+    expect(store.load()).toBeNull();
+  });
+
+  it.each(["cancel", "expiry"])("invalidates a deferred poll on %s before it can restore secrets", async () => {
+    const operations = new PairingOperationCoordinator();
+    const generation = operations.replace();
+    const operation = operations.begin(generation);
+    const result = deferred<typeof request>();
+    const persisted: typeof request[] = [];
+    const completion = commitPairingResult(operations, operation, result.promise, async (value) => { persisted.push(value); });
+
+    operations.invalidate();
+    result.resolve(request);
+
+    await expect(completion).resolves.toBe(false);
+    expect(operation.signal.aborted).toBe(true);
+    expect(persisted).toEqual([]);
+  });
+
+  it("keeps a replacement request when the superseded deferred poll resolves last", async () => {
+    const operations = new PairingOperationCoordinator();
+    const firstGeneration = operations.replace();
+    const firstOperation = operations.begin(firstGeneration);
+    const first = deferred<typeof request>();
+    const persisted: string[] = [];
+    const staleCompletion = commitPairingResult(operations, firstOperation, first.promise, async (value) => { persisted.push(value.pairingRequestId); });
+
+    const replacement = { ...request, pairingRequestId: "replacement-request" };
+    const replacementGeneration = operations.replace();
+    const replacementOperation = operations.begin(replacementGeneration);
+    await expect(commitPairingResult(operations, replacementOperation, Promise.resolve(replacement), async (value) => { persisted.push(value.pairingRequestId); })).resolves.toBe(true);
+    first.resolve(request);
+
+    await expect(staleCompletion).resolves.toBe(false);
+    expect(firstOperation.signal.aborted).toBe(true);
+    expect(persisted).toEqual(["replacement-request"]);
+  });
+
+  it("rolls back a credential persisted after final exchange cancellation and never acknowledges it", async () => {
+    const operations = new PairingOperationCoordinator();
+    const generation = operations.replace();
+    const operation = operations.begin(generation);
+    const persistStarted = deferred<void>();
+    const releasePersist = deferred<void>();
+    const persisted: StoredMachine[] = [];
+    const removed: string[] = [];
+    const acknowledge = vi.fn(async () => undefined);
+    const invitation = { kind: "invitation" as const, token: "one-time-token", hubId: "machine-uuid", hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] as const };
+    const exchange = exchangePendingPairing({
+      invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => response(200, { device_id: "device", credential_id: "credential", credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      persist: async (machine) => { persisted.push(machine); persistStarted.resolve(); await releasePersist.promise; },
+      removePersisted: async (id) => { removed.push(id); }, acknowledge,
+      signal: operation.signal, isCurrent: () => operations.isCurrent(operation),
+    });
+
+    await persistStarted.promise;
+    operations.invalidate();
+    releasePersist.resolve();
+
+    await expect(exchange).rejects.toBeInstanceOf(PairingExchangeError);
+    expect(persisted).toHaveLength(1);
+    expect(removed).toEqual([invitation.hubId]);
+    expect(acknowledge).not.toHaveBeenCalled();
+  });
+
+  it("does not persist a credential when a deferred exchange response arrives after cancellation", async () => {
+    const operations = new PairingOperationCoordinator();
+    const generation = operations.replace();
+    const operation = operations.begin(generation);
+    const fetched = deferred<Response>();
+    const persist = vi.fn(async (_machine: StoredMachine) => undefined);
+    const invitation = { kind: "invitation" as const, token: "one-time-token", hubId: "machine-uuid", hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] as const };
+    const exchange = exchangePendingPairing({
+      invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => fetched.promise,
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }), persist,
+      signal: operation.signal, isCurrent: () => operations.isCurrent(operation),
+    });
+
+    await Promise.resolve();
+    operations.invalidate();
+    fetched.resolve(response(200, { device_id: "device", credential_id: "credential", credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }));
+
+    await expect(exchange).rejects.toBeInstanceOf(PairingExchangeError);
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["legacy", [["url", "https://legacy.tail.example"], ["label", "Studio Mac"], ["device", "Phone"], ["operator", "Petra"], ["scope", "machine-read"], ["scope", "pane-read"]]],
+    ["relay", [["device", "Tablet"], ["operator", "Daniel"]]],
+  ] as const)("preserves %s confirmation fields across unrelated renders", (_kind, entries) => {
+    const initial = createPairingDraft("https://controller.tail.example");
+    const captured = updatePairingDraft(initial, entries);
+    const afterBackgroundRender = updatePairingDraft(captured, []);
+
+    expect(afterBackgroundRender).toEqual(captured);
+    expect(afterBackgroundRender.deviceLabel).not.toBe("Commander browser");
   });
 
   it("persists before acknowledgement and keeps local success when acknowledgement fails", async () => {

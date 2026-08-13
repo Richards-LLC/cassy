@@ -33,6 +33,15 @@ export interface PendingInvitation {
 
 export type PendingPairing = PendingRelayRequest | PendingInvitation;
 
+type PairingStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+class MemoryPairingStorage implements PairingStorage {
+  private readonly values = new Map<string, string>();
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -60,10 +69,17 @@ function isPendingPairing(value: unknown): value is PendingPairing {
 }
 
 export class PendingPairingStore {
-  constructor(private readonly storage: Storage, private readonly now: () => number = Date.now) {}
+  private readonly fallback = new MemoryPairingStorage();
+
+  constructor(private readonly storage?: PairingStorage, private readonly now: () => number = Date.now) {}
 
   load(): PendingPairing | null {
-    const raw = this.storage.getItem(STORAGE_KEY);
+    let raw: string | null;
+    try {
+      raw = this.storage?.getItem(STORAGE_KEY) ?? this.fallback.getItem(STORAGE_KEY);
+    } catch {
+      raw = this.fallback.getItem(STORAGE_KEY);
+    }
     if (!raw) return null;
     try {
       const value: unknown = JSON.parse(raw);
@@ -80,7 +96,9 @@ export class PendingPairingStore {
   }
 
   save(value: PendingPairing): void {
-    this.storage.setItem(STORAGE_KEY, JSON.stringify(value));
+    const serialized = JSON.stringify(value);
+    this.fallback.setItem(STORAGE_KEY, serialized);
+    try { this.storage?.setItem(STORAGE_KEY, serialized); } catch { /* private storage can be denied */ }
   }
 
   saveLegacy(token: string, hubId: string): PendingInvitation {
@@ -90,6 +108,16 @@ export class PendingPairingStore {
   }
 
   clear(): void {
-    this.storage.removeItem(STORAGE_KEY);
+    this.fallback.removeItem(STORAGE_KEY);
+    try { this.storage?.removeItem(STORAGE_KEY); } catch { /* private storage can be denied */ }
+  }
+}
+
+/** Acquire browser storage without allowing a denied getter to stop fragment scrubbing or boot. */
+export function pendingPairingStoreFor(provider: { readonly sessionStorage: Storage }): PendingPairingStore {
+  try {
+    return new PendingPairingStore(provider.sessionStorage);
+  } catch {
+    return new PendingPairingStore();
   }
 }

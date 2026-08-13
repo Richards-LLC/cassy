@@ -96,14 +96,14 @@ function relayError(status: number, code: unknown): PairingRelayError {
   return new PairingRelayError(typeof code === "string" ? code : "relay_error", "The pairing service refused the request.");
 }
 
-export async function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string): Promise<PendingRelayRequest> {
+export async function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string, signal?: AbortSignal): Promise<PendingRelayRequest> {
   if (!requestedScopes.length || new Set(requestedScopes).size !== requestedScopes.length || requestedScopes.some((scope) => !DEFAULT_PAIRING_SCOPES.includes(scope))) {
     throw new PairingRelayError("unsupported_scope", "Page-initiated pairing supports read-only access only.");
   }
   const body: Record<string, unknown> = { wire_version: 1, controller_origin: controllerOrigin, requested_scopes: requestedScopes };
   if (email) body.email = email;
   const response = await fetcher(relayEndpoint(relayOrigin, CREATE_PATH), {
-    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", body: JSON.stringify(body), signal,
   });
   const value = await jsonRecord(response);
   if (response.status !== 201) throw relayError(response.status, value.error);
@@ -135,9 +135,9 @@ export type PollResult =
   | { kind: "slow-down"; interval: number }
   | { kind: "authorized"; invitation: PendingInvitation };
 
-export async function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, request: PendingRelayRequest): Promise<PollResult> {
+export async function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, request: PendingRelayRequest, signal?: AbortSignal): Promise<PollResult> {
   const response = await fetcher(relayEndpoint(relayOrigin, POLL_PATH), {
-    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit",
+    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", signal,
     body: JSON.stringify({ wire_version: 1, pairing_request_id: request.pairingRequestId, poll_secret: request.pollSecret }),
   });
   const value = await jsonRecord(response);
@@ -176,9 +176,9 @@ export async function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, 
   };
 }
 
-export async function acknowledgePairing(fetcher: Fetcher, relayOrigin: string, relay: PairingRelayDelivery): Promise<void> {
+export async function acknowledgePairing(fetcher: Fetcher, relayOrigin: string, relay: PairingRelayDelivery, signal?: AbortSignal): Promise<void> {
   const response = await fetcher(relayEndpoint(relayOrigin, ACK_PATH), {
-    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit",
+    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", signal,
     body: JSON.stringify({ wire_version: 1, pairing_request_id: relay.pairingRequestId, poll_secret: relay.pollSecret, delivery_id: relay.deliveryId }),
   });
   if (response.status !== 204) throw new PairingRelayError("acknowledgement_failed", "The pairing service could not acknowledge delivery.");

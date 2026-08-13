@@ -46,13 +46,13 @@ impl CasCore {
         let skill_store = self.open_skill_store()?;
 
         // Try database first
-        let skill = match skill_store.get(&req.id) {
-            Ok(s) => s,
+        let (skill, served_from_project_file) = match skill_store.get(&req.id) {
+            Ok(s) => (s, false),
             Err(_) => {
                 // Try to find in .claude/skills/ by name
                 let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
                 match read_skill_from_file(project_root, &req.id) {
-                    Ok(Some(s)) => s,
+                    Ok(Some(s)) => (s, true),
                     Ok(None) => {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
@@ -71,13 +71,19 @@ impl CasCore {
             }
         };
 
-        let source = if skill.id.starts_with("file-") {
+        let source = if served_from_project_file {
             "file (.claude/skills/)"
         } else {
             "database"
         };
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        let staleness_banner = served_from_project_file
+            .then(|| project_skill_staleness_banner(project_root))
+            .flatten()
+            .unwrap_or_default();
         let output = format!(
-            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
+            "{}Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
+            staleness_banner,
             skill.name,
             skill.id,
             "=".repeat(skill.name.len() + skill.id.len() + 4),
@@ -563,4 +569,29 @@ impl CasCore {
 
         Ok(Self::success(output))
     }
+}
+
+/// A project SKILL.md is served directly from the checkout, so readers need a
+/// signal when that checkout lacks commits already present on its sync target.
+/// Keep this read-only: an MCP read must not fetch or otherwise mutate state.
+fn project_skill_staleness_banner(project_root: &std::path::Path) -> Option<String> {
+    let (behind, sync_ref) =
+        crate::mcp::tools::check_worktree_staleness_cached(project_root.to_str()?, None)?;
+    if behind == 0 {
+        return None;
+    }
+
+    let served_ref = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    Some(format!(
+        "WARNING: STALE PROJECT SKILL\nServed from checkout ref `{served_ref}`, which is {behind} commit(s) behind `{sync_ref}`. The file may omit newer project guidance; run `cas factory sync` before relying on it.\n\n"
+    ))
 }

@@ -279,9 +279,30 @@ pub(crate) fn resolve_staleness_sync_ref(
 /// When set, it always wins so multi-epic factories compare against the correct epic.
 ///
 /// Returns (commits_behind, sync_ref) or None if check fails (missing path / git error).
-fn check_worktree_staleness(
+pub(crate) fn check_worktree_staleness(
     clone_path: &str,
     preferred_sync_ref: Option<&str>,
+) -> Option<(u32, String)> {
+    check_worktree_staleness_with_fetch(clone_path, preferred_sync_ref, true)
+}
+
+/// Read-only variant of [`check_worktree_staleness`] for request paths that
+/// must not turn a display operation into an unbounded network fetch.
+///
+/// It deliberately uses the already-available local refs. A stale cached ref
+/// can only suppress a warning, never invent one; SessionStart and factory
+/// synchronization remain responsible for refreshing remotes.
+pub(crate) fn check_worktree_staleness_cached(
+    clone_path: &str,
+    preferred_sync_ref: Option<&str>,
+) -> Option<(u32, String)> {
+    check_worktree_staleness_with_fetch(clone_path, preferred_sync_ref, false)
+}
+
+fn check_worktree_staleness_with_fetch(
+    clone_path: &str,
+    preferred_sync_ref: Option<&str>,
+    fetch: bool,
 ) -> Option<(u32, String)> {
     use crate::worktree::GitOperations;
     use std::path::Path;
@@ -321,7 +342,7 @@ fn check_worktree_staleness(
     );
 
     // Fetch latest refs when sync target is a remote-tracking ref.
-    if let Some(remote) = remote_for_ref(path, &sync_ref) {
+    if fetch && let Some(remote) = remote_for_ref(path, &sync_ref) {
         let _ = Command::new("git")
             .args(["fetch", &remote])
             .current_dir(path)

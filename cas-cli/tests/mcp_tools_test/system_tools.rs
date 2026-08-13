@@ -1,9 +1,10 @@
 use crate::support::*;
 use cas::mcp::CasService;
 use cas::mcp::tools::*;
-use cas_mcp::SystemRequest;
+use cas_mcp::{SearchContextRequest, SystemRequest};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
+use serde_json::json;
 
 #[tokio::test]
 async fn test_context() {
@@ -47,6 +48,132 @@ async fn test_context() {
     let text = extract_text(result);
     // Context should return something (may be empty if no helpful memories)
     assert!(!text.is_empty() || text.contains("No context"));
+}
+
+/// GH #289: task-focused ambient context must retain operator preferences and
+/// lexical task matches instead of filling Helpful Memories with generic picks.
+#[tokio::test]
+async fn task_focused_context_surfaces_preferences_and_task_content_matches() {
+    let (_temp, core) = setup_cas();
+    let service = CasService::new(core.clone(), None);
+
+    let task = TaskCreateRequest {
+        depth: None,
+        title: "Gate 2D restoration report with dual-identity checks".to_string(),
+        description: Some(
+            "Produce HTML report deliverables covering Gate 2D restoration and dual-identity."
+                .to_string(),
+        ),
+        priority: 1,
+        task_type: "task".to_string(),
+        labels: None,
+        notes: None,
+        blocked_by: None,
+        design: None,
+        acceptance_criteria: None,
+        external_ref: None,
+        assignee: None,
+        demo_statement: None,
+        execution_note: None,
+        epic: None,
+    };
+    let task_id = extract_task_id(&extract_text(
+        core.cas_task_create(Parameters(task))
+            .await
+            .expect("task should be created"),
+    ))
+    .expect("task creation result should include its ID")
+    .to_string();
+
+    async fn remember(
+        core: &cas::mcp::CasCore,
+        entry_type: &str,
+        content: &str,
+        importance: f32,
+    ) -> String {
+        let result = core
+            .cas_remember(Parameters(RememberRequest {
+                scope: "project".to_string(),
+                content: content.to_string(),
+                entry_type: entry_type.to_string(),
+                tags: None,
+                title: None,
+                importance,
+                valid_from: None,
+                valid_until: None,
+                team_id: None,
+                bypass_overlap: Some(true),
+                mode: None,
+                expected_updated_at: None,
+                personal: None,
+            }))
+            .await
+            .expect("memory should be created");
+        extract_entry_id(&extract_text(result))
+            .expect("memory creation result should include its ID")
+            .to_string()
+    }
+
+    // These mirror the fresh #289 directives: they should beat generic learning
+    // entries even when the ambient bundle is capped to five memories.
+    let html_directive = remember(
+        &core,
+        "preference",
+        "Report deliverables must ship as HTML through cas-html-reports, never bare markdown.",
+        0.1,
+    )
+    .await;
+    let browser_directive = remember(
+        &core,
+        "preference",
+        "Operator browser directive: open final reports with /usr/bin/google-chrome.",
+        0.1,
+    )
+    .await;
+    let task_match = remember(
+        &core,
+        "learning",
+        "Gate 2D restoration must preserve the dual-identity report contract.",
+        0.1,
+    )
+    .await;
+    for ordinal in 0..5 {
+        remember(
+            &core,
+            "learning",
+            &format!("Generic historical process note {ordinal} with no report-specific guidance."),
+            0.95,
+        )
+        .await;
+    }
+
+    let request: SearchContextRequest = serde_json::from_value(json!({
+        "action": "context",
+        "task_id": task_id,
+        "max_tokens": 1500,
+        "limit": 5
+    }))
+    .expect("focused context request should deserialize");
+    let text = extract_text(
+        service
+            .search(Parameters(request))
+            .await
+            .expect("focused context should succeed"),
+    );
+
+    assert!(text.contains("## Helpful Memories"));
+    assert!(
+        text.contains(&html_directive),
+        "fresh preference directive must displace a generic memory: {text}"
+    );
+    assert!(
+        text.contains(&browser_directive),
+        "a non-task-keyword preference directive must still displace a generic memory: {text}"
+    );
+    assert!(
+        text.contains(&task_match),
+        "task title/description lexical match must surface: {text}"
+    );
 }
 
 #[tokio::test]

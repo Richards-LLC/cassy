@@ -550,7 +550,8 @@ fn cli_routing_skill_stays_three_way_synchronized() {
         );
         for required in [
             "codex exec",
-            "daniel@petrastella.io",
+            "pippenz@gmail.com",
+            "unapproved account",
             "CLAUDE_CONFIG_DIR",
             "docs/SLACK_POSTING_RUNBOOK.md",
         ] {
@@ -559,6 +560,10 @@ fn cli_routing_skill_stays_three_way_synchronized() {
                 "claude {rel} missing {required:?}"
             );
         }
+        assert!(
+            !claude.contains("daniel@petrastella.io"),
+            "claude {rel} retains the stale Daniel-only account gate"
+        );
         for twin in TWINS {
             let body = canonicalize(
                 &fs::read_to_string(flavor_path(rel, twin))

@@ -354,6 +354,29 @@ fn test_create_snippet() {
 }
 
 #[test]
+fn test_create_snippet_truncates_multibyte_text_on_char_boundary() {
+    for character in ['─', '🦀', '界'] {
+        let source: String = std::iter::repeat_n(character, 201).collect();
+        let snippet = CodeSearchResult::create_snippet(&source);
+
+        assert!(snippet.ends_with("..."), "missing ellipsis for {character:?}");
+        assert!(
+            snippet.len() <= 200,
+            "snippet exceeded the existing 200-byte cap for {character:?}: {} bytes",
+            snippet.len()
+        );
+        assert!(
+            snippet
+                .strip_suffix("...")
+                .unwrap()
+                .chars()
+                .all(|value| value == character),
+            "truncation corrupted {character:?}"
+        );
+    }
+}
+
+#[test]
 fn test_code_search_stats_default() {
     let stats = CodeSearchStats::default();
     assert_eq!(stats.file_count, 0);

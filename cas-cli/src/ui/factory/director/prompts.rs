@@ -2596,7 +2596,7 @@ mod tests {
             SupervisorCli::Codex,
             SupervisorCli::Grok,
         ] {
-            let prefix = cli.capabilities().tool_prefix;
+            let prefix = cli.backend().capabilities().tool_prefix;
             for event in &events {
                 let prompt = generate_prompt(
                     event,

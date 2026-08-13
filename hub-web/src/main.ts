@@ -4,12 +4,13 @@ import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
 import { PendingPairingStore, type PendingInvitation, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
-import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pollPairingRequest } from "./pairing-relay";
+import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = new PendingPairingStore(window.sessionStorage);
+const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
 let pendingPairing: PendingPairing | null = consumePairingFragment(window.location, window.history, pendingPairingStore) as PendingInvitation | null;
 pendingPairing ??= pendingPairingStore.load();
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -115,7 +116,7 @@ async function pairMachine(form: HTMLFormElement): Promise<void> {
       fetcher: fetch,
       createKey: createDeviceKey,
       persist: (candidate) => catalog.put(candidate),
-      acknowledge: (relay) => acknowledgePairing(fetch, relay),
+      acknowledge: relayOrigin ? (relay) => acknowledgePairing(fetch, relayOrigin, relay) : undefined,
     });
   } catch (error) {
     if (error instanceof PairingExchangeError) {
@@ -136,7 +137,8 @@ async function pairMachine(form: HTMLFormElement): Promise<void> {
 }
 
 async function startRelayPairing(email: string): Promise<void> {
-  const created = await createPairingRequest(fetch, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined);
+  if (!relayOrigin) throw new PairingRelayError("relay_unavailable", "Page-initiated pairing is unavailable in this deployment.");
+  const created = await createPairingRequest(fetch, relayOrigin, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined);
   pendingPairing = created;
   pendingPairingStore.save(created);
   pairingStatus = "Waiting for a machine to claim the code…";
@@ -145,7 +147,7 @@ async function startRelayPairing(email: string): Promise<void> {
 }
 
 function resumePairingPoll(): void {
-  if (pairingPollTimer !== undefined || pendingPairing?.kind !== "relay-request") return;
+  if (!relayOrigin || pairingPollTimer !== undefined || pendingPairing?.kind !== "relay-request") return;
   const request = pendingPairing;
   pairingPollTimer = window.setTimeout(() => void pollRelay(request), request.interval * 1000);
 }
@@ -154,7 +156,8 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
   pairingPollTimer = undefined;
   if (pendingPairing?.kind !== "relay-request" || pendingPairing.pairingRequestId !== request.pairingRequestId) return;
   try {
-    const result = await pollPairingRequest(fetch, request);
+    if (!relayOrigin) throw new PairingRelayError("relay_unavailable", "Page-initiated pairing is unavailable in this deployment.");
+    const result = await pollPairingRequest(fetch, relayOrigin, request);
     if (result.kind === "authorized") {
       pendingPairing = result.invitation;
       pendingPairingStore.save(result.invitation);
@@ -390,7 +393,10 @@ function pairDialogMarkup(): string {
     const scopes = pendingPairing.scopes;
     return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && scopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Hub</dt><dd>${escapeHtml(hubUrl)}</dd></div><div><dt>Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Hub URL<input name="url" type="url" required value="${escapeAttr(location.origin)}"></label><label>Machine label<input name="label" required placeholder="Studio Mac"></label><fieldset><legend>Scopes requested</legend>${scopeChecks()}</fieldset>`}<label>Device label<input name="device" required value="Commander browser"></label><label>Operator label<input name="operator" required placeholder="Your name"></label><div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary">Pair</button></div></form></dialog>`;
   }
-  return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Create a ten-minute code, then approve the exact origin and read-only scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">Close</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button><button id="pair-create" type="button" class="primary">Create pairing code</button></div></section></dialog>`;
+  const relayAction = relayOrigin
+    ? '<button id="pair-create" type="button" class="primary">Create pairing code</button>'
+    : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Commander build has no reviewed relay origin.</p>';
+  return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Create a ten-minute code, then approve the exact origin and read-only scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">Close</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
 }
 
 function render(): void {

@@ -116,7 +116,7 @@ The stylesheet has a single `max-width: 850px` compact breakpoint rather than a 
 
 - ✅ Escape every origin, URL, label, code, and scope before inserting generated dialog markup with `escapeHtml`/`escapeAttr`.
 - ❌ Never interpolate relay secrets, invitations, credentials, or server error bodies into Commander UI.
-- ✅ Display the exact kebab-case relay scopes; they are the hub wire contract and should not be cosmetically converted.
+- ✅ Display exact kebab-case JSON wire scopes; the binding ADR defines the one-to-one translation from canonical colon-form policy names.
 - ❌ Never make elevated scopes selectable in page-initiated pairing; its visual contract is the three read-only scopes.
 - ✅ Preserve an open pairing dialog across background fleet renders so polling and connection events do not dismiss the task.
 - ❌ Never rebuild or dispose the live terminal grid merely to update pairing status; retain the existing preserved-grid path.

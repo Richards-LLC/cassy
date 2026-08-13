@@ -27,6 +27,57 @@ fn open_startup_pull_task_store(
     crate::store::open_task_store_local(cas_root)
 }
 
+/// Bring the project database to the schema this MCP binary requires before
+/// any daemon, cloud sync, or store opener can issue application queries.
+///
+/// A factory worker shares its project's database with long-lived MCP servers.
+/// When a newly installed binary adds a column, letting it continue to eager
+/// store opening would turn this recoverable startup boundary into raw SQL
+/// errors on the first tool call.
+fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
+    let status = crate::migration::check_migrations(cas_root)
+        .context("could not determine the CAS schema required by this MCP binary")?;
+    if !status.has_pending() {
+        return Ok(());
+    }
+
+    let pending_migration = status
+        .pending
+        .first()
+        .map(|migration| format!("m{} `{}`", migration.id, migration.name))
+        .unwrap_or_else(|| "an unknown migration".to_string());
+    let mismatch = || crate::error::CasError::SchemaOutdated {
+        binary: env!("CARGO_PKG_VERSION").to_string(),
+        current: status.current_version,
+        required: status.latest_version,
+        pending_migration: pending_migration.clone(),
+    };
+
+    match crate::migration::run_migrations(cas_root, false) {
+        Ok(result) => {
+            if result.applied_count > 0 {
+                eprintln!(
+                    "[CAS] Applied {} pending schema migration(s) before MCP startup.",
+                    result.applied_count
+                );
+            }
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "{mismatch}; automatic application of pending migration {pending_migration} failed: {error}",
+                mismatch = mismatch(),
+            ));
+        }
+    }
+
+    let final_status = crate::migration::check_migrations(cas_root)
+        .context("could not verify the CAS schema after automatic migration")?;
+    if final_status.has_pending() {
+        return Err(anyhow::Error::from(mismatch()));
+    }
+    Ok(())
+}
+
 /// Internal implementation for running the MCP server
 async fn run_server_impl() -> anyhow::Result<()> {
     let enable_daemon = true;
@@ -53,11 +104,17 @@ async fn run_server_impl() -> anyhow::Result<()> {
     install_serve_panic_hook(&cas_root);
 
     // Parent-death watchdog (cas-82d6c). Armed before any store is opened so a
-    // startup that wedges *before* the transport exists is covered too — an
-    // orphan stuck in eager init holds the same write-side database fds as one
-    // stuck in the serve loop. See `parent_watchdog` for why stdin EOF is not
-    // sufficient and why the server reaps itself rather than being reaped.
+    // startup that wedges *before* the transport exists is covered too. It
+    // must also precede schema migration: an orphaned worker can otherwise
+    // hold the database mid-migration indefinitely. See `parent_watchdog` for
+    // why stdin EOF is not sufficient and why the server reaps itself rather
+    // than being reaped.
     let parent_watchdog = crate::mcp::server::parent_watchdog::spawn();
+
+    // This is deliberately before every remaining background path and every
+    // store opener. All MCP configurations — including freshly spawned
+    // factory workers — enter through `cas serve` and share this boundary.
+    ensure_mcp_schema(&cas_root)?;
 
     // Register this repo in the host-scoped known_repos registry. Fires
     // every time `cas serve` starts in a directory with `.cas/`, catching
@@ -205,22 +262,6 @@ async fn run_server_impl() -> anyhow::Result<()> {
     };
 
     let core = CasCore::with_daemon(cas_root.clone(), activity, daemon.clone());
-
-    // Loud pending-migration warning (2026-07-06 serve-brick follow-through):
-    // serve never runs DDL itself — migrations apply via `cas update` — so a
-    // new binary on an old store runs degraded (writes touching new columns
-    // fail) until the user migrates. Say so at startup instead of failing
-    // silently one INSERT at a time.
-    if let Ok(status) = crate::migration::check_migrations(&cas_root) {
-        if status.has_pending() {
-            eprintln!(
-                "[CAS] WARNING: {} schema migration(s) pending for {} — factory/agent \
-                 features may fail until you run `cas update --schema-only` in this project.",
-                status.pending.len(),
-                cas_root.display()
-            );
-        }
-    }
 
     // Eagerly initialize all stores before serving MCP requests.
     // This moves cold-start overhead (connection open, schema init) out of the
@@ -1148,7 +1189,8 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 #[cfg(test)]
 mod tests {
     use super::{
-        open_startup_pull_entry_store, open_startup_pull_task_store, resolve_mcp_serve_root,
+        ensure_mcp_schema, open_startup_pull_entry_store, open_startup_pull_task_store,
+        resolve_mcp_serve_root,
     };
     use crate::cloud::{CloudConfig, EntityType, SyncQueue};
     use crate::store::{init_cas_dir, open_store, open_task_store};
@@ -1156,6 +1198,83 @@ mod tests {
     use crate::types::{Entry, Task};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn make_m233_pending(cas_root: &std::path::Path, wrong_ledger_identity: bool) {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute("ALTER TABLE tasks DROP COLUMN terminal_outcome", [])
+            .unwrap();
+        conn.execute("DELETE FROM cas_migrations WHERE id = 233", [])
+            .unwrap();
+        if wrong_ledger_identity {
+            conn.execute(
+                "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+                 VALUES (233, 'wrong_migration_identity', 'tasks', 'TEST')",
+                [],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn mcp_startup_applies_pending_schema_before_store_opening() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = init_cas_dir(temp.path()).unwrap();
+        make_m233_pending(&cas_root, false);
+
+        ensure_mcp_schema(&cas_root).expect("MCP startup should repair a pending migration");
+
+        let status = crate::migration::check_migrations(&cas_root).unwrap();
+        assert!(status.pending.is_empty());
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        assert!(cas_store::shared_db::column_exists(
+            &conn,
+            "tasks",
+            "terminal_outcome"
+        ));
+    }
+
+    #[test]
+    fn casb123_mcp_startup_arms_parent_watchdog_before_schema_migration() {
+        let source = include_str!("runtime.rs");
+        let body = source
+            .split_once("async fn run_server_impl()")
+            .expect("run_server_impl source")
+            .1;
+        let watchdog = body
+            .find("parent_watchdog::spawn()")
+            .expect("startup watchdog arm");
+        let migration = body
+            .find("ensure_mcp_schema(&cas_root)?")
+            .expect("startup schema check");
+        assert!(
+            watchdog < migration,
+            "parent watchdog must be armed before a schema migration can hold the database"
+        );
+    }
+
+    #[test]
+    fn mcp_startup_refusal_names_binary_schema_pending_migration_and_fix_command() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = init_cas_dir(temp.path()).unwrap();
+        make_m233_pending(&cas_root, true);
+
+        let error = ensure_mcp_schema(&cas_root)
+            .expect_err("a corrupt migration ledger must refuse MCP startup")
+            .to_string();
+        assert!(error.contains("binary"), "missing binary version: {error}");
+        assert!(
+            error.contains("requires schema v233"),
+            "missing schema requirement: {error}"
+        );
+        assert!(
+            error.contains("m233 `tasks_add_terminal_outcome`"),
+            "missing pending migration name: {error}"
+        );
+        assert!(
+            error.contains("cas update --schema-only"),
+            "missing remediation command: {error}"
+        );
+    }
 
     #[test]
     fn startup_pull_apply_leaves_personal_and_team_queues_empty() {

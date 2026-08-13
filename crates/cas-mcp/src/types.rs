@@ -392,10 +392,17 @@ pub struct TaskRequest {
 
     /// Execution note (for create, update) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only. Pass empty string to clear on update."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, no-code. no-code declares an operations/artifact task and requires external_ref proof at close. Pass empty string to clear on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
+
+    /// Supervisor-only proof-scope correction for `action=update`.
+    #[schemars(
+        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
+    )]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub proof_scope_fix: Option<bool>,
 
     /// External reference (for create, update)
     #[schemars(description = "External reference (URL, ticket ID, etc.)")]
@@ -448,6 +455,11 @@ pub struct TaskRequest {
     )]
     #[serde(default)]
     pub depth: Option<String>,
+
+    /// Explicit acknowledgement of a planning-race or duplicate-task warning on create.
+    #[schemars(description = "For action=create, confirm creation after CAS reports a recent competing epic plan or a high-similarity open task.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub confirm_warning: Option<bool>,
 
     /// Explicit repository containing this task's code changes.
     #[schemars(

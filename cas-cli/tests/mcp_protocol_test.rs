@@ -1249,24 +1249,32 @@ fn test_serve_fails_fast_on_unreadable_cas_db() {
         "cas serve must exit non-zero when cas.db is unreadable; got success exit"
     );
 
-    // Drain stderr and require the exact context string anchored by
-    // `with_context` in eager_init_stores. Anchoring on this specific phrase
-    // ensures the test fails loudly if the diagnostic is ever stripped or
-    // refactored — it cannot be satisfied by some incidentally-similar log
-    // line from elsewhere in the binary (review T5).
+    // Schema reconciliation now runs before eager store initialization, so an
+    // unreadable database fails at that earlier boundary. Keep asserting the
+    // user-actionable diagnostic rather than a private eager-init label: the
+    // important contract is a loud non-zero startup failure that tells the
+    // operator how to repair the inaccessible database.
     let mut stderr = String::new();
     if let Some(mut s) = child.stderr.take() {
         use std::io::Read;
         let _ = s.read_to_string(&mut stderr);
     }
     assert!(
-        stderr.contains("eager store init failed at"),
-        "stderr must contain the eager_init_stores diagnostic; got: {stderr}"
+        stderr.contains("database error: unable to open database file"),
+        "stderr must name the unreadable database failure; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("cas doctor") && stderr.contains("permissions"),
+        "stderr must give an actionable database-permissions diagnostic; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Starting MCP server"),
+        "cas serve must not start the MCP server after an unreadable-database failure; got: {stderr}"
     );
 }
 
 #[test]
-fn test_serve_starts_degraded_and_warns_when_m213_is_partially_applied() {
+fn test_serve_repairs_m213_before_starting() {
     let sandbox = CasSandbox::new();
     let db_path = sandbox.cas_root().join("cas.db");
     {
@@ -1285,17 +1293,13 @@ fn test_serve_starts_degraded_and_warns_when_m213_is_partially_applied() {
     let response = client.initialize();
     assert!(
         response.error.is_none(),
-        "cas serve must start in its documented degraded mode while m213 is pending: {:?}",
+        "cas serve must start after repairing pending m213: {:?}",
         response.error
     );
     let stderr = client.stop_and_read_stderr();
     assert!(
-        stderr.contains("schema migration(s) pending"),
-        "degraded serve startup must emit the pending-migration warning: {stderr}"
-    );
-    assert!(
-        stderr.contains("cas update --schema-only"),
-        "warning must name the repair command: {stderr}"
+        stderr.contains("Applied 1 pending schema migration(s) before MCP startup."),
+        "startup must report that it repaired m213 before serving: {stderr}"
     );
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1310,10 +1314,20 @@ fn test_serve_starts_degraded_and_warns_when_m213_is_partially_applied() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-            0,
-            "cas serve must not silently run m213 for {table}"
+            1,
+            "cas serve must restore m213's dispatch_id column for {table}"
         );
     }
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM cas_migrations WHERE id = 213",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1,
+        "automatic startup repair must record m213 as applied"
+    );
 }
 
 #[test]

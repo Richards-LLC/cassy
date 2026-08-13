@@ -1,5 +1,45 @@
 use crate::mcp::tools::service::imports::*;
 
+/// Resolve and validate an explicit Claude config directory before its spawn
+/// request reaches the daemon.  A partial profile otherwise starts a PTY that
+/// cannot load CAS' worker contract, then fails sixty seconds later with no
+/// actionable cause (GH #270).
+fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("config_dir is empty; expected a Claude configuration directory".to_string());
+    }
+    let path = trimmed.strip_prefix('~').map_or_else(
+        || std::path::PathBuf::from(trimmed),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| home.join(suffix.trim_start_matches('/')))
+                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
+        },
+    );
+    let required_files = [
+        ("settings.json", path.join("settings.json")),
+        (".credentials.json", path.join(".credentials.json")),
+    ];
+    for (name, candidate) in required_files {
+        std::fs::File::open(&candidate).map_err(|error| {
+            format!("config_dir preflight failed: missing or unreadable {name}: {error}")
+        })?;
+    }
+    for name in ["agents", "skills"] {
+        let candidate = path.join(name);
+        let resolved = candidate.canonicalize().map_err(|error| {
+            format!("config_dir preflight failed: missing or unresolved {name}: {error}")
+        })?;
+        if !resolved.is_dir() {
+            return Err(format!(
+                "config_dir preflight failed: {name} must resolve to a directory"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Heartbeat age at which a worker is considered **stale** and becomes
 /// eligible for the opportunistic prune in `factory_worker_status`.
 ///
@@ -31,6 +71,7 @@ pub(crate) const WORKER_DEAD_SECS: i64 = 75;
 /// done anything recently, so they must read the same bounded source rather
 /// than diverging on an arbitrary event count or activity class.
 const WORKER_ACTIVITY_WINDOW_SECS: i64 = 600;
+const WORKER_FILE_WRITE_SCAN_LIMIT: usize = 2_000;
 
 /// Whether an event is evidence of work a worker actually performed.
 ///
@@ -1205,6 +1246,12 @@ impl CasService {
                 // reflect what will ACTUALLY spawn, not the pre-fallback request.
             }
             spec.config_dir = req.config_dir.clone();
+            if spec.cli == cas_mux::SupervisorCli::Claude {
+                if let Some(config_dir) = spec.config_dir.as_deref() {
+                    preflight_claude_config_dir(config_dir)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                }
+            }
             let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
             if (spec.config_dir.is_some() || requester_config_dir.is_some())
                 && spec.cli != cas_mux::SupervisorCli::Claude
@@ -1754,6 +1801,21 @@ impl CasService {
                 })
                 .unwrap_or_default()
         };
+        // File-write telemetry is rendered as an absolute per-worker
+        // timestamp, so it must not disappear merely because the broader
+        // activity line uses a ten-minute freshness window. Read a bounded
+        // recent slice of that event type separately.
+        let file_write_events: Vec<cas_types::Event> = {
+            use cas_store::{EventStore, SqliteEventStore};
+            SqliteEventStore::open(&self.inner.cas_root)
+                .and_then(|events| {
+                    events.list_by_type(
+                        cas_types::EventType::WorkerFileEdited,
+                        WORKER_FILE_WRITE_SCAN_LIMIT,
+                    )
+                })
+                .unwrap_or_default()
+        };
 
         // Agents suppressed from pruning due to recent I/O activity or a live
         // harness PID. Used in the render loop to show the dual-signal
@@ -2053,6 +2115,16 @@ impl CasService {
                     && owned.as_ref().is_none_or(|set| set.contains(&a.name))
             })
             .collect();
+        let outbound_targets: std::collections::BTreeSet<String> = agents
+            .iter()
+            .filter(|agent| {
+                agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director
+            })
+            .map(|agent| agent.name.clone())
+            .chain(["supervisor".to_string(), "director".to_string()])
+            .collect();
+        let outbound_target_refs: Vec<&str> =
+            outbound_targets.iter().map(String::as_str).collect();
         // cas-e728 (GH #105): per-worker inbox state — how many messages the
         // worker has NOT consumed, and how old the oldest one is.
         //
@@ -2077,46 +2149,44 @@ impl CasService {
         // reminders so the two can be told apart.
         let now = chrono::Utc::now();
         let pending_reminder_waits = pending_reminder_waits(&self.inner.cas_root, now);
-        let inbox_state: std::collections::HashMap<String, WorkerInbox> = {
-            use crate::store::open_prompt_queue_store;
-            open_prompt_queue_store(&self.inner.cas_root)
-                .ok()
-                .map(|queue| {
-                    workers
-                        .iter()
-                        .map(|agent| {
-                            let count = queue
-                                .count_unseen_for_recipient(&agent.name, factory_session.as_deref())
-                                .unwrap_or(0);
-                            let oldest = queue
-                                .oldest_unseen_age_secs_for_recipient(
-                                    &agent.name,
-                                    factory_session.as_deref(),
-                                )
-                                .unwrap_or(None);
-                            let rows: Vec<UnseenDelivery> = queue
-                                .peek_unseen_for_recipient(
-                                    &agent.name,
-                                    factory_session.as_deref(),
-                                    WORKER_INBOX_PEEK_LIMIT,
-                                )
-                                .unwrap_or_default()
-                                .iter()
-                                .map(UnseenDelivery::from_queued)
-                                .collect();
-                            let inbox = classify_worker_inbox(
-                                count,
-                                oldest,
-                                &rows,
-                                pending_reminder_waits.get(agent.id.as_str()).copied(),
-                                now,
-                            );
-                            (agent.name.clone(), inbox)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        let prompt_queue = crate::store::open_prompt_queue_store(&self.inner.cas_root).ok();
+        let inbox_state: std::collections::HashMap<String, WorkerInbox> = prompt_queue
+            .as_ref()
+            .map(|queue| {
+                workers
+                    .iter()
+                    .map(|agent| {
+                        let count = queue
+                            .count_unseen_for_recipient(&agent.name, factory_session.as_deref())
+                            .unwrap_or(0);
+                        let oldest = queue
+                            .oldest_unseen_age_secs_for_recipient(
+                                &agent.name,
+                                factory_session.as_deref(),
+                            )
+                            .unwrap_or(None);
+                        let rows: Vec<UnseenDelivery> = queue
+                            .peek_unseen_for_recipient(
+                                &agent.name,
+                                factory_session.as_deref(),
+                                WORKER_INBOX_PEEK_LIMIT,
+                            )
+                            .unwrap_or_default()
+                            .iter()
+                            .map(UnseenDelivery::from_queued)
+                            .collect();
+                        let inbox = classify_worker_inbox(
+                            count,
+                            oldest,
+                            &rows,
+                            pending_reminder_waits.get(agent.id.as_str()).copied(),
+                            now,
+                        );
+                        (agent.name.clone(), inbox)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let self_name = std::env::var("CAS_AGENT_NAME").ok();
         let supervisors: Vec<_> = agents
             .iter()
@@ -2201,15 +2271,16 @@ impl CasService {
                             .then(|| transcript_path_fast(clone_path.as_deref(), session_uuid))
                             .flatten()
                     });
-                // cas-4fb9: checkpoint/heartbeat freshness cannot answer
-                // whether the harness actually started a turn. Render the
-                // harness's own artifact-backed turn observation separately.
-                // Claude deliberately stays unobserved: Agent Teams inbox
-                // persistence is transport evidence, not wake evidence.
+                // cas-4fb9 / cas-71d9: checkpoint/heartbeat freshness cannot
+                // answer whether the harness actually started a turn. Render
+                // the harness's own artifact-backed turn observation
+                // separately; Claude's transcript is now authoritative too.
                 let harness_turn_info = format_harness_turn_observation(
                     worker_cli,
                     transcript_path_for_worker.as_deref(),
                 );
+                let turn_start_observable = harness_publishes_turn_start(worker_cli)
+                    && transcript_path_for_worker.is_some();
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -2335,11 +2406,26 @@ impl CasService {
                 // Reuses the same transcript path already resolved above for
                 // context_info/in_flight_tool_call, and the same
                 // wedged::transcript_mtime_age primitive `is-wedged` trusts.
-                let last_activity = last_worker_activity_secs_with_transcript(
+                let last_activity = last_worker_activity_secs_with_harness_turn(
                     &activity_events,
                     &agent.id,
                     worker_cli,
                     transcript_path_for_worker.as_deref(),
+                    now,
+                );
+                let progress_timestamps = format_worker_progress_timestamps(
+                    prompt_queue.as_ref().and_then(|queue| {
+                        queue
+                            .latest_created_at_for_targets_from_sources(
+                                &[agent.name.as_str()],
+                                &outbound_target_refs,
+                                factory_session.as_deref(),
+                            )
+                            .ok()
+                            .and_then(|timestamps| timestamps.into_values().max())
+                    }),
+                    latest_worker_file_write_at(&file_write_events, &agent.id),
+                    now,
                 );
                 // cas-d165 (Finding 1): reuse the SAME liveness evidence as
                 // cas-7e85 / `cas factory is-wedged` — an outstanding tool
@@ -2429,7 +2515,7 @@ impl CasService {
                         .map(|(task, elapsed)| {
                             (task.id.as_str(), elapsed, effective_stall_threshold)
                         }),
-                    harness_publishes_turn_start(worker_cli),
+                    turn_start_observable,
                     elapsed,
                     worker_inbox,
                 );
@@ -2492,7 +2578,7 @@ impl CasService {
                         .map(|t| (t.id.as_str(), t.title.as_str(), t.status)),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -2504,6 +2590,7 @@ impl CasService {
                     context_info,
                     compaction_info,
                     activity_info,
+                    progress_timestamps,
                     harness_turn_info,
                     task_info,
                     inbox_info,
@@ -3752,7 +3839,8 @@ impl CasService {
             )
         })?;
 
-        let statuses = collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
+        let mut statuses =
+            collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
 
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides
@@ -3786,6 +3874,23 @@ impl CasService {
             GitOperations::new(close_project_root.clone())
                 .unlanded_epic_ancestry(parent_branch, &trunk)
         };
+        if let Ok(agent_store) = crate::store::open_agent_store(&self.inner.cas_root) {
+            if let Ok(agents) = agent_store.list(None) {
+                for status in &mut statuses {
+                    status.dead_or_stale_assignee =
+                        status.assignee.as_ref().is_some_and(|assignee| {
+                            agents.iter().any(|agent| {
+                                (agent.name == *assignee || agent.id == *assignee)
+                                    && matches!(
+                                        agent.status,
+                                        cas_types::AgentStatus::Stale
+                                            | cas_types::AgentStatus::Shutdown
+                                    )
+                            })
+                        });
+                }
+            }
+        }
         let report =
             render_epic_status_report_with_stack(epic_id, parent_branch, &statuses, &stacked_on);
 
@@ -5404,6 +5509,69 @@ pub(crate) fn last_worker_activity_secs_with_transcript(
     }
 }
 
+/// Fold the latest parsed harness turn-start watermark into stall freshness.
+///
+/// Transcript mtime remains useful for tool activity, but a concrete turn
+/// record is stronger evidence and is the signal that makes Claude workers
+/// participate in the same stall classification as Codex and Grok.
+fn last_worker_activity_secs_with_harness_turn(
+    events: &[cas_types::Event],
+    agent_id: &str,
+    cli: cas_mux::SupervisorCli,
+    transcript_path: Option<&std::path::Path>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(i64, &'static str)> {
+    let activity =
+        last_worker_activity_secs_with_transcript(events, agent_id, cli, transcript_path);
+    let turn_start = transcript_path
+        .and_then(|path| {
+            crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli)
+                .wake
+        })
+        .map(|wake| ((now - wake.at).num_seconds().max(0), "turn start"));
+
+    match (activity, turn_start) {
+        (Some(existing), Some(turn)) if existing.0 <= turn.0 => Some(existing),
+        (_, Some(turn)) => Some(turn),
+        (existing, None) => existing,
+    }
+}
+
+/// Latest explicit file-edit event for one worker.
+fn latest_worker_file_write_at(
+    events: &[cas_types::Event],
+    agent_id: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    events
+        .iter()
+        .filter(|event| {
+            event.event_type == cas_types::EventType::WorkerFileEdited
+                && (event.session_id.as_deref() == Some(agent_id) || event.entity_id == agent_id)
+        })
+        .map(|event| event.created_at)
+        .max()
+}
+
+fn format_worker_progress_timestamps(
+    last_outbound: Option<chrono::DateTime<chrono::Utc>>,
+    last_file_write: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let render = |label: &str, at: Option<chrono::DateTime<chrono::Utc>>| match at {
+        Some(at) => format!(
+            "\n    {label}: {} ({}s ago)",
+            at.to_rfc3339(),
+            (now - at).num_seconds().max(0)
+        ),
+        None => format!("\n    {label}: unobserved"),
+    };
+    format!(
+        "{}{}",
+        render("last outbound message", last_outbound),
+        render("last file write", last_file_write)
+    )
+}
+
 /// Render the latest real harness turn observation for `worker_status`.
 ///
 /// This is intentionally separate from `last activity`: transcript mtime is
@@ -5423,9 +5591,6 @@ fn format_harness_turn_observation_at(
     artifact_path: Option<&std::path::Path>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    if cli == cas_mux::SupervisorCli::Claude {
-        return "\n    harness turn: unobserved (Claude has no authoritative turn-start artifact; inbox persistence is delivery only)".to_string();
-    }
     let Some(path) = artifact_path else {
         return format!(
             "\n    harness turn: unobserved ({} artifact unresolved)",
@@ -5455,8 +5620,12 @@ fn format_harness_turn_observation_at(
         || "reaction unobserved".to_string(),
         |reaction| format!("reaction observed at {}", reaction.at.to_rfc3339()),
     );
+    let completion = observations.completion.map_or_else(
+        || "completion unobserved".to_string(),
+        |completion| format!("completion observed at {}", completion.at.to_rfc3339()),
+    );
     format!(
-        "\n    harness turn: started {age}s ago at {} ({reaction}; artifact-backed: {})",
+        "\n    harness turn: started {age}s ago at {} ({reaction}; {completion}; artifact-backed: {})",
         wake.at.to_rfc3339(),
         wake.evidence
     )
@@ -5500,17 +5669,18 @@ fn format_assigned_unstarted_status(
 /// cas-e728 (GH #105): does this harness publish an authoritative turn-start
 /// artifact CAS can read?
 ///
-/// Codex and Grok write a rollout/signals record when a turn begins, so
-/// silence from them can be interpreted. Claude does not — Agent Teams inbox
-/// persistence is *delivery* evidence, not wake evidence (see
-/// `format_harness_turn_observation_at`, which says exactly this on every
-/// Claude row). For an unobservable harness, quiet is the NORMAL state
-/// between turns: a healthy Claude worker commits, pushes, notes, and then
-/// legitimately goes silent until its next message grants a turn. Calling
-/// that "stalled" produced dozens of false alarms in one session and zero
-/// true ones, which trains supervisors to ignore the flag.
+/// All supported harnesses now publish a readable turn-start artifact:
+/// Codex and Grok use rollout/signals records, while Claude uses top-level
+/// textual `user` records in its transcript (tool-result user records are
+/// excluded by the parser). This keeps stall classification artifact-backed
+/// instead of inferring wake state from inbox persistence.
 fn harness_publishes_turn_start(cli: cas_mux::SupervisorCli) -> bool {
-    cli != cas_mux::SupervisorCli::Claude
+    matches!(
+        cli,
+        cas_mux::SupervisorCli::Claude
+            | cas_mux::SupervisorCli::Codex
+            | cas_mux::SupervisorCli::Grok
+    )
 }
 
 /// How many unseen inbox rows `worker_status` reads per worker in order to
@@ -7712,6 +7882,37 @@ mod spawn_lifecycle_tests {
 mod tests {
     use super::*;
 
+    fn valid_claude_config(dir: &std::path::Path) {
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        std::fs::write(dir.join(".credentials.json"), "credential").unwrap();
+        std::fs::create_dir(dir.join("agents")).unwrap();
+        std::fs::create_dir(dir.join("skills")).unwrap();
+    }
+
+    #[test]
+    fn config_dir_preflight_names_each_missing_requirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let cases = [
+            ("settings.json", "settings.json"),
+            (".credentials.json", ".credentials.json"),
+            ("agents", "agents"),
+            ("skills", "skills"),
+        ];
+        for (missing, expected) in cases {
+            let profile = temp.path().join(missing.replace('.', "_"));
+            std::fs::create_dir(&profile).unwrap();
+            valid_claude_config(&profile);
+            let target = profile.join(missing);
+            if target.is_dir() {
+                std::fs::remove_dir(target).unwrap();
+            } else {
+                std::fs::remove_file(target).unwrap();
+            }
+            let error = preflight_claude_config_dir(profile.to_str().unwrap()).unwrap_err();
+            assert!(error.contains(expected), "expected {expected} in {error}");
+        }
+    }
+
     #[test]
     fn worker_status_dedupe_prefers_freshest_heartbeat_across_factory_sessions() {
         let mut parent = cas_types::Agent::new("parent-session".into(), "worker-one".into());
@@ -8439,14 +8640,86 @@ effort = "high"
     }
 
     #[test]
-    fn worker_status_does_not_call_claude_inbox_persistence_a_wake() {
+    fn worker_status_reports_artifact_backed_claude_turn_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("claude.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"timestamp\":\"2026-07-31T20:01:02Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"do the work\"}}\n",
+                "{\"timestamp\":\"2026-07-31T20:01:03Z\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n",
+                "{\"timestamp\":\"2026-07-31T20:01:04Z\",\"type\":\"system\",\"subtype\":\"turn_duration\"}\n"
+            ),
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-31T20:01:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         let rendered = format_harness_turn_observation_at(
             cas_mux::SupervisorCli::Claude,
-            None,
-            chrono::Utc::now(),
+            Some(&transcript),
+            now,
         );
-        assert!(rendered.contains("harness turn: unobserved"));
-        assert!(rendered.contains("inbox persistence is delivery only"));
+        assert!(
+            rendered.contains("harness turn: started 3s ago"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("reaction observed"), "{rendered}");
+        assert!(rendered.contains("completion observed"), "{rendered}");
+        assert!(rendered.contains("top-level textual user"), "{rendered}");
+    }
+
+    #[test]
+    fn claude_turn_watermark_participates_in_stall_classification() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("claude.jsonl");
+        let now = chrono::Utc::now();
+        let turn_started = now - chrono::Duration::seconds(200);
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"timestamp\":\"{}\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"resume\"}}}}\n",
+                turn_started.to_rfc3339()
+            ),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &transcript,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(900),
+            ),
+        )
+        .unwrap();
+
+        let activity = last_worker_activity_secs_with_harness_turn(
+            &[],
+            "claude-worker",
+            cas_mux::SupervisorCli::Claude,
+            Some(&transcript),
+            now,
+        )
+        .expect("parsed turn watermark");
+        assert_eq!(activity.1, "turn start");
+        assert!(activity.0 >= 199 && activity.0 <= 201, "{activity:?}");
+        assert!(
+            !is_worker_stalled(true, Some(activity.0), 300, false),
+            "the 200s Claude turn start is fresher than the 900s file mtime"
+        );
+        assert!(harness_publishes_turn_start(cas_mux::SupervisorCli::Claude));
+    }
+
+    #[test]
+    fn worker_status_progress_timestamps_name_outbound_and_file_write() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T20:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rendered = format_worker_progress_timestamps(
+            Some(now - chrono::Duration::seconds(12)),
+            Some(now - chrono::Duration::seconds(34)),
+            now,
+        );
+        assert!(rendered.contains("last outbound message: 2026-08-12T19:59:48+00:00 (12s ago)"));
+        assert!(rendered.contains("last file write: 2026-08-12T19:59:26+00:00 (34s ago)"));
     }
 
     // --- cas-8240: liveness_label_for branch matrix -------------------------
@@ -8587,7 +8860,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             inbox(0, None),
         )
@@ -8615,7 +8888,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0, // heartbeat fresh — the wedged-but-alive shape
             inbox(2, Some(900)),
         )
@@ -8644,7 +8917,7 @@ effort = "high"
             Some((348, "activity")),
             600,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             inbox(3, Some(2_884)),
         )
@@ -8667,7 +8940,7 @@ effort = "high"
             None,
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             inbox(1, Some(900)),
         )
@@ -8686,7 +8959,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             inbox(1, Some(5)),
         )
@@ -8708,7 +8981,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             Some(("cas-unstarted", 600, 300)),
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             inbox(0, None),
         )
@@ -8773,7 +9046,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             WORKER_STALE_SECS,
             inbox(0, None),
         )
@@ -8895,7 +9168,7 @@ effort = "high"
             Some((517, "checkpoint")),
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             WorkerInbox {
                 unread: 0,
@@ -8973,7 +9246,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             classified,
         )
@@ -9039,7 +9312,7 @@ effort = "high"
                 Some((900, "checkpoint")),
                 300,
                 None,
-                harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+                false,
                 0,
                 classified,
             ),
@@ -9103,7 +9376,7 @@ effort = "high"
             None,
             300,
             None,
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             classified,
         )
@@ -9121,7 +9394,7 @@ effort = "high"
             Some((900, "checkpoint")),
             300,
             Some(("cas-unstarted", 600, 300)),
-            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            false,
             0,
             WorkerInbox {
                 unread: 0,

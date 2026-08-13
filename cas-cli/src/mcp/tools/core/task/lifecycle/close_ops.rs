@@ -98,6 +98,31 @@ fn delivery_audit_text_is_portable(value: &str) -> bool {
     })
 }
 
+fn no_code_close_proof<'a>(
+    task_id: &str,
+    execution_note: Option<&str>,
+    external_ref: Option<&'a str>,
+    has_reviewable_code: bool,
+) -> Result<Option<&'a str>, String> {
+    if execution_note != Some("no-code") {
+        return Ok(None);
+    }
+    let proof_reference = external_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && delivery_audit_text_is_portable(value))
+        .ok_or_else(|| {
+            format!(
+                "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code. Record a non-empty portable artifact/proof reference with `task action=update id={task_id} external_ref=<reference>` before closing. Local absolute paths and secret-shaped values are not accepted as durable audit references."
+            )
+        })?;
+    if has_reviewable_code {
+        return Err(format!(
+            "⚠️ NO-CODE INTENT VIOLATED\n\nTask {task_id} declares execution_note=no-code, but its task-attributed branch history contains reviewable code changes. Clear or change execution_note and complete the ordinary review/merge gates; no-code cannot be used to bypass code delivery proof."
+        ));
+    }
+    Ok(Some(proof_reference))
+}
+
 /// Return a durable-proof path under tmpfs cited in a task-close reason.
 ///
 /// This deliberately inspects only the close reason, which workers use to
@@ -180,7 +205,7 @@ struct NegativeResultCloseReceipt {
 }
 
 #[derive(Debug)]
-pub(super) enum SupervisorAuthorityError {
+pub(crate) enum SupervisorAuthorityError {
     Identity(String),
     Store(String),
     NotRegistered { caller_id: String, error: String },
@@ -310,7 +335,7 @@ fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), S
 #[cfg(test)]
 mod delivery_audit_text_tests {
     use super::{
-        delivery_audit_text_is_portable, negative_result_missing_receipts,
+        delivery_audit_text_is_portable, negative_result_missing_receipts, no_code_close_proof,
         request_changes_role_gate, tmpfs_receipt_path_in_close_reason,
         validate_completion_artifact_path, validate_negative_result_reference,
     };
@@ -332,6 +357,35 @@ mod delivery_audit_text_tests {
         assert!(!delivery_audit_text_is_portable("token=secret-value"));
         assert!(!delivery_audit_text_is_portable("ghp_secret-shaped"));
         assert!(!delivery_audit_text_is_portable("payload\nsecond line"));
+    }
+
+    #[test]
+    fn cas525c_no_code_close_requires_proof_and_rejects_committed_code() {
+        assert_eq!(
+            no_code_close_proof(
+                "cas-ops",
+                Some("no-code"),
+                Some("artifact:firebase-remediation-2026-08-12"),
+                false,
+            )
+            .unwrap(),
+            Some("artifact:firebase-remediation-2026-08-12")
+        );
+        assert!(
+            no_code_close_proof("cas-ops", Some("no-code"), None, false)
+                .unwrap_err()
+                .contains("NO-CODE PROOF REQUIRED")
+        );
+        assert!(
+            no_code_close_proof(
+                "cas-ops",
+                Some("no-code"),
+                Some("artifact:firebase-remediation-2026-08-12"),
+                true,
+            )
+            .unwrap_err()
+            .contains("NO-CODE INTENT VIOLATED")
+        );
     }
 
     #[test]
@@ -715,7 +769,7 @@ impl CasCore {
     /// Resolve the authority shared by every supervisor-owned non-delivery
     /// outcome. Callers map the typed failure into operation-specific text,
     /// but identity, registration, role, and liveness checks are identical.
-    pub(super) fn resolve_live_supervisor_authority(
+    pub(crate) fn resolve_live_supervisor_authority(
         &self,
     ) -> Result<cas_types::Agent, SupervisorAuthorityError> {
         let caller_id = self
@@ -1609,14 +1663,11 @@ impl CasCore {
             )));
         }
 
-        let negative_result_receipt = match self.validate_negative_result_close(
-            &req.id,
-            &req,
-            negative_result.as_ref(),
-        ) {
-            Ok(receipt) => receipt,
-            Err(message) => return Ok(Self::tool_error(message)),
-        };
+        let negative_result_receipt =
+            match self.validate_negative_result_close(&req.id, &req, negative_result.as_ref()) {
+                Ok(receipt) => receipt,
+                Err(message) => return Ok(Self::tool_error(message)),
+            };
         let close_disposition = if task.task_type == TaskType::Gate {
             if let Err(message) = self.validate_gate_decision_close(&task) {
                 return Ok(Self::tool_error(message));
@@ -3478,6 +3529,23 @@ impl CasCore {
             })
         };
 
+        // `no-code` is an explicit operations/artifact contract, not a broad
+        // review bypass. It must retain a portable proof pointer, and any code
+        // committed during the task invalidates the declaration loudly.
+        if close_disposition.requires_delivery_gates()
+            && task.execution_note.as_deref() == Some("no-code")
+            && !bypass_close_gates
+        {
+            if let Err(message) = no_code_close_proof(
+                &task.id,
+                task.execution_note.as_deref(),
+                task.external_ref.as_deref(),
+                effective_has_reviewable,
+            ) {
+                return Ok(Self::tool_error(message));
+            }
+        }
+
         // cas-762e (B2): factory branch merge-reality gate.
         //
         // The cas-95ce gate (earlier in this function) already blocks when
@@ -3928,6 +3996,19 @@ impl CasCore {
         if depth_light {
             let timestamp = now.format("%Y-%m-%d %H:%M");
             let decision_note = format!("[{timestamp}] {}", light_skip_decision_note());
+            if task.notes.is_empty() {
+                task.notes = decision_note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
+        if task.execution_note.as_deref() == Some("no-code") {
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let reference = task.external_ref.as_deref().unwrap_or("<missing>");
+            let decision_note = format!(
+                "[{timestamp}] DECISION: no-code operations delivery accepted with recorded artifact/proof reference: {reference}"
+            );
             if task.notes.is_empty() {
                 task.notes = decision_note;
             } else {
@@ -8282,8 +8363,15 @@ pub(crate) fn validate_task_commit_receipt(
     let full_receipt = resolve_task_commit_receipt_sha(repo_path, receipt)?;
 
     if !commit_is_merged_into_parent(repo_path, &full_receipt, parent_branch) {
+        let suggestion = find_squash_tree_match(repo_path, &full_receipt, parent_branch)
+            .map(|sha| {
+                format!(
+                    "; however, target history contains tree-equivalent squash commit `{sha}`. Retry close with `commit_receipt={sha}`"
+                )
+            })
+            .unwrap_or_default();
         return Err(format!(
-            "the commit is not an ancestor of {parent_branch} or origin/{parent_branch}"
+            "the commit is not an ancestor of {parent_branch} or origin/{parent_branch}{suggestion}"
         ));
     }
 
@@ -8362,6 +8450,51 @@ pub(crate) fn validate_task_commit_receipt(
         COMMIT_RECEIPT_CLOCK_SKEW_SECS,
         prior_cycle_basis.unwrap_or_default()
     ))
+}
+
+/// Find a commit already on the target whose complete tree equals the
+/// submitted branch tip. This is the exact shape produced by a squash merge:
+/// the original commit is not an ancestor, but the resulting snapshot is.
+fn find_squash_tree_match(
+    repo_path: &std::path::Path,
+    source_commit: &str,
+    parent_branch: &str,
+) -> Option<String> {
+    use std::process::Command;
+
+    let source_tree = Command::new("git")
+        .args(["show", "-s", "--format=%T", source_commit, "--"])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let source_tree = String::from_utf8_lossy(&source_tree.stdout)
+        .trim()
+        .to_string();
+    if source_tree.is_empty() {
+        return None;
+    }
+    for target in [parent_branch.to_string(), format!("origin/{parent_branch}")] {
+        if !git_ref_exists(repo_path, &target) {
+            continue;
+        }
+        let history = Command::new("git")
+            .args(["log", "--format=%H %T", &target, "--"])
+            .current_dir(repo_path)
+            .output()
+            .ok()?;
+        if !history.status.success() {
+            continue;
+        }
+        if let Some(sha) = String::from_utf8_lossy(&history.stdout)
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .find_map(|(sha, tree)| (tree == source_tree).then(|| sha.to_string()))
+        {
+            return Some(sha);
+        }
+    }
+    None
 }
 
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) {
@@ -8649,6 +8782,7 @@ pub(crate) struct EpicChildBranchStatus {
     pub task_id: String,
     pub task_status: TaskStatus,
     pub assignee: Option<String>,
+    pub dead_or_stale_assignee: bool,
     /// Task-specific commit receipt recorded when the child was parked/closed.
     pub recorded_anchor: Option<String>,
     /// Primary branch checked when the task-specific anchor is unavailable.
@@ -8995,6 +9129,7 @@ pub(crate) fn collect_epic_branch_statuses(
                 task_id: t.id.clone(),
                 task_status: t.status,
                 assignee: t.assignee.clone(),
+                dead_or_stale_assignee: false,
                 recorded_anchor: recorded_anchor.map(str::to_string),
                 factory_branch,
                 additional_factory_branches,
@@ -9070,7 +9205,11 @@ pub(crate) fn render_epic_status_report_with_stack(
         // facing column matches the rest of the CLI's status rendering
         // (e.g., `task list`). Round-1 cas-code-review fix.
         let status_str = s.task_status.to_string();
-        let assignee = s.assignee.as_deref().unwrap_or("—");
+        let assignee = match s.assignee.as_deref() {
+            Some(name) if s.dead_or_stale_assignee => format!("{name} ⚠ dead/stale"),
+            Some(name) => name.to_string(),
+            None => "—".to_string(),
+        };
         let branch = s.factory_branches_label();
         // cas-2a99 (GH #131): a row whose refs resolve nowhere has no
         // measurement to report. Saying so beats printing `0`, which reads as
@@ -9090,7 +9229,7 @@ pub(crate) fn render_epic_status_report_with_stack(
             "| {task} | {status} | {assignee} | {branch} | {checked} | {unmerged} | {last} |\n",
             task = s.task_id,
             status = status_str,
-            assignee = assignee,
+                assignee = assignee,
             branch = branch,
             checked = s.checked_refs_label(),
             unmerged = unmerged,
@@ -11060,6 +11199,18 @@ pub(crate) enum LightweightLintOutcome {
     Fail(String),
 }
 
+fn target_only_receipt_lint_parent(
+    repo: &std::path::Path,
+    receipt: &str,
+) -> Result<String, String> {
+    resolve_branch_sha(repo, &format!("{receipt}^1")).ok_or_else(|| {
+        format!(
+            "PRE-CLOSE HOOK CONTEXT REJECTED: target-only receipt {receipt} has no resolvable \
+             first parent, so structural lint cannot establish a non-empty delivery range."
+        )
+    })
+}
+
 pub(crate) fn run_declared_pre_close_hook(
     task: &cas_types::Task,
     repo_context: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -11067,11 +11218,19 @@ pub(crate) fn run_declared_pre_close_hook(
     commit_receipt: Option<&str>,
 ) -> Result<cas_types::PreCloseHookEvidence, String> {
     let receipt_repo = worker_worktree_path.unwrap_or(&repo_context.repo_root);
+    // cas-92da (#272 cherry-pick variant): a supervisor may integrate the
+    // worker's delivery as a new squash/cherry-pick commit on the declared
+    // target. Refresh that exact target before resolving or classifying a
+    // supplied receipt; the worker's own branch deliberately will not contain
+    // the rewritten commit in this delivery shape.
+    if commit_receipt.is_some() {
+        fetch_parent_branch_best_effort(receipt_repo, &repo_context.target_branch);
+    }
     let normalized_receipt = commit_receipt
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
         .map_err(|error| format!("PRE-CLOSE HOOK CONTEXT REJECTED: commit_receipt {error}"))?;
-    let (execution_root, worktree_branch, task_tip) = match worker_worktree_path {
+    let (execution_root, worktree_branch, task_tip, lint_parent) = match worker_worktree_path {
         Some(path) => {
             let branch = git_branch_name(path).ok_or_else(|| {
                 "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
@@ -11093,14 +11252,28 @@ pub(crate) fn run_declared_pre_close_hook(
                         .to_string(),
                 );
             }
-            if !git_commit_is_ancestor(path, &tip, "HEAD") {
+            let reachable_from_worktree = git_commit_is_ancestor(path, &tip, "HEAD");
+            let receipt_reachable_from_target =
+                normalized_receipt.as_deref().is_some_and(|receipt| {
+                    commit_is_merged_into_parent(path, receipt, &repo_context.target_branch)
+                });
+            if !reachable_from_worktree && !receipt_reachable_from_target {
                 return Err(
                     "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence is not reachable from \
                      the validated task worktree branch. No close-time executable gate was run."
                         .to_string(),
                 );
             }
-            (path, Some(branch), tip)
+            let lint_parent = if !reachable_from_worktree && receipt_reachable_from_target {
+                // A squash/cherry-pick receipt that exists only on the target
+                // is itself the merge-base with that target. Diffing target
+                // vs receipt is therefore empty and silently disables lint.
+                // Measure the delivered commit against its first parent.
+                target_only_receipt_lint_parent(path, &tip)?
+            } else {
+                repo_context.target_branch.clone()
+            };
+            (path, Some(branch), tip, lint_parent)
         }
         None => {
             let tip = normalized_receipt
@@ -11130,14 +11303,20 @@ pub(crate) fn run_declared_pre_close_hook(
                         .to_string(),
                 );
             }
-            (repo_context.repo_root.as_path(), None, tip.to_string())
+            let lint_parent = if normalized_receipt.is_some() {
+                target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
+            } else {
+                repo_context.target_branch.clone()
+            };
+            (
+                repo_context.repo_root.as_path(),
+                None,
+                tip.to_string(),
+                lint_parent,
+            )
         }
     };
-    match run_lightweight_structural_lint_at_tip(
-        execution_root,
-        Some(&repo_context.target_branch),
-        &task_tip,
-    ) {
+    match run_lightweight_structural_lint_at_tip(execution_root, Some(&lint_parent), &task_tip) {
         LightweightLintOutcome::Pass => Ok(cas_types::PreCloseHookEvidence {
             repo_selector: repo_context.repo_selector.clone(),
             target_branch: repo_context.target_branch.clone(),
@@ -15253,7 +15432,10 @@ mod merge_state_gate_tests {
         let (dir, origin) = init_repo_with_origin("worker");
         let publisher_root = tempfile::tempdir().unwrap();
         let origin_path = origin.path().to_str().expect("origin path utf-8");
-        git(publisher_root.path(), &["clone", "-q", origin_path, "publisher"]);
+        git(
+            publisher_root.path(),
+            &["clone", "-q", origin_path, "publisher"],
+        );
         let publisher = publisher_root.path().join("publisher");
         std::fs::write(publisher.join("merged-remotely.rs"), "// remote merge\n").unwrap();
         git(&publisher, &["add", "merged-remotely.rs"]);
@@ -18243,6 +18425,7 @@ mod epic_status_gate_tests {
                 task_id: "cas-aaaa".to_string(),
                 task_status: TaskStatus::Closed,
                 assignee: Some("alpha".to_string()),
+                dead_or_stale_assignee: false,
                 recorded_anchor: None,
                 factory_branch: Some("factory/alpha".to_string()),
                 additional_factory_branches: Vec::new(),
@@ -18261,6 +18444,7 @@ mod epic_status_gate_tests {
                 task_id: "cas-bbbb".to_string(),
                 task_status: TaskStatus::InProgress,
                 assignee: Some("bravo".to_string()),
+                dead_or_stale_assignee: false,
                 recorded_anchor: None,
                 factory_branch: Some("factory/bravo".to_string()),
                 additional_factory_branches: Vec::new(),
@@ -18276,6 +18460,7 @@ mod epic_status_gate_tests {
                 task_id: "cas-cccc".to_string(),
                 task_status: TaskStatus::InProgress,
                 assignee: None,
+                dead_or_stale_assignee: false,
                 recorded_anchor: None,
                 factory_branch: None,
                 additional_factory_branches: Vec::new(),
@@ -18789,6 +18974,187 @@ mod zero_change_close_tests {
         }
     }
 
+    fn init_worker_repo_with_origin() -> (TempDir, TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let dir = init_worker_repo();
+        git(
+            dir.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        git(dir.path(), &["push", "-q", "origin", "main"]);
+        git(
+            dir.path(),
+            &["push", "-q", "origin", "factory/test-worker"],
+        );
+        git(dir.path(), &["fetch", "-q", "origin"]);
+        (dir, origin)
+    }
+
+    fn declared_main_context(
+        dir: &Path,
+    ) -> crate::mcp::tools::core::task::repo_context::RepoContext {
+        crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "remote:example.invalid/cas92da".to_string(),
+            repo_root: dir.to_path_buf(),
+            git_common_dir: dir.join(".git"),
+            target_branch: "main".to_string(),
+        }
+    }
+
+    #[test]
+    fn cas92da_pre_close_accepts_receipt_reachable_only_from_fresh_target() {
+        let (dir, origin) = init_worker_repo_with_origin();
+        std::fs::write(
+            dir.path().join("delivered.rs"),
+            "pub fn delivered_by_worker() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "delivered.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "worker delivery"]);
+        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
+
+        let publisher_root = tempfile::tempdir().unwrap();
+        git(
+            publisher_root.path(),
+            &["clone", "-q", origin.path().to_str().unwrap(), "publisher"],
+        );
+        let publisher = publisher_root.path().join("publisher");
+        git(
+            &publisher,
+            &["merge", "-q", "--squash", "origin/factory/test-worker"],
+        );
+        git(
+            &publisher,
+            &["commit", "-q", "-m", "supervisor squash delivery"],
+        );
+        let squash_receipt = head_sha(&publisher);
+        git(&publisher, &["push", "-q", "origin", "HEAD:main"]);
+
+        assert!(
+            resolve_task_commit_receipt_sha(dir.path(), &squash_receipt).is_err(),
+            "precondition: the squash receipt must exist only on the unfetched target"
+        );
+        let task = Task::new("cas-92da".to_string(), "target-only receipt".to_string());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&squash_receipt),
+        )
+        .expect("a freshly fetched target-only squash receipt must pass the pre-close hook");
+
+        assert_eq!(evidence.task_tip.as_deref(), Some(squash_receipt.as_str()));
+        assert!(
+            !git_commit_is_ancestor(dir.path(), &squash_receipt, "HEAD"),
+            "precondition: the squash receipt must remain absent from the worker branch"
+        );
+        assert!(
+            git_commit_is_ancestor(dir.path(), &squash_receipt, "origin/main"),
+            "the pre-close hook must refresh the declared remote target"
+        );
+        validate_task_commit_receipt(dir.path(), &squash_receipt, "main", &test_receipt_window())
+            .expect(
+                "accepted location must still satisfy non-empty-diff and target ancestry proof",
+            );
+    }
+
+    #[test]
+    fn casb123_target_only_squash_receipt_runs_lint_on_non_empty_delivery_range() {
+        let (dir, origin) = init_worker_repo_with_origin();
+        std::fs::write(
+            dir.path().join("unfinished.rs"),
+            "pub fn unfinished() { todo!() }\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "unfinished.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "worker delivery"]);
+        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
+
+        let publisher_root = tempfile::tempdir().unwrap();
+        git(
+            publisher_root.path(),
+            &["clone", "-q", origin.path().to_str().unwrap(), "publisher"],
+        );
+        let publisher = publisher_root.path().join("publisher");
+        git(
+            &publisher,
+            &["merge", "-q", "--squash", "origin/factory/test-worker"],
+        );
+        git(
+            &publisher,
+            &["commit", "-q", "-m", "supervisor squash delivery"],
+        );
+        let squash_receipt = head_sha(&publisher);
+        git(&publisher, &["push", "-q", "origin", "HEAD:main"]);
+
+        let task = Task::new(
+            "cas-b123".to_string(),
+            "lint target-only receipt".to_string(),
+        );
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&squash_receipt),
+        )
+        .expect_err("todo! in a target-only squash delivery must still fail structural lint");
+        assert!(error.contains("todo!()"), "unexpected lint result: {error}");
+        assert!(
+            !git_commit_is_ancestor(dir.path(), &squash_receipt, "HEAD"),
+            "precondition: receipt is target-only, not worktree-reachable"
+        );
+    }
+
+    #[test]
+    fn cas92da_pre_close_still_accepts_worktree_reachable_receipt() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        std::fs::write(
+            dir.path().join("worker-only.rs"),
+            "pub fn worker_only() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "worker-only.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "worker-only receipt"]);
+        let receipt = head_sha(dir.path());
+        let task = Task::new("cas-92da".to_string(), "worker receipt".to_string());
+
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&receipt),
+        )
+        .expect("the existing worktree-reachable receipt path must remain valid");
+        assert_eq!(evidence.task_tip.as_deref(), Some(receipt.as_str()));
+    }
+
+    #[test]
+    fn cas92da_pre_close_rejects_receipt_reachable_from_neither_branch() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        git(dir.path(), &["checkout", "-q", "-b", "unrelated", "main"]);
+        std::fs::write(dir.path().join("unrelated.rs"), "pub fn unrelated() {}\n").unwrap();
+        git(dir.path(), &["add", "unrelated.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated receipt"]);
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        let task = Task::new("cas-92da".to_string(), "foreign receipt".to_string());
+
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            Some(dir.path()),
+            Some(&receipt),
+        )
+        .expect_err("a receipt on neither the worker nor target branch must remain rejected");
+        assert!(
+            error.contains(
+                "task commit evidence is not reachable from the validated task worktree branch"
+            ),
+            "the existing refusal must be preserved: {error}"
+        );
+    }
+
     // ── has_worker_committed_reviewable_changes ──────────────────────────────
 
     /// Reproduces the cas-cabc scenario: researcher closes spike with zero
@@ -18827,6 +19193,31 @@ mod zero_change_close_tests {
         assert!(
             has_worker_committed_reviewable_changes(dir.path(), "main"),
             "code file commits must be reviewable"
+        );
+    }
+
+    #[test]
+    fn cas525c_invalid_branch_tip_receipt_suggests_tree_equivalent_squash_sha() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn delivered() {}\n").unwrap();
+        git(dir.path(), &["add", "lib.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "task delivery"]);
+        let original_tip = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "--squash", "factory/test-worker"]);
+        git(dir.path(), &["commit", "-q", "-m", "squash delivery"]);
+        let squash_sha = head_sha(dir.path());
+
+        let error =
+            validate_task_commit_receipt(dir.path(), &original_tip, "main", &test_receipt_window())
+                .expect_err(
+                    "the non-ancestor branch tip must be rejected with a squash suggestion",
+                );
+        assert!(error.contains(&squash_sha), "{error}");
+        assert!(
+            error.contains(&format!("commit_receipt={squash_sha}")),
+            "{error}"
         );
     }
 

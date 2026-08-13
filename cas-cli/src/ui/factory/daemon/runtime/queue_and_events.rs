@@ -25,20 +25,74 @@ const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 /// (`cas_pty::codex_trust`), so a Codex timeout that still happens means that
 /// write did not take, and the message says so. Non-Codex harnesses keep the
 /// previous wording verbatim.
-fn registration_timeout_detail(timeout: Duration, cli: cas_mux::SupervisorCli) -> String {
+fn registration_timeout_detail(
+    timeout: Duration,
+    cli: cas_mux::SupervisorCli,
+    pane_tail: Option<&str>,
+) -> String {
     let base = format!(
         "Worker process launched but did not register with CAS within {} seconds; \
          inspect the worker pane/process and daemon logs.",
         timeout.as_secs()
     );
-    match cli {
+    let detail = match cli {
         cas_mux::SupervisorCli::Codex => format!("{base} {}", cas_pty::CODEX_TRUST_TIMEOUT_HINT),
         _ => base,
+    };
+    match pane_tail.filter(|tail| !tail.trim().is_empty()) {
+        Some(tail) => format!("{detail}\n\nLast worker pane output:\n{tail}"),
+        None => detail,
     }
+}
+
+/// Return a bounded, readable final pane excerpt for a timeout diagnosis.
+/// The pane buffer has already been capped at 256 KiB; the error detail must
+/// stay small enough for the spawn-lifecycle row and supervisor relay.
+fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String> {
+    const MAX_CHARS: usize = 2_000;
+    let text = buffer?.as_plain_text();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let tail: String = trimmed.chars().rev().take(MAX_CHARS).collect();
+    Some(tail.chars().rev().collect())
 }
 
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
+}
+
+/// Sender-visible details for a message whose recipient never read it. Keep
+/// this as one rendered envelope so a sender can switch channels without
+/// separately polling `message_status` during an incident.
+fn delivery_stalled_notice(
+    queued: &cas_store::QueuedPrompt,
+    recipient_harness: cas_mux::SupervisorCli,
+    report: Option<&cas_store::MessageDeliveryReport>,
+) -> String {
+    let age_secs = (chrono::Utc::now() - queued.created_at)
+        .num_seconds()
+        .max(0);
+    let summary = queued.summary.as_deref().unwrap_or("(no summary)");
+    let delivery_state = report.map_or_else(
+        || "delivery state unavailable".to_string(),
+        |report| {
+            format!(
+                "stage={}, legacy_status={:?}, wake_attempt={}, wake={}",
+                report.stage, report.legacy_status, report.wake_attempt, report.wake
+            )
+        },
+    );
+    format!(
+        "<system-notice>Delivery stalled: notification_id={}; recipient='{}'; recipient_harness={}; age_secs={}; summary='{}'; delivery_state={}. The recipient has not acknowledged or read this message. Switch to another channel if this is time-critical.</system-notice>",
+        queued.id,
+        queued.target,
+        recipient_harness.as_str(),
+        age_secs,
+        summary,
+        delivery_state,
+    )
 }
 
 fn report_stale_reminder_expiry(result: cas_store::Result<cas_store::ReminderExpiryOutcome>) {
@@ -1115,6 +1169,10 @@ pub(super) fn deferred_inbox_outcome(
 /// wrongly-silent pane loses at most one cadence tick.
 const INBOX_DRAIN_TURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
 
+fn delivery_stalled_threshold_i64(configured_secs: u64) -> i64 {
+    i64::try_from(configured_secs).unwrap_or(i64::MAX)
+}
+
 /// cas-ef14 (GH #139): a queue row whose payload was written into the
 /// recipient's Agent-Teams inbox and left pending because the wake was
 /// deferred.
@@ -1133,6 +1191,63 @@ pub(crate) struct InboxDeferredWrite {
 }
 
 impl FactoryDaemon {
+    /// Bounce aged direct messages to their original sender. The prompt store
+    /// owns the read/ack race and one-shot marker; this daemon layer adds the
+    /// live recipient harness and the authoritative delivery-state context.
+    fn enqueue_delivery_stalled_bounces(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        let config = crate::config::Config::load(self.app.cas_dir()).unwrap_or_default();
+        let factory = config.factory();
+        let candidates = match queue.delivery_stalled_candidates(
+            &self.session_name,
+            delivery_stalled_threshold_i64(factory.delivery_stalled_priority_secs),
+            delivery_stalled_threshold_i64(factory.delivery_stalled_normal_secs),
+            50,
+        ) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "failed to scan aged unread coordination messages");
+                return;
+            }
+        };
+
+        for queued in candidates {
+            let report = match queue.message_delivery_report(queued.id) {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::warn!(message_id = queued.id, %error, "failed to read delivery state for sender bounce");
+                    None
+                }
+            };
+            let notice = delivery_stalled_notice(
+                &queued,
+                self.app.harness_for(&queued.target),
+                report.as_ref(),
+            );
+            match queue.enqueue_delivery_stalled_bounce(
+                queued.id,
+                &self.session_name,
+                &notice,
+                "delivery stalled — recipient unread",
+            ) {
+                Ok(Some(bounce_id)) => tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "delivery_stalled_bounced",
+                    message_id = queued.id,
+                    bounce_id,
+                    sender = %queued.source,
+                    recipient = %queued.target,
+                    "aged unread message bounced to its sender"
+                ),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    message_id = queued.id,
+                    %error,
+                    "failed to queue sender-side delivery-stalled bounce"
+                ),
+            }
+        }
+    }
+
     /// cas-ceae: drop every per-row delivery clock/marker for a row that is no
     /// longer pending. Both maps are keyed by `prompt_queue.id`, so leaving an
     /// entry behind leaks one record per terminalized row.
@@ -1484,12 +1599,20 @@ impl FactoryDaemon {
         if let Some(agent_id) = agent_id {
             if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
                 if let Ok(agent) = agent_store.get(&agent_id) {
+                    // Staling revokes leases. Snapshot first: leased work can
+                    // lack an assignee mirror, but must be named and parked.
+                    let held = agent_store
+                        .list_agent_leases(&agent.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|lease| lease.task_id)
+                        .collect::<Vec<_>>();
                     let _ = agent_store.mark_stale(&agent.id);
                     crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
                         self.app.cas_dir(),
                         agent_store.as_ref(),
                         &agent,
-                        &[],
+                        &held,
                         "worker PTY exited",
                     );
                 }
@@ -1541,7 +1664,7 @@ impl FactoryDaemon {
         Ok(())
     }
 
-    pub(super) fn reconcile_spawn_verifications(&mut self) {
+    pub(super) async fn reconcile_spawn_verifications(&mut self) {
         if self.spawn_verifications.is_empty() {
             return;
         }
@@ -1592,9 +1715,21 @@ impl FactoryDaemon {
                     registration_timeout_detail(
                         SPAWN_REGISTRATION_TIMEOUT,
                         self.app.harness_for(&worker),
+                        timeout_pane_tail(self.pane_buffers.get(&worker)).as_deref(),
                     ),
                 )
             };
+            if !success {
+                // A worker that never registered is not reachable through the
+                // normal shutdown path (which correctly requires an agent row).
+                // Kill its tracked PTY process group directly, then apply the
+                // existing crash cleanup so no unmanaged child survives.
+                if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
+                    tracing::warn!(worker = %worker, error = %error, "failed to reap registration-timeout worker PTY");
+                }
+                self.app.mark_worker_crashed(&worker).await;
+                self.pane_buffers.remove(&worker);
+            }
             append_spawn_audit(
                 self.app.cas_dir(),
                 &self.session_name,
@@ -2321,6 +2456,7 @@ impl FactoryDaemon {
         let now = Instant::now();
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
+            self.enqueue_delivery_stalled_bounces(queue.as_ref());
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &valid_targets,
                 &self.session_name,
@@ -5286,6 +5422,7 @@ mod tests {
         reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
         spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
+        timeout_pane_tail,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -5296,6 +5433,19 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn casb123_delivery_stalled_threshold_clamps_before_i64_store_boundary() {
+        assert_eq!(
+            super::delivery_stalled_threshold_i64(10_u64.pow(12)),
+            10_i64.pow(12)
+        );
+        assert_eq!(
+            super::delivery_stalled_threshold_i64(u64::MAX),
+            i64::MAX,
+            "oversized unsigned config must not wrap negative at the store boundary"
+        );
+    }
 
     #[derive(Clone)]
     struct LogBuffer(Arc<Mutex<Vec<u8>>>);
@@ -5318,7 +5468,7 @@ mod tests {
     #[test]
     fn registration_timeout_names_the_codex_trust_cause() {
         let codex =
-            registration_timeout_detail(Duration::from_secs(60), cas_mux::SupervisorCli::Codex);
+            registration_timeout_detail(Duration::from_secs(60), cas_mux::SupervisorCli::Codex, None);
         assert!(
             codex.contains("did not register with CAS within 60 seconds"),
             "must keep the base diagnostic: {codex}"
@@ -5333,7 +5483,7 @@ mod tests {
         );
 
         for other in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Grok] {
-            let detail = registration_timeout_detail(Duration::from_secs(60), other);
+            let detail = registration_timeout_detail(Duration::from_secs(60), other, None);
             assert_eq!(
                 detail,
                 "Worker process launched but did not register with CAS within 60 seconds; \
@@ -5341,6 +5491,30 @@ mod tests {
                 "{other:?} must keep the pre-cas-28a49 wording verbatim"
             );
         }
+    }
+
+    #[test]
+    fn registration_timeout_includes_bounded_pane_tail() {
+        let detail = registration_timeout_detail(
+            Duration::from_secs(60),
+            cas_mux::SupervisorCli::Claude,
+            Some("Claude failed to load settings.json"),
+        );
+        assert!(detail.contains("Last worker pane output:"), "{detail}");
+        assert!(detail.contains("failed to load settings.json"), "{detail}");
+    }
+
+    #[test]
+    fn registration_timeout_extracts_a_plain_bounded_pane_tail() {
+        let mut pane = super::super::relay::PaneBuffer::default();
+        let output = format!("\x1b[31m{}tail from Claude\x1b[0m", "x".repeat(2_100));
+        pane.append(output.as_bytes());
+
+        let tail = timeout_pane_tail(Some(&pane)).expect("non-empty pane has a tail");
+
+        assert_eq!(tail.chars().count(), 2_000, "tail must remain bounded");
+        assert!(tail.ends_with("tail from Claude"), "tail: {tail}");
+        assert!(!tail.contains("\x1b["), "ANSI must be stripped: {tail}");
     }
 
     #[test]

@@ -159,6 +159,16 @@ pub struct FactoryConfig {
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
 
+    /// Seconds before an unread critical/high-priority coordination message
+    /// bounces a delivery-stalled notice back to its sender.
+    #[serde(default = "default_delivery_stalled_priority_secs")]
+    pub delivery_stalled_priority_secs: u64,
+
+    /// Seconds before an unread normal-priority coordination message bounces a
+    /// delivery-stalled notice back to its sender.
+    #[serde(default = "default_delivery_stalled_normal_secs")]
+    pub delivery_stalled_normal_secs: u64,
+
     /// Base branch for epic auto-branch creation, and the default
     /// `sync_all_workers` / worker-spawn base when no epic is pinned.
     ///
@@ -245,6 +255,14 @@ fn default_stall_threshold_secs() -> u64 {
     cas_factory::DEFAULT_STALL_THRESHOLD_SECS
 }
 
+fn default_delivery_stalled_priority_secs() -> u64 {
+    10 * 60
+}
+
+fn default_delivery_stalled_normal_secs() -> u64 {
+    30 * 60
+}
+
 fn default_target_cache_high_watermark_percent() -> u8 {
     85
 }
@@ -271,6 +289,8 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             stall_threshold_secs: default_stall_threshold_secs(),
+            delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
+            delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
             strict_cli: false,
             target_cache_high_watermark_percent:
@@ -1051,6 +1071,25 @@ mod tests {
         assert_eq!(
             FactoryConfig::default().stall_threshold_secs,
             cas_factory::DEFAULT_STALL_THRESHOLD_SECS
+        );
+    }
+
+    #[test]
+    fn factory_config_delivery_stalled_thresholds_are_configurable() {
+        let toml_str =
+            "[factory]\ndelivery_stalled_priority_secs = 45\ndelivery_stalled_normal_secs = 120\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert_eq!(fc.delivery_stalled_priority_secs, 45);
+        assert_eq!(fc.delivery_stalled_normal_secs, 120);
+        assert_eq!(
+            FactoryConfig::default().delivery_stalled_priority_secs,
+            10 * 60
+        );
+        assert_eq!(
+            FactoryConfig::default().delivery_stalled_normal_secs,
+            30 * 60
         );
     }
 

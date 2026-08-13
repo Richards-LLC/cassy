@@ -2,8 +2,12 @@ use crate::support::*;
 use cas::mcp::CasService;
 use cas::mcp::tools::{IdRequest, TaskUpdateRequest};
 use cas::store::{open_agent_store, open_task_store};
-use cas::types::{AgentRole, TaskStatus, TaskTerminalOutcome, TaskType};
+use cas::types::{
+    AgentRole, TaskStatus, TaskTerminalOutcome, TaskType, WorkerCompletionReceiptInput,
+    WorkerDeliveryState,
+};
 use rmcp::handler::server::wrapper::Parameters;
+use std::process::Command;
 
 fn set_test_agent_role(cas_dir: &std::path::Path, role: AgentRole) {
     let store = open_agent_store(cas_dir).unwrap();
@@ -87,7 +91,10 @@ async fn supervisor_gate_closes_on_decision_and_unblocks_dependent_without_commi
         }),
     )
     .await;
-    assert!(refused.contains("no non-empty recorded DECISION note"), "{refused}");
+    assert!(
+        refused.contains("no non-empty recorded DECISION note"),
+        "{refused}"
+    );
     let unchanged = store.get(&gate_id).unwrap();
     assert_eq!(unchanged.status, TaskStatus::InProgress);
     assert_eq!(unchanged.terminal_outcome, None);
@@ -149,7 +156,9 @@ async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protecti
         .await
         .expect_err("a worker must not start a supervisor-owned Gate");
     assert!(
-        worker_error.message.contains("only a live registered supervisor"),
+        worker_error
+            .message
+            .contains("only a live registered supervisor"),
         "{}",
         worker_error.message
     );
@@ -209,4 +218,219 @@ async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protecti
         supervisor_error.message
     );
     assert_eq!(store.get(&ordinary.id).unwrap().status, TaskStatus::Open);
+}
+
+#[tokio::test]
+async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_failure() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/cas525c-fixture.git",
+    ]);
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    Command::new("git")
+        .args(["commit", "-q", "-m", "seed"])
+        .current_dir(temp.path())
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .status()
+        .unwrap();
+    git(&["branch", "release"]);
+    cas::store::known_repos::ensure_host_schema().unwrap();
+
+    let service = CasService::new(core.clone(), None);
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "title": "Correct delivery branch",
+            "target_repo": temp.path().to_str().unwrap(),
+            "target_branch": "main"
+        }),
+    )
+    .await;
+    let task_id = extract_task_id(&created).unwrap().to_string();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = store.get(&task_id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    store.update(&task).unwrap();
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+
+    let fixed = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "update",
+            "id": task_id,
+            "target_branch": "release",
+            "proof_scope_fix": true,
+            "reason": "The task was created against the wrong integration branch."
+        }),
+    )
+    .await;
+    assert!(fixed.contains("Corrected proof scope"), "{fixed}");
+    let corrected = store.get(&task_id).unwrap();
+    assert_eq!(corrected.status, TaskStatus::Open);
+    assert_eq!(
+        corrected
+            .deliverables
+            .work_target
+            .as_ref()
+            .unwrap()
+            .target_branch,
+        "release"
+    );
+    assert!(corrected.notes.contains("DECISION: proof scope corrected"));
+    assert!(
+        corrected
+            .notes
+            .contains("no failed-review verdict was recorded")
+    );
+    assert!(!corrected.notes.contains("changes requested by supervisor"));
+}
+
+#[tokio::test]
+async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/casb123-fixture.git",
+    ]);
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    Command::new("git")
+        .args(["commit", "-q", "-m", "seed"])
+        .current_dir(temp.path())
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .status()
+        .unwrap();
+    git(&["branch", "release"]);
+    cas::store::known_repos::ensure_host_schema().unwrap();
+
+    let service = CasService::new(core.clone(), None);
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "title": "Do not rewrite merged delivery",
+            "target_repo": temp.path().to_str().unwrap(),
+            "target_branch": "main"
+        }),
+    )
+    .await;
+    let task_id = extract_task_id(&created).unwrap().to_string();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = store.get(&task_id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    store.update(&task).unwrap();
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+
+    let receipt = cas_store::build_worker_completion_receipt(
+        &WorkerCompletionReceiptInput {
+            task_id: task_id.clone(),
+            worker_agent_id: "worker-session".into(),
+            repo_selector: "remote:github.com/example/casb123-fixture".into(),
+            source_branch: "factory/worker".into(),
+            commit_sha: "a".repeat(40),
+            merge_base_sha: "b".repeat(40),
+            target_branch: "main".into(),
+            target_sha: "c".repeat(40),
+            proof_reference: "proof:cas-b123".into(),
+            scope_summary: "merged delivery".into(),
+            artifact_path: None,
+        },
+        "worker",
+        chrono::Utc::now(),
+    );
+    let delivery = cas_store::create_worker_delivery(
+        &cas_dir,
+        &receipt,
+        WorkerDeliveryState::AwaitingMerge,
+        "worker-session",
+    )
+    .unwrap();
+    cas_store::transition_worker_delivery(
+        &cas_dir,
+        &delivery.id,
+        &[WorkerDeliveryState::AwaitingMerge],
+        WorkerDeliveryState::Merged,
+        "supervisor-session",
+        Some("supervisor-session"),
+        None,
+        Some(&"d".repeat(40)),
+        None,
+    )
+    .unwrap();
+
+    let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "target_branch": "release",
+        "proof_scope_fix": true,
+        "reason": "Wrong target was declared before the completed merge."
+    }))
+    .unwrap();
+    let error = service
+        .task(Parameters(request))
+        .await
+        .expect_err("a merged delivery is immutable proof, not stale proof");
+    assert!(
+        error.message.contains("merged delivery transaction")
+            && error.message.contains("immutable delivery fact"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        store.get(&task_id).unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "rejected correction must not reopen the task"
+    );
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .state,
+        WorkerDeliveryState::Merged,
+        "rejected correction must preserve the immutable merge fact"
+    );
 }

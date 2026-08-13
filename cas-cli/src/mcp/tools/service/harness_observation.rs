@@ -3,8 +3,10 @@
 //! The evidence matrix is intentionally asymmetric:
 //!
 //! - **Claude:** Agent Teams inbox persistence proves transport delivery, not
-//!   worker wake. Claude transcripts do not expose an authoritative turn-start
-//!   record CAS can correlate here, so wake and reaction remain unobserved.
+//!   worker wake. The session transcript does: a top-level `user` record with
+//!   textual content is a concrete turn start, while `system/turn_duration`
+//!   (or an assistant `end_turn`) is a concrete turn end. Tool-result `user`
+//!   records are deliberately excluded from the start watermark.
 //! - **Codex:** a per-message observation requires an exact queued-prompt match
 //!   in a user `response_item`, whose harness `turn_id` ties it to a concrete
 //!   turn. `task_started` records the wake of a new turn; when a message is
@@ -53,7 +55,7 @@ pub(crate) fn observations_after_delivery(
     prompt: &str,
 ) -> HarnessObservations {
     match cli {
-        cas_mux::SupervisorCli::Claude => HarnessObservations::default(),
+        cas_mux::SupervisorCli::Claude => scan_claude_message(artifact_path, delivered_at, prompt),
         cas_mux::SupervisorCli::Codex => scan_codex_message(artifact_path, delivered_at, prompt),
         cas_mux::SupervisorCli::Grok => scan_grok_completion(artifact_path, delivered_at),
     }
@@ -65,10 +67,133 @@ pub(crate) fn latest_turn_observations(
     cli: cas_mux::SupervisorCli,
 ) -> HarnessObservations {
     match cli {
-        cas_mux::SupervisorCli::Claude => HarnessObservations::default(),
+        cas_mux::SupervisorCli::Claude => scan_claude_turns(artifact_path, None, true),
         cas_mux::SupervisorCli::Codex => scan_codex_turns(artifact_path, None, true),
         cas_mux::SupervisorCli::Grok => scan_grok(artifact_path, None, true),
     }
+}
+
+fn scan_claude_message(
+    path: &Path,
+    delivered_at: DateTime<Utc>,
+    prompt: &str,
+) -> HarnessObservations {
+    if prompt.is_empty() {
+        return HarnessObservations::default();
+    }
+
+    let mut matched_wake = None;
+    let mut observations = HarnessObservations::default();
+    for_each_jsonl(path, |value| {
+        let Some(at) = json_timestamp(value) else {
+            return;
+        };
+        if at < delivered_at {
+            return;
+        }
+
+        if matched_wake.is_none()
+            && claude_user_text(value).is_some_and(|text| text_matches_queued_prompt(text, prompt))
+        {
+            matched_wake = Some(at);
+            observations.wake = Some(ArtifactObservation {
+                at,
+                evidence: format!(
+                    "Claude transcript {} contains a top-level textual user record matching the queued prompt",
+                    path.display()
+                ),
+            });
+            return;
+        }
+
+        let Some(wake_at) = matched_wake else {
+            return;
+        };
+        if at < wake_at {
+            return;
+        }
+        if observations.reaction.is_none() && claude_is_assistant(value) {
+            observations.reaction = Some(ArtifactObservation {
+                at,
+                evidence: format!(
+                    "Claude transcript {} contains an assistant record after the matched queued prompt",
+                    path.display()
+                ),
+            });
+        }
+        if observations.completion.is_none() && claude_is_turn_end(value) {
+            observations.completion = Some(ArtifactObservation {
+                at,
+                evidence: format!(
+                    "Claude transcript {} contains an end_turn/turn_duration record after the matched queued prompt",
+                    path.display()
+                ),
+            });
+        }
+    });
+    observations
+}
+
+fn scan_claude_turns(
+    path: &Path,
+    after: Option<DateTime<Utc>>,
+    latest: bool,
+) -> HarnessObservations {
+    let mut observations = HarnessObservations::default();
+    for_each_jsonl(path, |value| {
+        let Some(at) = json_timestamp(value) else {
+            return;
+        };
+        if after.is_some_and(|floor| at < floor) {
+            return;
+        }
+
+        if claude_user_text(value).is_some() {
+            record(
+                &mut observations.wake,
+                ArtifactObservation {
+                    at,
+                    evidence: format!(
+                        "Claude transcript {} contains a top-level textual user turn-start record",
+                        path.display()
+                    ),
+                },
+                latest,
+            );
+            return;
+        }
+
+        let wake_at = observations.wake.as_ref().map(|observation| observation.at);
+        if wake_at.is_some_and(|wake_at| at >= wake_at) && claude_is_assistant(value) {
+            record(
+                &mut observations.reaction,
+                ArtifactObservation {
+                    at,
+                    evidence: format!(
+                        "Claude transcript {} contains an assistant record after the observed turn start",
+                        path.display()
+                    ),
+                },
+                latest,
+            );
+        }
+        if wake_at.is_some_and(|wake_at| at >= wake_at) && claude_is_turn_end(value) {
+            record(
+                &mut observations.completion,
+                ArtifactObservation {
+                    at,
+                    evidence: format!(
+                        "Claude transcript {} contains an end_turn/turn_duration record",
+                        path.display()
+                    ),
+                },
+                latest,
+            );
+        }
+    });
+    discard_reaction_before_wake(&mut observations);
+    discard_completion_before_wake(&mut observations);
+    observations
 }
 
 fn scan_codex_message(
@@ -292,6 +417,17 @@ fn discard_reaction_before_wake(observations: &mut HarnessObservations) {
     }
 }
 
+fn discard_completion_before_wake(observations: &mut HarnessObservations) {
+    if observations
+        .wake
+        .as_ref()
+        .zip(observations.completion.as_ref())
+        .is_some_and(|(wake, completion)| completion.at < wake.at)
+    {
+        observations.completion = None;
+    }
+}
+
 fn record(slot: &mut Option<ArtifactObservation>, candidate: ArtifactObservation, latest: bool) {
     let replace = match slot {
         None => true,
@@ -322,6 +458,41 @@ fn json_timestamp(value: &Value) -> Option<DateTime<Utc>> {
         .and_then(Value::as_str)
         .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn claude_user_text(value: &Value) -> Option<&str> {
+    if value.get("type").and_then(Value::as_str) != Some("user")
+        || value.pointer("/message/role").and_then(Value::as_str) != Some("user")
+        || value.get("isSidechain").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let content = value.pointer("/message/content")?;
+    if let Some(text) = content.as_str() {
+        return (!text.trim().is_empty()).then_some(text);
+    }
+    content.as_array()?.iter().find_map(|part| {
+        (part.get("type").and_then(Value::as_str) == Some("text"))
+            .then(|| part.get("text").and_then(Value::as_str))
+            .flatten()
+            .filter(|text| !text.trim().is_empty())
+    })
+}
+
+fn claude_is_assistant(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("assistant")
+        && value.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+        && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
+}
+
+fn claude_is_turn_end(value: &Value) -> bool {
+    (value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("turn_duration"))
+        || (claude_is_assistant(value)
+            && value
+                .pointer("/message/stop_reason")
+                .and_then(Value::as_str)
+                == Some("end_turn"))
 }
 
 fn codex_turn_start_id(value: &Value) -> Option<&str> {
@@ -356,6 +527,9 @@ fn codex_matching_user_turn<'a>(value: &'a Value, prompt: &str) -> Option<&'a st
 
 fn text_matches_queued_prompt(text: &str, prompt: &str) -> bool {
     if text == prompt {
+        return true;
+    }
+    if text.starts_with("<teammate-message ") && text.contains(prompt) {
         return true;
     }
     text.strip_suffix(prompt)
@@ -469,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_inbox_or_transcript_is_never_promoted_to_wake_evidence() {
+    fn claude_transport_only_record_is_not_promoted_to_wake_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let transcript = temp.path().join("claude.jsonl");
         write_lines(
@@ -483,6 +657,53 @@ mod tests {
             "inbox persisted",
         );
         assert_eq!(got, HarnessObservations::default());
+    }
+
+    #[test]
+    fn claude_teammate_transcript_records_turn_boundaries_and_reaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("claude.jsonl");
+        write_lines(
+            &transcript,
+            &[
+                r#"{"timestamp":"2026-07-31T20:00:00Z","type":"user","isSidechain":false,"message":{"role":"user","content":"old prompt"}}"#,
+                r#"{"timestamp":"2026-07-31T20:00:01Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"old answer"}]}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:02Z","type":"user","isSidechain":false,"message":{"role":"user","content":"<teammate-message teammate_id=\"supervisor\">interrupt now</teammate-message>"}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:03Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"ack"}]}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:04Z","type":"system","subtype":"turn_duration"}"#,
+            ],
+        );
+
+        let got = observations_after_delivery(
+            &transcript,
+            cas_mux::SupervisorCli::Claude,
+            ts("2026-07-31T20:01:00Z"),
+            "interrupt now",
+        );
+        assert_eq!(got.wake.unwrap().at, ts("2026-07-31T20:01:02Z"));
+        assert_eq!(got.reaction.unwrap().at, ts("2026-07-31T20:01:03Z"));
+        assert_eq!(got.completion.unwrap().at, ts("2026-07-31T20:01:04Z"));
+    }
+
+    #[test]
+    fn latest_claude_turn_ignores_tool_results_and_uses_textual_user_watermark() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("claude.jsonl");
+        write_lines(
+            &transcript,
+            &[
+                r#"{"timestamp":"2026-07-31T20:01:00Z","type":"user","isSidechain":false,"message":{"role":"user","content":"start work"}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:01Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1"}]}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:02Z","type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:03Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:04Z","type":"system","subtype":"turn_duration"}"#,
+            ],
+        );
+
+        let got = latest_turn_observations(&transcript, cas_mux::SupervisorCli::Claude);
+        assert_eq!(got.wake.unwrap().at, ts("2026-07-31T20:01:00Z"));
+        assert_eq!(got.reaction.unwrap().at, ts("2026-07-31T20:01:03Z"));
+        assert_eq!(got.completion.unwrap().at, ts("2026-07-31T20:01:04Z"));
     }
 
     #[test]

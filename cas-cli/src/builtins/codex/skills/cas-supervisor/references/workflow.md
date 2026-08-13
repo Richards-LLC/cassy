@@ -157,7 +157,7 @@ Three flags that are routinely confused — they are independent (cas-0b32 / cas
 | Flag | What it authorizes | What it does NOT do |
 |---|---|---|
 | `force=true` | Merging a **dirty** worktree | Does not authorize trunk as a target |
-| `allow_trunk=true` | Trunk as the merge target when no epic branch is resolvable (standalone task) | Does not bypass dirty-tree protection |
+| `allow_trunk=true` | A genuine fallback to trunk when neither an epic branch nor task WorkTarget is declared | Is not needed for a declared WorkTarget and does not bypass dirty-tree protection |
 | `cleanup=true/false` | Removing the worktree + deleting the branch after the merge | Not implied by `force` |
 
 `cleanup` defaults to **preserve** for factory (`isolate=true`) worktrees, so a mid-epic
@@ -275,8 +275,10 @@ When workers share the main directory, there's no branch merging — workers com
    mcp__cs__coordination action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
    mcp__cs__coordination action=shutdown_workers count=0
    ```
-   Then merge the epic branch to base. A standalone task with no parent epic needs
-   `allow_trunk=true` to target trunk at all — `force=true` will not authorize it.
+   Then merge the epic branch to base. A standalone task with a declared WorkTarget
+   needs no trunk flag. Only a missing-target fallback to trunk needs `allow_trunk=true`;
+   its refusal names the destination and its success receipt carries a loud trunk-push warning.
+   `force=true` will not authorize trunk.
    Fallback only, when a merge must be resolved by hand: `git checkout <base-branch> && git merge epic/<slug>`, `git worktree remove <path>`, `git branch -d epic/<slug>` — this bypasses factory tracking/lease/cleanup, so note it on the task.
 7. Close the epic and post release notes.
 8. Shutdown workers: `mcp__cs__coordination action=shutdown_workers count=0`

@@ -768,11 +768,11 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub force: Option<bool>,
 
-    /// Explicit intent to merge a System-B factory worker into trunk when no
-    /// epic target can be resolved (cas-0b32). Independent of `force` so
-    /// authorizing trunk never bypasses dirty-worktree protection.
+    /// Explicit intent to use the configured trunk fallback when no epic or
+    /// task WorkTarget is declared (cas-0b32/cas-84df). Independent of `force`
+    /// so authorizing trunk never bypasses dirty-worktree protection.
     #[schemars(
-        description = "worktree_merge only: authorize merge to trunk/main when no epic target is resolvable. Separate from force= (dirty worktree override)."
+        description = "worktree_merge only: authorize a genuine fallback to the configured trunk branch when no epic or task WorkTarget is declared. A declared WorkTarget does not require this flag. Refusals name the resolved trunk destination before authorization, and successful trunk pushes carry a loud warning. Separate from force= (dirty worktree override)."
     )]
     #[serde(default)]
     pub allow_trunk: Option<bool>,

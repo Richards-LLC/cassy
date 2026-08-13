@@ -144,6 +144,7 @@ impl CasCore {
                 "rule" | "rules" => Some(vec![DocType::Rule]),
                 "skill" | "skills" => Some(vec![DocType::Skill]),
                 "spec" | "specs" | "specification" | "specifications" => Some(vec![DocType::Spec]),
+                "artifact" | "artifacts" => Some(vec![DocType::Artifact]),
                 "code" | "code_symbol" | "symbol" | "symbols" => Some(vec![DocType::CodeSymbol]),
                 "code_file" | "file" | "files" => Some(vec![DocType::CodeFile]),
                 _ => None,
@@ -528,6 +529,23 @@ impl CasCore {
                         format!("[Spec] {}", result.id),
                         scope_ok && tags_ok,
                         HitMetadata {
+                            scope: "project".to_string(),
+                            ..Default::default()
+                        },
+                    )
+                }
+                DocType::Artifact => {
+                    let scope_ok = scope_filter != ScopeFilter::Global;
+                    let tags_ok = tags_filter.is_empty();
+                    let preview =
+                        crate::hybrid_search::artifacts::parse_artifact_document_id(&result.id)
+                            .map(|(task_id, path)| format!("[Artifact] Task {task_id}: {path}"))
+                            .unwrap_or_else(|| format!("[Artifact] {}", result.id));
+                    (
+                        preview,
+                        scope_ok && tags_ok,
+                        HitMetadata {
+                            origin: Some("factory_artifact".to_string()),
                             scope: "project".to_string(),
                             ..Default::default()
                         },

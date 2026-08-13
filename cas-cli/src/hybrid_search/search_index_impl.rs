@@ -5,6 +5,7 @@ use tantivy::{Index, IndexWriter};
 use cas_code::CodeSymbol;
 
 use crate::error::MemError;
+use crate::hybrid_search::artifacts::{ArtifactDocument, artifact_document_id};
 use crate::hybrid_search::frontmatter::{FrontmatterFields, extract_frontmatter_fields};
 use crate::hybrid_search::{DEFAULT_WRITER_MEMORY, DocType, EXPECTED_FIELD_COUNT, SearchIndex};
 use crate::types::{Entry, Rule, Skill, Spec, Task};
@@ -354,6 +355,45 @@ impl SearchIndex {
         writer.commit()?;
 
         Ok(())
+    }
+
+    /// Index durable task artifacts with one commit for a close-time scan or
+    /// a full backfill. Artifact content is already bounded and text-validated
+    /// by the discovery layer.
+    pub fn index_artifacts(&self, artifacts: &[ArtifactDocument]) -> Result<usize, MemError> {
+        if artifacts.is_empty() {
+            return Ok(0);
+        }
+
+        let mut writer = self.writer()?;
+        for artifact in artifacts {
+            let id = artifact_document_id(&artifact.task_id, &artifact.path);
+            writer.delete_term(tantivy::Term::from_field_text(self.id_field, &id));
+
+            let mut doc = tantivy::TantivyDocument::new();
+            doc.add_text(self.id_field, &id);
+            doc.add_text(
+                self.content_field,
+                format!(
+                    "{} {} {} {}",
+                    artifact.task_id,
+                    artifact.path.display(),
+                    artifact
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default(),
+                    artifact.content
+                ),
+            );
+            doc.add_text(self.tags_field, "");
+            doc.add_text(self.type_field, &artifact.task_id);
+            doc.add_text(self.doc_type_field, DocType::Artifact.as_str());
+            doc.add_text(self.title_field, artifact.path.to_string_lossy());
+            writer.add_document(doc)?;
+        }
+        writer.commit()?;
+        Ok(artifacts.len())
     }
 
     /// Index a single rule

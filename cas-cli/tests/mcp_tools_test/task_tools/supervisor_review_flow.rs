@@ -86,13 +86,15 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
     git(&["config", "user.email", "test@example.com"]);
     git(&["config", "user.name", "Test"]);
     // Initial commit so HEAD exists
-    std::fs::write(project_root.join("base.rs"), "fn main() {}\n")
-        .expect("write should succeed");
+    std::fs::write(project_root.join("base.rs"), "fn main() {}\n").expect("write should succeed");
     git(&["add", "base.rs"]);
     git(&["commit", "-m", "init"]);
     // Stage a reviewable Rust file so has_reviewable_changes() returns true
-    std::fs::write(project_root.join("feature.rs"), "pub fn feature() -> u32 { 42 }\n")
-        .expect("write should succeed");
+    std::fs::write(
+        project_root.join("feature.rs"),
+        "pub fn feature() -> u32 { 42 }\n",
+    )
+    .expect("write should succeed");
     git(&["add", "feature.rs"]);
 }
 
@@ -100,7 +102,9 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
 /// This fixture has no untracked non-CAS files, so only the tracked Git diff
 /// participates in the digest.
 fn repository_proof_fixture(project_root: &std::path::Path) -> RepositoryProofBoundary {
-    let root = project_root.canonicalize().expect("canonical repository root");
+    let root = project_root
+        .canonicalize()
+        .expect("canonical repository root");
     let git = |args: &[&str]| {
         let output = Command::new("git")
             .arg("-C")
@@ -250,7 +254,8 @@ async fn test_worker_close_in_supervisor_mode_skips_cas_code_review() {
 
     // Must see the queued-for-supervisor-review confirmation.
     assert!(
-        close_text.contains("supervisor review") || close_text.contains("pending_supervisor_review"),
+        close_text.contains("supervisor review")
+            || close_text.contains("pending_supervisor_review"),
         "Close response should confirm supervisor-review transition; got: {close_text}"
     );
 
@@ -354,7 +359,9 @@ async fn test_pending_supervisor_review_status_persists_through_restart() {
 
     // Simulate a "restart" by opening a fresh store handle to the same DB.
     let task_store2 = open_task_store(&cas_dir).unwrap();
-    let reloaded = task_store2.get("cas-b51a-test-psr").expect("task should exist after reload");
+    let reloaded = task_store2
+        .get("cas-b51a-test-psr")
+        .expect("task should exist after reload");
 
     assert_eq!(
         reloaded.status,
@@ -551,12 +558,17 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
         }))
         .await
         .expect("supervisor rejects exact pending review dispatch");
-    let rejected_task = open_task_store(&cas_dir).unwrap().get(&rejected_task_id).unwrap();
+    let rejected_task = open_task_store(&cas_dir)
+        .unwrap()
+        .get(&rejected_task_id)
+        .unwrap();
     assert_eq!(rejected_task.status, TaskStatus::Open);
     assert_eq!(rejected_task.assignee.as_deref(), Some("test-agent"));
     assert!(!rejected_task.pending_verification);
     assert!(
-        rejected_task.notes.contains("Decision: supervisor review rejected"),
+        rejected_task
+            .notes
+            .contains("Decision: supervisor review rejected"),
         "the rejected verdict must leave an audited decision note"
     );
 
@@ -571,7 +583,11 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
         .await
         .expect("task-only rejection must allow the assigned worker to restart");
     assert_eq!(
-        open_task_store(&cas_dir).unwrap().get(&rejected_task_id).unwrap().status,
+        open_task_store(&cas_dir)
+            .unwrap()
+            .get(&rejected_task_id)
+            .unwrap()
+            .status,
         TaskStatus::InProgress
     );
 
@@ -597,6 +613,89 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
     assert_eq!((dispatches, verdicts, capabilities, handoffs), (1, 1, 0, 0));
 }
 
+/// cas-df27 (GH #301): a merge may leave the durable supervisor-review task
+/// projection without the dispatch normally created by worker close. A
+/// registered supervisor who has already performed the review must be able to
+/// record it without fabricating an impossible dispatch ID.
+#[tokio::test]
+async fn supervisor_direct_verification_recovers_missing_post_merge_dispatch_cas_df27() {
+    let (temp, _core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+
+    let supervisor_id = "cas-df27-supervisor";
+    let agent_store = open_agent_store(&cas_dir).unwrap();
+    let mut supervisor =
+        cas::types::Agent::new(supervisor_id.to_string(), "df27-supervisor".to_string());
+    supervisor.role = cas::types::AgentRole::Supervisor;
+    supervisor.heartbeat();
+    agent_store.register(&supervisor).unwrap();
+
+    // This is the state observed after a GitHub PR/worktree merge: the task
+    // is waiting for the supervisor's review, but no exact dispatch survived
+    // the external merge path. It must be observable before the add call.
+    let mut task = Task::new(
+        "cas-df27-post-merge".to_string(),
+        "post-merge supervisor verification".to_string(),
+    );
+    task.status = TaskStatus::PendingSupervisorReview;
+    task.pending_verification = true;
+    open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+    assert!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
+            .unwrap()
+            .is_none(),
+        "precondition: post-merge review has no dispatch to name"
+    );
+
+    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing(supervisor_id.to_string());
+    supervisor_core
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task.id.clone(),
+            status: "approved".to_string(),
+            summary: "Post-merge supervisor gate passed.".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: Some("verification_tools.rs".to_string()),
+            duration_ms: Some(5),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: None,
+        }))
+        .await
+        .expect("supervisor can recover the missing post-merge dispatch");
+
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
+        .unwrap()
+        .expect("recovery creates an exact durable dispatch");
+    assert_eq!(
+        dispatch.state,
+        cas::types::VerificationDispatchState::Resolved,
+        "the same add resolves the recovered boundary"
+    );
+    assert_eq!(dispatch.requester_agent_id, supervisor_id);
+    assert_eq!(dispatch.owner_agent_id, supervisor_id);
+    let verdict = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&task.id)
+        .unwrap()
+        .expect("recovered boundary records the supervisor verdict");
+    assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    assert_eq!(
+        verdict.provenance,
+        cas::types::VerificationProvenance::SupervisorDirect
+    );
+    assert!(
+        !open_task_store(&cas_dir)
+            .unwrap()
+            .get(&task.id)
+            .unwrap()
+            .pending_verification,
+        "resolved supervisor verification clears the pending projection"
+    );
+}
+
 /// cas-f985: a rejected repository-proof supervisor dispatch is a completed review
 /// cycle. It must reopen the same assigned worker without requiring a force
 /// reset or leaving the exact proof scope locked.
@@ -611,8 +710,7 @@ async fn test_repository_proof_rejection_reopens_and_allows_worker_restart_cas_f
     let supervisor_id = "cas-f985-supervisor";
     let agent_store = open_agent_store(&cas_dir).unwrap();
 
-    let mut worker =
-        cas::types::Agent::new(worker_id.to_string(), worker_id.to_string());
+    let mut worker = cas::types::Agent::new(worker_id.to_string(), worker_id.to_string());
     worker.role = cas::types::AgentRole::Worker;
     worker.agent_type = cas::types::AgentType::Worker;
     worker.factory_session = Some(session.to_string());
@@ -674,7 +772,11 @@ async fn test_repository_proof_rejection_reopens_and_allows_worker_restart_cas_f
     assert_eq!(reopened.assignee.as_deref(), Some(worker_id));
     assert!(!reopened.pending_verification);
     assert!(reopened.notes.contains(&dispatch.id));
-    assert!(reopened.notes.contains("Needs the missing regression case."));
+    assert!(
+        reopened
+            .notes
+            .contains("Needs the missing regression case.")
+    );
 
     let worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
     worker_core.set_agent_id_for_testing(worker_id.to_string());
@@ -687,10 +789,7 @@ async fn test_repository_proof_rejection_reopens_and_allows_worker_restart_cas_f
         .await
         .expect("repository-proof rejection must allow the assigned worker to restart");
     assert_eq!(
-        task_store
-            .get("cas-f985-repository-proof")
-            .unwrap()
-            .status,
+        task_store.get("cas-f985-repository-proof").unwrap().status,
         TaskStatus::InProgress
     );
 }
@@ -732,15 +831,30 @@ async fn test_owner_config_default_is_supervisor() {
     // Test explicit owner = "supervisor" round-trip.
     let toml_supervisor = "[code_review]\nowner = \"supervisor\"\n";
     let cfg2: Config = toml::from_str(toml_supervisor).expect("supervisor TOML should parse");
-    let cr2 = cfg2.code_review.as_ref().expect("code_review section should be present");
-    assert_eq!(cr2.owner, "supervisor", "TOML owner = 'supervisor' must round-trip");
-    assert!(cr2.supervisor_owned(), "supervisor_owned() must be true for owner = 'supervisor'");
+    let cr2 = cfg2
+        .code_review
+        .as_ref()
+        .expect("code_review section should be present");
+    assert_eq!(
+        cr2.owner, "supervisor",
+        "TOML owner = 'supervisor' must round-trip"
+    );
+    assert!(
+        cr2.supervisor_owned(),
+        "supervisor_owned() must be true for owner = 'supervisor'"
+    );
 
     // Test explicit owner = "worker" round-trip (legacy opt-out).
     let toml_worker = "[code_review]\nowner = \"worker\"\n";
     let cfg3: Config = toml::from_str(toml_worker).expect("worker TOML should parse");
-    let cr3 = cfg3.code_review.as_ref().expect("code_review section should be present");
-    assert!(!cr3.supervisor_owned(), "supervisor_owned() must be false for owner = 'worker'");
+    let cr3 = cfg3
+        .code_review
+        .as_ref()
+        .expect("code_review section should be present");
+    assert!(
+        !cr3.supervisor_owned(),
+        "supervisor_owned() must be false for owner = 'worker'"
+    );
 }
 
 /// cas-b5ac: A close whose diff contains a `todo!()` call must be rejected by
@@ -903,7 +1017,8 @@ async fn test_worker_close_absent_code_review_section_defaults_to_supervisor_mod
 
     // Must see the supervisor-review confirmation.
     assert!(
-        close_text.contains("supervisor review") || close_text.contains("pending_supervisor_review"),
+        close_text.contains("supervisor review")
+            || close_text.contains("pending_supervisor_review"),
         "Absent [code_review] must transition to supervisor review; got: {close_text}"
     );
 
@@ -937,7 +1052,10 @@ async fn test_start_on_pending_supervisor_review_task_is_rejected() {
 
     // Create a task directly in PendingSupervisorReview state (simulates a
     // worker that already closed → PSR transition).
-    let mut task = cas::types::Task::new("cas-9684-start-psr".to_string(), "PSR start guard test".to_string());
+    let mut task = cas::types::Task::new(
+        "cas-9684-start-psr".to_string(),
+        "PSR start guard test".to_string(),
+    );
     task.status = TaskStatus::PendingSupervisorReview;
     task_store.add(&task).expect("task.add should succeed");
 
@@ -964,7 +1082,9 @@ async fn test_start_on_pending_supervisor_review_task_is_rejected() {
     );
 
     // Status must remain PendingSupervisorReview — must NOT have been reset.
-    let task_after = task_store.get("cas-9684-start-psr").expect("task should exist");
+    let task_after = task_store
+        .get("cas-9684-start-psr")
+        .expect("task should exist");
     assert_eq!(
         task_after.status,
         TaskStatus::PendingSupervisorReview,
@@ -994,7 +1114,10 @@ async fn test_release_orphan_recovery_does_not_reset_psr_to_open() {
 
     // Create a task in PendingSupervisorReview — simulates a worker that
     // finished close → PSR transition but whose lease was never released.
-    let mut task = cas::types::Task::new("cas-6e4c-release-psr".to_string(), "PSR release guard test".to_string());
+    let mut task = cas::types::Task::new(
+        "cas-6e4c-release-psr".to_string(),
+        "PSR release guard test".to_string(),
+    );
     task.status = TaskStatus::PendingSupervisorReview;
     task_store.add(&task).expect("task.add should succeed");
 
@@ -1014,7 +1137,9 @@ async fn test_release_orphan_recovery_does_not_reset_psr_to_open() {
     // reset the task to Open.
     let _ = release_result; // result shape is unimportant for this assertion
 
-    let task_after = task_store.get("cas-6e4c-release-psr").expect("task should exist");
+    let task_after = task_store
+        .get("cas-6e4c-release-psr")
+        .expect("task should exist");
     assert_ne!(
         task_after.status,
         TaskStatus::Open,
@@ -1070,7 +1195,9 @@ async fn test_psr_transition_releases_worker_lease() {
         .to_string();
 
     service
-        .task(Parameters(task_req(serde_json::json!({ "action": "start", "id": id }))))
+        .task(Parameters(task_req(
+            serde_json::json!({ "action": "start", "id": id }),
+        )))
         .await
         .expect("start should succeed");
 
@@ -1086,7 +1213,8 @@ async fn test_psr_transition_releases_worker_lease() {
 
     let close_text = extract_text(close_result);
     assert!(
-        close_text.contains("supervisor review") || close_text.contains("pending_supervisor_review"),
+        close_text.contains("supervisor review")
+            || close_text.contains("pending_supervisor_review"),
         "Close must transition to supervisor review mode; got: {close_text}"
     );
 
@@ -1308,11 +1436,15 @@ async fn test_worker_reclose_without_approved_verification_still_queues() {
 
     // A REJECTED verdict must not authorize the close either.
     let verification_store = open_verification_store(&cas_dir).unwrap();
-    let ver_id = verification_store.generate_id().expect("should generate ID");
+    let ver_id = verification_store
+        .generate_id()
+        .expect("should generate ID");
     let mut row = Verification::new(ver_id, id.clone());
     row.status = VerificationStatus::Rejected;
     row.summary = "Needs rework.".to_string();
-    verification_store.add(&row).expect("verdict should persist");
+    verification_store
+        .add(&row)
+        .expect("verdict should persist");
 
     service
         .task(Parameters(task_req(serde_json::json!({

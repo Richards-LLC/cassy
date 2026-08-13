@@ -45,6 +45,7 @@ mod delivery_store;
 mod entity_store;
 pub mod error;
 mod event_store;
+mod external_task_dependency_store;
 mod file_change_store;
 mod fts_query;
 mod history_provenance;
@@ -106,6 +107,9 @@ pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
 // Entity store for knowledge graph feature
 pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
+pub use external_task_dependency_store::{
+    EXTERNAL_TASK_DEPENDENCY_SCHEMA, ExternalTaskDependencyProjection, ExternalTaskDependencyStore,
+};
 
 // Structural git-history index (EPIC cas-6212 / cas-7a21): commits, their
 // touched files, and the walker watermark.

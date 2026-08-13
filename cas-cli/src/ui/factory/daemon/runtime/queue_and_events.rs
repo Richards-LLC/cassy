@@ -4423,6 +4423,12 @@ impl FactoryDaemon {
                     if let Some(ref tc) = teams_config {
                         crate::ui::theme::register_agent_color(&tc.agent_name, &tc.agent_color);
                     }
+                    // cas-30c6: the Teams member entry must carry the cwd the
+                    // harness was actually bound to. Re-deriving it from the
+                    // worktree manager below named a worktree path even for
+                    // non-isolated spawns, so the roster could disagree with the
+                    // live process about which directory the worker is in.
+                    let bound_cwd = result.cwd.clone();
                     let task_id_for_finish = pending_task_id.clone();
                     match self.app.finish_worker_spawn(
                         result,
@@ -4463,12 +4469,7 @@ impl FactoryDaemon {
                             self.dead_workers.remove(&name);
                             // Register new worker with native Agent Teams
                             if let Some(ref teams) = self.teams {
-                                let worker_cwd = self
-                                    .app
-                                    .worktree_manager()
-                                    .map(|mgr| mgr.worktree_path_for_worker(&name))
-                                    .unwrap_or_else(|| self.app.project_path().to_path_buf());
-                                if let Err(e) = teams.add_member(&name, &worker_cwd, color_idx) {
+                                if let Err(e) = teams.add_member(&name, &bound_cwd, color_idx) {
                                     tracing::error!(
                                         "Failed to add worker '{}' to teams: {}",
                                         name,

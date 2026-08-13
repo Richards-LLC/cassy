@@ -79,8 +79,8 @@ pub mod scorer;
 pub mod semantic;
 
 pub use hybrid::{HistoryFilter, HybridSearch, HybridSearchOptions};
-pub use semantic::{SemanticChannel, open_semantic_channel};
 pub use metrics::{LatencyTimer, MetricsStore, SearchEvent, SearchMethod, generate_event_id};
+pub use semantic::{SemanticChannel, open_semantic_channel};
 
 pub mod filter_grammar;
 pub mod frontmatter;
@@ -91,9 +91,9 @@ mod search_index_query;
 use std::sync::Mutex;
 
 use chrono::Duration;
-use tantivy::{Index, IndexReader};
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
+use tantivy::{Index, IndexReader};
 
 pub use id_utils::extract_id_patterns;
 
@@ -381,6 +381,19 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"cas-abcd".to_string()));
         assert!(ids.contains(&"cas-1234".to_string()));
+
+        // Cloud-reserved proposal task IDs use exactly 16 lowercase hex digits.
+        let (ids, remaining) = extract_id_patterns("open cas-0123456789abcdef now");
+        assert_eq!(ids, vec!["cas-0123456789abcdef"]);
+        assert_eq!(remaining, "open now");
+
+        let (ids, remaining) =
+            extract_id_patterns("cas-0123456789abcdeg cas-0123456789ABCDEF cas-0123456789abcdef0");
+        assert!(ids.is_empty());
+        assert_eq!(
+            remaining,
+            "cas-0123456789abcdeg cas-0123456789ABCDEF cas-0123456789abcdef0"
+        );
     }
 
     #[test]

@@ -6,8 +6,9 @@ use regex::Regex;
 pub fn extract_id_patterns(query: &str) -> (Vec<String>, String) {
     // Match CAS-style IDs: cas-XXXX, rule-XXX, cas-skXX, etc.
     // Pattern: word boundary + (cas|rule|skill) + hyphen + alphanumeric
-    let re = match Regex::new(r"(?i)\b(cas-[a-z0-9]{2,8}|rule-[a-z0-9]{2,6}|skill-[a-z0-9]{2,6})\b")
-    {
+    let re = match Regex::new(
+        r"\b(cas-[0-9a-f]{16}|(?i:cas-[a-z0-9]{2,8}|rule-[a-z0-9]{2,6}|skill-[a-z0-9]{2,6}))\b",
+    ) {
         Ok(regex) => regex,
         Err(_) => return (Vec::new(), query.trim().to_string()),
     };

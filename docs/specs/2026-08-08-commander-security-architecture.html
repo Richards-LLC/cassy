@@ -143,8 +143,15 @@
       <h2>Amendment · 2026-08-10 · optional hosted static controller origin</h2>
       <p>The controller-hub origin remains the default. An operator may choose the HTTPS hosted static controller origin <code>https://hub.petrastella.io</code> for a browser profile only as an explicit, per-machine trust grant; every target must be paired with <code>cas hub pair --origin https://hub.petrastella.io</code>. This supersedes the former outright rejection because t3code demonstrates the same static-SPA/direct-machine shape at <code>app.t3.codes</code>; it does not remove the hosted availability or supply-chain boundary.</p>
       <div class="normative"><strong>Binding controls:</strong> static-only host (no APIs, redirects, server sessions, or credentials); immutable byte-identical <code>hub-web/dist</code> deployment named by cas-src commit, artifact digest, deploy owner, and rollback artifact; published Ghostty WASM hashes verified before deployment; no telemetry or credential egress to the host; and explicit device revocation/re-pairing for every origin move.</div>
-      <p>The deployment CSP forbids third-party runtime, inline/eval, forms, and framing. It may permit <code>connect-src 'self' https: wss:</code> because static CSP cannot enumerate the dynamic paired-machine catalog; Commander constructs authenticated fetches and WebSockets only from paired catalog entries, and hubs retain literal exact-Origin + DPoP + ticket checks. The hosted host is never a wildcard or proxy.</p>
+      <p>The deployment CSP forbids third-party runtime, inline/eval, forms, and framing. It may permit <code>connect-src 'self' https: wss:</code> because static CSP cannot enumerate the dynamic paired-machine catalog; Commander constructs authenticated fetches and WebSockets only from paired catalog entries, and hubs retain literal exact-Origin + DPoP + ticket checks. The pairing ceremony may additionally contact only the reviewed external relay origin described below. No pairing-relay or control request is sent to the hosted static origin; it is never a wildcard or proxy.</p>
       <p>Commander fetches authenticated <code>GET /v1/machine</code> before enabling controls. Missing, unknown, newer, or incompatible schema/capabilities produce a visible banner and leave unsupported controls disabled. A compromised host/DNS/deploy authority can serve malicious same-origin JavaScript until detected; that accepted residual risk is revocable through rollback, device/origin revocation, and re-pairing.</p>
+    </section>
+
+    <section id="pairing-relay-amendment">
+      <h2>Amendment · 2026-08-13 · page-initiated pairing relay</h2>
+      <p>The reviewed wire-v1 relay is the narrow external ceremony boundary at <code>https://petra-stella-cloud.vercel.app</code>. The byte-identical bundle names that HTTPS origin in <code>hub-web/index.html</code>; changing it requires source review and a new pinned <code>hub-web/dist/</code> artifact. Both embedded controller-hub and optional <code>https://hub.petrastella.io</code> modes send only credential-omitted create, poll, and acknowledge calls under <code>/api/hub/pairing/</code> to this origin. Exact-Origin CORS binds the declared controller origin to the browser Origin.</p>
+      <div class="normative"><strong>Fail closed:</strong> absent, malformed, credentialed, non-root, or non-HTTPS relay metadata disables page-initiated pairing. Commander never retries these calls against the controller hub or hosted static origin.</div>
+      <p>The relay receives no DPoP credential, catalog, session or pane data, hub control request, or WebSocket traffic. It delivers a short-lived one-time invitation; the browser exchanges that invitation directly with the normalized target hub origin. Every authenticated <code>/v1/*</code> request and WebSocket remains browser-to-target-hub direct. Neither controller host implements nor proxies the relay API.</p>
     </section>
 
     <section id="boundaries">
@@ -158,6 +165,7 @@
       <ol>
         <li>At most one hub instance runs for a CAS account on a machine.</li>
         <li>The controller hub serves static assets; it does not proxy control, store the remote catalog, or cache remote sessions.</li>
+        <li>Only page-initiated pairing create, poll, and acknowledge may use the reviewed external relay. Invitation exchange and all hub control remain direct; neither controller origin proxies relay or target traffic.</li>
         <li>Discovery may suggest endpoints but cannot grant trust, scopes, or catalog membership.</li>
         <li>Each hub opens exactly one Commander-owned daemon WebSocket per daemon/session, regardless of viewers, windows, or panes.</li>
         <li>Commander does not import the t3 agent-owning runtime or change model/session counts.</li>
@@ -229,6 +237,7 @@ manifest-src 'self'</pre>
         </tbody>
       </table></div>
       <p>The default grant is read-only: <code>machine:read</code>, <code>session:read</code>, and <code>pane:read</code>. Every control or administrative scope requires explicit selection during pairing or later local re-authorization. Scopes are additive and do not imply one another. Targeted interrupt is additive and never silently becomes the legacy session-wide interrupt.</p>
+      <p>These colon-form names are the canonical authorization-policy vocabulary. Commander JSON wire surfaces, including hub APIs and relay wire-v1, serialize the same enum one-to-one in kebab form (<code>machine-read</code>, <code>session-read</code>, and so on). Operator-facing CLI input accepts the colon spelling for compatibility, converts immediately to the shared enum, and emits kebab-case on the wire; the UI displays that wire spelling without changing authority.</p>
     </section>
 
     <section id="control">

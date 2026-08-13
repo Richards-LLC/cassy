@@ -599,20 +599,28 @@ impl CasCore {
 
         // If epic filter specified, get subtasks and filter to ready ones
         let mut tasks = if let Some(ref epic_id) = req.epic {
-            let subtasks = task_store.get_subtasks(epic_id).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to get subtasks for epic {epic_id}: {e}")),
-                data: None,
-            })?;
-            // Filter to only ready tasks (open, not blocked)
-            subtasks
+            let subtask_ids = task_store
+                .get_subtasks(epic_id)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to get subtasks for epic {epic_id}: {e}")),
+                    data: None,
+                })?
                 .into_iter()
-                .filter(|t| {
-                    t.status == cas_types::TaskStatus::Open
-                        && task_store
-                            .get_blockers(&t.id)
-                            .map_or(true, |b| b.is_empty())
-                })
+                .map(|task| task.id)
+                .collect::<std::collections::HashSet<_>>();
+            // list_ready is the canonical readiness policy: it combines local
+            // and projected external blockers. Filter that result by the
+            // epic, rather than reimplementing its local-only SQL predicate.
+            task_store
+                .list_ready()
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to list ready tasks: {e}")),
+                    data: None,
+                })?
+                .into_iter()
+                .filter(|task| subtask_ids.contains(&task.id))
                 .collect()
         } else {
             task_store.list_ready().map_err(|e| McpError {
@@ -726,6 +734,7 @@ impl CasCore {
         }
 
         super::ensure_no_open_blockers(task_store.as_ref(), &req.id, "start")?;
+        super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
 
         if let Some(target) = task.deliverables.work_target.as_ref() {
             super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(

@@ -3793,7 +3793,8 @@ This is the body content."#;
                 "name: cli-routing",
                 "codex exec",
                 "claude auth status --json",
-                "daniel@petrastella.io",
+                "pippenz@gmail.com",
+                "unapproved account",
                 "docs/SLACK_POSTING_RUNBOOK.md",
                 "release-notes",
             ] {
@@ -3802,6 +3803,10 @@ This is the body content."#;
                     "{label} cli-routing SKILL.md missing required marker: {required:?}"
                 );
             }
+            assert!(
+                !skill.content.contains("daniel@petrastella.io"),
+                "{label} cli-routing SKILL.md retains the stale Daniel-only account gate"
+            );
         }
     }
 

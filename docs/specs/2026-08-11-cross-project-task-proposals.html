@@ -68,7 +68,7 @@
     <div class="eyebrow">Design decision · 11 August 2026</div>
     <h1>Cross-project work should arrive as a proposal, not a foreign task replica.</h1>
     <p class="recommendation">Add a dedicated cloud proposal API and proposal store. Require an explicit target, gate the client to supervisors/directors, validate a shared-team grant in the cloud, stamp provenance there, and create an ordinary target task only after receiving-side acceptance.</p>
-    <div class="meta"><span>Status: design decided</span><span>Implementation: cloud-first successor</span><span>Audience: CAS CLI + Cloud maintainers</span><span>Source: cas-a0ba / cas#171</span><span>Cloud: <a href="https://github.com/Richards-LLC/petra-stella-cloud/issues/44">petra-stella-cloud#44</a></span></div>
+    <div class="meta"><span>Status: cloud + CLI implemented</span><span>Remaining gate: cloud push-side provenance preservation confirmation</span><span>Audience: CAS CLI + Cloud maintainers</span><span>Source: cas-a0ba / cas#171</span><span>Cloud: <a href="https://github.com/Richards-LLC/petra-stella-cloud/issues/44">petra-stella-cloud#44</a></span></div>
   </header>
 
   <main id="content">
@@ -209,13 +209,13 @@ GET  /api/teams/{team_id}/cross-project-task-dependencies?origin_project_id=...&
 
     <section aria-labelledby="boundary">
       <h2 id="boundary">Current versus planned boundary</h2>
-      <div class="boundary"><p><strong>Current:</strong> team membership validation, explicit project-scoped pulls, normal task sync, and task mutations. <strong>Planned:</strong> proposal/dependency tables and endpoints, CLI <code>project</code> parameter, triage actions, provenance rendering, and external dependency reconciliation. Cloud ships first.</p></div>
+      <div class="boundary"><p><strong>Implemented:</strong> <code>create project=&lt;target-canonical-id&gt;</code> selects the proposal path and requires an explicit bounded <code>proposal_attempt_id</code>. Reuse that identity only for an ambiguous retry; use a new identity for a later intentionally identical create. <code>proposal_inbox</code>, <code>proposal_accept</code>, and <code>proposal_reject</code> keep triage separate; <code>proposal_reconcile project=&lt;current-canonical-id&gt;</code> projects dependency signals without foreign task replicas. The origin is accepted only from an explicit <code>.cas/config.toml</code> canonical ID, and registered supervisor/director authorization runs before cloud configuration or network setup. Project task listing names its current database boundary; all documents current-project equivalence; global is rejected.</p></div>
     </section>
 
     <section aria-labelledby="tests">
       <h2 id="tests">Implementation acceptance tests</h2>
       <ol>
-        <li>Local create without <code>project</code> stays compatible.</li><li>Worker/unknown roles fail before network I/O.</li><li>No shared-team grant returns a named <code>403</code>.</li><li>No cwd inference; missing origin/target is an error.</li><li>One idempotency key yields one proposal/task ID.</li><li>Proposals stay outside ready/list until accepted.</li><li>Accept creates one open task with visible provenance.</li><li>Reject creates no task and audits reason.</li><li>External blocker stays blocked while pending/open, flags rejection, and unblocks after close.</li><li>Project task listing names its real database boundary.</li>
+        <li>Local create without <code>project</code> stays compatible.</li><li>Worker/unknown roles fail before network I/O.</li><li>No shared-team grant returns a named <code>403</code>.</li><li>No cwd inference; missing origin/target is an error.</li><li>One explicit attempt identity yields one proposal/task ID, while a new identity permits a later identical create.</li><li>Proposals stay outside ready/list until accepted.</li><li>Accept creates one open task with visible provenance.</li><li>Reject creates no task and audits reason.</li><li>External blocker stays blocked while pending/open, flags rejection, and unblocks after close.</li><li>Project task listing names its real database boundary.</li>
       </ol>
     </section>
 

@@ -3,6 +3,17 @@
 Commander is a controller-origin SPA embedded in `cas hub`. Build it with `npm ci && npm run build`.
 The checked-in `dist/` is the Cargo input so ordinary Rust builds remain offline and do not require Node.
 
+Page-initiated pairing uses one explicit external relay boundary. The reviewed
+`cas-pairing-relay-origin` metadata in `index.html` is
+`https://petra-stella-cloud.vercel.app`; create, poll, and acknowledge requests
+go there with credentials omitted. They never resolve against the controller
+hub or the optional static host. The invitation exchange and every authenticated
+`/v1/*` request or WebSocket remain direct browser-to-target-hub traffic. If the
+metadata is absent or is not an HTTPS origin, Commander hides the create action
+and legacy `cas hub pair` fragments remain available. Changing the relay origin
+requires a reviewed source and `dist/` rebuild rather than deployment-time HTML
+mutation.
+
 The terminal adapter is pinned from `pingdotgg/t3code` commit
 `05eb051184ac4d486795ac6f8be29129b8b8845f`, using Ghostty revision
 `9f62873bf195e4d8a762d768a1405a5f2f7b1697` and Zig 0.15.2. The two WASM integrity hashes are:

@@ -100,6 +100,40 @@ impl CasCore {
             })?;
 
         if !found {
+            if dep_type == DependencyType::Blocks {
+                let external_store = cas_store::ExternalTaskDependencyStore::open(&self.cas_root)
+                    .map_err(|error| {
+                    Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                })?;
+                if external_store
+                    .remove(&req.from_id, &req.to_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                {
+                    let mut task = task_store.get(&req.from_id).map_err(|error| {
+                        Self::error(ErrorCode::INVALID_PARAMS, error.to_string())
+                    })?;
+                    if task.status == TaskStatus::Blocked
+                        && task_store
+                            .get_blockers(&req.from_id)
+                            .unwrap_or_default()
+                            .is_empty()
+                        && external_store
+                            .list_blocking_for_task(&req.from_id)
+                            .unwrap_or_default()
+                            .is_empty()
+                    {
+                        task.status = TaskStatus::Open;
+                        task.updated_at = chrono::Utc::now();
+                        task_store.update(&task).map_err(|error| {
+                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                        })?;
+                    }
+                    return Ok(Self::success(format!(
+                        "Removed external dependency: {} was blocked_by {}.",
+                        req.from_id, req.to_id
+                    )));
+                }
+            }
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
@@ -172,10 +206,7 @@ mod describe_dependency_tests {
             DependencyType::Blocks,
         );
         let msg = describe_dependency(&dep);
-        assert!(
-            !msg.contains("->"),
-            "must not contain a bare arrow: {msg}"
-        );
+        assert!(!msg.contains("->"), "must not contain a bare arrow: {msg}");
         assert!(
             msg.contains("blocked_by"),
             "must state blocked_by in plain words: {msg}"
@@ -211,10 +242,16 @@ mod describe_dependency_tests {
 
     #[test]
     fn discovered_from_and_extracted_from_have_no_arrow() {
-        for dep_type in [DependencyType::DiscoveredFrom, DependencyType::ExtractedFrom] {
+        for dep_type in [
+            DependencyType::DiscoveredFrom,
+            DependencyType::ExtractedFrom,
+        ] {
             let dep = Dependency::new("cas-a".to_string(), "cas-b".to_string(), dep_type);
             let msg = describe_dependency(&dep);
-            assert!(!msg.contains("->"), "{dep_type:?}: must not contain arrow: {msg}");
+            assert!(
+                !msg.contains("->"),
+                "{dep_type:?}: must not contain arrow: {msg}"
+            );
         }
     }
 }

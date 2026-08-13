@@ -1,0 +1,12 @@
+{
+  "wire_version": 1,
+  "pairing_request_id": "9ef5a981-0c32-44b4-9c8a-d1f8e4858e77",
+  "user_code": "K7MW-4H2Q",
+  "poll_secret": "base64url-32-random-bytes",
+  "controller_origin": "https://commander.example",
+  "requested_scopes": ["machine-read", "session-read", "pane-read"],
+  "expires_at": "2026-08-11T20:10:00Z",
+  "expires_in": 600,
+  "interval": 3,
+  "email_sent": true
+}

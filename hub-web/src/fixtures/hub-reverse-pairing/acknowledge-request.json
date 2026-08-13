@@ -1,0 +1,6 @@
+{
+  "wire_version": 1,
+  "pairing_request_id": "9ef5a981-0c32-44b4-9c8a-d1f8e4858e77",
+  "poll_secret": "base64url-32-random-bytes",
+  "delivery_id": "75128f2d-845b-4d2b-9d42-ffdb74661ca2"
+}

@@ -258,7 +258,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task operations. Actions: create, show, update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes (add progress), dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes (add progress), dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
     )]
     pub async fn task(
         &self,
@@ -279,6 +279,9 @@ impl CasService {
                     | "request_changes"
                     | "delete"
                     | "notes"
+                    | "proposal_accept"
+                    | "proposal_reject"
+                    | "proposal_reconcile"
                     | "dep_add"
                     | "dep_remove"
                     | "claim"
@@ -289,6 +292,10 @@ impl CasService {
 
             let result = match req.action.as_str() {
                 "create" => this.task_create(req).await,
+                "proposal_inbox" => this.task_proposal_inbox(req).await,
+                "proposal_accept" => this.task_proposal_accept(req).await,
+                "proposal_reject" => this.task_proposal_reject(req).await,
+                "proposal_reconcile" => this.task_proposal_reconcile(req).await,
                 "show" => this.task_show(req).await,
                 "update" => this.task_update(req).await,
                 "start" => this.task_start(req).await,
@@ -313,7 +320,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown task action: {}. Valid: create, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
+                        "Unknown task action: {}. Valid: create, proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
                         req.action
                     ),
                 )),

@@ -443,6 +443,19 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"cas-abcd".to_string()));
         assert!(ids.contains(&"cas-1234".to_string()));
+
+        // Cloud-reserved proposal task IDs use exactly 16 lowercase hex digits.
+        let (ids, remaining) = extract_id_patterns("open cas-0123456789abcdef now");
+        assert_eq!(ids, vec!["cas-0123456789abcdef"]);
+        assert_eq!(remaining, "open now");
+
+        let (ids, remaining) =
+            extract_id_patterns("cas-0123456789abcdeg cas-0123456789ABCDEF cas-0123456789abcdef0");
+        assert!(ids.is_empty());
+        assert_eq!(
+            remaining,
+            "cas-0123456789abcdeg cas-0123456789ABCDEF cas-0123456789abcdef0"
+        );
     }
 
     #[test]

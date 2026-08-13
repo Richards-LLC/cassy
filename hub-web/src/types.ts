@@ -21,6 +21,12 @@ export interface StoredMachine {
   privateKey: CryptoKey;
 }
 
+export interface PairingInstallIdentity {
+  machineId: string;
+  credentialId: string;
+  generation: number;
+}
+
 export interface HubSession {
   name: string;
   project_dir?: string;

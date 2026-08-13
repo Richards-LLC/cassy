@@ -592,6 +592,6 @@ fn project_skill_staleness_banner(project_root: &std::path::Path) -> Option<Stri
         .unwrap_or_else(|| "HEAD".to_string());
 
     Some(format!(
-        "WARNING: STALE PROJECT SKILL\nServed from checkout ref `{served_ref}`, which is {behind} commit(s) behind `{sync_ref}`. \\\n+         The file may omit newer project guidance; run `cas factory sync` before relying on it.\n\n"
+        "WARNING: STALE PROJECT SKILL\nServed from checkout ref `{served_ref}`, which is {behind} commit(s) behind `{sync_ref}`. The file may omit newer project guidance; run `cas factory sync` before relying on it.\n\n"
     ))
 }

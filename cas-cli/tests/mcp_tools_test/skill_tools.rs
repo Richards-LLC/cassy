@@ -141,9 +141,12 @@ async fn project_skill_show_marks_a_checkout_behind_its_sync_ref() {
         .expect("file-backed skill should be served");
     let text = extract_text(result);
 
-    assert!(text.starts_with("WARNING: STALE PROJECT SKILL"), "{text}");
-    assert!(text.contains("factory/stale-skill"), "{text}");
-    assert!(text.contains("1 commit(s) behind `main`"), "{text}");
+    assert!(
+        text.starts_with(
+            "WARNING: STALE PROJECT SKILL\nServed from checkout ref `factory/stale-skill`, which is 1 commit(s) behind `main`. The file may omit newer project guidance; run `cas factory sync` before relying on it.\n\n"
+        ),
+        "{text}"
+    );
 }
 
 #[tokio::test]

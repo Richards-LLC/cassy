@@ -111,8 +111,16 @@ pub enum CasError {
     #[error("migration failed: {name} - {reason}")]
     MigrationFailed { name: String, reason: String },
 
-    #[error("database schema outdated: v{current} -> v{required}. Run 'cas update --schema-only'")]
-    SchemaOutdated { current: u32, required: u32 },
+    #[error(
+        "binary {binary} requires schema v{required} — run `cas update --schema-only` \
+         (current schema v{current}; pending migration {pending_migration})"
+    )]
+    SchemaOutdated {
+        binary: String,
+        current: u32,
+        required: u32,
+        pending_migration: String,
+    },
 
     #[error("{0}")]
     Other(String),

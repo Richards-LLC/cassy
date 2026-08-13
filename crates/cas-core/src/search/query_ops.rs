@@ -11,6 +11,29 @@ use crate::search::{
 use cas_types::Entry;
 
 impl SearchIndex {
+    /// Quote field-like tokens whose field name is not registered in this
+    /// index schema so Tantivy treats them as free text rather than rejecting
+    /// the whole query. Registered fields stay untouched and therefore retain
+    /// Tantivy's normal syntax validation.
+    fn literalize_unknown_field_tokens(&self, query: &str) -> String {
+        query
+            .split_whitespace()
+            .map(|token| {
+                let Some((field, _)) = token.split_once(':') else {
+                    return token.to_string();
+                };
+
+                if self.schema.get_field(field).is_ok() {
+                    return token.to_string();
+                }
+
+                let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{escaped}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Search for entries matching a query (legacy - for backward compatibility)
     pub fn search(
         &self,
@@ -37,7 +60,7 @@ impl SearchIndex {
         );
 
         let query = query_parser
-            .parse_query(&opts.query)
+            .parse_query(&self.literalize_unknown_field_tokens(&opts.query))
             .map_err(|e| CoreError::Parse(e.to_string()))?;
 
         // Get more results than needed for post-filtering
@@ -216,7 +239,7 @@ impl SearchIndex {
             );
 
             let query = query_parser
-                .parse_query(&remaining_query)
+                .parse_query(&self.literalize_unknown_field_tokens(&remaining_query))
                 .map_err(|e| CoreError::Parse(e.to_string()))?;
 
             // Get more results than needed for post-filtering

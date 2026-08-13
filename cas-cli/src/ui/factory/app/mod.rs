@@ -296,6 +296,19 @@ impl WorkerSpawnPrep {
                 // directory itself (not in wt.repo_root).  In a valid worktree the
                 // answer is the worktree's branch; in a plain directory git climbs to
                 // the nearest ancestor repo and reports its HEAD instead.
+                //
+                // cas-30c6: the branch answer alone is forgeable. When the shared
+                // checkout is itself parked on `factory/<name>` (the GH #120 /
+                // cas-5bef shape), a stale plain directory *matches* the expected
+                // branch while every git operation in it resolves to that shared
+                // checkout — the exact misbinding of spawn request 1031. Prove the
+                // full canonical binding (working-tree root AND branch) first and
+                // fail the spawn closed, so no harness is ever started on it.
+                crate::factory_isolation::verify_worker_worktree_binding(
+                    &self.worker_name,
+                    &wt.worktree_path,
+                    Some(&wt.branch_name),
+                )?;
                 let wt_git = GitOperations::new(wt.worktree_path.clone());
                 match wt_git.current_branch() {
                     Ok(ref actual_branch) if actual_branch == &wt.branch_name => {
@@ -5154,6 +5167,174 @@ mod spawn_isolation_tests {
             .current_dir(dir)
             .output()
             .expect("git commit");
+    }
+
+    // -----------------------------------------------------------------
+    // cas-30c6: provisioning must bind the worker's OWN worktree, or fail
+    // closed before any harness is started.
+    // -----------------------------------------------------------------
+
+    /// Spawn request 1031 class: the worker's harness stayed bound to the
+    /// dirty SHARED checkout even though a factory worktree existed.
+    ///
+    /// The reuse validation compares branches by running git *inside* the
+    /// worktree path. A stale plain directory is not a worktree, so git
+    /// climbs out of it into the enclosing checkout — and when that shared
+    /// checkout is itself parked on `factory/<name>` (the GH #120 /
+    /// cas-5bef shape), the branch comparison *matches* and provisioning
+    /// hands back a cwd whose every git operation resolves to shared main.
+    ///
+    /// Only the worktree toplevel can distinguish the two, so provisioning
+    /// must prove the path is its own worktree root and fail closed
+    /// otherwise.
+    #[test]
+    fn stale_directory_resolving_to_shared_checkout_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        // The shared checkout was left parked on the worker's own branch.
+        Command::new("git")
+            .args(["switch", "-c", "factory/reuse-worker"])
+            .current_dir(&repo)
+            .output()
+            .expect("park shared HEAD on the worker branch");
+
+        // A stale plain directory sits where the worktree belongs.
+        let cas_dir = repo.join(".cas");
+        let worktree_path = cas_dir.join("worktrees").join("reuse-worker");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        let prep = WorkerSpawnPrep {
+            worker_name: "reuse-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/reuse-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo.clone(),
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+
+        let error = match prep.run() {
+            Ok(result) => panic!(
+                "a directory that is not the worker's own worktree must fail the spawn, \
+                 but provisioning returned cwd {:?}",
+                result.cwd
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("reuse-worker"),
+            "the refusal must name the worker whose spawn failed: {error}"
+        );
+        assert!(
+            error.contains(&repo.display().to_string()),
+            "the refusal must name the shared checkout the path really resolves to: {error}"
+        );
+    }
+
+    /// Respawn 1034 class: the path exists as a real worktree but belongs to
+    /// a SIBLING worker. Provisioning must refuse rather than hand a worker
+    /// another worker's branch.
+    #[test]
+    fn sibling_owned_worktree_is_rejected_for_a_different_worker() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let cas_dir = repo.join(".cas");
+        let sibling_path = cas_dir.join("worktrees").join("bright-dolphin-92");
+        std::fs::create_dir_all(sibling_path.parent().unwrap()).unwrap();
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "factory/bright-dolphin-92",
+                sibling_path.to_str().unwrap(),
+                "main",
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add");
+
+        // fair-pelican-51 is handed the sibling's directory.
+        let prep = WorkerSpawnPrep {
+            worker_name: "fair-pelican-51".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: sibling_path,
+                branch_name: "factory/fair-pelican-51".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+
+        let error = match prep.run() {
+            Ok(result) => panic!(
+                "a sibling's worktree must never be bound to another worker, \
+                 but provisioning returned cwd {:?}",
+                result.cwd
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("fair-pelican-51") && error.contains("bright-dolphin-92"),
+            "the refusal must name both the spawning worker and the real owner: {error}"
+        );
+    }
+
+    /// The ordinary reuse path is unchanged: a real worktree on the worker's
+    /// own branch still provisions.
+    #[test]
+    fn own_worktree_is_still_reused() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let cas_dir = repo.join(".cas");
+        let worktree_path = cas_dir.join("worktrees").join("own-worker");
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "factory/own-worker",
+                worktree_path.to_str().unwrap(),
+                "main",
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add");
+
+        let prep = WorkerSpawnPrep {
+            worker_name: "own-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/own-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+
+        let result = prep.run().expect("own worktree must still be reusable");
+        assert_eq!(result.cwd, worktree_path);
+        assert!(!result.worktree_created, "the existing worktree is reused");
     }
 
     // -----------------------------------------------------------------

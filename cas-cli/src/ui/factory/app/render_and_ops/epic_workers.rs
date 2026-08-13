@@ -1453,10 +1453,38 @@ impl FactoryApp {
         let cas_root = result.cas_root;
 
         // STEP 3 (cas-5232): Capture expected branch before worktree is consumed.
-        // `verify_isolated_worker_branch` runs AFTER the PTY is up, so we log errors
-        // rather than returning them (the worker process is already running at that
-        // point and terminating finish_worker_spawn would orphan it).
         let expected_branch: Option<String> = result.worktree.as_ref().map(|wt| wt.branch.clone());
+
+        // cas-30c6: PRE-harness binding gate — fail closed.
+        //
+        // The post-spawn assertion below used to be the only check, and it runs
+        // after `mux.add_worker` has already started the PTY, so it can do
+        // nothing but log: by then the harness is live on the wrong repository
+        // and will accept a task there (spawn request 1031). Prove the binding
+        // BEFORE the process exists so a misbound spawn simply fails; the
+        // daemon's existing failure path releases the early task pre-assign and
+        // reports the refusal to the supervisor.
+        if let Some(ref expected) = expected_branch {
+            if let Err(e) = crate::factory_isolation::verify_worker_worktree_binding(
+                &worker_name,
+                &cwd,
+                Some(expected),
+            ) {
+                crate::telemetry::track(
+                    "factory_worker_spawn_result",
+                    vec![("success", "false"), ("reason", "worktree_binding_failed")],
+                );
+                tracing::error!(
+                    worker = %worker_name,
+                    cwd = %cwd.display(),
+                    expected_branch = %expected,
+                    error = %e,
+                    "ISOLATION BUG pre-spawn: refusing to start a harness that is not bound \
+                     to its own worktree"
+                );
+                return Err(e);
+            }
+        }
 
         // Register the worktree with the manager if applicable
         if let (Some(manager), Some(wt)) = (&mut self.worktree_manager, result.worktree) {
@@ -1485,12 +1513,12 @@ impl FactoryApp {
         }
         self.track_worker_process_group(&worker_name);
 
-        // STEP 3 (cas-5232): Post-spawn branch assertion.
-        // PTY is now running. Verify the worker's cwd resolves to the expected
-        // branch. STEP 2 makes this nearly impossible to trigger for the stale-
-        // directory case, but this catch covers any gap (e.g. concurrent FS changes,
-        // git state drift between prep and finish, or non-isolated workers that
-        // somehow inherit the wrong cwd).
+        // STEP 3 (cas-5232): Post-spawn branch assertion — now the SECOND belt.
+        // The cas-30c6 gate above already refused a misbound spawn before the
+        // PTY existed; this remains to catch drift between that gate and the
+        // running process (concurrent FS changes, git state drift). It still
+        // only logs: the process is live by this point, and unwinding here
+        // would orphan it.
         if let Some(ref expected) = expected_branch {
             if let Err(e) =
                 crate::ui::factory::app::verify_isolated_worker_branch(&worker_name, &cwd, expected)

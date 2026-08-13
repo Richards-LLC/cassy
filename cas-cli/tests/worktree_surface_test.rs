@@ -1951,62 +1951,165 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
 }
 
 #[tokio::test]
-async fn test_worktree_merge_standalone_task_requires_force_for_trunk() {
-    // cas-0b32 AC4: standalone (no parent epic) trunk merge needs explicit intent.
+async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    run_git(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/staging-target.git",
+        ],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+    run_git(&["branch", "staging"], &repo.root);
+
+    let task_store = open_task_store(&cas_root).expect("open_task_store");
+    let mut standalone_task = Task::new(
+        "standalone-staging".to_string(),
+        "Standalone staging task".to_string(),
+    );
+    standalone_task.assignee = Some("alice".to_string());
+    standalone_task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/staging-target".to_string(),
+        target_branch: "staging".to_string(),
+    });
+    task_store
+        .add(&standalone_task)
+        .expect("add standalone task");
+
+    let wt_path = cas_root.join("worktrees").join("alice");
+    repo.add_worktree(&wt_path, "factory/alice");
+    std::fs::write(wt_path.join("staging-only.txt"), "staging delivery").unwrap();
+    run_git(&["add", "staging-only.txt"], &wt_path);
+    run_git(&["commit", "-m", "staging delivery"], &wt_path);
+
+    env.set_current_dir(&repo.root);
+
+    let svc = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".to_string());
+    req.task_id = Some(standalone_task.id);
+    req.cleanup = Some(false);
+    let result = svc
+        .coordination(Parameters(req))
+        .await
+        .expect("a declared non-trunk WorkTarget must not require allow_trunk");
+    let text = get_text(&result);
+    assert!(
+        text.contains("to staging") && text.contains("task WorkTarget"),
+        "success must name the declared staging destination:\n{text}"
+    );
+    assert!(
+        git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "staging"])
+            .contains("staging-only.txt"),
+        "the WorkTarget branch must receive the standalone task"
+    );
+    assert!(
+        !git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "main"])
+            .contains("staging-only.txt"),
+        "main must remain untouched"
+    );
+}
+
+#[tokio::test]
+async fn missing_work_target_refusal_names_resolved_trunk_cas_84df() {
     let repo = GitRepo::new();
     let mut env = test_env();
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
-    let mut standalone_task = Task::new("standalone-1".to_string(), "Standalone task".to_string());
-    // cas-bd5f: explicit task_id requires worker ownership.
+    let mut standalone_task = Task::new(
+        "standalone-missing-target".to_string(),
+        "Standalone task missing WorkTarget".to_string(),
+    );
     standalone_task.assignee = Some("bob".to_string());
-    task_store
-        .add(&standalone_task)
-        .expect("add standalone task");
+    task_store.add(&standalone_task).expect("add standalone task");
 
     let wt_path = cas_root.join("worktrees").join("bob");
     repo.add_worktree(&wt_path, "factory/bob");
-
     env.set_current_dir(&repo.root);
 
-    let svc = make_service(cas_root.clone());
+    let svc = make_service(cas_root);
 
-    // Without allow_trunk: refuse silent trunk (force alone must NOT authorize).
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/bob".to_string());
-    req.task_id = Some(standalone_task.id.clone());
-    req.force = Some(true); // dirty bypass only — must not open trunk
-    let refused = svc.coordination(Parameters(req)).await;
+    req.task_id = Some(standalone_task.id);
+    let refused = svc
+        .coordination(Parameters(req))
+        .await
+        .expect_err("missing WorkTarget must require explicit trunk authorization");
     assert!(
-        refused.is_err(),
-        "standalone task with force but without allow_trunk must refuse trunk"
+        refused.message.contains("would merge to: main"),
+        "refusal must reveal the exact fallback destination before authorization:\n{}",
+        refused.message
     );
-    let msg = format!("{:?}", refused.unwrap_err());
-    assert!(
-        msg.contains("no parent epic") || msg.contains("refusing") || msg.contains("allow_trunk"),
-        "refusal must explain missing parent epic / allow_trunk. Got: {msg}"
-    );
+}
 
-    // allow_trunk=true (force=false): trunk authorized without dirty bypass.
+#[tokio::test]
+async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
+    let repo = GitRepo::new();
+    let remote = TempDir::new().expect("bare origin tempdir");
+    let output = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(remote.path())
+        .output()
+        .expect("initialize bare origin");
+    assert!(
+        output.status.success(),
+        "git init --bare failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    run_git(
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        &repo.root,
+    );
+    run_git(&["push", "-u", "origin", "main"], &repo.root);
+
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    let task_store = open_task_store(&cas_root).expect("open_task_store");
+    let mut standalone_task = Task::new(
+        "standalone-trunk".to_string(),
+        "Explicit trunk fallback".to_string(),
+    );
+    standalone_task.assignee = Some("bob".to_string());
+    task_store.add(&standalone_task).expect("add standalone task");
+
+    let wt_path = cas_root.join("worktrees").join("bob");
+    repo.add_worktree(&wt_path, "factory/bob");
+    std::fs::write(wt_path.join("production.txt"), "published to trunk").unwrap();
+    run_git(&["add", "production.txt"], &wt_path);
+    run_git(&["commit", "-m", "production delivery"], &wt_path);
+    env.set_current_dir(&repo.root);
+
+    let svc = make_service(cas_root);
+
     let mut trunk_ok = coord_req("worktree_merge");
     trunk_ok.id = Some("factory/bob".to_string());
-    trunk_ok.task_id = Some(standalone_task.id.clone());
+    trunk_ok.task_id = Some(standalone_task.id);
     trunk_ok.allow_trunk = Some(true);
-    trunk_ok.force = Some(false);
     let result = svc
         .coordination(Parameters(trunk_ok))
         .await
-        .expect("allow_trunk=true standalone merge should succeed");
+        .expect("allow_trunk=true must authorize a genuine trunk fallback");
     let text = get_text(&result);
     assert!(
-        text.contains("Merged worktree"),
-        "allow_trunk=true must allow trunk for standalone task.\nGot:\n{text}"
+        text.contains("⚠️ TRUNK PUSH COMPLETE")
+            && text.contains("allow_trunk=true")
+            && text.contains("main"),
+        "the destructive-adjacent trunk push must be unmistakable:\n{text}"
     );
     assert!(
-        text.contains("allow_trunk=true") || text.contains("no parent epic"),
-        "reason must cite allow_trunk / no parent epic.\nGot:\n{text}"
+        git_stdout(remote.path(), &["ls-tree", "-r", "--name-only", "main"])
+            .contains("production.txt"),
+        "origin/main must contain the authorized trunk delivery"
     );
 }
 

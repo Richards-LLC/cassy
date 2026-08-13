@@ -93,6 +93,43 @@ async fn test_task_create_and_start() {
     );
 }
 
+#[tokio::test]
+async fn no_code_create_and_start_warn_that_external_ref_is_required_at_close() {
+    let (_temp, service) = setup_cas();
+    let created = service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            depth: Some("light".to_string()),
+            title: "Publish an operational report".to_string(),
+            description: None,
+            priority: 2,
+            task_type: "chore".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: Some("no-code".to_string()),
+            epic: None,
+        }))
+        .await
+        .expect("create no-code task");
+    let created_text = extract_text(created);
+    assert!(created_text.contains("No-code close requirement"));
+    assert!(created_text.contains("external_ref"));
+    let task_id = extract_task_id(&created_text).unwrap().to_string();
+
+    let started = service
+        .cas_task_start(Parameters(IdRequest { id: task_id }))
+        .await
+        .expect("start no-code task");
+    let started_text = extract_text(started);
+    assert!(started_text.contains("No-code close requirement"));
+    assert!(started_text.contains("external_ref"));
+}
+
 /// Test that epic creation creates a branch, not a worktree
 ///
 /// This is a regression test for the bug where supervisors were getting

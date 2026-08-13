@@ -44,6 +44,14 @@ const RELATED_RECALL_CHAR_CAP: usize = 1_200;
 const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
 const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
 
+fn no_code_external_ref_guidance(task: &Task) -> &'static str {
+    if task.execution_note.as_deref() == Some("no-code") {
+        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
+    } else {
+        ""
+    }
+}
+
 fn title_terms(title: &str) -> std::collections::HashSet<String> {
     title
         .split(|c: char| !c.is_alphanumeric())
@@ -535,11 +543,12 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}",
+            "Created task: {} - {} (P{}){}{}",
             id,
             task.title,
             task.priority.0,
-            branch_info.unwrap_or_default() + &related_context
+            branch_info.unwrap_or_default() + &related_context,
+            no_code_external_ref_guidance(&task),
         )))
     }
 
@@ -1188,12 +1197,13 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}{}{}{}{}",
+                "Started task: {} - {}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 claim_info.unwrap_or_default(),
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 own_notes,
+                no_code_external_ref_guidance(&task),
                 push_note,
             );
             // `truncate_str` appends three bytes when it truncates, hence the
@@ -1204,7 +1214,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}{}{}{}{}{}{}{}",
+            "Started task: {} - {}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             claim_info.unwrap_or_default(),
@@ -1216,6 +1226,7 @@ impl CasCore {
             wt_info,
             sibling_notes_info.unwrap_or_default(),
             Self::workflow_guidance(),
+            no_code_external_ref_guidance(&task),
             push_note,
         )))
     }

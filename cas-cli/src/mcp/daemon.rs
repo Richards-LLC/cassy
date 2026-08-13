@@ -90,6 +90,48 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
     }
 }
 
+/// Parse the harness-provided durable role hint used by every registration
+/// entrypoint. Verification authority is still bound independently to the
+/// in-process [`AgentIdentitySource`](crate::mcp::server::AgentIdentitySource);
+/// this helper only keeps the registered row aligned with the factory launch
+/// contract so routing and session ownership can resolve it.
+pub(crate) fn parse_agent_role_hint(role: Option<&str>) -> Option<AgentRole> {
+    role.and_then(|value| value.trim().parse().ok())
+}
+
+fn apply_agent_role(agent: &mut Agent, role: AgentRole) {
+    agent.role = role;
+    match role {
+        AgentRole::Worker => agent.agent_type = AgentType::Worker,
+        AgentRole::Supervisor | AgentRole::Director => agent.agent_type = AgentType::Primary,
+        AgentRole::Standard => {}
+    }
+}
+
+/// Register while preserving the store's general anti-forgery contract, then
+/// explicitly reconcile a role that came from the harness environment or a
+/// typed server-internal caller. `AgentStore::register` deliberately preserves
+/// role on conflict, so this narrow second step is required to repair rows
+/// created as `standard` by an earlier registration path.
+pub(crate) fn register_with_role_reconciliation(
+    store: &dyn crate::store::AgentStore,
+    agent: &Agent,
+    configured_role: Option<AgentRole>,
+) -> crate::store::Result<Agent> {
+    store.register(agent)?;
+    let mut persisted = store.get(&agent.id)?;
+    if let Some(role) = configured_role
+        && (persisted.role != role
+            || (role == AgentRole::Worker && persisted.agent_type != AgentType::Worker)
+            || (matches!(role, AgentRole::Supervisor | AgentRole::Director)
+                && persisted.agent_type != AgentType::Primary))
+    {
+        apply_agent_role(&mut persisted, role);
+        store.update(&persisted)?;
+    }
+    Ok(persisted)
+}
+
 /// Queue the factory daemon's proven teardown for a worker maintenance just declared dead.
 pub(crate) fn queue_stale_factory_worker_shutdown(
     cas_root: &std::path::Path,
@@ -142,7 +184,8 @@ pub(crate) fn register_session_start_agent(
     cc_pid: u32,
     clone_path: Option<&str>,
 ) -> crate::store::Result<(Agent, bool)> {
-    let requested_worker = agent_role.is_some_and(|role| role.eq_ignore_ascii_case("worker"));
+    let configured_role = parse_agent_role_hint(agent_role);
+    let requested_worker = configured_role == Some(AgentRole::Worker);
     let reusable = if requested_worker {
         agent_name.and_then(|name| {
             [
@@ -188,14 +231,13 @@ pub(crate) fn register_session_start_agent(
     stamp_pid_fingerprint(&mut agent, cc_pid);
     agent.machine_id = Some(Agent::get_or_generate_machine_id());
 
-    if requested_worker {
-        agent.role = AgentRole::Worker;
-        agent.agent_type = AgentType::Worker;
+    if let Some(role) = configured_role {
+        apply_agent_role(&mut agent, role);
     }
     apply_factory_worker_metadata(&mut agent, clone_path);
 
-    store.register(&agent)?;
-    Ok((agent, reused))
+    let persisted = register_with_role_reconciliation(store, &agent, configured_role)?;
+    Ok((persisted, reused))
 }
 
 /// Extension trait for EmbeddedDaemonConfig to convert to DaemonConfig

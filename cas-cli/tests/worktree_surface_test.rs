@@ -4383,9 +4383,10 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
     )
     .expect("exact dispatch");
 
-    // A public caller controls request fields, display name, and its process
-    // environment. Registration may establish an ordinary session, but those
-    // hints must carry zero supervisor_direct authority.
+    // The MCP server's launch environment is the factory's durable role
+    // contract, so registration must persist it for routing. Identity-source
+    // provenance remains separate: a public call still carries zero
+    // supervisor_direct verification authority.
     let public = CasCore::with_daemon(cas_root.clone(), None, None);
     {
         let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "supervisor");
@@ -4404,8 +4405,8 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
             .get("public-env-supervisor")
             .expect("registered public agent")
             .role,
-        AgentRole::Standard,
-        "environment and display-name hints cannot mint a supervisor row"
+        AgentRole::Supervisor,
+        "register must persist the harness-provided supervisor role"
     );
 
     let before_denial = durable_close_snapshot(&cas_root);
@@ -4470,8 +4471,8 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
             .get("public-session-env-supervisor")
             .expect("public session agent")
             .role,
-        AgentRole::Standard,
-        "session_start environment/name hints cannot mint supervisor"
+        AgentRole::Supervisor,
+        "session_start must persist the harness-provided supervisor role"
     );
     let before_session_denial = durable_close_snapshot(&cas_root);
     public_session
@@ -4495,8 +4496,9 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
         "denied session_start spoof must not mutate proof state"
     );
 
-    // An existing Worker row also cannot be elevated by ON CONFLICT
-    // re-registration, even with a privileged environment claim.
+    // Re-registration must repair a stale role even though the generic store
+    // ON CONFLICT contract preserves authority by default. Public provenance
+    // still prevents the repaired row from submitting verification directly.
     register_delivery_agent(
         &cas_root,
         "existing-worker-registration",
@@ -4519,9 +4521,9 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
     }
     let worker = agent_store
         .get("existing-worker-registration")
-        .expect("worker remains registered");
-    assert_eq!(worker.role, AgentRole::Worker);
-    assert_eq!(worker.agent_type, AgentType::Worker);
+        .expect("re-registered supervisor");
+    assert_eq!(worker.role, AgentRole::Supervisor);
+    assert_eq!(worker.agent_type, AgentType::Primary);
     let mut worker_task = Task::new(
         "cas-worker-reregister-proof".to_string(),
         "Worker re-registration cannot mint proof authority".to_string(),

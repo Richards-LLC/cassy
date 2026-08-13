@@ -1,13 +1,12 @@
 use crate::mcp::tools::core::imports::*;
 
 use cas_store::{ExternalTaskDependencyProjection, ExternalTaskDependencyStore};
-use sha2::{Digest, Sha256};
 
 use crate::cloud::task_proposals::{
     CreateTaskProposalRequest, ProposalProvenance, TaskProposal, TaskProposalClient,
     authorize_registered_role, render_proposal,
 };
-use crate::cloud::{CloudConfig, canonical_id_from_config_toml, is_acceptable_endpoint};
+use crate::cloud::{CloudConfig, canonical_id_from_config_toml};
 
 const EXPLICIT_ORIGIN_REQUIRED: &str = "Cross-project task proposals require an explicit [project] canonical_id in .cas/config.toml; nothing is inferred from cwd, folder name, or git remote.";
 const TRUSTED_PRODUCTION_ENDPOINT: &str = "https://petra-stella-cloud.vercel.app";
@@ -73,18 +72,12 @@ impl CasCore {
                     "Cross-project task creation requires membership in a team shared by the origin and target projects.",
                 )
             })?;
-        let endpoint = user_config.endpoint.trim_end_matches('/').to_string();
-        let is_trusted_production = endpoint == TRUSTED_PRODUCTION_ENDPOINT;
-        let is_local_test_endpoint = endpoint.starts_with("http://localhost")
-            || endpoint.starts_with("http://127.0.0.1")
-            || endpoint.starts_with("http://0.0.0.0");
-        if !is_acceptable_endpoint(&endpoint) || (!is_trusted_production && !is_local_test_endpoint)
-        {
-            return Err(Self::error(
+        let endpoint = normalized_trusted_proposal_endpoint(&user_config.endpoint).ok_or_else(|| {
+            Self::error(
                 ErrorCode::INVALID_PARAMS,
                 "Cross-project task proposals require the trusted Petra Stella Cloud endpoint configured with the authenticated user credential.",
-            ));
-        }
+            )
+        })?;
         Ok(TaskProposalClient::new(endpoint, token, team_id))
     }
 
@@ -118,6 +111,7 @@ impl CasCore {
         req: TaskCreateRequest,
         target_project: &str,
         blocks_origin_task_id: Option<&str>,
+        proposal_attempt_id: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let agent = self.proposal_authority()?;
         let origin_project = self.explicit_local_project()?;
@@ -152,18 +146,7 @@ impl CasCore {
             "acceptance_criteria": req.acceptance_criteria.unwrap_or_default(),
             "external_ref": req.external_ref.unwrap_or_default(),
         });
-        let request_fingerprint = proposal_request_fingerprint(
-            &agent.id,
-            &origin_project,
-            target_project,
-            &task,
-            blocks_origin_task_id,
-        )?;
-        let projection_store = ExternalTaskDependencyStore::open(&self.cas_root)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let client_request_id = projection_store
-            .client_request_id(&request_fingerprint, &uuid::Uuid::new_v4().to_string())
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;
         let request = CreateTaskProposalRequest {
             client_request_id,
             origin_project_canonical_id: origin_project,
@@ -191,6 +174,8 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         if let Some(origin_task_id) = blocks_origin_task_id {
+            let projection_store = ExternalTaskDependencyStore::open(&self.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             let projection = ExternalTaskDependencyProjection {
                 origin_task_id: origin_task_id.to_string(),
                 proposal_id: response.proposal_id.clone(),
@@ -404,22 +389,46 @@ impl CasCore {
     }
 }
 
-fn proposal_request_fingerprint(
-    agent_id: &str,
-    origin_project: &str,
-    target_project: &str,
-    task: &serde_json::Value,
-    blocks_origin_task_id: Option<&str>,
-) -> Result<String, McpError> {
-    let canonical = serde_json::to_vec(&serde_json::json!({
-        "agent_id": agent_id,
-        "origin_project": origin_project,
-        "target_project": target_project,
-        "task": task,
-        "blocks_origin_task_id": blocks_origin_task_id,
-    }))
-    .map_err(|error| CasCore::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-    Ok(format!("{:x}", Sha256::digest(canonical)))
+fn validate_proposal_attempt_id(value: Option<&str>) -> Result<String, McpError> {
+    let value = value.ok_or_else(|| {
+        CasCore::error(
+            ErrorCode::INVALID_PARAMS,
+            "Cross-project task creation requires proposal_attempt_id: an explicit identity for one logical attempt. Reuse it only for an ambiguous retry; choose a new value for a later identical create.",
+        )
+    })?;
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    if !valid {
+        return Err(CasCore::error(
+            ErrorCode::INVALID_PARAMS,
+            "proposal_attempt_id must be 1..=128 ASCII letters, digits, or - _ . : characters.",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn normalized_trusted_proposal_endpoint(endpoint: &str) -> Option<String> {
+    let parsed = url::Url::parse(endpoint.trim()).ok()?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return None;
+    }
+    let trusted_production = parsed.scheme() == "https"
+        && parsed.origin().ascii_serialization() == TRUSTED_PRODUCTION_ENDPOINT;
+    let loopback_host = match parsed.host()? {
+        url::Host::Domain(domain) => domain == "localhost",
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    };
+    let trusted_local = parsed.scheme() == "http" && loopback_host;
+    (trusted_production || trusted_local).then(|| parsed.as_str().trim_end_matches('/').to_string())
 }
 
 fn proposal_from_create(provenance: ProposalProvenance, state: String) -> TaskProposal {
@@ -478,7 +487,7 @@ mod tests {
     async fn worker_is_refused_before_cloud_config_is_loaded() {
         let (_temp, core) = core_with_role(cas_types::AgentRole::Worker);
         let error = core
-            .cas_task_proposal_create(request(), "target-project", None)
+            .cas_task_proposal_create(request(), "target-project", None, Some("attempt-1"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -491,7 +500,7 @@ mod tests {
     async fn supervisor_without_explicit_origin_never_falls_back_to_cwd_or_git() {
         let (_temp, core) = core_with_role(cas_types::AgentRole::Supervisor);
         let error = core
-            .cas_task_proposal_create(request(), "target-project", None)
+            .cas_task_proposal_create(request(), "target-project", None, Some("attempt-1"))
             .await
             .unwrap_err();
         assert_eq!(error.message.as_ref(), EXPLICIT_ORIGIN_REQUIRED);
@@ -543,5 +552,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(global.message.contains("Global task scope is unsupported"));
+    }
+
+    #[test]
+    fn proposal_attempt_identity_is_explicit_bounded_and_not_content_addressed() {
+        assert_eq!(
+            validate_proposal_attempt_id(Some("attempt-2026-08-13:one")).unwrap(),
+            "attempt-2026-08-13:one"
+        );
+        assert_eq!(
+            validate_proposal_attempt_id(Some("attempt-2026-08-13:two")).unwrap(),
+            "attempt-2026-08-13:two"
+        );
+        assert!(validate_proposal_attempt_id(None).is_err());
+        assert!(validate_proposal_attempt_id(Some("contains whitespace")).is_err());
+        assert!(validate_proposal_attempt_id(Some(&"x".repeat(129))).is_err());
+    }
+
+    #[test]
+    fn proposal_endpoint_parses_and_requires_an_exact_allowed_host() {
+        assert_eq!(
+            normalized_trusted_proposal_endpoint("http://localhost:4321/"),
+            Some("http://localhost:4321".into())
+        );
+        assert_eq!(
+            normalized_trusted_proposal_endpoint("http://[::1]:4321/"),
+            Some("http://[::1]:4321".into())
+        );
+        assert_eq!(
+            normalized_trusted_proposal_endpoint("https://petra-stella-cloud.vercel.app/"),
+            Some(TRUSTED_PRODUCTION_ENDPOINT.into())
+        );
+        for deceptive in [
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://0.0.0.0",
+            "http://attacker@localhost",
+            "https://petra-stella-cloud.vercel.app.evil.example",
+            "https://petra-stella-cloud.vercel.app/api/redirect",
+        ] {
+            assert_eq!(normalized_trusted_proposal_endpoint(deceptive), None);
+        }
     }
 }

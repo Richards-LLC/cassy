@@ -229,6 +229,7 @@ impl CasService {
         let target_branch = req.target_branch.clone();
         let target_project = req.project.clone();
         let blocks_origin_task_id = req.blocks_origin_task_id.clone();
+        let proposal_attempt_id = req.proposal_attempt_id.clone();
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -259,6 +260,7 @@ impl CasService {
                     inner_req,
                     &target_project,
                     blocks_origin_task_id.as_deref(),
+                    proposal_attempt_id.as_deref(),
                 )
                 .await;
         }

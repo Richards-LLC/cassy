@@ -338,6 +338,11 @@ impl TaskProposalClient {
                 "rejected"
             }),
         )?;
+        if proposal.proposal_id != proposal_id {
+            return Err(contract(
+                "triage response proposal ID did not match the requested proposal ID",
+            ));
+        }
         Ok(proposal)
     }
 
@@ -561,17 +566,44 @@ fn validate_external_dependency(
             "dependency response had no explicit origin project",
         ));
     }
-    if dependency.resolution_state == "resolved"
-        && dependency.target_task_status.as_deref() != Some("closed")
-    {
+    if !valid_dependency_state_matrix(dependency) {
         return Err(contract(
-            "dependency response marked a non-closed target resolved",
+            "dependency response violated the proposal/target/resolution state matrix",
         ));
     }
-    if dependency.resolution_state == "handoff_rejected" && dependency.resolved_at.is_some() {
-        return Err(contract("rejected dependency response carried resolved_at"));
-    }
     Ok(())
+}
+
+fn valid_dependency_state_matrix(dependency: &ExternalTaskDependency) -> bool {
+    let unresolved =
+        dependency.resolution_state == "unresolved" && dependency.resolved_at.is_none();
+    match dependency.proposal_state.as_str() {
+        "proposed" => dependency.target_task_status.is_none() && unresolved,
+        "rejected" => {
+            dependency.target_task_status.is_none()
+                && dependency.resolution_state == "handoff_rejected"
+                && dependency.resolved_at.is_none()
+        }
+        "accepted" => match dependency.target_task_status.as_deref() {
+            Some("closed") => {
+                dependency.resolution_state == "resolved"
+                    && dependency
+                        .resolved_at
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            }
+            Some(
+                "open"
+                | "in_progress"
+                | "blocked"
+                | "cancelled"
+                | "pending_supervisor_review"
+                | "awaiting_merge",
+            ) => unresolved,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn valid_opaque_id(value: &str) -> bool {
@@ -879,6 +911,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn triage_response_must_match_the_requested_proposal_id() {
+        let server = MockServer::start().await;
+        let mut wrong = proposal("accepted");
+        wrong["proposal_id"] = json!("proposal-other");
+        wrong["provenance"]["server_attested"]["proposal_id"] = json!("proposal-other");
+        Mock::given(method("POST"))
+            .and(path("/api/teams/team-1/task-proposals/proposal-1/accept"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(wrong))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = tokio::task::spawn_blocking(move || {
+            client(&server).accept("proposal-1", "target-project")
+        })
+        .await
+        .unwrap()
+        .expect_err("a triage response for another proposal must be rejected");
+        assert!(error.to_string().contains("proposal ID"), "{error}");
+    }
+
+    #[tokio::test]
     async fn dependency_feed_follows_opaque_cursor_and_stops_on_stable_loop() {
         let server = MockServer::start().await;
         let row = json!({
@@ -1060,6 +1114,36 @@ mod tests {
             replayed.resolved_at.as_deref(),
             Some("2026-08-13T16:00:00.000Z")
         );
+    }
+
+    #[tokio::test]
+    async fn dependency_feed_rejects_cross_field_state_contradictions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "dependencies": [{
+                    "origin_task_id": "cas-origin",
+                    "proposal_id": "proposal-1",
+                    "target_project_canonical_id": "target-project",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "proposal_state": "proposed",
+                    "target_task_status": "closed",
+                    "resolution_state": "resolved",
+                    "resolved_at": "2026-08-13T16:00:00.000Z"
+                }],
+                "next_cursor": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = tokio::task::spawn_blocking(move || {
+            client(&server).dependency_feed_all("origin-project", None)
+        })
+        .await
+        .unwrap()
+        .expect_err("a proposed dependency cannot claim a resolved target");
+        assert!(error.to_string().contains("state matrix"), "{error}");
     }
 
     #[test]

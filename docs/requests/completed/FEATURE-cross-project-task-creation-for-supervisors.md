@@ -9,7 +9,7 @@ priority: P2
 > proposal/triage flow, provenance schema, and cross-project dependency projection are defined in
 > [`docs/specs/2026-08-11-cross-project-task-proposals.md`](../../specs/2026-08-11-cross-project-task-proposals.md).
 > The shipped CLI mechanism is `task action=create project=<target-canonical-id>` plus the dedicated
-> `proposal_inbox`, `proposal_accept`, `proposal_reject`, and `proposal_reconcile` actions. Pending
+> `proposal_inbox`, `proposal_accept`, `proposal_reject`, and `proposal_reconcile` actions. Cross-project create uses an explicit `proposal_attempt_id`: reuse it only for an ambiguous retry and select a new identity for a later identical create. Pending
 > proposals never enter the local task table; optional origin blockers live in the
 > `external_task_dependencies` projection and unblock only after reconciliation reports the accepted
 > target task closed. The cloud contract is tracked at

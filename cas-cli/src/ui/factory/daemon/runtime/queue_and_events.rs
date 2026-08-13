@@ -1194,6 +1194,7 @@ impl FactoryDaemon {
         let config = crate::config::Config::load(self.app.cas_dir()).unwrap_or_default();
         let factory = config.factory();
         let candidates = match queue.delivery_stalled_candidates(
+            &self.session_name,
             factory.delivery_stalled_priority_secs as i64,
             factory.delivery_stalled_normal_secs as i64,
             50,
@@ -1220,6 +1221,7 @@ impl FactoryDaemon {
             );
             match queue.enqueue_delivery_stalled_bounce(
                 queued.id,
+                &self.session_name,
                 &notice,
                 "delivery stalled — recipient unread",
             ) {

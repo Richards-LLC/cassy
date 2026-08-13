@@ -2018,6 +2018,68 @@ mod worker_commit_guard_tests {
 
     // ── check_worker_git_commit_scope tests ──────────────────────────────
 
+    // ── cas-30c6 regression: sibling-worktree misbinding ─────────────────
+
+    /// Respawn 1034 class: the harness was bound to a SIBLING worker's
+    /// factory worktree. `factory/*` is allowlisted by the cas-7e7b denylist
+    /// and the cwd is inside CAS_CLONE_PATH, so both existing checks passed
+    /// and the worker was free to commit onto another worker's branch.
+    ///
+    /// The guard must compare the branch against the worker's own registered
+    /// identity, not just against the protected-trunk denylist.
+    #[test]
+    fn sibling_factory_branch_commit_is_denied() {
+        let tmp = make_git_repo();
+        let p = tmp.path().to_string_lossy().to_string();
+        std::process::Command::new("git")
+            .args(["switch", "-c", "factory/bright-dolphin-92"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("switch to the sibling's branch");
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&p)),
+            ("CAS_AGENT_NAME", Some("fair-pelican-51")),
+        ]);
+
+        let msg = check_worker_git_commit_scope(&p)
+            .expect("a worker bound to a sibling's factory branch must be denied");
+        assert!(
+            msg.contains("bright-dolphin-92"),
+            "the refusal must name the sibling that owns the branch: {msg}"
+        );
+        assert!(
+            msg.contains("fair-pelican-51"),
+            "the refusal must name the worker's own identity: {msg}"
+        );
+        assert!(
+            msg.contains("factory/fair-pelican-51"),
+            "the refusal must name the branch this worker actually owns: {msg}"
+        );
+    }
+
+    /// A worker on its OWN factory branch is untouched by the sibling check.
+    #[test]
+    fn own_factory_branch_commit_is_still_allowed() {
+        let tmp = make_git_repo();
+        let p = tmp.path().to_string_lossy().to_string();
+        std::process::Command::new("git")
+            .args(["switch", "-c", "factory/fair-pelican-51"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("switch to the worker's own branch");
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&p)),
+            ("CAS_AGENT_NAME", Some("fair-pelican-51")),
+        ]);
+
+        assert!(
+            check_worker_git_commit_scope(&p).is_none(),
+            "a worker committing on its own factory branch must still be allowed"
+        );
+    }
+
     // ── cas-ba04 regression: non-isolated worker protection ──────────────
 
     #[test]

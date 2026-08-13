@@ -2456,7 +2456,7 @@ mod tests {
 
     use crate::test_support::TestEnvGuard;
     use cas_factory::{EpicState, FileChangeInfo, GitFileStatus, SourceChangesInfo, TaskSummary};
-    use cas_types::{Priority, TaskStatus, TaskType};
+    use cas_types::{Entry, Priority, TaskStatus, TaskType};
 
     use super::{
         DirectorData, DirectorEvent, merge_director_data_preserving_git, non_closed_task_ids,
@@ -2541,6 +2541,52 @@ mod tests {
                 .is_empty(),
             "Claude worker intro missing: {:?}",
             cas_mux::missing_contract_elements(&wrk[0].prompt, cas_mux::ContractRole::Worker)
+        );
+    }
+
+    /// cas-2085 / GH #290: Claude 2.1.231 did not dispatch SessionStart for a
+    /// live factory supervisor even though its custom config dir and per-team
+    /// `--settings` file both contained the hook. The guaranteed launch-time
+    /// intro prompt must therefore carry the context bundle as a fallback.
+    #[test]
+    fn claude_custom_config_supervisor_intro_carries_context_fallback() {
+        use crate::store::{detect::open_prompt_queue_store, init_cas_dir, open_store};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = init_cas_dir(project.path()).unwrap();
+        let custom_config = project.path().join(".claude-support@example.test");
+        let _guard = TestEnvGuard::with_vars(&[(
+            "CLAUDE_CONFIG_DIR",
+            custom_config.to_str().expect("UTF-8 config dir"),
+        )]);
+
+        open_store(&cas_dir)
+            .unwrap()
+            .add(&Entry::new(
+                "ambient-launch-shape".to_string(),
+                "custom profile ambient memory sentinel".to_string(),
+            ))
+            .unwrap();
+
+        queue_supervisor_intro_prompt(
+            &cas_dir,
+            "sup",
+            cas_mux::SupervisorCli::Claude,
+            &[],
+            Some("custom-config-factory"),
+        );
+
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue
+            .peek_for_targets(&["sup"], Some("custom-config-factory"), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .prompt
+                .contains("custom profile ambient memory sentinel"),
+            "custom-config supervisor launch must receive ambient context even when Claude skips SessionStart: {}",
+            rows[0].prompt
         );
     }
 

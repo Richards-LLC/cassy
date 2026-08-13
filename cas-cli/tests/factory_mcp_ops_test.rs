@@ -733,6 +733,40 @@ async fn test_sync_all_workers_explicit_id_beats_unrelated_in_progress_epic_cas_
 }
 
 #[tokio::test]
+async fn test_sync_all_workers_explicit_epic_uses_recorded_parent_branch_cas_580e() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-sync-recorded-parent"),
+        ("HOME", home.path().to_str().unwrap()),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "sync-recorded-parent-worker";
+    let _worker_path = init_sync_repo(&env, worker);
+    env.register_worker_in_session(worker, "session-sync-recorded-parent");
+    add_epic_with_id(&env, "cas-580e-parent", TaskStatus::Open, "epic/requested");
+    let store = env.task_store();
+    let mut epic = store.get("cas-580e-parent").expect("get epic fixture");
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "main".to_string(),
+    });
+    store.update(&epic).expect("record integration parent");
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some(epic.id);
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("explicit epic should resolve its recorded parent");
+    let text = get_text(&result);
+    assert!(
+        text.contains("Sync target: main"),
+        "sync must target the epic's recorded parent, not epic/requested: {text}"
+    );
+}
+
+#[tokio::test]
 async fn test_sync_all_workers_invalid_explicit_id_has_zero_worker_mutations_cas_bfa5() {
     let home = TempDir::new().expect("home tempdir");
     let _guard = EnvGuard::set(&[

@@ -835,7 +835,7 @@ fn resolve_sync_all_workers_target(
     use crate::store::open_task_store;
     use cas_types::TaskType;
 
-    fn epic_branch(
+    fn epic_parent_branch(
         task_store: &dyn crate::store::TaskStore,
         epic_id: &str,
         source: &str,
@@ -854,9 +854,16 @@ fn resolve_sync_all_workers_target(
                 "sync_all_workers: {source} epic {epic_id} is Closed"
             ));
         }
-        epic.branch
-            .filter(|branch| !branch.trim().is_empty())
-            .ok_or_else(|| format!("sync_all_workers: {source} epic {epic_id} has no branch"))
+        epic.deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.trim())
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+            .or_else(|| epic.branch.filter(|branch| !branch.trim().is_empty()))
+            .ok_or_else(|| {
+                format!("sync_all_workers: {source} epic {epic_id} has no parent branch")
+            })
     }
 
     if let Some(raw_id) = req.id.as_deref() {
@@ -866,7 +873,7 @@ fn resolve_sync_all_workers_target(
         }
         let task_store = open_task_store(cas_root)
             .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
-        return epic_branch(task_store.as_ref(), epic_id, "explicit");
+        return epic_parent_branch(task_store.as_ref(), epic_id, "explicit");
     }
 
     if let Some(branch) = req
@@ -936,7 +943,7 @@ fn resolve_sync_all_workers_target(
         if let Some(epic_id) = focused_epic_id {
             let task_store = open_task_store(cas_root)
                 .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
-            return epic_branch(task_store.as_ref(), epic_id, "focused");
+            return epic_parent_branch(task_store.as_ref(), epic_id, "focused");
         }
     }
 
@@ -5007,9 +5014,9 @@ pub(crate) fn normalize_branch_ref(reference: &str) -> String {
 
 /// Resolve which branch a task integrates into.
 ///
-/// Order (cas-5884): parent epic branch (the lane's integration branch) wins,
-/// then an explicit `work_target.target_branch`, else the task is standalone
-/// and belongs on trunk. An epic task itself uses its own branch.
+/// Order (cas-580e): an epic's recorded integration parent wins, then its
+/// coordination branch; a task's own target is next, else it is standalone
+/// and belongs on trunk.
 fn task_branch_affinity(
     store: &dyn crate::store::TaskStore,
     task: &cas_types::Task,
@@ -5021,13 +5028,23 @@ fn task_branch_affinity(
             .map(str::to_string)
     }
 
+    fn epic_parent_or_branch(epic: &cas_types::Task) -> Option<String> {
+        epic.deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.trim())
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+            .or_else(|| non_empty(epic.branch.as_ref()))
+    }
+
     if task.task_type == cas_types::TaskType::Epic
-        && let Some(branch) = non_empty(task.branch.as_ref())
+        && let Some(branch) = epic_parent_or_branch(task)
     {
         return BranchAffinity::Branch(branch);
     }
     if let Ok(Some(epic)) = store.get_parent_epic(&task.id)
-        && let Some(branch) = non_empty(epic.branch.as_ref())
+        && let Some(branch) = epic_parent_or_branch(&epic)
     {
         return BranchAffinity::Branch(branch);
     }
@@ -12385,6 +12402,40 @@ mod sync_safety_tests {
                 false,
             ),
             SyncGate::Proceed
+        );
+    }
+
+    #[test]
+    fn worker_affinity_uses_its_epics_recorded_parent_branch_cas_580e() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-580e-epic".into(), "stacked epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/stale-base".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:active-project".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let mut child = cas_types::Task::new("cas-580e-child".into(), "worker task".into());
+        child.assignee = Some("worker".into());
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id.clone(),
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            task_branch_affinity(store.as_ref(), &child),
+            BranchAffinity::Branch("main".into()),
+            "sync must use the epic's declared integration parent, not its stale coordination ref"
         );
     }
 

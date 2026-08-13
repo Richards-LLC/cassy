@@ -438,8 +438,9 @@ pub(crate) fn build_large_artifact_staging_banner(config: &Config) -> Option<Str
 
 #[cfg(test)]
 mod large_artifact_staging_tests {
-    use crate::test_support::TestEnvGuard;
     use super::*;
+    use crate::test_support::TestEnvGuard;
+    use crate::types::{Agent, AgentRole};
 
     /// Role environment for a SessionStart test, rooted in a temporary HOME.
     ///
@@ -531,6 +532,34 @@ mod large_artifact_staging_tests {
         assert!(context.contains(
             "Stage large artifacts (>1GB) in /mnt/datacube/staging — /tmp is tmpfs on this host."
         ));
+    }
+
+    #[test]
+    fn supervisor_session_start_warns_about_active_peer_but_not_itself() {
+        let with_peer = tempfile::tempdir().unwrap();
+        let peer_store = crate::store::open_agent_store(with_peer.path()).unwrap();
+        peer_store.init().unwrap();
+        let peer = Agent::new_with_role(
+            "peer-supervisor-session".to_string(),
+            "peer-supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        peer_store.register(&peer).unwrap();
+
+        let mut env = staging_env("supervisor");
+        env.set("CAS_AGENT_NAME", "current-supervisor");
+        let input = session_input(with_peer.path().to_str().unwrap());
+        let context = additional_context(handle_session_start(&input, Some(with_peer.path())).unwrap());
+        assert!(context.contains("CONCURRENT SUPERVISORS ACTIVE: peer-supervisor"));
+        assert!(context.contains("Planning under a shared epic can race."));
+
+        let no_peer = tempfile::tempdir().unwrap();
+        let input = session_input(no_peer.path().to_str().unwrap());
+        let context = additional_context(handle_session_start(&input, Some(no_peer.path())).unwrap());
+        assert!(
+            !context.contains("CONCURRENT SUPERVISORS ACTIVE"),
+            "a lone supervisor must not receive a false concurrent-supervisor warning: {context}"
+        );
     }
 
     /// Production-shape regression for cas-066a: the real worker guidance,

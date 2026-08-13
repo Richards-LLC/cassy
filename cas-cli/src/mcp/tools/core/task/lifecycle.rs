@@ -1258,6 +1258,7 @@ mod factory_epic_owner_tests {
 #[cfg(test)]
 mod related_recall_response_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::Entry;
     use tempfile::TempDir;
 
@@ -1305,6 +1306,26 @@ mod related_recall_response_tests {
             demo_statement: None,
             execution_note: None,
             epic: None,
+            depth: None,
+        }
+    }
+
+    fn child_request(title: &str, epic: String) -> TaskCreateRequest {
+        TaskCreateRequest {
+            title: title.to_string(),
+            description: Some("A child planned under the test epic.".to_string()),
+            priority: 2,
+            task_type: "task".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: Some(epic),
             depth: None,
         }
     }
@@ -1375,6 +1396,84 @@ mod related_recall_response_tests {
             format!("Created task: {} - Unique no-match epic (P2)", task.id),
             "no-match receipt must remain byte-identical to the legacy response"
         );
+    }
+
+    #[tokio::test]
+    async fn recent_other_epic_plan_requires_confirmation_before_creating_child() {
+        let temp = TempDir::new().expect("temp project");
+        let mut env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_SESSION_ID", Some("planning-supervisor-one")),
+            ("CAS_AGENT_NAME", Some("planning-supervisor-one")),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
+        ]);
+        let first = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        first
+            .cas_task_create(Parameters(epic_request(
+                "Planning race test epic",
+                "Exercise the concurrent-supervisor planning lock.",
+            )))
+            .await
+            .expect("create epic");
+        let epic_id = first
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Planning race test epic")
+            .expect("created epic")
+            .id;
+        first
+            .cas_task_create(Parameters(child_request(
+                "First supervisor child",
+                epic_id.clone(),
+            )))
+            .await
+            .expect("first supervisor plans child");
+
+        env.set("CAS_SESSION_ID", "planning-supervisor-two");
+        env.set("CAS_AGENT_NAME", "planning-supervisor-two");
+        let second = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let warning = second
+            .cas_task_create(Parameters(child_request(
+                "Second supervisor child",
+                epic_id.clone(),
+            )))
+            .await
+            .expect_err("recent competing plan must require confirmation");
+        assert!(
+            warning.message.contains("PLANNING RACE WARNING")
+                && warning.message.contains("planning-supervisor-one")
+                && warning.message.contains("confirm_warning=true"),
+            "unexpected warning: {}",
+            warning.message
+        );
+
+        let mut duplicate_request =
+            child_request("First supervisor child follow-up", epic_id.clone());
+        duplicate_request.epic = None;
+        let duplicate = second
+            .cas_task_create(Parameters(duplicate_request))
+            .await
+            .expect_err("near-identical open title must require confirmation");
+        assert!(
+            duplicate.message.contains("DUPLICATE TASK WARNING")
+                && duplicate.message.contains("First supervisor child")
+                && duplicate.message.contains("confirm_warning=true"),
+            "unexpected duplicate warning: {}",
+            duplicate.message
+        );
+
+        second
+            .cas_task_create_with_target(
+                child_request("Intentional second supervisor child", epic_id),
+                None,
+                None,
+                true,
+            )
+            .await
+            .expect("explicit confirmation permits the intentional child");
     }
 
     #[test]

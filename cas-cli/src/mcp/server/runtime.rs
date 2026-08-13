@@ -103,17 +103,18 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // auto-respawn path gives us no diagnostic trail.
     install_serve_panic_hook(&cas_root);
 
-    // This is deliberately before every background path and every store
-    // opener. All MCP configurations — including freshly spawned factory
-    // workers — enter through `cas serve` and therefore share this boundary.
-    ensure_mcp_schema(&cas_root)?;
-
     // Parent-death watchdog (cas-82d6c). Armed before any store is opened so a
-    // startup that wedges *before* the transport exists is covered too — an
-    // orphan stuck in eager init holds the same write-side database fds as one
-    // stuck in the serve loop. See `parent_watchdog` for why stdin EOF is not
-    // sufficient and why the server reaps itself rather than being reaped.
+    // startup that wedges *before* the transport exists is covered too. It
+    // must also precede schema migration: an orphaned worker can otherwise
+    // hold the database mid-migration indefinitely. See `parent_watchdog` for
+    // why stdin EOF is not sufficient and why the server reaps itself rather
+    // than being reaped.
     let parent_watchdog = crate::mcp::server::parent_watchdog::spawn();
+
+    // This is deliberately before every remaining background path and every
+    // store opener. All MCP configurations — including freshly spawned
+    // factory workers — enter through `cas serve` and share this boundary.
+    ensure_mcp_schema(&cas_root)?;
 
     // Register this repo in the host-scoped known_repos registry. Fires
     // every time `cas serve` starts in a directory with `.cas/`, catching
@@ -1230,6 +1231,25 @@ mod tests {
             "tasks",
             "terminal_outcome"
         ));
+    }
+
+    #[test]
+    fn casb123_mcp_startup_arms_parent_watchdog_before_schema_migration() {
+        let source = include_str!("runtime.rs");
+        let body = source
+            .split_once("async fn run_server_impl()")
+            .expect("run_server_impl source")
+            .1;
+        let watchdog = body
+            .find("parent_watchdog::spawn()")
+            .expect("startup watchdog arm");
+        let migration = body
+            .find("ensure_mcp_schema(&cas_root)?")
+            .expect("startup schema check");
+        assert!(
+            watchdog < migration,
+            "parent watchdog must be armed before a schema migration can hold the database"
+        );
     }
 
     #[test]

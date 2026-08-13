@@ -1169,6 +1169,10 @@ pub(super) fn deferred_inbox_outcome(
 /// wrongly-silent pane loses at most one cadence tick.
 const INBOX_DRAIN_TURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
 
+fn delivery_stalled_threshold_i64(configured_secs: u64) -> i64 {
+    i64::try_from(configured_secs).unwrap_or(i64::MAX)
+}
+
 /// cas-ef14 (GH #139): a queue row whose payload was written into the
 /// recipient's Agent-Teams inbox and left pending because the wake was
 /// deferred.
@@ -1195,8 +1199,8 @@ impl FactoryDaemon {
         let factory = config.factory();
         let candidates = match queue.delivery_stalled_candidates(
             &self.session_name,
-            factory.delivery_stalled_priority_secs as i64,
-            factory.delivery_stalled_normal_secs as i64,
+            delivery_stalled_threshold_i64(factory.delivery_stalled_priority_secs),
+            delivery_stalled_threshold_i64(factory.delivery_stalled_normal_secs),
             50,
         ) {
             Ok(candidates) => candidates,
@@ -5429,6 +5433,19 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn casb123_delivery_stalled_threshold_clamps_before_i64_store_boundary() {
+        assert_eq!(
+            super::delivery_stalled_threshold_i64(10_u64.pow(12)),
+            10_i64.pow(12)
+        );
+        assert_eq!(
+            super::delivery_stalled_threshold_i64(u64::MAX),
+            i64::MAX,
+            "oversized unsigned config must not wrap negative at the store boundary"
+        );
+    }
 
     #[derive(Clone)]
     struct LogBuffer(Arc<Mutex<Vec<u8>>>);

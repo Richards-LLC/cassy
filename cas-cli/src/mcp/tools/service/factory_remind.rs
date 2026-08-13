@@ -96,6 +96,26 @@ impl CasService {
 
         let ttl_secs = req.remind_ttl_secs.unwrap_or(3600);
         let cross_session = req.cross_session.unwrap_or(false);
+        let task_id = req
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+
+        if let Some(task_id) = task_id {
+            let task_store = self.inner.open_task_store().map_err(|e| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Cannot open task store for reminder context: {e}"),
+                )
+            })?;
+            task_store.get(task_id).map_err(|e| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Cannot bind reminder to task {task_id}: {e}"),
+                )
+            })?;
+        }
 
         // cas-fcd4: bind event-based (and all) reminds to the registering factory
         // session so concurrent factories sharing cas.db do not cross-fire.
@@ -136,6 +156,7 @@ impl CasService {
                     session_id.as_deref(),
                     Some(&origin_session_id),
                     cross_session,
+                    task_id,
                 )
                 .map_err(|e| {
                     Self::error(
@@ -160,12 +181,17 @@ impl CasService {
             };
 
             let scope_desc = if cross_session {
-                format!(", cross-session opt-in; origin session: {origin_session_id}")
+                format!(
+                    ", explicit keep across session/task close; origin session: {origin_session_id}"
+                )
             } else {
                 ", session-scoped; cancelled when this session ends".to_string()
             };
+            let task_desc = task_id
+                .map(|id| format!(", task: {id}"))
+                .unwrap_or_default();
             Ok(Self::success(format!(
-                "Reminder #{id} set (time-based, fires in {time_desc}{target_desc}{scope_desc})\nMessage: {message}"
+                "Reminder #{id} set (time-based, fires in {time_desc}{target_desc}{task_desc}{scope_desc})\nMessage: {message}"
             )))
         } else {
             let event_type = req.remind_event.unwrap();
@@ -222,6 +248,7 @@ impl CasService {
                     session_id.as_deref(),
                     Some(&origin_session_id),
                     cross_session,
+                    task_id,
                 )
                 .map_err(|e| {
                     Self::error(
@@ -243,19 +270,24 @@ impl CasService {
 
             let session_desc = match (&session_id, cross_session) {
                 (Some(s), true) => format!(
-                    ", factory session: {s}, cross-session opt-in; origin session: {origin_session_id}"
+                    ", factory session: {s}, explicit keep across session/task close; origin session: {origin_session_id}"
                 ),
                 (Some(s), false) => format!(
                     ", factory session: {s}, session-scoped; cancelled when this session ends"
                 ),
                 (None, true) => {
-                    format!(", cross-session opt-in; origin session: {origin_session_id}")
+                    format!(
+                        ", explicit keep across session/task close; origin session: {origin_session_id}"
+                    )
                 }
                 (None, false) => ", session-scoped; cancelled when this session ends".to_string(),
             };
+            let task_desc = task_id
+                .map(|id| format!(", task: {id}"))
+                .unwrap_or_default();
 
             Ok(Self::success(format!(
-                "Reminder #{id} set (event-based, fires on {event_type}{filter_desc}{target_desc}{session_desc})\nMessage: {message}"
+                "Reminder #{id} set (event-based, fires on {event_type}{filter_desc}{target_desc}{task_desc}{session_desc})\nMessage: {message}"
             )))
         }
     }

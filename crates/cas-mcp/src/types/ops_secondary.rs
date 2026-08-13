@@ -724,9 +724,11 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// Task ID (for loop_start, worktree_create, spawn_workers)
+    /// Task ID (for loop_start, worktree_create, spawn_workers, or remind).
+    /// A reminder linked to this task is quarantined when it closes unless
+    /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only) — see spawn_workers-specific docs. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
+        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
@@ -973,10 +975,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
 
-    /// Allow a reminder to survive its creator's session end. This is an
-    /// explicit opt-in; delivery includes origin and creation-time context.
+    /// Explicitly keep a reminder across its creator's session end and a
+    /// linked task close. Delivery includes origin, creation-time, and task
+    /// status context.
     #[schemars(
-        description = "Opt in to a reminder surviving its creator session (default false). Cross-session deliveries include origin-session and created-at context."
+        description = "Explicitly keep a reminder across creator session end and linked task close (default false). Deliveries include origin-session, created-at, and linked-task status context."
     )]
     #[serde(default)]
     pub cross_session: Option<bool>,

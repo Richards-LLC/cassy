@@ -11,7 +11,7 @@
 use crate::support::*;
 use cas::mcp::tools::*;
 use cas::mcp::{CasCore, CasService};
-use cas::store::open_task_store;
+use cas::store::{ReminderTriggerType, open_reminder_store, open_task_store};
 use cas::types::TaskStatus;
 use rmcp::handler::server::wrapper::Parameters;
 use std::process::Command;
@@ -177,6 +177,65 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
          gates: {}",
         task.notes
     );
+}
+
+/// GH #276: a task close must quarantine its default reminders while retaining
+/// only the explicit cross-session/task-close opt-in.
+#[tokio::test]
+async fn task_close_quarantines_linked_reminders_unless_explicitly_kept() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+
+    let created = core
+        .cas_task_create(Parameters(create_req(
+            "reminder context task",
+            Some("light"),
+        )))
+        .await
+        .expect("task_create should succeed");
+    let id = extract_task_id(&extract_text(created))
+        .expect("should have task ID")
+        .to_string();
+    core.cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("task_start should succeed");
+
+    let reminders = open_reminder_store(&cas_dir).unwrap();
+    for keep in [false, true] {
+        reminders
+            .create_with_scope(
+                "worker-1",
+                None,
+                "follow up on transient draft",
+                ReminderTriggerType::Time,
+                Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+                None,
+                None,
+                3600,
+                None,
+                None,
+                keep,
+                Some(&id),
+            )
+            .unwrap();
+    }
+
+    core.cas_task_close(Parameters(TaskCloseRequest {
+        id: id.clone(),
+        reason: Some("The task is complete.".to_string()),
+        bypass_code_review: None,
+        code_review_findings: None,
+        search_manifest: None,
+        commit_receipt: None,
+    }))
+    .await
+    .expect("task close should succeed");
+
+    let remaining = reminders.list_pending("worker-1").unwrap();
+    assert_eq!(remaining.len(), 1, "only explicit keep may survive close");
+    assert!(remaining[0].cross_session);
+    assert_eq!(remaining[0].task_id.as_deref(), Some(id.as_str()));
 }
 
 /// Regression guard: a `depth=deep` (explicit) task still arms the jail.

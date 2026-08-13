@@ -1,0 +1,14 @@
+{
+  "wire_version": 1,
+  "status": "authorized",
+  "delivery_id": "75128f2d-845b-4d2b-9d42-ffdb74661ca2",
+  "invitation": {
+    "token": "base64url-32-random-bytes",
+    "hub_id": "machine-uuid",
+    "hub_url": "https://workstation.tail.example:443/",
+    "machine_label": "Studio workstation",
+    "controller_origin": "https://commander.example",
+    "scopes": ["machine-read", "session-read", "pane-read"],
+    "expires_at": "2026-08-11T20:11:30Z"
+  }
+}

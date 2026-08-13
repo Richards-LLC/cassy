@@ -37,6 +37,7 @@ pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
 pub mod factory_context_reset;
+pub mod factory_isolation;
 pub mod factory_preflight;
 pub mod factory_target_cache;
 pub mod fs_space;

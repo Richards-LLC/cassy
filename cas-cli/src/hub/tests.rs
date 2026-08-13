@@ -853,7 +853,9 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         DaemonConnector::new(SessionMultiplexer::new(4), events.clone()),
         events,
     );
-    let response = router(state)
+    let app = router(state);
+    let response = app
+        .clone()
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -886,8 +888,29 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("/commander/app.js"));
-    assert!(!html.contains("https://"));
+    let relay_metadata =
+        "name=\"cas-pairing-relay-origin\" content=\"https://petra-stella-cloud.vercel.app\"";
+    assert!(html.contains(relay_metadata));
+    assert!(
+        !html.replacen(relay_metadata, "", 1).contains("https://"),
+        "the reviewed pairing relay must be the embedded page's only external origin"
+    );
     assert!(!html.contains("<script>"), "inline scripts are forbidden");
+
+    let relay_response = app
+        .oneshot(
+            Request::post("/api/hub/pairing/requests")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        relay_response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the controller hub must not grow a pairing relay or control proxy"
+    );
 }
 
 #[tokio::test]

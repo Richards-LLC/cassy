@@ -1425,6 +1425,11 @@ mod related_recall_response_tests {
     async fn epic_create_bases_on_declared_staging_target_cas_3afc() {
         use std::process::Command;
 
+        // Work-target declaration writes to the host-scoped registry. Keep
+        // that registry private to this test so a populated developer HOME
+        // cannot mask the missing-schema failure seen in clean CI runners.
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("initialize isolated host registry");
         let temp = TempDir::new().expect("temp project");
         let repo = temp.path();
         let git = |args: &[&str]| {

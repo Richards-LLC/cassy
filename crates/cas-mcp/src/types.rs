@@ -140,7 +140,7 @@ pub struct MemoryRequest {
 pub struct TaskRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'start', 'close', 'cancel', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
+        description = "Action: 'create', 'proposal_inbox', 'proposal_accept', 'proposal_reject', 'proposal_reconcile', 'show', 'update', 'start', 'close', 'cancel', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
     )]
     pub action: String,
 
@@ -162,6 +162,25 @@ pub struct TaskRequest {
     #[schemars(description = "Task title for create")]
     #[serde(default)]
     pub title: Option<String>,
+
+    /// Explicit target canonical project ID for cross-project proposal actions.
+    #[schemars(
+        description = "Explicit canonical project ID. On create, presence selects the cross-project proposal path; never inferred from cwd."
+    )]
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Cloud proposal ID for accept/reject.
+    #[schemars(description = "Cloud proposal ID for proposal_accept or proposal_reject")]
+    #[serde(default)]
+    pub proposal_id: Option<String>,
+
+    /// Optional local origin task blocked by the proposed target task.
+    #[schemars(
+        description = "For cross-project create: local origin task ID that remains blocked until the accepted target task closes"
+    )]
+    #[serde(default)]
+    pub blocks_origin_task_id: Option<String>,
 
     /// Description (for create)
     #[schemars(description = "Task description")]
@@ -457,7 +476,9 @@ pub struct TaskRequest {
     pub depth: Option<String>,
 
     /// Explicit acknowledgement of a planning-race or duplicate-task warning on create.
-    #[schemars(description = "For action=create, confirm creation after CAS reports a recent competing epic plan or a high-similarity open task.")]
+    #[schemars(
+        description = "For action=create, confirm creation after CAS reports a recent competing epic plan or a high-similarity open task."
+    )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub confirm_warning: Option<bool>,
 

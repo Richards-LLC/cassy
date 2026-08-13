@@ -1,6 +1,7 @@
 mod dependencies;
 pub(crate) mod lifecycle;
 mod notes;
+mod proposals;
 mod query;
 pub(crate) mod repo_context;
 mod update;
@@ -42,6 +43,42 @@ pub(crate) fn ensure_no_open_blockers(
              Close those blocker tasks first, or remove an incorrect `blocks` dependency \
              with `task action=dep_remove id={task_id} to_id=<blocker-id> dep_type=blocks`.",
             blocker_ids.join(", ")
+        )),
+        data: None,
+    })
+}
+
+pub(crate) fn ensure_no_external_blockers(
+    cas_root: &std::path::Path,
+    task_id: &str,
+    action: &str,
+) -> Result<(), rmcp::ErrorData> {
+    let blockers = cas_store::ExternalTaskDependencyStore::open(cas_root)
+        .and_then(|store| store.list_blocking_for_task(task_id))
+        .map_err(|error| rmcp::ErrorData {
+            code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+            message: std::borrow::Cow::from(format!(
+                "Failed to check external blocking dependencies for task {task_id}: {error}"
+            )),
+            data: None,
+        })?;
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    let rendered = blockers
+        .iter()
+        .map(|blocker| {
+            format!(
+                "{} ({}, proposal {})",
+                blocker.target_task_id, blocker.resolution_state, blocker.proposal_id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(rmcp::ErrorData {
+        code: rmcp::model::ErrorCode::INVALID_PARAMS,
+        message: std::borrow::Cow::from(format!(
+            "Cannot {action} task {task_id}: cross-project blockers are unresolved: {rendered}. Reconcile after the target closes; a rejected handoff remains blocking until an operator removes or replaces it."
         )),
         data: None,
     })

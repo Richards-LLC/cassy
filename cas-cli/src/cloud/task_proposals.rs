@@ -95,6 +95,8 @@ pub struct CreateTaskProposalResponse {
 pub struct ExternalTaskDependency {
     pub origin_task_id: String,
     pub proposal_id: String,
+    #[serde(default)]
+    pub target_project_canonical_id: String,
     pub target_task_id: String,
     pub proposal_state: String,
     pub target_task_status: Option<String>,

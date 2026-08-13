@@ -2,7 +2,7 @@
 
 **Recommendation:** add a dedicated cloud proposal API and proposal store; do not route cross-project creation through generic task sync. The CLI must require an explicit `project=<canonical_id>`, gate the call to a registered supervisor/director, and let the cloud validate the shared-team grant, stamp authenticated provenance, hold the item in `proposed`, and materialize a normal `open` task only after a receiving supervisor accepts it.
 
-Status: design decided; implementation split at the cloud contract boundary
+Status: cloud contract and CLI client implemented; cloud push-side provenance preservation awaiting live confirmation
 
 Date: 2026-08-11
 
@@ -162,6 +162,15 @@ The local `tasks` table has no row-level `project_id`; its project boundary is t
 It must not pretend to row-filter on a column that does not exist.
 
 ## Current versus planned boundary
+
+The CLI half now exposes the selected design through the unified `task` MCP tool:
+
+- `create project=<target-canonical-id>` selects the proposal path; omitting `project` preserves local create.
+- `proposal_inbox`, `proposal_accept`, and `proposal_reject` keep receiving triage separate from ordinary task lists.
+- `proposal_reconcile project=<current-canonical-id>` projects cloud dependency signals locally; rejected handoffs remain blockers until an operator removes or replaces them.
+- `list scope=project` names the current canonical project database, `scope=all` documents its current-project equivalence, and `scope=global` is rejected.
+
+The origin canonical ID must be explicitly pinned in `.cas/config.toml`; the proposal path does not use the folder/git/cwd fallback chain. The registered supervisor/director check runs before cloud configuration is loaded or a network client is constructed.
 
 Current code already provides team membership validation, explicit project-scoped pulls, normal task sync, and receiving-side task mutations. The proposal API, proposal/dependency tables, CLI `project` parameter, triage actions, and external-dependency reconciliation are planned and must ship in the cloud-first order.
 

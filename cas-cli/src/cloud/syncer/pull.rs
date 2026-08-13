@@ -43,6 +43,62 @@ fn deserialize_pulled_entity<T: DeserializeOwned>(
         .map_err(|error| format!("{entity_type} deserialize error (id={id}): {error}"))
 }
 
+/// Persist proposal provenance visibly in the ordinary local task record.
+/// The cloud proposal row remains authoritative; this rendering is explicitly
+/// labeled and is refreshed whenever the materialized task is pulled.
+fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
+    const MARKER: &str = "Server-attested proposal provenance:";
+    let Some(raw_provenance) = raw.get("proposal_provenance").cloned() else {
+        return;
+    };
+    let Ok(provenance) =
+        serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(raw_provenance)
+    else {
+        return;
+    };
+    let server = &provenance.server_attested;
+    let client = &provenance.client_asserted;
+    let rendered = format!(
+        "{MARKER}\n  proposal_id: {}\n  target_task_id: {}\n  creator_user_id: {}\n  team_id: {}\n  origin_project_canonical_id: {}\n  target_project_canonical_id: {}\n  received_at: {}\n  client_request_id: {}\nClient-asserted proposal provenance:\n  origin_session_id: {}\n  origin_agent_id: {}\n  origin_agent_name: {}\n  origin_agent_role: {}\n  client_version: {}\n  client_build: {}",
+        server.proposal_id,
+        server.target_task_id,
+        server.creator_user_id,
+        server.team_id,
+        server.origin_project_canonical_id,
+        server.target_project_canonical_id,
+        server.received_at,
+        server.client_request_id,
+        client
+            .origin_session_id
+            .as_deref()
+            .unwrap_or("(not asserted)"),
+        client
+            .origin_agent_id
+            .as_deref()
+            .unwrap_or("(not asserted)"),
+        client
+            .origin_agent_name
+            .as_deref()
+            .unwrap_or("(not asserted)"),
+        client
+            .origin_agent_role
+            .as_deref()
+            .unwrap_or("(not asserted)"),
+        client.client_version.as_deref().unwrap_or("(not asserted)"),
+        client.client_build.as_deref().unwrap_or("(not asserted)"),
+    );
+    let notes = raw
+        .get("notes")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let prefix = notes.split(MARKER).next().unwrap_or_default().trim_end();
+    raw["notes"] = serde_json::Value::String(if prefix.is_empty() {
+        rendered
+    } else {
+        format!("{prefix}\n\n{rendered}")
+    });
+}
+
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
 /// project scope cannot be resolved.
 ///
@@ -363,7 +419,7 @@ impl CloudSyncer {
         }
 
         // Process tasks
-        for raw_task in body.tasks.unwrap_or_default() {
+        for mut raw_task in body.tasks.unwrap_or_default() {
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
                 continue;
             }
@@ -372,6 +428,7 @@ impl CloudSyncer {
             // close — apply it authoritatively rather than via the
             // timestamp-gated upsert.
             let web_close = is_web_close_tombstone(&raw_task);
+            render_task_proposal_provenance(&mut raw_task);
             let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -1139,10 +1196,11 @@ impl CloudSyncer {
         }
 
         // Process tasks
-        for raw_task in body.tasks.unwrap_or_default() {
+        for mut raw_task in body.tasks.unwrap_or_default() {
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
                 continue;
             }
+            render_task_proposal_provenance(&mut raw_task);
             let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
@@ -1235,6 +1293,7 @@ impl CloudSyncer {
 mod tests {
     use super::{
         PULL_PATH, build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
+        render_task_proposal_provenance,
     };
     use crate::types::Entry;
     use serde_json::json;
@@ -1254,6 +1313,40 @@ mod tests {
         assert!(error.contains("entry deserialize error"), "{error}");
         assert!(error.contains("id=p-malformed-created"), "{error}");
         assert!(error.contains("missing field `created`"), "{error}");
+    }
+
+    #[test]
+    fn materialized_task_renders_attested_and_asserted_provenance_visibly() {
+        let mut raw = json!({
+            "notes": "Receiver notes",
+            "proposal_provenance": {
+                "server_attested": {
+                    "proposal_id": "proposal-1",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "creator_user_id": "user-1",
+                    "team_id": "team-1",
+                    "origin_project_canonical_id": "origin",
+                    "target_project_canonical_id": "target",
+                    "received_at": "2026-08-13T12:00:00Z",
+                    "client_request_id": "request-1"
+                },
+                "client_asserted": {
+                    "origin_session_id": "session-1",
+                    "origin_agent_id": "agent-1",
+                    "origin_agent_name": "supervisor",
+                    "origin_agent_role": "supervisor",
+                    "client_version": "2.65.0",
+                    "client_build": "deadbeef"
+                }
+            }
+        });
+        render_task_proposal_provenance(&mut raw);
+        let notes = raw["notes"].as_str().unwrap();
+        assert!(notes.contains("Server-attested proposal provenance:"));
+        assert!(notes.contains("creator_user_id: user-1"));
+        assert!(notes.contains("Client-asserted proposal provenance:"));
+        assert!(notes.contains("origin_agent_role: supervisor"));
+        assert!(notes.starts_with("Receiver notes"));
     }
 
     // cas-0be9: the pull URL builder must FAIL CLOSED when the project scope

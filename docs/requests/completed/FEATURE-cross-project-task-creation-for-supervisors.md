@@ -5,13 +5,18 @@ date: 2026-08-07
 priority: P2
 ---
 
-> **Disposition (2026-08-11, cas-a0ba):** DESIGN COMPLETE — the authorization predicate,
-> proposal/triage flow, provenance schema, and cross-project dependency projection are decided in
+> **Disposition (2026-08-13, cas-e0c9):** IMPLEMENTED — the authorization predicate,
+> proposal/triage flow, provenance schema, and cross-project dependency projection are defined in
 > [`docs/specs/2026-08-11-cross-project-task-proposals.md`](../../specs/2026-08-11-cross-project-task-proposals.md).
-> The required cloud contract is filed as
+> The shipped CLI mechanism is `task action=create project=<target-canonical-id>` plus the dedicated
+> `proposal_inbox`, `proposal_accept`, `proposal_reject`, and `proposal_reconcile` actions. Pending
+> proposals never enter the local task table; optional origin blockers live in the
+> `external_task_dependencies` projection and unblock only after reconciliation reports the accepted
+> target task closed. The cloud contract is tracked at
 > [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44);
-> CLI implementation is intentionally split to a successor gated on that endpoint. Original CAS
-> issue: [#171](https://github.com/pippenz/cas/issues/171).
+> create/triage/dependency endpoints are live, while authoritative push-side preservation of the
+> materialized task's provenance copy remains a cloud hardening gate. Original CAS issue:
+> [#171](https://github.com/pippenz/cas/issues/171).
 
 # Feature Request: let supervisors create tasks in other projects, when appropriate and authorized
 

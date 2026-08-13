@@ -227,6 +227,8 @@ impl CasService {
         use crate::mcp::tools::TaskCreateRequest;
         let target_repo = req.target_repo.clone();
         let target_branch = req.target_branch.clone();
+        let target_project = req.project.clone();
+        let blocks_origin_task_id = req.blocks_origin_task_id.clone();
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -250,6 +252,16 @@ impl CasService {
             epic: req.epic,
             depth: req.depth,
         };
+        if let Some(target_project) = target_project {
+            return self
+                .inner
+                .cas_task_proposal_create(
+                    inner_req,
+                    &target_project,
+                    blocks_origin_task_id.as_deref(),
+                )
+                .await;
+        }
         self.inner
             .cas_task_create_with_target(
                 inner_req,
@@ -257,6 +269,79 @@ impl CasService {
                 target_branch.as_deref(),
                 req.confirm_warning.unwrap_or(false),
             )
+            .await
+    }
+
+    pub(super) async fn task_proposal_inbox(
+        &self,
+        req: TaskRequest,
+    ) -> Result<CallToolResult, McpError> {
+        self.inner
+            .cas_task_proposal_inbox(req.project.as_deref().ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "project required for proposal_inbox",
+                )
+            })?)
+            .await
+    }
+
+    pub(super) async fn task_proposal_accept(
+        &self,
+        req: TaskRequest,
+    ) -> Result<CallToolResult, McpError> {
+        self.inner
+            .cas_task_proposal_accept(
+                req.proposal_id.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "proposal_id required for proposal_accept",
+                    )
+                })?,
+                req.project.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "project required for proposal_accept",
+                    )
+                })?,
+            )
+            .await
+    }
+
+    pub(super) async fn task_proposal_reject(
+        &self,
+        req: TaskRequest,
+    ) -> Result<CallToolResult, McpError> {
+        self.inner
+            .cas_task_proposal_reject(
+                req.proposal_id.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "proposal_id required for proposal_reject",
+                    )
+                })?,
+                req.project.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "project required for proposal_reject",
+                    )
+                })?,
+                req.reason.as_deref(),
+            )
+            .await
+    }
+
+    pub(super) async fn task_proposal_reconcile(
+        &self,
+        req: TaskRequest,
+    ) -> Result<CallToolResult, McpError> {
+        self.inner
+            .cas_task_proposal_reconcile(req.project.as_deref().ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "project required for proposal_reconcile",
+                )
+            })?)
             .await
     }
 

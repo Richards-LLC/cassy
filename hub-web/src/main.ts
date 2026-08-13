@@ -5,6 +5,7 @@ import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
+import { pairingCleanupFailureUpdate } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
@@ -140,12 +141,23 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       isCurrent: () => pairingOperations.isCurrent(operation),
     });
   } catch (error) {
-    pairingExchangeInFlight = false;
     if (error instanceof PairingCleanupError) {
-      pendingPairingStore.clear();
-      pendingPairing = null;
-      pairingDraft = createPairingDraft(location.origin);
-      pairingStatus = error.message;
+      const update = pairingCleanupFailureUpdate({
+        coordinator: pairingOperations,
+        operation,
+        expectedPending: invitation,
+        current: { pendingPairing, pairingDraft, exchangeInFlight: pairingExchangeInFlight, status: pairingStatus },
+        cleanupMessage: error.message,
+        resetDraft: () => createPairingDraft(location.origin),
+      });
+      if (!update) return false;
+      const cleared = pendingPairingStore.clear();
+      pendingPairing = update.pendingPairing;
+      pairingDraft = update.pairingDraft;
+      pairingExchangeInFlight = update.exchangeInFlight;
+      pairingStatus = cleared.failClosed
+        ? `${update.status}${cleared.persistentRemovalFailed ? " Browser storage removal was denied; the cancelled request is durably blocked." : ""}`
+        : `${update.status} Browser storage could not durably block the cancelled request.`;
       render(false);
       throw error;
     }
@@ -156,6 +168,7 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       }
       return false;
     }
+    pairingExchangeInFlight = false;
     if (error instanceof PairingExchangeError) {
       pairingOperations.invalidate();
       pendingPairingStore.clear();
@@ -266,12 +279,18 @@ function cancelPendingPairing(): void {
   const verifiesCleanup = pairingExchangeInFlight;
   document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
   pairingOperations.invalidate();
-  pendingPairingStore.clear();
+  const cleared = pendingPairingStore.clear();
   pendingPairing = null;
   pairingCreateInFlight = false;
   pairingExchangeInFlight = false;
   pairingDraft = createPairingDraft(location.origin);
-  pairingStatus = verifiesCleanup ? "Cancelling pairing and verifying durable local cleanup…" : "Pairing cancelled.";
+  pairingStatus = !cleared.failClosed
+    ? "Pairing cancellation could not durably block the request; keep this page open and retry after storage access is restored."
+    : verifiesCleanup
+      ? "Cancelling pairing and verifying durable local cleanup…"
+      : cleared.persistentRemovalFailed
+        ? "Pairing cancelled. Browser storage removal was denied, so the request was durably blocked."
+        : "Pairing cancelled.";
   stopPairingTimers();
   render(false);
 }

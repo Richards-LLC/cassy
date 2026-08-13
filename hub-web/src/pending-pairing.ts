@@ -1,6 +1,7 @@
 import type { Scope } from "./types";
 
 const STORAGE_KEY = "cas.commander.pending-pairing.v1";
+const CLEARED_TOMBSTONE = '{"kind":"cleared"}';
 
 export interface PendingRelayRequest {
   kind: "relay-request";
@@ -34,6 +35,13 @@ export interface PendingInvitation {
 export type PendingPairing = PendingRelayRequest | PendingInvitation;
 
 type PairingStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+export interface PendingPairingClearResult {
+  /** `removeItem` was denied, so a tombstone rather than deletion was persisted. */
+  persistentRemovalFailed: boolean;
+  /** Reload cannot resume the cancelled request from the persistent store. */
+  failClosed: boolean;
+}
 
 class MemoryPairingStorage implements PairingStorage {
   private readonly values = new Map<string, string>();
@@ -81,6 +89,7 @@ export class PendingPairingStore {
       raw = this.fallback.getItem(STORAGE_KEY);
     }
     if (!raw) return null;
+    if (raw === CLEARED_TOMBSTONE) return null;
     try {
       const value: unknown = JSON.parse(raw);
       if (!isPendingPairing(value)) throw new Error("invalid pending pairing");
@@ -107,9 +116,20 @@ export class PendingPairingStore {
     return invitation;
   }
 
-  clear(): void {
+  clear(): PendingPairingClearResult {
     this.fallback.removeItem(STORAGE_KEY);
-    try { this.storage?.removeItem(STORAGE_KEY); } catch { /* private storage can be denied */ }
+    try {
+      this.storage?.removeItem(STORAGE_KEY);
+      return { persistentRemovalFailed: false, failClosed: true };
+    } catch {
+      try {
+        this.storage?.setItem(STORAGE_KEY, CLEARED_TOMBSTONE);
+        return { persistentRemovalFailed: true, failClosed: true };
+      } catch {
+        // Keep the current page clear and let the caller surface that reload safety is unknown.
+        return { persistentRemovalFailed: true, failClosed: false };
+      }
+    }
   }
 }
 

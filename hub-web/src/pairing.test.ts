@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
+import { pairingCleanupFailureUpdate } from "./pairing-cleanup";
+import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { PendingPairingStore, pendingPairingStoreFor } from "./pending-pairing";
 import {
@@ -282,6 +283,19 @@ describe("wire-v1 reverse pairing", () => {
     expect(store.load()).toBeNull();
   });
 
+  it("writes a fail-closed tombstone when only sessionStorage removal is denied", () => {
+    const storage = new MemoryStorage();
+    storage.removeItem = () => { throw new DOMException("denied", "SecurityError"); };
+    const firstPage = new PendingPairingStore(storage);
+    firstPage.save(request);
+
+    const result = firstPage.clear();
+
+    expect(result).toMatchObject({ persistentRemovalFailed: true, failClosed: true });
+    expect([...storage.values.values()].join("\n")).not.toContain(request.pollSecret);
+    expect(new PendingPairingStore(storage).load()).toBeNull();
+  });
+
   it.each(["cancel", "expiry"])("invalidates a deferred poll on %s before it can restore secrets", async () => {
     const operations = new PairingOperationCoordinator();
     const generation = operations.replace();
@@ -413,6 +427,90 @@ describe("wire-v1 reverse pairing", () => {
 
     await expect(exchange).rejects.toMatchObject({ name: "PairingCleanupError" });
     await expect(catalog.snapshot()).resolves.toMatchObject({ machines: [], pendingCleanup: 1 });
+  });
+
+  it("keeps a replacement request and draft when an older cleanup rejection settles last", async () => {
+    const operations = new PairingOperationCoordinator();
+    const operation = operations.begin(operations.replace());
+    const persistStarted = deferred<void>();
+    const releasePersist = deferred<void>();
+    const oldInvitation = {
+      kind: "invitation" as const,
+      token: "old-one-time-token",
+      hubId: "machine-uuid",
+      hubUrl: "https://workstation.tail.example",
+      controllerOrigin: request.controllerOrigin,
+      scopes: ["machine-read"] as const,
+    };
+    const exchange = exchangePendingPairing({
+      invitation: oldInvitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => response(200, { device_id: "old-device", credential_id: "old-credential", credential: "old-opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: operation.generation,
+      stagePersisted: async () => { persistStarted.resolve(); await releasePersist.promise; },
+      activatePersisted: async () => true,
+      rollbackPersisted: async () => { throw new Error("durable cleanup rejected"); },
+      signal: operation.signal,
+      isCurrent: () => operations.isCurrent(operation),
+    });
+
+    await persistStarted.promise;
+    operations.invalidate();
+    const replacement = { ...request, pairingRequestId: "replacement-request", pollSecret: "replacement-poll-secret" };
+    operations.replace();
+    const replacementDraft = { ...createPairingDraft(request.controllerOrigin), email: "replacement@example.com" };
+    const current = {
+      pendingPairing: replacement,
+      pairingDraft: replacementDraft,
+      exchangeInFlight: false,
+      status: "Waiting for the replacement machine…",
+    };
+    releasePersist.resolve();
+
+    const cleanupError = await exchange.catch((error: unknown) => error);
+    expect(cleanupError).toBeInstanceOf(PairingCleanupError);
+    expect(pairingCleanupFailureUpdate({
+      coordinator: operations,
+      operation,
+      expectedPending: oldInvitation,
+      current,
+      cleanupMessage: (cleanupError as Error).message,
+      resetDraft: () => createPairingDraft(request.controllerOrigin),
+    })).toBeNull();
+    expect(current.pendingPairing).toEqual(replacement);
+    expect(current.pendingPairing.pollSecret).toBe("replacement-poll-secret");
+    expect(current.pairingDraft).toEqual(replacementDraft);
+    expect(current.status).toBe("Waiting for the replacement machine…");
+  });
+
+  it("applies a cleanup failure only to its current pending invitation", () => {
+    const operations = new PairingOperationCoordinator();
+    const operation = operations.begin(operations.replace());
+    const invitation = {
+      kind: "invitation" as const,
+      token: "one-time-token",
+      hubId: "machine-uuid",
+    };
+    const current = {
+      pendingPairing: invitation,
+      pairingDraft: { ...createPairingDraft(request.controllerOrigin), email: "current@example.com" },
+      exchangeInFlight: true,
+      status: "Creating this browser credential…",
+    };
+
+    expect(pairingCleanupFailureUpdate({
+      coordinator: operations,
+      operation,
+      expectedPending: invitation,
+      current,
+      cleanupMessage: "durable cleanup is pending",
+      resetDraft: () => createPairingDraft(request.controllerOrigin),
+    })).toEqual({
+      pendingPairing: null,
+      pairingDraft: createPairingDraft(request.controllerOrigin),
+      exchangeInFlight: false,
+      status: "durable cleanup is pending",
+    });
   });
 
   it("does not persist a credential when a deferred exchange response arrives after cancellation", async () => {

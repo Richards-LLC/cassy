@@ -139,28 +139,21 @@ async fn task_show_renders_work_target_and_explicit_trunk_fallback_cas_0094() {
     let (temp, core) = setup_cas();
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
 
-    let mut targeted = cas::types::Task::new(
-        "cas-targeted-show".to_string(),
-        "Targeted task".to_string(),
-    );
+    let mut targeted =
+        cas::types::Task::new("cas-targeted-show".to_string(), "Targeted task".to_string());
     targeted.deliverables.work_target = Some(cas::types::WorkTarget {
         repo_selector: "project:gabber-studio".to_string(),
         target_branch: "staging".to_string(),
     });
     task_store.add(&targeted).expect("add targeted task");
 
-    let fallback = cas::types::Task::new(
-        "cas-fallback-show".to_string(),
-        "Fallback task".to_string(),
-    );
+    let fallback =
+        cas::types::Task::new("cas-fallback-show".to_string(), "Fallback task".to_string());
     task_store.add(&fallback).expect("add fallback task");
 
     let service = CasService::new(core, None);
     for (task_id, expected) in [
-        (
-            targeted.id,
-            "Target: project:gabber-studio @ staging",
-        ),
+        (targeted.id, "Target: project:gabber-studio @ staging"),
         (fallback.id, "Target: (none — trunk fallback)"),
     ] {
         let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({

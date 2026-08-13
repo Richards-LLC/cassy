@@ -401,4 +401,31 @@ mod tests {
         let escalation = granted_scopes(&requested, Some(&["hub:admin".to_owned()])).unwrap_err();
         assert!(escalation.to_string().contains("may reduce"));
     }
+
+    #[test]
+    fn loopback_fallback_requires_a_literal_http_loopback_origin() {
+        for origin in [
+            "http://127.0.0.1",
+            "http://127.42.0.1:42759",
+            "http://[::1]:42759",
+        ] {
+            assert!(is_loopback_origin(origin), "{origin}");
+        }
+
+        for origin in [
+            "http://127.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1@evil.example",
+            "http://attacker@127.0.0.1",
+            "http://127.0.0.1/pair",
+            "http://[::1]/pair",
+            "http://127.0.0.1?next=https://evil.example",
+            "http://127.0.0.1#fragment",
+            "http://localhost:42759",
+            "http://192.168.1.1:42759",
+            "https://127.0.0.1:42759",
+        ] {
+            assert!(!is_loopback_origin(origin), "{origin}");
+        }
+    }
 }

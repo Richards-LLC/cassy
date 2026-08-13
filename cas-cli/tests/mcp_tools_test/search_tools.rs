@@ -139,6 +139,97 @@ async fn test_search_with_content() {
 }
 
 #[tokio::test]
+async fn cas_57e5_colon_bearing_free_text_queries_return_results() {
+    let (_temp, service) = setup_cas();
+    service
+        .cas_remember(Parameters(RememberRequest {
+            scope: "project".to_string(),
+            content: "test colon handling 12:49 https://example.invalid/path foo::bar".to_string(),
+            entry_type: "learning".to_string(),
+            tags: None,
+            title: None,
+            importance: 0.5,
+            valid_from: None,
+            valid_until: None,
+            team_id: None,
+            bypass_overlap: None,
+            mode: None,
+            expected_updated_at: None,
+            personal: None,
+        }))
+        .await
+        .expect("remember should succeed");
+
+    for query in [
+        "test colon handling 12:49",
+        "https://example.invalid/path",
+        "foo::bar",
+    ] {
+        let result = service
+            .cas_search(Parameters(SearchRequest {
+                scope: "all".to_string(),
+                query: query.to_string(),
+                doc_type: Some("entry".to_string()),
+                limit: 10,
+                tags: None,
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{query:?} must not fail parsing: {error}"));
+        assert!(
+            extract_text(result).contains("[Entry]"),
+            "expected literal query {query:?} to return the remembered entry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn artifact_fixture_content_is_searchable_after_backfill() {
+    let (temp, service) = setup_cas();
+    let artifacts_root = temp.path().join("durable-artifacts");
+    let task_id = "cas-artifact-fixture";
+    let artifact = artifacts_root.join(task_id).join("SEND-LOG.md");
+    std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    std::fs::write(
+        &artifact,
+        "SES MessageId: artifact-fixture-unique-message-id-292",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join(".cas/config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n",
+            artifacts_root.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    service
+        .cas_reindex(Parameters(ReindexRequest {
+            bm25: true,
+            embeddings: false,
+            missing_only: false,
+        }))
+        .await
+        .expect("artifact backfill should succeed");
+
+    let result = service
+        .cas_search(Parameters(SearchRequest {
+            scope: "project".to_string(),
+            query: "artifact-fixture-unique-message-id-292".to_string(),
+            doc_type: Some("artifact".to_string()),
+            limit: 10,
+            tags: None,
+        }))
+        .await
+        .expect("artifact search should succeed");
+
+    let output = extract_text(result);
+    assert!(output.contains("[Artifact]"));
+    assert!(output.contains(task_id));
+    assert!(output.contains(artifact.to_str().unwrap()));
+}
+
+#[tokio::test]
 async fn cas_4caa_expired_memory_is_excluded_from_search_recall() {
     let (_temp, service) = setup_cas();
     let request = RememberRequest {

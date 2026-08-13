@@ -44,6 +44,14 @@ const RELATED_RECALL_CHAR_CAP: usize = 1_200;
 const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
 const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
 
+fn no_code_external_ref_guidance(task: &Task) -> &'static str {
+    if task.execution_note.as_deref() == Some("no-code") {
+        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
+    } else {
+        ""
+    }
+}
+
 fn title_terms(title: &str) -> std::collections::HashSet<String> {
     title
         .split(|c: char| !c.is_alphanumeric())
@@ -535,11 +543,12 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}",
+            "Created task: {} - {} (P{}){}{}",
             id,
             task.title,
             task.priority.0,
-            branch_info.unwrap_or_default() + &related_context
+            branch_info.unwrap_or_default() + &related_context,
+            no_code_external_ref_guidance(&task),
         )))
     }
 
@@ -1188,12 +1197,13 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}{}{}{}{}",
+                "Started task: {} - {}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 claim_info.unwrap_or_default(),
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 own_notes,
+                no_code_external_ref_guidance(&task),
                 push_note,
             );
             // `truncate_str` appends three bytes when it truncates, hence the
@@ -1204,7 +1214,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}{}{}{}{}{}{}{}",
+            "Started task: {} - {}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             claim_info.unwrap_or_default(),
@@ -1216,6 +1226,7 @@ impl CasCore {
             wt_info,
             sibling_notes_info.unwrap_or_default(),
             Self::workflow_guidance(),
+            no_code_external_ref_guidance(&task),
             push_note,
         )))
     }
@@ -1406,6 +1417,95 @@ mod related_recall_response_tests {
             .expect("open search index")
             .index_entry(&entry)
             .expect("index memory");
+    }
+
+    /// cas-3afc (GH #298): an epic's branch must start at the explicitly
+    /// declared target, not the repository default branch.
+    #[tokio::test]
+    async fn epic_create_bases_on_declared_staging_target_cas_3afc() {
+        use std::process::Command;
+
+        let temp = TempDir::new().expect("temp project");
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@cas.test"]);
+        git(&["config", "user.name", "CAS Test"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/staging-target.git",
+        ]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").expect("seed");
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["checkout", "-q", "-b", "staging"]);
+        std::fs::write(repo.join("staging.txt"), "staging-only\n").expect("staging change");
+        git(&["add", "staging.txt"]);
+        git(&["commit", "-q", "-m", "staging baseline"]);
+        let staging_tip = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "staging"])
+                .current_dir(repo)
+                .output()
+                .expect("resolve staging")
+                .stdout,
+        )
+        .expect("staging sha utf8")
+        .trim()
+        .to_string();
+        git(&["checkout", "-q", "main"]);
+
+        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        core.cas_task_create_with_target(
+            epic_request("Staging delivery epic", "must begin at staging"),
+            Some(repo.to_str().expect("repo utf8")),
+            Some("staging"),
+            false,
+        )
+        .await
+        .expect("create staging epic");
+        let epic = core
+            .open_task_store()
+            .expect("open task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Staging delivery epic")
+            .expect("created epic");
+        let branch = epic.branch.expect("epic branch persisted");
+        let branch_tip = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", &branch])
+                .current_dir(repo)
+                .output()
+                .expect("resolve epic branch")
+                .stdout,
+        )
+        .expect("branch sha utf8")
+        .trim()
+        .to_string();
+
+        assert_eq!(branch_tip, staging_tip, "epic must be cut from staging");
+        assert_eq!(
+            epic.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some("staging")
+        );
     }
 
     #[tokio::test]

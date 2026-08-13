@@ -425,7 +425,7 @@ pub struct TaskRequest {
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
+        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,
@@ -491,7 +491,7 @@ pub struct TaskRequest {
 
     /// Explicit repository containing this task's code changes.
     #[schemars(
-        description = "Repository path containing this task's code changes (create/update)."
+        description = "Repository path containing this task's code changes (create/update). With update proof_scope_fix=true on an already-no-code parked task, pass an empty string to clear a stale code anchor."
     )]
     #[serde(default)]
     pub target_repo: Option<String>,

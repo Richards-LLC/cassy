@@ -1,5 +1,5 @@
 use crate::error::CoreError;
-use crate::search::{DocType, SearchIndex};
+use crate::search::{ArtifactDocument, DocType, SearchIndex, artifact_document_id};
 use cas_types::{Entry, Rule, Skill, Spec, Task};
 
 impl SearchIndex {
@@ -68,6 +68,47 @@ impl SearchIndex {
             .map_err(|e| CoreError::Other(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Index durable task artifacts with a single commit for a close-time scan
+    /// or a full backfill.
+    pub fn index_artifacts(&self, artifacts: &[ArtifactDocument]) -> Result<usize, CoreError> {
+        if artifacts.is_empty() {
+            return Ok(0);
+        }
+
+        let mut writer = self.writer()?;
+        for artifact in artifacts {
+            let id = artifact_document_id(&artifact.task_id, &artifact.path);
+            writer.delete_term(tantivy::Term::from_field_text(self.id_field, &id));
+
+            let mut doc = tantivy::TantivyDocument::new();
+            doc.add_text(self.id_field, &id);
+            doc.add_text(
+                self.content_field,
+                format!(
+                    "{} {} {} {}",
+                    artifact.task_id,
+                    artifact.path,
+                    std::path::Path::new(&artifact.path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default(),
+                    artifact.content
+                ),
+            );
+            doc.add_text(self.tags_field, "");
+            doc.add_text(self.type_field, &artifact.task_id);
+            doc.add_text(self.doc_type_field, DocType::Artifact.as_str());
+            doc.add_text(self.title_field, &artifact.path);
+            writer
+                .add_document(doc)
+                .map_err(|e| CoreError::Other(e.to_string()))?;
+        }
+        writer
+            .commit()
+            .map_err(|e| CoreError::Other(e.to_string()))?;
+        Ok(artifacts.len())
     }
 
     /// Index a single rule

@@ -52,6 +52,8 @@
 pub mod background;
 pub use background::{BackgroundIndexer, IndexingConfig, IndexingResult};
 
+pub mod artifacts;
+
 // Query and results caching
 pub mod cache;
 
@@ -116,6 +118,8 @@ pub enum DocType {
     /// channel's two row classes are distinguishable from the first response
     /// that can carry either; the table itself lands in M6.
     HistoryDoc,
+    /// A durable factory artifact under `[factory] artifacts_root/<task-id>/`.
+    Artifact,
 }
 
 impl DocType {
@@ -131,6 +135,7 @@ impl DocType {
             DocType::KnowledgePage => "knowledge_page",
             DocType::HistoryCommit => "history_commit",
             DocType::HistoryDoc => "history_doc",
+            DocType::Artifact => "artifact",
         }
     }
 
@@ -150,6 +155,7 @@ impl DocType {
                 Some(DocType::HistoryCommit)
             }
             "history_doc" | "historydoc" | "history" => Some(DocType::HistoryDoc),
+            "artifact" | "artifacts" => Some(DocType::Artifact),
             _ => None,
         }
     }
@@ -206,7 +212,7 @@ pub struct SearchOptions {
     pub tags: Vec<String>,
     /// Filter by entry types
     pub types: Vec<String>,
-    /// Filter by document types (entry, task, rule, skill, code_symbol)
+    /// Filter by document types (entry, task, rule, skill, artifact, code_symbol)
     pub doc_types: Vec<DocType>,
     /// Include archived entries
     pub include_archived: bool,
@@ -294,6 +300,62 @@ mod tests {
         let results = index.search(&opts, &entries).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "001");
+    }
+
+    #[test]
+    fn unknown_field_like_tokens_are_literal_terms_in_unified_search() {
+        let index = SearchIndex::in_memory().unwrap();
+        let entry = create_test_entry(
+            "001",
+            "test colon handling 12:49 https://example.invalid/path foo::bar",
+        );
+        index.index_entry(&entry).unwrap();
+
+        for query in [
+            "test colon handling 12:49",
+            "https://example.invalid/path",
+            "foo::bar",
+        ] {
+            let results = index
+                .search_unified(&SearchOptions {
+                    query: query.to_string(),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap_or_else(|error| panic!("{query:?} must parse as literal text: {error}"));
+            assert!(
+                results.iter().any(|result| result.id == "001"),
+                "expected literal query {query:?} to match the indexed entry"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_search_keeps_registered_fields_strict() {
+        let index = SearchIndex::in_memory().unwrap();
+        let entry = create_test_entry("001", "a searchable entry");
+        index.index_entry(&entry).unwrap();
+
+        let results = index
+            .search_unified(&SearchOptions {
+                query: "doc_type:entry".to_string(),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "001");
+
+        assert!(
+            index
+                .search_unified(&SearchOptions {
+                    query: "doc_type:".to_string(),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .is_err(),
+            "registered fields must retain Tantivy's strict syntax validation"
+        );
     }
 
     #[test]

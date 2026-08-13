@@ -277,6 +277,29 @@ impl Bm25Index {
         Ok(guard.as_ref().unwrap().clone())
     }
 
+    /// Quote field-like tokens whose field name is not registered in this
+    /// index schema so Tantivy treats them as free text rather than rejecting
+    /// the whole query. Registered fields stay untouched and therefore retain
+    /// Tantivy's normal syntax validation.
+    fn literalize_unknown_field_tokens(&self, query: &str) -> String {
+        query
+            .split_whitespace()
+            .map(|token| {
+                let Some((field, _)) = token.split_once(':') else {
+                    return token.to_string();
+                };
+
+                if self.schema.get_field(field).is_ok() {
+                    return token.to_string();
+                }
+
+                let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{escaped}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Invalidate the cached QueryParser (e.g., after rebuild_atomic swaps the index).
     fn invalidate_query_parser(&self) {
         if let Ok(mut guard) = self.cached_query_parser.lock() {
@@ -499,7 +522,7 @@ impl Bm25Index {
         // Build full-text query using cached QueryParser
         let query_parser = self.query_parser()?;
         let text_query = query_parser
-            .parse_query(query)
+            .parse_query(&self.literalize_unknown_field_tokens(query))
             .map_err(|e| SearchError::Query(e.to_string()))?;
 
         // If no filters, just run the text query

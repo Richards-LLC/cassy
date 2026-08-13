@@ -229,5 +229,91 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
         .expect("safe direct close against the unchanged main target");
     assert!(result_text(&legacy_close).contains("Updated task"));
     assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
+}
 
+#[tokio::test]
+async fn anchored_no_code_task_can_add_parked_proof_and_close_without_code_hook() {
+    let home = TempDir::new().expect("temporary HOME");
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
+
+    let repo = GitRepo::new();
+    let cas_root = init_cas_dir(&repo.root).expect("initialize CAS");
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[worktrees]\nenabled = false\n[verification]\nenabled = false\n",
+    )
+    .unwrap();
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "cas-f1f8-no-code-anchor".to_string(),
+        "Produce an operations report".to_string(),
+    );
+    task.status = TaskStatus::AwaitingMerge;
+    task.depth = TaskDepth::Light;
+    task.execution_note = Some("no-code".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/updated-target".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add anchored no-code task");
+
+    let service = CasService::new(CasCore::with_daemon(cas_root.clone(), None, None), None);
+    let task_type_error = service
+        .task(Parameters(task_request(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "task_type": "chore"
+        }))))
+        .await
+        .expect_err("task_type updates must be rejected explicitly");
+    assert!(task_type_error.message.contains("TASK UPDATE REJECTED"));
+    assert!(task_type_error.message.contains("task_type is create-only"));
+    assert!(!task_type_error.message.contains("No changes specified"));
+
+    let proof = "artifact:reports/cas-f1f8-no-code-anchor.html";
+    let update = service
+        .task(Parameters(task_request(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "external_ref": proof
+        }))))
+        .await
+        .expect("the first proof reference must remain writable while parked");
+    assert!(result_text(&update).contains("external_ref"));
+    assert_eq!(
+        task_store.get(&task.id).unwrap().external_ref.as_deref(),
+        Some(proof)
+    );
+
+    let replacement = service
+        .task(Parameters(task_request(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "external_ref": "artifact:reports/replacement.html"
+        }))))
+        .await
+        .expect_err("an already-recorded parked proof must stay immutable");
+    assert!(replacement.message.contains("DELIVERY PROOF SCOPE LOCKED"));
+    assert_eq!(
+        task_store.get(&task.id).unwrap().external_ref.as_deref(),
+        Some(proof),
+        "the rejected replacement must preserve the approved proof"
+    );
+
+    let close = service
+        .task(Parameters(task_request(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "Operations report published"
+        }))))
+        .await
+        .expect("anchored no-code close");
+    let close_text = result_text(&close);
+    assert!(
+        close_text.contains("Closed task:"),
+        "no-code must bypass the code-only declared hook: {close_text}"
+    );
+    assert!(!close_text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"));
+    assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
 }

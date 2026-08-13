@@ -1013,6 +1013,33 @@ fn landed_epics_drop_out_of_the_chain() {
     );
 }
 
+/// cas-3afc (GH #299): staging promotions legitimately leave `main` behind.
+/// Landing truth is relative to the epic's declared target, so an epic already
+/// reachable from staging must not be shown as an unlanded stack dependency.
+#[test]
+fn epic_already_ancestor_of_declared_staging_target_is_not_unlanded_cas_3afc() {
+    let (_temp, repo_path) = create_test_repo();
+    let staging = "staging";
+    Command::new("git")
+        .args(["checkout", "-q", "-b", staging])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    commit_on(&repo_path, "promoted.txt", "promotion on staging");
+    Command::new("git")
+        .args(["branch", "epic/landed-on-staging"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    commit_on(&repo_path, "more-staging.txt", "later staging work");
+
+    let git = GitOperations::new(repo_path);
+    assert!(
+        git.unlanded_epic_ancestry(staging, staging).is_empty(),
+        "an epic ancestor of its declared target must not appear stacked/unlanded"
+    );
+}
+
 #[test]
 fn sibling_epics_are_not_part_of_the_chain() {
     let (_temp, repo_path, trunk) = three_deep_stack();

@@ -4,6 +4,51 @@ use crate::mcp::tools::core::imports::*;
 /// (cas-cc74). Aligned with claim/close assignee liveness (~5 min).
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
 
+fn requested_update_fields(
+    request: &TaskUpdateRequest,
+    target_repo_supplied: bool,
+    target_branch_supplied: bool,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    macro_rules! supplied {
+        ($field:ident) => {
+            if request.$field.is_some() {
+                fields.push(stringify!($field));
+            }
+        };
+    }
+    supplied!(title);
+    supplied!(notes);
+    supplied!(priority);
+    supplied!(labels);
+    supplied!(blocked_by);
+    supplied!(description);
+    supplied!(design);
+    supplied!(acceptance_criteria);
+    supplied!(demo_statement);
+    supplied!(execution_note);
+    supplied!(external_ref);
+    supplied!(assignee);
+    supplied!(status);
+    supplied!(epic);
+    supplied!(epic_verification_owner);
+    supplied!(depth);
+    if target_repo_supplied {
+        fields.push("target_repo");
+    }
+    if target_branch_supplied {
+        fields.push("target_branch");
+    }
+    fields
+}
+
+fn assignee_batch_abort(fields: &[&str], rejection: impl std::fmt::Display) -> String {
+    format!(
+        "TASK UPDATE BATCH ABORTED: assignee validation rejected the request; no requested task fields were applied. Fields not applied: [{}]. Rejection: {rejection}",
+        fields.join(", ")
+    )
+}
+
 /// Normalize `epic_verification_owner` at write boundaries (cas-cc74 discovery).
 /// Trims whitespace; empty/whitespace-only becomes `None` (unset / invalid).
 pub(crate) fn normalize_epic_verification_owner(raw: &str) -> Option<String> {
@@ -259,6 +304,8 @@ impl CasCore {
         proof_scope_fix_reason: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
+        let requested_fields =
+            requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
@@ -341,8 +388,35 @@ impl CasCore {
                 data: None,
             })?;
 
-            let corrected_target = if let Some(repo) = target_repo {
-                super::repo_context::declare_work_target(&self.cas_root, Some(repo), target_branch)
+            let corrected_target = if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
+                if task.execution_note.as_deref() != Some("no-code") {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "PROOF-SCOPE FIX REJECTED: clearing a work target is allowed only for a task already reclassified with execution_note=no-code."
+                                .to_string(),
+                        ),
+                        data: None,
+                    });
+                }
+                if target_branch.is_some_and(|branch| !branch.trim().is_empty()) {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "PROOF-SCOPE FIX REJECTED: target_branch must be omitted or empty when clearing target_repo for a no-code task."
+                                .to_string(),
+                        ),
+                        data: None,
+                    });
+                }
+                None
+            } else if let Some(repo) = target_repo {
+                Some(
+                    super::repo_context::declare_work_target(
+                        &self.cas_root,
+                        Some(repo),
+                        target_branch,
+                    )
                     .map_err(|message| McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(message),
@@ -355,7 +429,8 @@ impl CasCore {
                                 .to_string(),
                         ),
                         data: None,
-                    })?
+                    })?,
+                )
             } else {
                 let existing = task.deliverables.work_target.as_ref().ok_or_else(|| McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -380,12 +455,12 @@ impl CasCore {
                     message: Cow::from(message),
                     data: None,
                 })?;
-                cas_types::WorkTarget {
+                Some(cas_types::WorkTarget {
                     repo_selector: existing.repo_selector.clone(),
                     target_branch: branch,
-                }
+                })
             };
-            if task.deliverables.work_target.as_ref() == Some(&corrected_target) {
+            if task.deliverables.work_target.as_ref() == corrected_target.as_ref() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
@@ -396,21 +471,31 @@ impl CasCore {
                 });
             }
 
-            task.deliverables.work_target = Some(corrected_target.clone());
+            task.deliverables.work_target = corrected_target.clone();
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
             task.updated_at = chrono::Utc::now();
+            let target_description = corrected_target
+                .as_ref()
+                .map(|target| {
+                    format!(
+                        "Work target is now {} @ {}.",
+                        target.repo_selector, target.target_branch
+                    )
+                })
+                .unwrap_or_else(|| {
+                    "The stale code work target was cleared for this no-code task.".to_string()
+                });
             let note = format!(
-                "[{}] DECISION: proof scope corrected by supervisor {} ({}): {} Work target is now {} @ {}. The prior exact proof cycle was invalidated; no failed-review verdict was recorded.",
+                "[{}] DECISION: proof scope corrected by supervisor {} ({}): {} {} The prior exact proof cycle was invalidated; no failed-review verdict was recorded.",
                 task.updated_at.format("%Y-%m-%d %H:%M"),
                 supervisor.name,
                 supervisor.id,
                 reason,
-                corrected_target.repo_selector,
-                corrected_target.target_branch,
+                target_description,
             );
             task.notes = if task.notes.is_empty() {
                 note
@@ -429,12 +514,20 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
+            let result_target = corrected_target
+                .as_ref()
+                .map(|target| {
+                    format!(
+                        "New work target: {} @ {}.",
+                        target.repo_selector, target.target_branch
+                    )
+                })
+                .unwrap_or_else(|| "The stale code work target was cleared.".to_string());
             return Ok(Self::success(format!(
-                "Corrected proof scope for task {}. The task is Open with assignee {} preserved; the stale proof cycle was invalidated without recording review failure. New work target: {} @ {}.",
+                "Corrected proof scope for task {}. The task is Open with assignee {} preserved; the stale proof cycle was invalidated without recording review failure. {}",
                 task.id,
                 task.assignee.as_deref().unwrap_or("unassigned"),
-                corrected_target.repo_selector,
-                corrected_target.target_branch,
+                result_target,
             )));
         }
         if req.status.as_deref().is_some_and(|status| {
@@ -514,7 +607,11 @@ impl CasCore {
                 });
             }
         }
-        let existing_repo_context = if target_repo.is_none() {
+        // Resolving an existing work target is necessary only when this call
+        // changes its branch. Unrelated task fields (notably the first
+        // external_ref proof on a parked no-code task) must not be rejected
+        // merely because a stale code anchor is no longer resolvable.
+        let existing_repo_context = if target_repo.is_none() && target_branch.is_some() {
             match task.deliverables.work_target.as_ref() {
                 Some(target) => Some(
                     super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
@@ -737,17 +834,16 @@ impl CasCore {
                                                     {
                                                         return Err(McpError {
                                                             code: ErrorCode::INVALID_PARAMS,
-                                                            message: Cow::from(format!(
-                                                                "Cannot assign to worker '{}': {} \
-                                                                 commits behind {} (threshold: \
-                                                                 {}). Ask the worker to rebase: \
-                                                                 `git rebase {}`",
-                                                                assignee,
-                                                                behind_count,
-                                                                branch,
-                                                                factory_config
-                                                                    .stale_threshold_commits,
-                                                                branch
+                                                            message: Cow::from(assignee_batch_abort(
+                                                                &requested_fields,
+                                                                format!(
+                                                                    "Cannot assign to worker '{}': {} commits behind {} (threshold: {}). Ask the worker to rebase: `git rebase {}`",
+                                                                    assignee,
+                                                                    behind_count,
+                                                                    branch,
+                                                                    factory_config.stale_threshold_commits,
+                                                                    branch
+                                                                ),
                                                             )),
                                                             data: None,
                                                         });
@@ -796,14 +892,12 @@ impl CasCore {
                                                     {
                                                         return Err(McpError {
                                                             code: ErrorCode::INVALID_PARAMS,
-                                                            message: Cow::from(format!(
-                                                                "Cannot assign to worker \
-                                                                 '{worker_name}': {behind_count} \
-                                                                 commits behind {branch} \
-                                                                 (threshold: {}). Ask the worker \
-                                                                 to rebase: `git rebase {branch}`",
-                                                                factory_config
-                                                                    .stale_threshold_commits,
+                                                            message: Cow::from(assignee_batch_abort(
+                                                                &requested_fields,
+                                                                format!(
+                                                                    "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `git rebase {branch}`",
+                                                                    factory_config.stale_threshold_commits,
+                                                                ),
                                                             )),
                                                             data: None,
                                                         });

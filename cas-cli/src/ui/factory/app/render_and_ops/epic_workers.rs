@@ -101,6 +101,10 @@ pub(crate) struct TaskEpicBase {
     pub branch: String,
     /// Whether `branch` currently resolves to a commit in the repository.
     pub branch_exists: bool,
+    /// The integration branch explicitly declared by the epic, when any.
+    /// Worker-base freshness must be evaluated against this authority rather
+    /// than the factory's ambient configured default (cas-3afc / GH #298).
+    pub target_branch: Option<String>,
 }
 
 /// cas-d897 (GH #146): what the task store could tell us about the base for a
@@ -128,6 +132,14 @@ impl TaskBase {
             TaskBase::Epic(epic) => Some(epic),
             _ => None,
         }
+    }
+
+    /// The declared integration branch for the task's owning epic.
+    pub(crate) fn target_branch(&self) -> Option<&str> {
+        self.epic()
+            .and_then(|epic| epic.target_branch.as_deref())
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty())
     }
 }
 
@@ -361,6 +373,11 @@ pub(crate) fn task_epic_base(
         epic_id: epic.id,
         branch,
         branch_exists,
+        target_branch: epic
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.clone()),
     })
 }
 
@@ -402,10 +419,40 @@ fn worker_base_mismatch_notice(
     }
 }
 
-/// Count commits reachable from `newer` but not from `base` (how far `base` is
-/// behind `newer`). `None` when either ref is missing or git fails — a missing
-/// comparison ref is not evidence of staleness and must not manufacture a
-/// warning.
+/// `true` when `candidate` has a tree change since it diverged from `base`.
+///
+/// Commit counts are not freshness: a correct staging-based epic is expected
+/// to be permanently behind `main` after promotions, and empty/replayed
+/// commits should not make a worker base look stale. Compare the declared
+/// target's tree against the merge base instead. A clean diff means all target
+/// content is already in the base history (including the strict-superset
+/// shape), so no warning is warranted.
+fn target_has_tree_delta(repo_root: &std::path::Path, base: &str, candidate: &str) -> Option<bool> {
+    let merge_base = std::process::Command::new("git")
+        .args(["merge-base", base, candidate])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())?;
+    let output = std::process::Command::new("git")
+        .args(["diff", "--quiet", &merge_base, candidate])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    match output.status.code() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    }
+}
+
+/// Count commits reachable from `newer` but not from `base`.
+///
+/// This remains appropriate for choosing between a local branch and its own
+/// remote tracking ref in [`prefer_fresher_base_ref`]. It is deliberately not
+/// used for declared-target staleness, which is content-based above.
 fn commits_behind(repo_root: &std::path::Path, base: &str, newer: &str) -> Option<usize> {
     let output = std::process::Command::new("git")
         .args(["rev-list", "--count", &format!("{base}..{newer}")])
@@ -472,40 +519,35 @@ fn full_sha(repo_root: &std::path::Path, reference: &str) -> Option<String> {
 /// tip — trivially true when the base *is* the epic branch), so every worker
 /// silently started in the past.
 ///
-/// Compares `worker_base` against, in order of interest: its own remote
-/// tracking branch, the integration trunk, and trunk's remote tracking branch.
-/// Refs that don't exist locally are skipped; only positive behind-counts
-/// produce a notice.
+/// Compares `worker_base` only to its declared integration target (and that
+/// target's remote tracking ref), by tree content rather than commit counts.
+/// Refs that don't exist locally are skipped; only a target-side tree delta
+/// produces a notice.
 fn stale_spawn_base_notice(
     repo_root: &std::path::Path,
     worker_base: &str,
-    trunk: &str,
+    target_branch: &str,
 ) -> Option<String> {
-    let mut candidates: Vec<String> = vec![format!("origin/{worker_base}")];
-    if trunk != worker_base {
-        candidates.push(trunk.to_string());
-        candidates.push(format!("origin/{trunk}"));
+    let mut candidates = vec![target_branch.to_string()];
+    let remote_target = format!("origin/{target_branch}");
+    if remote_target != worker_base && remote_target != target_branch {
+        candidates.push(remote_target);
     }
 
-    let mut stale: Vec<(String, usize)> = candidates
+    let stale: Vec<String> = candidates
         .into_iter()
         .filter(|reference| ref_exists(repo_root, reference))
-        .filter_map(|reference| {
-            commits_behind(repo_root, worker_base, &reference)
-                .filter(|behind| *behind > 0)
-                .map(|behind| (reference, behind))
-        })
+        .filter(|reference| target_has_tree_delta(repo_root, worker_base, reference) == Some(true))
         .collect();
     if stale.is_empty() {
         return None;
     }
-    stale.sort_by(|a, b| b.1.cmp(&a.1));
 
     let detail = stale
         .iter()
-        .map(|(reference, behind)| {
+        .map(|reference| {
             format!(
-                "{behind} commit(s) behind '{reference}' ({})",
+                "target tree differs from '{reference}' ({})",
                 short_sha(repo_root, reference)
             )
         })
@@ -514,10 +556,10 @@ fn stale_spawn_base_notice(
 
     Some(format!(
         "⚠️ STALE WORKER BASE: new worker worktrees are being cut from '{worker_base}' ({}), \
-         which is {detail}. Every worker spawned now starts WITHOUT those commits and will \
-         rebuild/retest against old code. Refresh the base first (merge or rebase the newer \
-         ref into '{worker_base}'), or immediately run \
-         `coordination action=sync_all_workers branch={worker_base} force=true` after the spawn.",
+         and the declared integration target has changes absent from that base ({detail}). Every \
+         worker spawned now starts without those target changes. Refresh the base first (merge or \
+         rebase '{target_branch}' into '{worker_base}'). Do not force-sync workers created by this \
+         spawn; inspect and update each worker only after confirming its worktree is safe.",
         short_sha(repo_root, worker_base)
     ))
 }
@@ -589,6 +631,98 @@ fn prefer_fresher_base_ref(
             )),
         ),
     }
+}
+
+/// Fast-forward an epic's local base ref from the parent branch it recorded
+/// when the two histories are cleanly aligned.  A spawned worker merges back
+/// into the epic ref, so updating that ref (rather than merely checking out
+/// the parent commit) keeps both the new worker and later sync operations on
+/// the same integration history.
+///
+/// A non-fast-forward relationship is intentionally a no-op.  The caller
+/// retains `stale_spawn_base_notice` for that unsafe shape rather than
+/// replacing local epic work with the parent branch.
+fn fast_forward_epic_base_from_parent(
+    repo_root: &std::path::Path,
+    epic_branch: &str,
+    parent_branch: &str,
+) -> Result<Option<String>, String> {
+    if epic_branch == parent_branch
+        || !ref_exists(repo_root, epic_branch)
+        || !ref_exists(repo_root, parent_branch)
+    {
+        return Ok(None);
+    }
+
+    let epic_sha = full_sha(repo_root, epic_branch)
+        .ok_or_else(|| format!("could not resolve epic base '{epic_branch}'"))?;
+    let parent_sha = full_sha(repo_root, parent_branch)
+        .ok_or_else(|| format!("could not resolve recorded parent '{parent_branch}'"))?;
+    if epic_sha == parent_sha {
+        return Ok(None);
+    }
+
+    let is_ancestor = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", epic_branch, parent_branch])
+        .current_dir(repo_root)
+        .status()
+        .map_err(|error| {
+            format!(
+                "could not check whether epic base '{epic_branch}' can fast-forward from '{parent_branch}': {error}"
+            )
+        })?;
+    if !is_ancestor.success() {
+        return Ok(None);
+    }
+
+    let refname = if epic_branch.starts_with("refs/heads/") {
+        epic_branch.to_string()
+    } else if epic_branch.starts_with("refs/") || epic_branch.starts_with("origin/") {
+        return Err(format!(
+            "epic base '{epic_branch}' is not a local branch ref eligible for fast-forward"
+        ));
+    } else {
+        format!("refs/heads/{epic_branch}")
+    };
+    let update = std::process::Command::new("git")
+        .args(["update-ref", &refname, &parent_sha, &epic_sha])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| format!("could not fast-forward epic base '{epic_branch}': {error}"))?;
+    if !update.status.success() {
+        return Err(format!(
+            "could not fast-forward epic base '{epic_branch}' from recorded parent '{parent_branch}': {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        ));
+    }
+
+    Ok(Some(format!(
+        "EPIC BASE FAST-FORWARDED: local epic base '{epic_branch}' ({}) advanced to its recorded parent '{parent_branch}' ({}) before cutting the worker worktree.",
+        &epic_sha[..epic_sha.len().min(8)],
+        &parent_sha[..parent_sha.len().min(8)],
+    )))
+}
+
+/// Return an epic branch and its explicitly declared integration parent. An
+/// epic without a `WorkTarget` retains the legacy branch-only behaviour.
+fn recorded_epic_parent_branch(
+    cas_dir: &std::path::Path,
+    epic_id: &str,
+) -> Option<(String, String)> {
+    let store = open_task_store(cas_dir).ok()?;
+    let epic = store.get(epic_id).ok()?;
+    let epic_branch = epic
+        .branch
+        .filter(|branch| !branch.trim().is_empty())
+        .unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
+    let parent_branch = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|branch| !branch.is_empty())?
+        .to_string();
+    Some((epic_branch, parent_branch))
 }
 
 fn cleanup_cancelled_spawn_worktree_with_manager(
@@ -1209,15 +1343,43 @@ impl FactoryApp {
                 // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
                 // is the pre-assigned task's epic branch first, pinned epic
                 // focus second, trunk last.
-                let trunk = Config::configured_epic_base_branch(manager.repo_root())
+                let configured_trunk = Config::configured_epic_base_branch(manager.repo_root())
                     .unwrap_or_else(|| manager.git().detect_default_branch());
                 let task_base = task_id
                     .map(|tid| task_epic_base(&self.cas_dir, manager.repo_root(), tid))
                     .unwrap_or(TaskBase::Unresolved);
+                // An epic's declared delivery target is authoritative for both
+                // a no-epic child fallback and stale-base comparison. Falling
+                // back to factory configuration keeps legacy/taskless spawns.
+                let trunk = task_base
+                    .target_branch()
+                    .unwrap_or(&configured_trunk)
+                    .to_string();
                 let task_epic = task_base.epic().cloned();
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
+                let base_epic_id = match &base_source {
+                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
+                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
+                    SpawnBaseSource::TaskWithoutEpic { .. } | SpawnBaseSource::Trunk => None,
+                };
+                if let Some((epic_branch, recorded_parent)) = base_epic_id
+                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
+                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
+                {
+                    match fast_forward_epic_base_from_parent(
+                        manager.repo_root(),
+                        &epic_branch,
+                        &recorded_parent,
+                    ) {
+                        Ok(Some(notice)) => notices.push(notice),
+                        Ok(None) => {}
+                        Err(error) => notices.push(format!(
+                            "EPIC BASE REFRESH SKIPPED: {error}. Keeping the existing stale-base warning fallback."
+                        )),
+                    }
+                }
                 // cas-d897 (GH #146): the winning branch name still has to be
                 // resolved to the fresher of its local and origin refs — a
                 // stale local ref silently backdates every worker cut from it.
@@ -2116,6 +2278,34 @@ mod spawn_base_tests {
     }
 
     #[test]
+    fn task_epic_base_exposes_declared_target_branch_cas_3afc() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "staging", "main");
+        branch_at(&repo, "epic/staging-target", "staging");
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-staging".into(), "Staging epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/staging-target".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "staging".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let base = task_epic_base(&cas_dir, &repo, "cas-staging");
+        assert_eq!(base.target_branch(), Some("staging"));
+        assert_eq!(
+            resolve_spawn_base(&base, None, base.target_branch().unwrap()).0,
+            "epic/staging-target"
+        );
+    }
+
+    #[test]
     fn taskless_spawn_keeps_pinned_focus_then_trunk_cas_7587() {
         assert_eq!(
             resolve_spawn_base(&TaskBase::Unresolved, Some("epic/alpha"), "main"),
@@ -2898,8 +3088,97 @@ mod spawn_base_tests {
             "notice must name the stale base: {notice}"
         );
         assert!(
-            notice.contains("2 commit(s) behind 'main'"),
-            "notice must quantify the gap against trunk: {notice}"
+            notice.contains("target tree differs from 'main'"),
+            "notice must name the target-side content gap: {notice}"
+        );
+        assert!(
+            !notice.contains("force=true"),
+            "a spawn-time warning must not recommend destructively syncing workers it just made: {notice}"
+        );
+    }
+
+    #[test]
+    fn fast_forwardable_epic_base_is_refreshed_before_a_worker_is_cut() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["branch", "epic/behind", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "parent-advance.txt", "parent branch advanced");
+        let parent_tip = head_sha(&repo, "main");
+
+        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .expect("clean ancestry must be safe to fast-forward")
+            .expect("the stale epic base must be refreshed");
+        assert!(notice.contains("EPIC BASE FAST-FORWARDED"), "{notice}");
+        assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
+        assert_eq!(
+            stale_spawn_base_notice(&repo, "epic/behind", "main"),
+            None,
+            "a refreshed epic base must no longer emit the stale-base warning"
+        );
+
+        let worker_path = repo.join(".cas/worktrees/refreshed-worker");
+        WorkerSpawnPrep {
+            worker_name: "refreshed-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/refreshed-worker".to_string(),
+                parent_branch: "epic/behind".to_string(),
+                base_ref: None,
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+        .run()
+        .expect("worker provisioning after the refresh");
+        assert!(
+            worker_path.join("parent-advance.txt").exists(),
+            "the spawned worktree must include the parent branch advance"
+        );
+    }
+
+    #[test]
+    fn diverged_epic_base_is_not_forced_and_keeps_stale_warning_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/diverged"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "epic-only.txt", "epic-only work");
+        let epic_tip = head_sha(&repo, "epic/diverged");
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "parent-only.txt", "parent-only work");
+
+        assert_eq!(
+            fast_forward_epic_base_from_parent(&repo, "epic/diverged", "main")
+                .expect("divergence is an expected non-mutating shape"),
+            None
+        );
+        assert_eq!(
+            head_sha(&repo, "epic/diverged"),
+            epic_tip,
+            "non-fast-forward parent histories must not overwrite epic work"
+        );
+        assert!(
+            stale_spawn_base_notice(&repo, "epic/diverged", "main").is_some(),
+            "the existing stale-base warning remains the operator fallback"
         );
     }
 
@@ -2932,8 +3211,8 @@ mod spawn_base_tests {
         let notice = stale_spawn_base_notice(&repo, "main", "main")
             .expect("a base behind its own remote must produce a notice");
         assert!(
-            notice.contains("1 commit(s) behind 'origin/main'"),
-            "notice must quantify the gap against the remote: {notice}"
+            notice.contains("target tree differs from 'origin/main'"),
+            "notice must identify the remote target tree: {notice}"
         );
     }
 
@@ -2971,6 +3250,40 @@ mod spawn_base_tests {
             None,
             "trunk level with its remote must not warn"
         );
+    }
+
+    /// cas-3afc (GH #299): a staging-based epic is legitimately ahead of an
+    /// older main after promotions. The declared target is already contained
+    /// in the epic, so main's unrelated history must not manufacture a stale
+    /// worker-base warning.
+    #[test]
+    fn staging_epic_superset_does_not_warn_against_unrelated_main_cas_3afc() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "staging"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "promoted.txt", "promotion already on staging");
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/staging-based"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "epic-only.txt", "epic addition");
+
+        assert_eq!(
+            stale_spawn_base_notice(&repo, "epic/staging-based", "staging"),
+            None,
+            "a base that already contains its declared target must stay silent"
+        );
+
+        // The factory must never consult the default `main` for this spawn;
+        // only the epic's declared staging target is authoritative.
     }
 
     /// Missing comparison refs (no remote configured, trunk absent) are not

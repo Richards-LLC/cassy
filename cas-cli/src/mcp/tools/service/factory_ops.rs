@@ -654,16 +654,23 @@ fn format_assigned_task_info(
 /// without a daemon, a queue, or a clock.
 fn format_undelivered_relay_section(
     rows: &[cas_store::UndeliveredLifecycleRelay],
-    terminal_count: usize,
+    terminal_rows: &[cas_store::UndeliveredLifecycleRelay],
 ) -> String {
-    if rows.is_empty() && terminal_count == 0 {
+    if rows.is_empty() && terminal_rows.is_empty() {
         return String::new();
     }
     let mut out = String::new();
-    if terminal_count > 0 {
+    if !terminal_rows.is_empty() {
+        let terminal_ids = terminal_rows
+            .iter()
+            .filter_map(lifecycle_relay_notification_id)
+            .map(|id| format!("`lifecycle-wake:{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!(
-            "⚠ {terminal_count} UNDELIVERED SUPERVISOR RELAY{} for terminal tasks suppressed; acknowledge each by its `lifecycle-wake:<id>` ID with `coordination action=message_ack notification_id=<id>` to dismiss it durably.\n",
-            if terminal_count == 1 { "" } else { "s" }
+            "⚠ {} UNDELIVERED SUPERVISOR RELAY{} for terminal tasks suppressed: {terminal_ids}. Acknowledge each with `coordination action=message_ack notification_id=<id>` to dismiss it durably.\n",
+            terminal_rows.len(),
+            if terminal_rows.len() == 1 { "" } else { "s" }
         ));
     }
     if rows.is_empty() {
@@ -700,6 +707,17 @@ fn format_undelivered_relay_section(
          (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
     );
     out
+}
+
+/// Return the durable notification ID a lifecycle relay exposes to operators.
+/// Sources have evolved (`lifecycle-wake:<id>` and
+/// `lifecycle-wake:worker-attention:<id>`); the final numeric component is
+/// the public ACK identity for both forms.
+fn lifecycle_relay_notification_id(row: &cas_store::UndeliveredLifecycleRelay) -> Option<i64> {
+    row.source
+        .rsplit(':')
+        .next()
+        .and_then(|id| id.parse::<i64>().ok())
 }
 
 /// A lifecycle relay is only actionable while its named task remains open.
@@ -835,7 +853,7 @@ fn resolve_sync_all_workers_target(
     use crate::store::open_task_store;
     use cas_types::TaskType;
 
-    fn epic_branch(
+    fn epic_parent_branch(
         task_store: &dyn crate::store::TaskStore,
         epic_id: &str,
         source: &str,
@@ -854,9 +872,16 @@ fn resolve_sync_all_workers_target(
                 "sync_all_workers: {source} epic {epic_id} is Closed"
             ));
         }
-        epic.branch
-            .filter(|branch| !branch.trim().is_empty())
-            .ok_or_else(|| format!("sync_all_workers: {source} epic {epic_id} has no branch"))
+        epic.deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.trim())
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+            .or_else(|| epic.branch.filter(|branch| !branch.trim().is_empty()))
+            .ok_or_else(|| {
+                format!("sync_all_workers: {source} epic {epic_id} has no parent branch")
+            })
     }
 
     if let Some(raw_id) = req.id.as_deref() {
@@ -866,7 +891,7 @@ fn resolve_sync_all_workers_target(
         }
         let task_store = open_task_store(cas_root)
             .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
-        return epic_branch(task_store.as_ref(), epic_id, "explicit");
+        return epic_parent_branch(task_store.as_ref(), epic_id, "explicit");
     }
 
     if let Some(branch) = req
@@ -936,7 +961,7 @@ fn resolve_sync_all_workers_target(
         if let Some(epic_id) = focused_epic_id {
             let task_store = open_task_store(cas_root)
                 .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
-            return epic_branch(task_store.as_ref(), epic_id, "focused");
+            return epic_parent_branch(task_store.as_ref(), epic_id, "focused");
         }
     }
 
@@ -1959,10 +1984,17 @@ impl CasService {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let terminal_count = closed_task_ids.len();
+        let terminal_rows: Vec<_> = undelivered_relays
+            .iter()
+            .filter(|row| {
+                lifecycle_relay_task_id(row)
+                    .is_some_and(|task_id| closed_task_ids.iter().any(|id| id == task_id))
+            })
+            .cloned()
+            .collect();
         let undelivered_section = format_undelivered_relay_section(
             &unresolved_lifecycle_relays(undelivered_relays, &closed_task_ids),
-            terminal_count,
+            &terminal_rows,
         );
 
         if agents.is_empty() {
@@ -2123,8 +2155,7 @@ impl CasService {
             .map(|agent| agent.name.clone())
             .chain(["supervisor".to_string(), "director".to_string()])
             .collect();
-        let outbound_target_refs: Vec<&str> =
-            outbound_targets.iter().map(String::as_str).collect();
+        let outbound_target_refs: Vec<&str> = outbound_targets.iter().map(String::as_str).collect();
         // cas-e728 (GH #105): per-worker inbox state — how many messages the
         // worker has NOT consumed, and how old the oldest one is.
         //
@@ -5013,9 +5044,9 @@ pub(crate) fn normalize_branch_ref(reference: &str) -> String {
 
 /// Resolve which branch a task integrates into.
 ///
-/// Order (cas-5884): parent epic branch (the lane's integration branch) wins,
-/// then an explicit `work_target.target_branch`, else the task is standalone
-/// and belongs on trunk. An epic task itself uses its own branch.
+/// Order (cas-580e): an epic's recorded integration parent wins, then its
+/// coordination branch; a task's own target is next, else it is standalone
+/// and belongs on trunk.
 fn task_branch_affinity(
     store: &dyn crate::store::TaskStore,
     task: &cas_types::Task,
@@ -5027,13 +5058,23 @@ fn task_branch_affinity(
             .map(str::to_string)
     }
 
+    fn epic_parent_or_branch(epic: &cas_types::Task) -> Option<String> {
+        epic.deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.trim())
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+            .or_else(|| non_empty(epic.branch.as_ref()))
+    }
+
     if task.task_type == cas_types::TaskType::Epic
-        && let Some(branch) = non_empty(task.branch.as_ref())
+        && let Some(branch) = epic_parent_or_branch(task)
     {
         return BranchAffinity::Branch(branch);
     }
     if let Ok(Some(epic)) = store.get_parent_epic(&task.id)
-        && let Some(branch) = non_empty(epic.branch.as_ref())
+        && let Some(branch) = epic_parent_or_branch(&epic)
     {
         return BranchAffinity::Branch(branch);
     }
@@ -7543,7 +7584,7 @@ mod spawn_lifecycle_tests {
             &[lost_relay(
                 "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
             )],
-            0,
+            &[],
         );
         assert!(
             out.contains("UNDELIVERED SUPERVISOR RELAY"),
@@ -7569,7 +7610,7 @@ mod spawn_lifecycle_tests {
     /// has to be believed the single time it fires.
     #[test]
     fn no_undelivered_relays_renders_nothing() {
-        assert!(format_undelivered_relay_section(&[], 0).is_empty());
+        assert!(format_undelivered_relay_section(&[], &[]).is_empty());
     }
 
     #[test]
@@ -7577,11 +7618,11 @@ mod spawn_lifecycle_tests {
         let closed = lost_relay("task_awaiting_merge: cas-reconciled (2026-08-09T15:56:36Z)");
         let still_actionable = lost_relay("task_blocked: cas-open (2026-08-09T15:57:00Z)");
         let remaining = unresolved_lifecycle_relays(
-            vec![closed, still_actionable],
+            vec![closed.clone(), still_actionable],
             &["cas-reconciled".to_string()],
         );
 
-        let rendered = format_undelivered_relay_section(&remaining, 1);
+        let rendered = format_undelivered_relay_section(&remaining, &[closed]);
         assert!(
             !rendered.contains("cas-reconciled"),
             "closed lane must not replay: {rendered}"
@@ -7593,6 +7634,10 @@ mod spawn_lifecycle_tests {
         assert!(
             rendered.contains("1 UNDELIVERED SUPERVISOR RELAY for terminal tasks suppressed"),
             "terminal relays collapse to one count while live relays remain detailed: {rendered}"
+        );
+        assert!(
+            rendered.contains("`lifecycle-wake:3386`"),
+            "the terminal count must name the exact lifecycle-wake ID it demands: {rendered}"
         );
     }
 
@@ -9377,16 +9422,9 @@ effort = "high"
         let classified = classify_worker_inbox(0, None, &[], Some(wait), at(0));
 
         assert_eq!(classified.reminder_wait, Some(wait), "{classified:?}");
-        let rendered = format_priority_worker_status_alert(
-            true,
-            None,
-            300,
-            None,
-            false,
-            0,
-            classified,
-        )
-        .expect("alert");
+        let rendered =
+            format_priority_worker_status_alert(true, None, 300, None, false, 0, classified)
+                .expect("alert");
         assert!(rendered.contains("waiting on reminder #51"), "{rendered}");
         assert!(!rendered.contains("between turns"), "{rendered}");
     }
@@ -12391,6 +12429,40 @@ mod sync_safety_tests {
                 false,
             ),
             SyncGate::Proceed
+        );
+    }
+
+    #[test]
+    fn worker_affinity_uses_its_epics_recorded_parent_branch_cas_580e() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-580e-epic".into(), "stacked epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/stale-base".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:active-project".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let mut child = cas_types::Task::new("cas-580e-child".into(), "worker task".into());
+        child.assignee = Some("worker".into());
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id.clone(),
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            task_branch_affinity(store.as_ref(), &child),
+            BranchAffinity::Branch("main".into()),
+            "sync must use the epic's declared integration parent, not its stale coordination ref"
         );
     }
 

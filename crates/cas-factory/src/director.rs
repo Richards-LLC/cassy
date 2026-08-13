@@ -79,7 +79,11 @@ pub struct TaskSummary {
     pub task_type: TaskType,
     /// Parent epic ID (if this is a subtask)
     pub epic: Option<String>,
-    /// Branch name (for epics)
+    /// The branch that is authoritative for this summary's delivery boundary:
+    /// an epic's branch, or a task's declared WorkTarget branch.
+    ///
+    /// A task-level WorkTarget deliberately wins over its parent epic. The
+    /// factory relay must advertise the same destination that close enforces.
     pub branch: Option<String>,
     /// Last-updated timestamp from the task store. Drives recency ordering in
     /// the TASKS panel so the supervisor's current focus surfaces above a
@@ -280,7 +284,12 @@ impl DirectorData {
                 assignee: t.assignee.clone(),
                 task_type: t.task_type,
                 epic: child_to_epic.get(&t.id).cloned(),
-                branch: t.branch.clone(),
+                branch: t
+                    .deliverables
+                    .work_target
+                    .as_ref()
+                    .map(|target| target.target_branch.clone())
+                    .or_else(|| t.branch.clone()),
                 updated_at: Some(t.updated_at),
                 epic_verification_owner: t.epic_verification_owner.clone(),
             }
@@ -942,7 +951,7 @@ fn parse_diff_numstat(output: &str, line_counts: &mut HashMap<String, (usize, us
 mod tests {
     use super::*;
     use cas_store::{PendingReason, TaskStore};
-    use cas_types::{Agent, EventEntityType};
+    use cas_types::{Agent, EventEntityType, WorkTarget};
     use chrono::{Duration, Utc};
 
     #[test]
@@ -1012,6 +1021,31 @@ mod tests {
         assert!(
             activity_age < crate::config::DEFAULT_STALL_THRESHOLD_SECS as i64,
             "recent task-note activity must keep the stall predicate below threshold"
+        );
+    }
+
+    #[test]
+    fn task_summary_projects_declared_work_target_branch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp_dir.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+
+        let mut task = Task::new("cas-work-target".to_string(), "Declared target".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "remote:example.invalid/acme/cas".to_string(),
+            target_branch: "main".to_string(),
+        });
+        stores.task_store.add(&task).unwrap();
+
+        let data =
+            DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        assert_eq!(
+            data.in_progress_tasks[0].branch.as_deref(),
+            Some("main"),
+            "the director relay must receive the WorkTarget branch rather than infer a focus"
         );
     }
 

@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::cli::Cli;
 use crate::cli::hub::{HubAuthorizeArgs, record_is_live};
@@ -267,7 +268,23 @@ fn resolve_hub_url(explicit: Option<&str>, controller_origin: &str) -> Result<St
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
-    origin.starts_with("http://127.") || origin.starts_with("http://[::1]")
+    let Ok(url) = Url::parse(origin) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(_)) | None => false,
+    }
 }
 
 fn granted_scopes(
@@ -342,20 +359,18 @@ mod tests {
 
     #[test]
     fn section_four_claim_fixture_is_byte_faithful() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../hub-web/src/fixtures/hub-reverse-pairing/claim-request.json"
+        )))
+        .unwrap();
         let request = serde_json::to_value(ClaimRequest {
             wire_version: 1,
             user_code: "K7MW-4H2Q",
-            authorize_nonce: "nonce",
+            authorize_nonce: "base64url-32-random-bytes",
         })
         .unwrap();
-        assert_eq!(
-            request,
-            serde_json::json!({
-                "wire_version": 1,
-                "user_code": "K7MW-4H2Q",
-                "authorize_nonce": "nonce"
-            })
-        );
+        assert_eq!(request, expected);
         assert_eq!(
             format!("{RELAY_PREFIX}/authorizations"),
             "/api/hub/pairing/authorizations"
@@ -364,29 +379,23 @@ mod tests {
 
     #[test]
     fn section_four_completion_fixture_uses_kebab_case_scopes() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../hub-web/src/fixtures/hub-reverse-pairing/complete-request.json"
+        )))
+        .unwrap();
         let scopes = Scope::default_read_only();
         let request = serde_json::to_value(CompleteRequest {
             wire_version: 1,
-            authorize_nonce: "nonce",
-            hub_url: "https://workstation.tail.example",
+            authorize_nonce: "base64url-32-random-bytes",
+            hub_url: "https://workstation.tail.example:443/",
             machine_label: "Studio workstation",
-            invitation_url: "https://commander.example/#pair=token&hub=machine-uuid",
+            invitation_url: "https://commander.example/#pair=base64url-32-random-bytes&hub=machine-uuid",
             invitation_expires_at: "2026-08-11T20:11:30Z".parse().unwrap(),
             granted_scopes: &scopes,
         })
         .unwrap();
-        assert_eq!(
-            request,
-            serde_json::json!({
-                "wire_version": 1,
-                "authorize_nonce": "nonce",
-                "hub_url": "https://workstation.tail.example",
-                "machine_label": "Studio workstation",
-                "invitation_url": "https://commander.example/#pair=token&hub=machine-uuid",
-                "invitation_expires_at": "2026-08-11T20:11:30Z",
-                "granted_scopes": ["machine-read", "session-read", "pane-read"]
-            })
-        );
+        assert_eq!(request, expected);
         assert_eq!(
             format!("{RELAY_PREFIX}/authorizations/id/complete"),
             "/api/hub/pairing/authorizations/id/complete"
@@ -408,5 +417,32 @@ mod tests {
         assert_eq!(reduced, [Scope::MachineRead].into_iter().collect());
         let escalation = granted_scopes(&requested, Some(&["hub:admin".to_owned()])).unwrap_err();
         assert!(escalation.to_string().contains("may reduce"));
+    }
+
+    #[test]
+    fn loopback_fallback_requires_a_literal_http_loopback_origin() {
+        for origin in [
+            "http://127.0.0.1",
+            "http://127.42.0.1:42759",
+            "http://[::1]:42759",
+        ] {
+            assert!(is_loopback_origin(origin), "{origin}");
+        }
+
+        for origin in [
+            "http://127.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1@evil.example",
+            "http://attacker@127.0.0.1",
+            "http://127.0.0.1/pair",
+            "http://[::1]/pair",
+            "http://127.0.0.1?next=https://evil.example",
+            "http://127.0.0.1#fragment",
+            "http://localhost:42759",
+            "http://192.168.1.1:42759",
+            "https://127.0.0.1:42759",
+        ] {
+            assert!(!is_loopback_origin(origin), "{origin}");
+        }
     }
 }

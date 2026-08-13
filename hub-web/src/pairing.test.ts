@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
+import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { PendingPairingStore, pendingPairingStoreFor } from "./pending-pairing";
 import {
@@ -61,6 +61,7 @@ class MemoryMachineCatalogBackend implements MachineCatalogBackend {
   readonly records = new Map<string, MachineCatalogRecord>();
   rejectUpdate = false;
   rejectDelete = false;
+  rejectNextUpdate = false;
 
   async list(): Promise<MachineCatalogRecord[]> { return [...this.records.values()]; }
 
@@ -69,6 +70,10 @@ class MemoryMachineCatalogBackend implements MachineCatalogBackend {
     change: (current: MachineCatalogRecord | undefined) => MachineCatalogRecord | undefined,
   ): Promise<void> {
     const next = change(this.records.get(id));
+    if (this.rejectNextUpdate) {
+      this.rejectNextUpdate = false;
+      throw new Error("durable cleanup rejected");
+    }
     if (this.rejectUpdate || (this.rejectDelete && !next)) throw new Error("durable cleanup rejected");
     if (next) this.records.set(id, next);
     else this.records.delete(id);
@@ -351,6 +356,66 @@ describe("wire-v1 reverse pairing", () => {
     backend.rejectUpdate = false;
     await expect(reloaded.recoverPending()).resolves.toEqual({ machines: [prior], pendingCleanup: 0 });
     expect(backend.records.get(prior.id)).toEqual(prior);
+  });
+
+  it("writes activated records in the prior reader's StoredMachine shape", async () => {
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const candidate = storedMachine("active");
+    const identity = installIdentity(candidate.credentialId, 8);
+
+    await catalog.stage(candidate, identity);
+    await expect(catalog.activate(identity)).resolves.toBe(true);
+
+    // The pre-catalog Commander bundle reads the v1 store directly as StoredMachine rows.
+    const priorMainReader = async (): Promise<StoredMachine[]> => [...backend.records.values()] as StoredMachine[];
+    await expect(priorMainReader()).resolves.toMatchObject([candidate]);
+  });
+
+  it("keeps cancellation fail-closed after activation when its first rollback write rejects", async () => {
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const prior = storedMachine("prior");
+    const candidate = storedMachine("cancelled-after-activation");
+    const identity = installIdentity(candidate.credentialId, 9);
+    backend.records.set(prior.id, prior);
+
+    await catalog.stage(candidate, identity);
+    await catalog.activate(identity);
+    backend.rejectNextUpdate = true;
+
+    await expect(catalog.rollback(identity)).rejects.toThrow("durable cleanup rejected");
+    const reloaded = new MachineCatalog(backend);
+    await expect(reloaded.snapshot()).resolves.toEqual({ machines: [prior], pendingCleanup: 1 });
+  });
+
+  it("reports active cancellation as blocked after a transient rollback failure and keeps it hidden on reload", async () => {
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const prior = storedMachine("prior");
+    const identity = installIdentity("cancelled-after-activation", 10);
+    backend.records.set(prior.id, prior);
+    let current = true;
+
+    const exchange = exchangePendingPairing({
+      invitation: { kind: "invitation", token: "one-time-token", hubId: identity.machineId, hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] },
+      controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => response(200, { device_id: "device", credential_id: identity.credentialId, credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: identity.generation,
+      stagePersisted: (machine, install) => catalog.stage(machine, install),
+      activatePersisted: async (install) => {
+        const activated = await catalog.activate(install);
+        current = false;
+        backend.rejectNextUpdate = true;
+        return activated;
+      },
+      rollbackPersisted: (install) => catalog.rollback(install),
+      isCurrent: () => current,
+    });
+
+    await expect(exchange).rejects.toBeInstanceOf(PairingCleanupError);
+    await expect(new MachineCatalog(backend).snapshot()).resolves.toEqual({ machines: [prior], pendingCleanup: 1 });
   });
 
   it("lets only the exact same-hub credential generation activate or roll back", async () => {

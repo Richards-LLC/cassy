@@ -6,11 +6,14 @@ rust-version = "1.85"
 description = "MCP proxy engine for CAS"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
-anyhow = "1.0"
+anyhow.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # TLS uses CAS's process-wide ring provider; keep rmcp's HTTP transport without
 # enabling reqwest's second, AWS-LC-backed provider.

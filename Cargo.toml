@@ -20,6 +20,13 @@ members = [
     "crates/ghostty_vt",
 ]
 
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
 # Exact crates.io 1.8.6 source with one build.rs correction: when cas-store
 # enables no_avx512, do not compile/link the otherwise runtime-disabled AVX-512
 # archive. See docs/third-party/blake3-1.8.6.md.

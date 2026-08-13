@@ -6,6 +6,9 @@ rust-version = "1.85"
 description = "Code analysis and indexing for CAS (Coding Agent System)"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 # CAS crates
 cas-types = { path = "../cas-types" }
@@ -23,7 +26,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Error handling
-thiserror = "2.0"
+thiserror.workspace = true
 
 # Date/Time
 chrono = { version = "0.4", features = ["serde"] }

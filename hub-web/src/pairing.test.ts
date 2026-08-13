@@ -299,6 +299,28 @@ describe("wire-v1 reverse pairing", () => {
     expect(acknowledge).not.toHaveBeenCalled();
   });
 
+  it("does not persist a credential when a deferred exchange response arrives after cancellation", async () => {
+    const operations = new PairingOperationCoordinator();
+    const generation = operations.replace();
+    const operation = operations.begin(generation);
+    const fetched = deferred<Response>();
+    const persist = vi.fn(async (_machine: StoredMachine) => undefined);
+    const invitation = { kind: "invitation" as const, token: "one-time-token", hubId: "machine-uuid", hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] as const };
+    const exchange = exchangePendingPairing({
+      invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => fetched.promise,
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }), persist,
+      signal: operation.signal, isCurrent: () => operations.isCurrent(operation),
+    });
+
+    await Promise.resolve();
+    operations.invalidate();
+    fetched.resolve(response(200, { device_id: "device", credential_id: "credential", credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }));
+
+    await expect(exchange).rejects.toBeInstanceOf(PairingExchangeError);
+    expect(persist).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["legacy", [["url", "https://legacy.tail.example"], ["label", "Studio Mac"], ["device", "Phone"], ["operator", "Petra"], ["scope", "machine-read"], ["scope", "pane-read"]]],
     ["relay", [["device", "Tablet"], ["operator", "Daniel"]]],

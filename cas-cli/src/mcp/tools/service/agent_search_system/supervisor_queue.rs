@@ -15,7 +15,6 @@ pub(crate) fn acknowledge_linked_lifecycle_notification(
     cas_root: &std::path::Path,
     notification_id: i64,
 ) -> Result<Option<LinkedLifecycleAck>, String> {
-
     let supervisor_queue = crate::store::open_supervisor_queue_store(cas_root)
         .map_err(|error| format!("open supervisor queue: {error}"))?;
     let Some(notification) = supervisor_queue
@@ -31,6 +30,15 @@ pub(crate) fn acknowledge_linked_lifecycle_notification(
             )
         }
         "worker_died" => format!("worker-died-outbox:{notification_id}"),
+        // Worker attention wakes use the durable supervisor notification ID
+        // in their public `lifecycle-wake:worker-attention:<id>` source, but
+        // their outbox key is distinct from a task lifecycle transition.  If
+        // this bridge does not recognise them, `message_ack notification_id`
+        // acknowledges only the durable row and leaves the linked prompt
+        // relay visible in every later worker_status response.
+        "worker_idle" | "worker_stalled" => {
+            format!("worker-attention-outbox:{notification_id}")
+        }
         _ => return Ok(None),
     };
 
@@ -280,8 +288,7 @@ mod cas_20ac_ack_tests {
     fn visible_lifecycle_notification_id_acks_its_linked_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
         let prompt_queue = open_prompt_queue_store(temp.path()).expect("prompt queue");
-        let supervisor_queue =
-            open_supervisor_queue_store(temp.path()).expect("supervisor queue");
+        let supervisor_queue = open_supervisor_queue_store(temp.path()).expect("supervisor queue");
 
         // Force the two table sequences apart and leave prompt id=1 unrelated.
         let unrelated = prompt_queue
@@ -353,5 +360,74 @@ mod cas_20ac_ack_tests {
             .expect("repeat ack")
             .expect("lifecycle row");
         assert_eq!(repeated.prompt_id, Some(linked_prompt_id));
+    }
+
+    /// Worker attention relays use a different event type and source spelling
+    /// than task lifecycle/death relays.  The printed durable ID must still
+    /// acknowledge the linked prompt, otherwise a consumed idle notice is
+    /// replayed forever by `worker_status`.
+    #[test]
+    fn visible_worker_attention_id_acks_its_linked_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt_queue = open_prompt_queue_store(temp.path()).expect("prompt queue");
+        let supervisor_queue = open_supervisor_queue_store(temp.path()).expect("supervisor queue");
+
+        let durable_id = supervisor_queue
+            .notify(
+                "supervisor-id",
+                "worker_idle",
+                r#"{"worker":"quiet-ibis"}"#,
+                NotificationPriority::High,
+            )
+            .expect("durable notice");
+        let prompt_id = match prompt_queue
+            .enqueue_idempotent(
+                &format!("lifecycle-wake:worker-attention:{durable_id}"),
+                "supervisor",
+                &format!(
+                    "<worker-attention kind=\"worker_idle\" worker=\"quiet-ibis\" notification_id=\"{durable_id}\">\\nidle\\n</worker-attention>"
+                ),
+                None,
+                Some("worker_idle: quiet-ibis"),
+                Some(NotificationPriority::High),
+                &format!("worker-attention-outbox:{durable_id}"),
+            )
+            .expect("linked prompt")
+        {
+            EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        prompt_queue
+            .mark_undelivered_lifecycle_relay(prompt_id, Some("worker shut down before delivery"))
+            .expect("terminal relay");
+        assert_eq!(
+            prompt_queue
+                .list_undelivered_lifecycle_relays(10)
+                .expect("terminal relay list")
+                .len(),
+            1,
+            "the banner must count the exact relay before its printed ID is acknowledged"
+        );
+
+        let ack = acknowledge_linked_lifecycle_notification(temp.path(), durable_id)
+            .expect("ack bridge")
+            .expect("worker attention lifecycle row");
+        assert_eq!(ack.prompt_id, Some(prompt_id));
+        assert!(
+            prompt_queue
+                .message_delivery_report(prompt_id)
+                .expect("report")
+                .expect("linked row")
+                .confirmed_at
+                .is_some(),
+            "the linked relay must be terminal after its printed durable ID is acknowledged"
+        );
+        let reopened = open_prompt_queue_store(temp.path()).expect("reopen prompt queue");
+        assert!(
+            reopened
+                .list_undelivered_lifecycle_relays(10)
+                .expect("reopened terminal relay list")
+                .is_empty(),
+            "an acknowledged worker-attention relay must remain absent after a store reopen"
+        );
     }
 }

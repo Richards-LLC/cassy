@@ -1285,6 +1285,18 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Atomically surface unread rows from a bounded set of senders.
+    ///
+    /// This source-filtered counterpart leaves unrelated daemon/director
+    /// traffic unread. An empty source set performs no query or write.
+    fn surface_unseen_from_sources_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        sources: &[&str],
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Record that a transport OTHER than CAS's own surfacing paths put this
     /// row's content in front of `recipient` (cas-b8ce, GH #176).
     ///
@@ -2642,6 +2654,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             factory_session,
             limit,
             SurfacingSource::InboxPoll,
+            None,
         )
     }
 
@@ -2659,6 +2672,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             factory_session,
             limit,
             SurfacingSource::HookSurfaced,
+            None,
+        )
+    }
+
+    fn surface_unseen_from_sources_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        sources: &[&str],
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::HookSurfaced,
+            Some(sources),
         )
     }
 
@@ -4045,6 +4075,7 @@ impl SqlitePromptQueueStore {
         factory_session: Option<&str>,
         limit: usize,
         source: SurfacingSource,
+        source_filter: Option<&[&str]>,
     ) -> Result<Vec<QueuedPrompt>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other(
@@ -4052,6 +4083,18 @@ impl SqlitePromptQueueStore {
             ));
         }
         if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let normalized_sources = source_filter
+            .map(|sources| {
+                sources
+                    .iter()
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .filter(|value| !value.is_empty())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if source_filter.is_some() && normalized_sources.is_empty() {
             return Ok(Vec::new());
         }
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -4071,9 +4114,30 @@ impl SqlitePromptQueueStore {
                  AND (q.highest_stage IS NULL
                       OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
             );
+            let source_sql = if normalized_sources.is_empty() {
+                String::new()
+            } else {
+                let placeholders = std::iter::repeat_n("?", normalized_sources.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("AND LOWER(q.source) IN ({placeholders})")
+            };
 
             let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
                 if let Some(session) = factory_session {
+                    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                        Box::new(recipient.to_string()),
+                        Box::new(stale_cutoff.clone()),
+                        Box::new(recipient.to_string()),
+                    ];
+                    params.extend(
+                        normalized_sources
+                            .iter()
+                            .cloned()
+                            .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>),
+                    );
+                    params.push(Box::new(session.to_string()));
+                    params.push(Box::new(sql_limit));
                     (
                         format!(
                             "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
@@ -4086,19 +4150,26 @@ impl SqlitePromptQueueStore {
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
+                           {source_sql}
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
                          ORDER BY q.priority ASC, q.id ASC
                          LIMIT ?"
                         ),
-                        vec![
-                            Box::new(recipient.to_string()),
-                            Box::new(stale_cutoff.clone()),
-                            Box::new(recipient.to_string()),
-                            Box::new(session.to_string()),
-                            Box::new(sql_limit),
-                        ],
+                        params,
                     )
                 } else {
+                    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                        Box::new(recipient.to_string()),
+                        Box::new(stale_cutoff.clone()),
+                        Box::new(recipient.to_string()),
+                    ];
+                    params.extend(
+                        normalized_sources
+                            .iter()
+                            .cloned()
+                            .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>),
+                    );
+                    params.push(Box::new(sql_limit));
                     (
                         format!(
                             "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
@@ -4111,16 +4182,12 @@ impl SqlitePromptQueueStore {
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
+                           {source_sql}
                            AND q.factory_session IS NULL
                          ORDER BY q.priority ASC, q.id ASC
                          LIMIT ?"
                         ),
-                        vec![
-                            Box::new(recipient.to_string()),
-                            Box::new(stale_cutoff.clone()),
-                            Box::new(recipient.to_string()),
-                            Box::new(sql_limit),
-                        ],
+                        params,
                     )
                 };
 
@@ -8837,6 +8904,50 @@ mod tests {
         let report = store.message_delivery_report(id).unwrap().unwrap();
         assert_eq!(report.wake, ObservationStatus::Unobserved);
         assert_ne!(report.confirmation_source, ConfirmationSource::HookSurfaced);
+    }
+
+    #[test]
+    fn source_filtered_surface_leaves_unrelated_startup_mail_unread() {
+        let (_temp, store) = create_test_store();
+        let correction = store
+            .enqueue_with_session(
+                "bright-supervisor",
+                "worker-a",
+                "Do not touch the generated files.",
+                "session",
+            )
+            .unwrap();
+        let task_brief = store
+            .enqueue_with_session(
+                "director",
+                "worker-a",
+                "Start the pre-assigned task.",
+                "session",
+            )
+            .unwrap();
+
+        let surfaced = store
+            .surface_unseen_from_sources_for_recipient(
+                "worker-a",
+                Some("session"),
+                &["BRIGHT-SUPERVISOR"],
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            surfaced.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![correction],
+            "the transition gate must surface only the supervisor correction"
+        );
+
+        let still_unread = store
+            .peek_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+        assert_eq!(
+            still_unread.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![task_brief],
+            "the daemon-generated task brief must remain on its normal delivery path"
+        );
     }
 
     /// The GH #124 / cas-ceae storm guard, stated as the supervisor required:

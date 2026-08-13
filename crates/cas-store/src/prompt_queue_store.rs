@@ -1047,6 +1047,11 @@ const PROMPT_QUEUE_WAKE_ATTEMPT_DETAIL_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN wake_attempt_detail TEXT;
 "#;
 
+/// Sender-side delivery-stalled bounces are one-shot across daemon restarts.
+const PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN delivery_stalled_notified_at TEXT;
+"#;
+
 /// cas-7a01 (GH #155): which surfacing path wrote a receipt. NULL on rows
 /// receipted before this column existed — those all came from `inbox_poll`,
 /// the only writer at the time, but they are left NULL rather than
@@ -1193,6 +1198,24 @@ pub trait PromptQueueStore: Send + Sync {
         priority: Option<NotificationPriority>,
         dedupe_key: &str,
     ) -> Result<EnqueueIdempotentResult>;
+
+    /// Find direct messages that are still unread past their priority threshold.
+    fn delivery_stalled_candidates(
+        &self,
+        priority_threshold_secs: i64,
+        normal_threshold_secs: i64,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Atomically enqueue the one durable sender bounce if the original row is
+    /// still unread; returns its notification ID when it was (or already is)
+    /// created. A read or ack that wins the race cancels the bounce.
+    fn enqueue_delivery_stalled_bounce(
+        &self,
+        prompt_id: i64,
+        notice: &str,
+        summary: &str,
+    ) -> Result<Option<i64>>;
 
     /// Poll for pending prompts for a specific target (marks as processed)
     fn poll_for_target(&self, target: &str, limit: usize) -> Result<Vec<QueuedPrompt>>;
@@ -2191,6 +2214,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "wake_attempt_detail",
                     PROMPT_QUEUE_WAKE_ATTEMPT_DETAIL_MIGRATION,
                 ),
+                (
+                    "delivery_stalled_notified_at",
+                    PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION,
+                ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
@@ -2370,6 +2397,102 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 |row| row.get(0),
             )?;
             Ok(EnqueueIdempotentResult::AlreadyExists(existing_id))
+        })
+    }
+
+    fn delivery_stalled_candidates(
+        &self,
+        priority_threshold_secs: i64,
+        normal_threshold_secs: i64,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        let conn = self.conn.lock().unwrap();
+        let priority_cutoff =
+            (Utc::now() - chrono::Duration::seconds(priority_threshold_secs.max(0))).to_rfc3339();
+        let normal_cutoff =
+            (Utc::now() - chrono::Duration::seconds(normal_threshold_secs.max(0))).to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+             FROM prompt_queue q
+             WHERE q.target <> 'all_workers'
+               AND q.source <> 'delivery-watchdog'
+               AND q.delivery_stalled_notified_at IS NULL
+               AND q.acked_at IS NULL
+               AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+               AND NOT EXISTS (
+                    SELECT 1 FROM prompt_queue_recipient_seen seen
+                     WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+               )
+               AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
+                    OR (q.urgent = 0 AND q.priority > 1 AND q.created_at <= ?))
+             ORDER BY q.priority ASC, q.id ASC
+             LIMIT ?",
+        )?;
+        Ok(stmt
+            .query_map(
+                params![priority_cutoff, normal_cutoff, limit as i64],
+                Self::prompt_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    fn enqueue_delivery_stalled_bounce(
+        &self,
+        prompt_id: i64,
+        notice: &str,
+        summary: &str,
+    ) -> Result<Option<i64>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let original = tx
+                .query_row(
+                    "SELECT source, factory_session FROM prompt_queue q
+                     WHERE q.id = ?
+                       AND q.target <> 'all_workers'
+                       AND q.source <> 'delivery-watchdog'
+                       AND q.delivery_stalled_notified_at IS NULL
+                       AND q.acked_at IS NULL
+                       AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM prompt_queue_recipient_seen seen
+                            WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                       )",
+                    params![prompt_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            let Some((sender, factory_session)) = original else {
+                return Ok(None);
+            };
+
+            let now = Utc::now().to_rfc3339();
+            let dedupe_key = format!("delivery-stalled:{prompt_id}");
+            tx.execute(
+                "INSERT OR IGNORE INTO prompt_queue
+                    (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key)
+                 VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, ?, 0, ?)",
+                params![
+                    sender,
+                    notice,
+                    now,
+                    factory_session,
+                    summary,
+                    i32::from(NotificationPriority::High),
+                    dedupe_key
+                ],
+            )?;
+            let bounce_id: i64 = tx.query_row(
+                "SELECT id FROM prompt_queue WHERE dedupe_key = ?",
+                params![dedupe_key],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE prompt_queue SET delivery_stalled_notified_at = ? WHERE id = ?",
+                params![now, prompt_id],
+            )?;
+            tx.commit()?;
+            Ok(Some(bounce_id))
         })
     }
 
@@ -6253,6 +6376,100 @@ mod tests {
         // With a large timeout, the recently processed message should NOT appear
         let unacked = store.unacked(3600, 10).unwrap();
         assert!(unacked.is_empty());
+    }
+
+    #[test]
+    fn delivery_stalled_bounce_uses_priority_threshold_once_and_cancels_on_read() {
+        let (_temp, store) = create_test_store();
+        let urgent = store
+            .enqueue_full(
+                "supervisor",
+                "claude-worker",
+                "approve refund",
+                Some("session"),
+                Some("refund approval"),
+                Some(NotificationPriority::Critical),
+            )
+            .unwrap();
+        let normal = store
+            .enqueue_full(
+                "supervisor",
+                "claude-worker",
+                "status update",
+                Some("session"),
+                Some("weekly status"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        let old = (Utc::now() - chrono::Duration::seconds(11 * 60)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id IN (?, ?)",
+                params![old, urgent, normal],
+            )
+            .unwrap();
+
+        let candidates = store
+            .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+            .unwrap();
+        assert_eq!(
+            candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![urgent]
+        );
+        let bounce = store
+            .enqueue_delivery_stalled_bounce(
+                urgent,
+                "delivery stalled: notification_id=urgent; recipient_harness=claude; delivery_state=enqueued",
+                "delivery stalled",
+            )
+            .unwrap()
+            .expect("eligible urgent row should bounce");
+        assert!(
+            store
+                .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .enqueue_delivery_stalled_bounce(urgent, "duplicate", "duplicate")
+                .unwrap(),
+            None,
+            "the original row can create only one sender bounce"
+        );
+        let bounced = store.message_delivery_report(bounce).unwrap().unwrap();
+        assert_eq!(bounced.target, "supervisor");
+
+        let very_old = (Utc::now() - chrono::Duration::seconds(31 * 60)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![very_old, normal],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .poll_unseen_for_recipient("claude-worker", Some("session"), 10)
+            .unwrap();
+        assert!(
+            store
+                .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+                .unwrap()
+                .is_empty(),
+            "a recipient read cancels the pending sender bounce"
+        );
     }
 
     // ---- cas-c931: urgent (interrupt-and-redirect) flag ----

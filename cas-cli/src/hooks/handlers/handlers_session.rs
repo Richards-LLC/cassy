@@ -177,6 +177,19 @@ pub fn handle_session_start(
     // (role guidance + CAS header + memories/tasks) is protected.
     let mut assembler = SessionContextAssembler::new(context);
 
+    // Planning is a shared write surface: two live supervisors can otherwise
+    // decompose the same epic before either sees the other's task set. Put
+    // this at the protected top of supervisor context so it survives the
+    // SessionStart preview/budget compaction path.
+    if is_supervisor {
+        if let Some(banner) = active_peer_supervisor_banner(
+            cas_root,
+            std::env::var("CAS_AGENT_NAME").ok().as_deref(),
+        ) {
+            assembler.prepend_degradable(banner.clone(), banner);
+        }
+    }
+
     // cas-cd54: ambient recall is a degradable, independently hard-bounded
     // evidence segment. It stays below immutable role guidance and never
     // competes with safety banners for protected SessionStart bytes.
@@ -385,6 +398,25 @@ pub fn handle_session_start(
     }
 
     Ok(output)
+}
+
+fn active_peer_supervisor_banner(cas_root: &Path, current_name: Option<&str>) -> Option<String> {
+    let agents = crate::store::open_agent_store(cas_root)
+        .ok()?
+        .list(Some(cas_types::AgentStatus::Active))
+        .ok()?;
+    let peers: Vec<String> = agents
+        .into_iter()
+        .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+        .filter(|agent| current_name.is_none_or(|name| agent.name != name))
+        .map(|agent| agent.name)
+        .collect();
+    (!peers.is_empty()).then(|| {
+        format!(
+            "⚠️ CONCURRENT SUPERVISORS ACTIVE: {}\nPlanning under a shared epic can race. Review existing children before creating tasks; CAS will require confirmation for recent competing plans and duplicate titles.",
+            peers.join(", ")
+        )
+    })
 }
 
 /// Estimate token count (rough approximation: ~4 chars per token)

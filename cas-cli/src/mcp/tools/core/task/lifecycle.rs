@@ -41,6 +41,69 @@ pub(crate) fn resolve_factory_epic_owner(
 
 const RELATED_RECALL_LIMIT: usize = 3;
 const RELATED_RECALL_CHAR_CAP: usize = 1_200;
+const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
+const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
+
+fn title_terms(title: &str) -> std::collections::HashSet<String> {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|term| term.len() > 2)
+        .collect()
+}
+
+/// A deliberately small, transparent adaptation of memory overlap scoring for
+/// task titles. Planning titles are short, so a Jaccard score over normalized
+/// terms is less surprising than a search-index score and is stable before the
+/// new task has been indexed.
+fn title_similarity(left: &str, right: &str) -> f64 {
+    let left = title_terms(left);
+    let right = title_terms(right);
+    let union = left.union(&right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    left.intersection(&right).count() as f64 / union as f64
+}
+
+fn open_task_title_overlap(
+    task_store: &dyn cas_store::TaskStore,
+    title: &str,
+) -> Result<Option<(String, String, f64)>, String> {
+    let best = task_store
+        .list(None)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|task| !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
+        .map(|task| {
+            let score = title_similarity(title, &task.title);
+            (task.id, task.title, score)
+        })
+        .filter(|(_, _, score)| *score >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD)
+        .max_by(|left, right| left.2.total_cmp(&right.2));
+    Ok(best)
+}
+
+fn recent_other_epic_planner(
+    task_store: &dyn cas_store::TaskStore,
+    epic_id: &str,
+    creator: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>, String> {
+    let recent = task_store
+        .get_dependents(epic_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
+        .filter_map(|dependency| {
+            let planner = dependency.created_by?;
+            (planner != creator
+                && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
+                .then_some((planner, dependency.created_at))
+        })
+        .max_by_key(|(_, created_at)| *created_at);
+    Ok(recent)
+}
 
 /// Best-effort, response-only recall for write moments that establish work.
 /// Uses the same unified BM25 index as `search`; failures deliberately add no
@@ -113,7 +176,7 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_create_with_target(req, None, None).await
+        self.cas_task_create_with_target(req, None, None, false).await
     }
 
     pub(crate) async fn cas_task_create_with_target(
@@ -121,6 +184,7 @@ impl CasCore {
         req: TaskCreateRequest,
         target_repo: Option<&str>,
         target_branch: Option<&str>,
+        confirm_warning: bool,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -159,6 +223,53 @@ impl CasCore {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToString::to_string);
+        let created_by = self.get_agent_id().ok();
+
+        // A recent sibling plan is a strong signal that another supervisor is
+        // decomposing the same epic. Refuse the write until the caller makes a
+        // conscious override; no task row or dependency is created on this path.
+        if !confirm_warning {
+            if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
+                if let Some((other_creator, planned_at)) = recent_other_epic_planner(
+                    task_store.as_ref(),
+                    epic,
+                    creator,
+                    chrono::Utc::now(),
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to inspect recent epic planning: {error}")),
+                    data: None,
+                })? {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \\
+                             Review that plan before adding another child; if this is intentional, retry with confirm_warning=true."
+                        )),
+                        data: None,
+                    });
+                }
+            }
+
+            if let Some((existing_id, existing_title, score)) =
+                open_task_title_overlap(task_store.as_ref(), &req.title).map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
+                    data: None,
+                })?
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this title \\
+                         at {:.0}%. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
+                        score * 100.0
+                    )),
+                    data: None,
+                });
+            }
+        }
 
         // Reject the case where the epic and a blocker are the same task (cas-6009).
         // A task cannot be blocked by its own parent epic — the ParentChild dep and
@@ -268,7 +379,6 @@ impl CasCore {
         // Associate the creation event and dependency metadata with the
         // current session. This is used by ambient recall to avoid feeding a
         // task back to the agent that just authored it.
-        let created_by = self.get_agent_id().ok();
         task_store
             .create_atomic(
                 &task,
@@ -1161,6 +1271,22 @@ mod related_recall_response_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn duplicate_title_similarity_flags_near_identical_titles_but_not_unrelated_work() {
+        assert!(
+            title_similarity(
+                "Guard concurrent supervisors against planning race",
+                "Guard concurrent supervisors against planning race conditions",
+            ) >= DUPLICATE_TITLE_SIMILARITY_THRESHOLD
+        );
+        assert!(
+            title_similarity(
+                "Guard concurrent supervisors against planning race",
+                "Add release note Slack publication receipts",
+            ) < DUPLICATE_TITLE_SIMILARITY_THRESHOLD
+        );
     }
 
     fn epic_request(title: &str, description: &str) -> TaskCreateRequest {

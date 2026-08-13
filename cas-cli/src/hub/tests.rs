@@ -31,8 +31,7 @@ fn private_tempdir() -> tempfile::TempDir {
 // normal isolated run takes about 3 seconds, so the former 5-second deadline
 // flakes under full-suite build contention. Fifteen seconds keeps a bounded
 // failure while leaving enough scheduling headroom for a busy developer host.
-const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(15);
+const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
@@ -177,9 +176,7 @@ fn h1_death_05_fixture_process_entry() {
     };
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         std::fs::write(port_file, listener.local_addr().unwrap().port().to_string()).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -242,10 +239,15 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
     assert_eq!(catalog.list().await.unwrap().len(), 1);
     let events = MachineEventBus::new(8);
     let mut event_rx = events.subscribe();
-    let connector = DaemonConnector::new(SessionMultiplexer::new(8), events)
-        .with_exit_evidence_store(store);
+    let connector =
+        DaemonConnector::new(SessionMultiplexer::new(8), events).with_exit_evidence_store(store);
     let mut viewer = connector
-        .attach("death-fixture", port, std::iter::empty::<String>(), Some(identity.clone()))
+        .attach(
+            "death-fixture",
+            port,
+            std::iter::empty::<String>(),
+            Some(identity.clone()),
+        )
         .await
         .unwrap();
     let welcome = viewer.recv().await.unwrap();
@@ -253,7 +255,10 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
         serde_json::from_slice::<DaemonMessage>(&welcome.bytes).unwrap(),
         DaemonMessage::Welcome { .. }
     ));
-    assert_eq!(connector.upstream_connection_count("death-fixture").await, 1);
+    assert_eq!(
+        connector.upstream_connection_count("death-fixture").await,
+        1
+    );
 
     // SAFETY: exact child pid is fingerprinted above and owned by this test.
     assert_eq!(unsafe { libc::kill(identity.pid as i32, libc::SIGILL) }, 0);
@@ -282,7 +287,10 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
     assert_eq!(source.model_call_count(), 0);
     assert_eq!(source.logical_session_create_count(), 0);
     assert_eq!(catalog.list().await.unwrap().len(), 1);
-    assert_eq!(connector.upstream_connection_count("death-fixture").await, 1);
+    assert_eq!(
+        connector.upstream_connection_count("death-fixture").await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -755,7 +763,11 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
         .await
         .unwrap();
     assert_eq!(hostile.status(), StatusCode::UNAUTHORIZED);
-    assert!(!hostile.headers().contains_key("access-control-allow-origin"));
+    assert!(
+        !hostile
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
     assert!(auth.list_devices().unwrap().is_empty());
 
     let accepted_invitation = auth
@@ -771,9 +783,7 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
         Request::post("/v1/auth/pairing/exchange")
             .header("origin", origin)
             .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&accepted_exchange).unwrap(),
-            ))
+            .body(Body::from(serde_json::to_vec(&accepted_exchange).unwrap()))
             .unwrap()
     };
     let accepted = app.clone().oneshot(accepted_request()).await.unwrap();
@@ -853,7 +863,9 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         DaemonConnector::new(SessionMultiplexer::new(4), events.clone()),
         events,
     );
-    let response = router(state)
+    let app = router(state);
+    let response = app
+        .clone()
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -886,8 +898,29 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("/commander/app.js"));
-    assert!(!html.contains("https://"));
+    let relay_metadata =
+        "name=\"cas-pairing-relay-origin\" content=\"https://petra-stella-cloud.vercel.app\"";
+    assert!(html.contains(relay_metadata));
+    assert!(
+        !html.replacen(relay_metadata, "", 1).contains("https://"),
+        "the reviewed pairing relay must be the embedded page's only external origin"
+    );
     assert!(!html.contains("<script>"), "inline scripts are forbidden");
+
+    let relay_response = app
+        .oneshot(
+            Request::post("/api/hub/pairing/requests")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        relay_response.status(),
+        StatusCode::NOT_FOUND,
+        "the controller hub must not grow a pairing relay or control proxy"
+    );
 }
 
 #[tokio::test]

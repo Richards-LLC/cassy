@@ -1710,7 +1710,7 @@ impl SqlitePromptQueueStore {
         detail: Option<&str>,
     ) -> Result<PromptRetryDisposition> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let row = tx
                 .query_row(
@@ -2167,7 +2167,7 @@ impl SqlitePromptQueueStore {
         if recipient.trim().is_empty() {
             return Ok((0, None));
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let (predicate, params) = Self::unseen_for_recipient_predicate(recipient, factory_session);
         let sql = format!("SELECT COUNT(*), MIN(q.created_at) {predicate}");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -2192,7 +2192,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // auto-commits DDL, so do not wrap ADD COLUMN in ImmediateTx.
         // ensure_column + with_write_retry; indexes only after columns exist.
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(PROMPT_QUEUE_SCHEMA)?;
             let first_lifecycle_migration =
                 !crate::shared_db::column_exists(&conn, "prompt_queue", "highest_stage");
@@ -2321,7 +2321,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         attribution: Option<&serde_json::Value>,
     ) -> Result<EnqueueOutcome> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now();
             let now_text = now.to_rfc3339();
@@ -2386,7 +2386,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         dedupe_key: &str,
     ) -> Result<EnqueueIdempotentResult> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
 
@@ -2450,7 +2450,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let priority_cutoff = cutoff("priority", priority_threshold_secs)?;
         let normal_cutoff = cutoff("normal", normal_threshold_secs)?;
         let stale_cutoff = cutoff("stale TTL", PROMPT_QUEUE_STALE_TTL_SECS)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
              FROM prompt_queue q
@@ -2500,7 +2500,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         summary: &str,
     ) -> Result<Option<i64>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let stale_cutoff =
                 (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
@@ -2576,7 +2576,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
 
             let (sql, prompt_params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(session) =
@@ -2702,7 +2702,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             return Ok(());
         }
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute(
                 "INSERT OR IGNORE INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
@@ -2725,7 +2725,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         detail: Option<&str>,
     ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             // Never downgrade a recorded `Fired` to `NotAttempted`: a later
             // pass that declines to nudge says nothing about the wake this row
@@ -2775,7 +2775,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         if recipient.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let (predicate, mut params) =
             Self::unseen_for_recipient_predicate(recipient, factory_session);
         let sql = format!(
@@ -2798,7 +2798,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
 
             let mut stmt = conn.prepare_cached(
@@ -2838,7 +2838,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn peek_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
@@ -2871,7 +2871,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         // cas-d047 (GH #69): a row this old was never consumed by anyone;
         // delivering it now would hand a live worker an instruction from a
@@ -3055,7 +3055,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             query_params.push(Box::new(session.to_string()));
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
@@ -3079,7 +3079,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // transport delivery (cas-2c5f). Prefer mark_transport_delivered /
         // mark_dropped / mark_suppressed / mark_abandoned on the delivery path.
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             conn.execute(
                 "UPDATE prompt_queue SET processed_at = ? WHERE id = ?",
@@ -3091,7 +3091,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn ack(&self, prompt_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             // Atomic stage advance to Confirmed (legal from Delivered or Partial).
             let _ = Self::atomic_stage_stamp(
@@ -3112,7 +3112,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn ack_by_dedupe_key(&self, dedupe_key: &str) -> Result<Option<i64>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let prompt_id = conn
                 .query_row(
                     "SELECT id FROM prompt_queue WHERE dedupe_key = ? LIMIT 1",
@@ -3142,7 +3142,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn rewrite_pending(&self, prompt_id: i64, prompt: &str, summary: Option<&str>) -> Result<bool> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let changed = conn.execute(
                 "UPDATE prompt_queue
                  SET prompt = ?, summary = ?
@@ -3168,7 +3168,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
 
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             let recipient_placeholders =
                 std::iter::repeat_n("?", recipient_aliases.len()).collect::<Vec<_>>();
@@ -3269,7 +3269,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn unacked(&self, timeout_secs: i64, limit: usize) -> Result<Vec<QueuedPrompt>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(timeout_secs)).to_rfc3339();
 
         let mut stmt = conn.prepare_cached(
@@ -3292,7 +3292,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn message_status(&self, prompt_id: i64) -> Result<Option<MessageStatus>> {
         // Legacy ladder: processed_at / acked_at only (includes non-delivery
         // drains). Structured stage uses separate columns.
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.query_row(
             "SELECT processed_at, acked_at FROM prompt_queue WHERE id = ?",
             params![prompt_id],
@@ -3312,7 +3312,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn message_delivery_report(&self, prompt_id: i64) -> Result<Option<MessageDeliveryReport>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let row = conn.query_row(
             "SELECT id, prompt, source, target, created_at, processed_at, factory_session,
@@ -3555,7 +3555,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn record_selected(&self, prompt_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::atomic_stage_stamp(
                 &conn,
                 prompt_id,
@@ -3572,7 +3572,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         detail: Option<&str>,
     ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             Self::atomic_stage_stamp_in_tx(
                 &tx,
@@ -3610,7 +3610,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             // reason=None clears last_pending_* inside the same ImmediateTx UPDATE.
             Self::atomic_stage_stamp(
                 &conn,
@@ -3637,7 +3637,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         detail: Option<&str>,
     ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             if attempted == 0 {
                 return Self::atomic_stage_stamp(
                     &conn,
@@ -3705,7 +3705,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn mark_dropped(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::atomic_stage_stamp(
                 &conn,
                 prompt_id,
@@ -3724,7 +3724,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn mark_suppressed(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::atomic_stage_stamp(
                 &conn,
                 prompt_id,
@@ -3743,7 +3743,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn mark_superseded(&self, prompt_id: i64, detail: &str) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::atomic_stage_stamp(
                 &conn,
                 prompt_id,
@@ -3762,7 +3762,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::atomic_stage_stamp(
                 &conn,
                 prompt_id,
@@ -3781,7 +3781,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::atomic_stage_stamp(
                 &conn,
                 prompt_id,
@@ -3803,7 +3803,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         min_attempts: u32,
         limit: usize,
     ) -> Result<Vec<RetriedPrompt>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT id, source, target, summary, delivery_attempts,
                     last_pending_reason, first_attempt_at
@@ -3833,7 +3833,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         &self,
         limit: usize,
     ) -> Result<Vec<UndeliveredLifecycleRelay>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         // `transport_delivered_at IS NULL` is the whole test for "never
         // arrived" — it is stamped only by `mark_transport_delivered` /
         // a fully successful broadcast. Terminal stage means the row will
@@ -3882,7 +3882,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn ack_lifecycle_wake(&self, lifecycle_wake_id: i64) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let prompt_id = conn
             .query_row(
                 "SELECT id FROM prompt_queue WHERE source = ? ORDER BY id DESC LIMIT 1",
@@ -3898,7 +3898,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn pending_count(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM prompt_queue WHERE processed_at IS NULL",
@@ -3911,7 +3911,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn abandon_pending_older_than(&self, older_than_secs: i64) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let now = Utc::now().to_rfc3339();
             let detail = format!(
@@ -3933,7 +3933,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let now = Utc::now().to_rfc3339();
@@ -3981,7 +3981,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             return Ok(0);
         }
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let now = Utc::now().to_rfc3339();
             let placeholders = std::iter::repeat_n("?", targets.len())
@@ -4019,7 +4019,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn clear(&self) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let rows = tx.execute("DELETE FROM prompt_queue", [])?;
             tx.execute("DELETE FROM prompt_queue_recipient_seen", [])?;
@@ -4030,7 +4030,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn cleanup_old(&self, older_than_secs: i64) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             // CI red-run rows are durable receipts keyed by branch + SHA.  They
@@ -4100,7 +4100,7 @@ impl SqlitePromptQueueStore {
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
 
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             // cas-d047 (GH #69): never hand a recipient a months-old item, and
             // (GH #70 sibling) never hand it a row the daemon already
@@ -4537,12 +4537,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.ack_lifecycle_wake(4401).unwrap(), Some(prompt_id));
-        assert!(store
-            .message_delivery_report(prompt_id)
-            .unwrap()
-            .unwrap()
-            .confirmed_at
-            .is_some());
+        assert!(
+            store
+                .message_delivery_report(prompt_id)
+                .unwrap()
+                .unwrap()
+                .confirmed_at
+                .is_some()
+        );
     }
 
     /// cas-0147 (GH #167): a withdrawal is not idle-noise suppression.

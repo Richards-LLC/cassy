@@ -88,7 +88,7 @@ fn delivery_stalled_notice(
         "<system-notice>Delivery stalled: notification_id={}; recipient='{}'; recipient_harness={}; age_secs={}; summary='{}'; delivery_state={}. The recipient has not acknowledged or read this message. Switch to another channel if this is time-critical.</system-notice>",
         queued.id,
         queued.target,
-        recipient_harness.as_str(),
+        recipient_harness.backend().name(),
         age_secs,
         summary,
         delivery_state,

@@ -144,7 +144,10 @@ impl BasicContextScorer {
         let type_weight = match entry.entry_type {
             EntryType::Learning => 1.5,
             EntryType::Context => 1.3,
-            EntryType::Preference => 1.2,
+            // Preferences encode standing operator directives. They need to
+            // survive the compact ambient-memory window even when generic
+            // learnings have higher importance or feedback scores.
+            EntryType::Preference => 2.5,
             EntryType::Observation => 0.3, // Much lower - these are raw, unprocessed
         };
 

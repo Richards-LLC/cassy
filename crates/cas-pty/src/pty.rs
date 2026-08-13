@@ -815,8 +815,7 @@ impl PtyConfig {
     ///   resolver keys on this exact value.
     /// - `-m/--model <MODEL>`, `--reasoning-effort <EFFORT>` (aliased
     ///   `--effort`; same minimal/low/medium/high/xhigh vocabulary as
-    ///   Claude/Codex — reused via the caller's existing
-    ///   `Effort::as_claude_arg()`, no separate `as_grok_arg` needed),
+    ///   Claude/Codex — supplied by the caller's backend adapter),
     ///   `--cwd <CWD>`, `--permission-mode <MODE>` (accepts
     ///   `bypassPermissions`) all confirmed present.
     /// - `--rules <RULES>`: "Extra rules to append to the system prompt" —

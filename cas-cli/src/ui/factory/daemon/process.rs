@@ -19,9 +19,9 @@ pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
         .arg("--workers")
         .arg(config.factory_config.workers.to_string())
         .arg("--supervisor-cli")
-        .arg(config.factory_config.supervisor_cli.as_str())
+        .arg(config.factory_config.supervisor_cli.backend().name())
         .arg("--worker-cli")
-        .arg(config.factory_config.worker_cli.as_str())
+        .arg(config.factory_config.worker_cli.backend().name())
         .arg("--foreground");
 
     if config.boot_progress {

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! Storage abstraction for CAS
 //!
 //! This crate provides a unified storage interface for all CAS data types:

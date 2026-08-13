@@ -339,10 +339,10 @@ fn validate_model_matches_cli(cli: cas_mux::SupervisorCli, model: &str) -> Resul
             "invalid spawn_workers combination: model {model:?} is a {} model but \
              cli={} was requested. \
              Pass cli={} to spawn it on its own harness, or choose a {} model (e.g. {}).",
-            model_cli.as_str(),
-            cli.as_str(),
-            model_cli.as_str(),
-            cli.as_str(),
+            model_cli.backend().name(),
+            cli.backend().name(),
+            model_cli.backend().name(),
+            cli.backend().name(),
             default_worker_model_for_cli(cli),
         )),
         _ => Ok(()),
@@ -424,8 +424,8 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
                 tracing::info!(
                     target: "cas::factory",
                     requested_model = %model.unwrap_or_default(),
-                    resolved_cli = %spec.cli.as_str(),
-                    model_cli = %model_cli.as_str(),
+                    resolved_cli = %spec.cli.backend().name(),
+                    model_cli = %model_cli.backend().name(),
                     "cas-28a4: explicit model slug overrides the resolved default cli"
                 );
                 spec.cli = model_cli;
@@ -476,7 +476,7 @@ fn spawn_spec_summary(spec_json: &str) -> String {
     match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
         Ok(spec) => format!(
             "{} model={} effort={}",
-            spec.cli.as_str(),
+            spec.cli.backend().name(),
             spec.model.as_deref().unwrap_or("(backend default)"),
             format_effort(spec.effort)
         ),
@@ -506,7 +506,7 @@ fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &s
                 };
                 warnings.push(format!(
                     "Warning: spawn_workers omitted {omitted}; resolved to {fallback} {}/{}/{} — pass model=/effort= explicitly to tier the spawn.",
-                    spec.cli.as_str(),
+                    spec.cli.backend().name(),
                     spec.model.as_deref().unwrap_or("(backend default)"),
                     format_effort(spec.effort)
                 ));
@@ -1283,7 +1283,7 @@ impl CasService {
             {
                 let warning = format!(
                     "config_dir is Claude-only; resolved {} worker will not receive CLAUDE_CONFIG_DIR",
-                    spec.cli.as_str()
+                    spec.cli.backend().name()
                 );
                 tracing::warn!(target: "cas::factory", "{warning}");
                 config_dir_notice = format!("\nWarning: {warning}");
@@ -5641,7 +5641,7 @@ fn format_harness_turn_observation_at(
     let Some(path) = artifact_path else {
         return format!(
             "\n    harness turn: unobserved ({} artifact unresolved)",
-            cli.as_str()
+            cli.backend().name()
         );
     };
     let observations =
@@ -5658,7 +5658,7 @@ fn format_harness_turn_observation_at(
             });
         return format!(
             "\n    harness turn: unobserved (resolved {} artifact has no authoritative turn-start record{})",
-            cli.as_str(),
+            cli.backend().name(),
             completion
         );
     };
@@ -6936,7 +6936,7 @@ fn worker_status_cached_transcript_resolution_in_roots(
     cli: cas_mux::SupervisorCli,
 ) -> TranscriptResolution {
     let key = WorkerTranscriptCacheKey {
-        cli: cli.as_str(),
+        cli: cli.backend().name(),
         base_dirs: roots.to_vec(),
         clone_path: clone_path.map(str::to_owned),
         session_id: session_id.to_owned(),
@@ -8417,7 +8417,7 @@ mod tests {
         ] {
             assert_eq!(spec.cli, cli);
             let model = spec.model.as_deref().expect("fallback model");
-            let allowed_route = format!("cli={} model={model}", cli.as_str());
+            let allowed_route = format!("cli={} model={model}", cli.backend().name());
             assert!(
                 routing_doc
                     .lines()

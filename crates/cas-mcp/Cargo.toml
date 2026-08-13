@@ -6,6 +6,9 @@ rust-version = "1.85"
 description = "MCP server for CAS"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 cas-types = { path = "../cas-types" }
 cas-store = { path = "../cas-store" }

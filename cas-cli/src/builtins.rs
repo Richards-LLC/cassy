@@ -5619,7 +5619,7 @@ This is the body content."#;
 
     /// cas-2c61: every Codex builtin (agent or skill) must reference the
     /// codex-aliased tool prefix `mcp__cs__` (per
-    /// `SupervisorCli::Codex.capabilities().tool_prefix`), never `mcp__cas__`
+    /// `SupervisorCli::Codex.backend().capabilities().tool_prefix`), never `mcp__cas__`
     /// (Claude's prefix). A codex worker/supervisor following a skill that
     /// carries the wrong prefix calls a tool name that doesn't resolve.
     /// Anti-drift guard mirroring the Grok corpus check (cas-6f46).

@@ -685,7 +685,7 @@ pub fn with_response_instructions(
     respond_to: &str,
     receiver_cli: SupervisorCli,
 ) -> String {
-    let prefix = receiver_cli.capabilities().tool_prefix;
+    let prefix = receiver_cli.backend().capabilities().tool_prefix;
     format!(
         "{message}\n\n---\nTo respond to this message, use: `{prefix}coordination action=message target={respond_to} message=\"...\"`"
     )
@@ -1187,8 +1187,8 @@ pub fn generate_prompt_at(
     if !config.enabled {
         return None;
     }
-    let supervisor_prefix = supervisor_cli.capabilities().tool_prefix;
-    let worker_prefix = worker_cli.capabilities().tool_prefix;
+    let supervisor_prefix = supervisor_cli.backend().capabilities().tool_prefix;
+    let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
 
     match event {
         DirectorEvent::TaskAssigned {

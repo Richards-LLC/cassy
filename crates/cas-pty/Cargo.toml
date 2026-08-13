@@ -5,6 +5,9 @@ edition = "2024"
 description = "PTY management for CAS factory mode"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 # PTY management
 portable-pty = "0.9"
@@ -20,7 +23,7 @@ tokio = { version = "1", features = ["sync", "io-util", "time", "net"] }
 serde = { version = "1", features = ["derive"] }
 
 # Error handling
-thiserror = "2"
+thiserror.workspace = true
 
 # Structured logging (cas-5232: cwd audit trail)
 tracing = "0.1"

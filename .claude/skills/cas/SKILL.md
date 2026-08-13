@@ -1,6 +1,6 @@
 ---
 name: cas
-description: Use when work needs CAS memory, task tracking, context search, rules, or skills management. (project)
+description: Coding Agent System - unified memory, tasks, rules, and skills. Use when you need to remember something, track work, search past context, or manage tasks. (project)
 managed_by: cas
 ---
 

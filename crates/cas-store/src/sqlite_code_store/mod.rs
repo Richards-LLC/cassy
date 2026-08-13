@@ -102,7 +102,7 @@ impl SqliteCodeStore {
 
         // Ensure code tables exist
         {
-            let c = conn.lock().unwrap();
+            let c = crate::shared_db::lock_connection(&conn)?;
             c.execute_batch(CODE_SCHEMA)?;
         }
 

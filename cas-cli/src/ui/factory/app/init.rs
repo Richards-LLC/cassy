@@ -158,7 +158,9 @@ impl FactoryApp {
         // CLI/model/effort for the supervisor pane (cas-1948).
         let (supervisor_cli, supervisor_model, supervisor_effort) =
             if let Some(ref sup_spec) = config.resolved_supervisor_spec {
-                let effort_str = sup_spec.effort.map(|e| e.as_claude_arg().to_string());
+                let effort_str = sup_spec
+                    .effort
+                    .map(|e| sup_spec.cli.backend().effort_arg(e).to_string());
                 (sup_spec.cli, sup_spec.model.clone(), effort_str)
             } else {
                 (

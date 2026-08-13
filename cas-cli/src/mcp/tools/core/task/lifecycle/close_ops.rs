@@ -1,3 +1,4 @@
+use super::TaskLifecycleGateError;
 use crate::harness_policy::{
     is_supervisor_from_env, is_worker_without_subagents_from_env, supervisor_harness_from_env,
     supervisor_verification_tool, verification_policy, worker_coordination_tool,
@@ -17,7 +18,7 @@ pub(crate) fn epic_close_owner_gate(
     caller_id: Option<&str>,
     caller_name: Option<&str>,
     caller_session: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), TaskLifecycleGateError> {
     // cas-cc74: trim owner + identity facets so write-boundary normalize and
     // close compare stay consistent (exact match after trim).
     let owner = owner.trim();
@@ -33,18 +34,15 @@ pub(crate) fn epic_close_owner_gate(
         .flatten()
         .any(|s| !s.trim().is_empty());
     if !has_identity {
-        return Err(format!(
-            "Epic {epic_id} is owned by epic_verification_owner={owner}; \
-             caller identity is unknown — refusing close (fail closed, cas-9fff). \
-             Present CAS agent id / CAS_AGENT_NAME / CAS_SESSION_ID matching the owner, \
-             or transfer epic_verification_owner first."
-        ));
+        return Err(TaskLifecycleGateError::OwnerIdentityUnknown {
+            epic_id: epic_id.to_string(),
+            owner: owner.to_string(),
+        });
     }
-    Err(format!(
-        "Epic {epic_id} is owned by epic_verification_owner={owner}; \
-         this session cannot close it. Update epic_verification_owner \
-         if ownership has transferred (cas-9fff)."
-    ))
+    Err(TaskLifecycleGateError::OwnerMismatch {
+        epic_id: epic_id.to_string(),
+        owner: owner.to_string(),
+    })
 }
 
 /// Deadline for one explicit task-scoped verification dispatch.
@@ -150,47 +148,48 @@ fn validate_completion_artifact_path(
     cas_root: &std::path::Path,
     task_id: &str,
     artifact_path: &str,
-) -> Result<(), String> {
+) -> Result<(), TaskLifecycleGateError> {
+    let reject = |message: String| TaskLifecycleGateError::ArtifactPath { message };
     if artifact_path.trim().is_empty() || artifact_path.len() > 4096 {
-        return Err(
+        return Err(reject(
             "artifact_path must be a non-empty path no longer than 4096 bytes.".to_string(),
-        );
+        ));
     }
     let artifact_path = std::path::Path::new(artifact_path);
     if !artifact_path.is_absolute() {
-        return Err(
+        return Err(reject(
             "artifact_path must be an absolute path under the configured [factory] artifacts_root/<task-id>/."
                 .to_string(),
-        );
+        ));
     }
 
     let config = crate::config::Config::load(cas_root)
-        .map_err(|error| format!("could not load [factory] artifacts_root: {error}"))?;
+        .map_err(|error| reject(format!("could not load [factory] artifacts_root: {error}")))?;
     let configured_root =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let canonical_root = configured_root.canonicalize().map_err(|_| {
+    let canonical_root = configured_root.canonicalize().map_err(|_| reject(
         "configured [factory] artifacts_root must exist before a completion artifact can be recorded."
             .to_string()
-    })?;
-    let canonical_task_root = canonical_root.join(task_id).canonicalize().map_err(|_| {
+    ))?;
+    let canonical_task_root = canonical_root.join(task_id).canonicalize().map_err(|_| reject(
         "artifact_path requires an existing per-task directory at configured [factory] artifacts_root/<task-id>/."
             .to_string()
-    })?;
+    ))?;
     if !canonical_task_root.is_dir() || !canonical_task_root.starts_with(&canonical_root) {
-        return Err(
+        return Err(reject(
             "artifact_path task directory must be a real directory directly beneath the configured [factory] artifacts_root."
                 .to_string(),
-        );
+        ));
     }
-    let canonical_artifact = artifact_path.canonicalize().map_err(|_| {
+    let canonical_artifact = artifact_path.canonicalize().map_err(|_| reject(
         "artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<task-id>/."
             .to_string()
-    })?;
+    ))?;
     if !canonical_artifact.starts_with(&canonical_task_root) {
-        return Err(
+        return Err(reject(
             "artifact_path must resolve beneath configured [factory] artifacts_root/<task-id>/."
                 .to_string(),
-        );
+        ));
     }
     Ok(())
 }
@@ -291,19 +290,20 @@ fn negative_result_missing_receipts(
     missing
 }
 
-fn validate_negative_result_reference(reference: &str) -> Result<(), String> {
+fn validate_negative_result_reference(reference: &str) -> Result<(), TaskLifecycleGateError> {
+    let reject = |message: String| TaskLifecycleGateError::NegativeResultReference { message };
     let reference = reference.trim();
     if reference.is_empty() || reference.len() > 512 {
-        return Err(
+        return Err(reject(
             "negative_result_reference must be a non-empty PR/branch reference no longer than 512 bytes."
                 .to_string(),
-        );
+        ));
     }
     if !delivery_audit_text_is_portable(reference) {
-        return Err(
+        return Err(reject(
             "negative_result_reference must be portable audit text without local absolute paths, control characters, or secret-shaped values."
                 .to_string(),
-        );
+        ));
     }
     let branch = reference.strip_prefix("branch:").unwrap_or(reference);
     let looks_like_pr = (reference.starts_with("https://") || reference.starts_with("http://"))
@@ -314,21 +314,26 @@ fn validate_negative_result_reference(reference: &str) -> Result<(), String> {
             .output()
             .is_ok_and(|output| output.status.success());
     if !looks_like_pr && !looks_like_branch {
-        return Err(
+        return Err(reject(
             "negative_result_reference must identify a closed-unmerged PR URL or a valid branch name (optionally prefixed with `branch:`)."
                 .to_string(),
-        );
+        ));
     }
     Ok(())
 }
 
-fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), String> {
+fn request_changes_role_gate(
+    is_supervisor: bool,
+    task_id: &str,
+) -> Result<(), TaskLifecycleGateError> {
     if is_supervisor {
         Ok(())
     } else {
-        Err(format!(
-            "task request_changes rejected: only supervisors may decline an AwaitingMerge delivery. Task {task_id} stays parked; a worker cannot reject its own work to escape the delivery proof boundary."
-        ))
+        Err(TaskLifecycleGateError::SupervisorOnly {
+            message: format!(
+                "task request_changes rejected: only supervisors may decline an AwaitingMerge delivery. Task {task_id} stays parked; a worker cannot reject its own work to escape the delivery proof boundary."
+            ),
+        })
     }
 }
 
@@ -789,14 +794,22 @@ impl CasCore {
         Ok(caller)
     }
 
-    fn validate_gate_decision_close(&self, task: &cas_types::Task) -> Result<(), String> {
-        self.resolve_live_supervisor_authority()
-            .map_err(|error| gate_supervisor_authority_error("CLOSE", error))?;
+    fn validate_gate_decision_close(
+        &self,
+        task: &cas_types::Task,
+    ) -> Result<(), TaskLifecycleGateError> {
+        self.resolve_live_supervisor_authority().map_err(|error| {
+            TaskLifecycleGateError::SupervisorOnly {
+                message: gate_supervisor_authority_error("CLOSE", error),
+            }
+        })?;
         if !has_recorded_gate_decision(&task.notes) {
-            return Err(format!(
-                "GATE CLOSE REJECTED: task {} has no non-empty recorded DECISION note. Record the decision first with mcp__cas__task action=notes id={} note_type=decision notes=\"...\", then retry close.",
-                task.id, task.id
-            ));
+            return Err(TaskLifecycleGateError::MissingGateDecision {
+                message: format!(
+                    "GATE CLOSE REJECTED: task {} has no non-empty recorded DECISION note. Record the decision first with mcp__cas__task action=notes id={} note_type=decision notes=\"...\", then retry close.",
+                    task.id, task.id
+                ),
+            });
         }
         Ok(())
     }
@@ -1486,12 +1499,12 @@ impl CasCore {
     pub(crate) fn guard_direct_update_close_delivery_state(
         &self,
         task: &Task,
-    ) -> Result<(), String> {
+    ) -> Result<(), TaskLifecycleGateError> {
         let Some((receipt, transaction)) =
             cas_store::get_latest_worker_delivery(&self.cas_root, &task.id).map_err(|error| {
-                format!(
+                TaskLifecycleGateError::DeliveryState { message: format!(
                     "DELIVERY CLOSE CHECK FAILED: could not inspect the task's immutable delivery state: {error}"
-                )
+                ) }
             })?
         else {
             return Ok(());
@@ -1503,10 +1516,12 @@ impl CasCore {
             {
                 return Ok(());
             }
-            return Err(format!(
-                "DELIVERY CLOSE BLOCKED\n\nTask {} was reopened after immutable delivery transaction {} reached Delivered. The terminal receipt belongs to the prior proof cycle and cannot authorize this close.\n\nRemediation: complete the reopened work and submit a fresh immutable completion receipt for the new cycle.",
-                task.id, transaction.id
-            ));
+            return Err(TaskLifecycleGateError::DeliveryState {
+                message: format!(
+                    "DELIVERY CLOSE BLOCKED\n\nTask {} was reopened after immutable delivery transaction {} reached Delivered. The terminal receipt belongs to the prior proof cycle and cannot authorize this close.\n\nRemediation: complete the reopened work and submit a fresh immutable completion receipt for the new cycle.",
+                    task.id, transaction.id
+                ),
+            });
         }
 
         let remediation = match transaction.state {
@@ -1529,10 +1544,12 @@ impl CasCore {
             }
             cas_types::WorkerDeliveryState::Delivered => unreachable!(),
         };
-        Err(format!(
-            "DELIVERY CLOSE BLOCKED\n\nTask {} has immutable delivery transaction {} in state {}. Direct task update cannot advance or bypass the delivery state machine.\n\nRemediation: {}",
-            task.id, transaction.id, transaction.state, remediation
-        ))
+        Err(TaskLifecycleGateError::DeliveryState {
+            message: format!(
+                "DELIVERY CLOSE BLOCKED\n\nTask {} has immutable delivery transaction {} in state {}. Direct task update cannot advance or bypass the delivery state machine.\n\nRemediation: {}",
+                task.id, transaction.id, transaction.state, remediation
+            ),
+        })
     }
 
     /// Apply the normal task-close merge predicate to direct
@@ -1546,7 +1563,7 @@ impl CasCore {
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
         declared_repo_context: Option<&super::super::repo_context::RepoContext>,
-    ) -> Result<(), String> {
+    ) -> Result<(), TaskLifecycleGateError> {
         if task.task_type == TaskType::Epic || task.assignee.is_none() {
             return Ok(());
         }
@@ -1567,7 +1584,9 @@ impl CasCore {
         let close_repo_verified = resolved_repo.is_ok();
         let close_project_root = match resolved_repo {
             Ok(repo_root) => repo_root,
-            Err(message) if factory_merge_enforcement => return Err(message),
+            Err(message) if factory_merge_enforcement => {
+                return Err(TaskLifecycleGateError::UnmergedChildBranch { message });
+            }
             Err(_) => self
                 .cas_root
                 .parent()
@@ -1601,7 +1620,9 @@ impl CasCore {
         };
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
-            Err(message) if factory_merge_enforcement => return Err(message),
+            Err(message) if factory_merge_enforcement => {
+                return Err(TaskLifecycleGateError::UnmergedChildBranch { message });
+            }
             Err(_) => "main".to_string(),
         };
         let req = TaskCloseRequest {
@@ -1619,7 +1640,9 @@ impl CasCore {
             &close_project_root,
         ) {
             MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
-            MergeStateGateOutcome::Reject(message) => Err(message),
+            MergeStateGateOutcome::Reject(message) => {
+                Err(TaskLifecycleGateError::UnmergedChildBranch { message })
+            }
         }
     }
 
@@ -1670,7 +1693,7 @@ impl CasCore {
             };
         let close_disposition = if task.task_type == TaskType::Gate {
             if let Err(message) = self.validate_gate_decision_close(&task) {
-                return Ok(Self::tool_error(message));
+                return Ok(Self::tool_error(message.to_string()));
             }
             TaskCloseDisposition::Decision
         } else if negative_result_receipt.is_some() {
@@ -1685,7 +1708,7 @@ impl CasCore {
                 &task,
                 super::proof_scope::ProofScopeOperation::CompletionReceipt,
             ) {
-                return Ok(Self::tool_error(message));
+                return Ok(Self::tool_error(message.to_string()));
             }
             return self
                 .submit_worker_completion_receipt(raw_receipt, &mut task, task_store.as_ref())
@@ -1858,7 +1881,7 @@ impl CasCore {
                 ) {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(msg),
+                        message: Cow::from(msg.to_string()),
                         data: None,
                     });
                 }
@@ -4534,10 +4557,12 @@ impl CasCore {
             );
         }
         if let Some(worktree) = system_a {
-            validate_pre_close_worktree(&worktree.path, expected, Some(&worktree.branch))?;
+            validate_pre_close_worktree(&worktree.path, expected, Some(&worktree.branch))
+                .map_err(|error| error.to_string())?;
             if let Some(assignee) = task.assignee.as_deref() {
                 let expected_branch = format!("factory/{assignee}");
-                validate_pre_close_worktree(&worktree.path, expected, Some(&expected_branch))?;
+                validate_pre_close_worktree(&worktree.path, expected, Some(&expected_branch))
+                    .map_err(|error| error.to_string())?;
             }
             return Ok(Some(worktree.path));
         }
@@ -4547,7 +4572,8 @@ impl CasCore {
                 .as_deref()
                 .expect("System B requires assignee");
             let expected_branch = format!("factory/{assignee}");
-            validate_pre_close_worktree(path, expected, Some(&expected_branch))?;
+            validate_pre_close_worktree(path, expected, Some(&expected_branch))
+                .map_err(|error| error.to_string())?;
         }
         Ok(system_b)
     }
@@ -5090,7 +5116,7 @@ impl CasCore {
         Parameters(req): Parameters<TaskRequestChangesRequest>,
     ) -> Result<CallToolResult, McpError> {
         request_changes_role_gate(is_supervisor_from_env(), &req.id)
-            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message.to_string()))?;
         if req.reason.trim().is_empty() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -7826,13 +7852,15 @@ fn validate_pre_close_worktree(
     path: &std::path::Path,
     expected: &crate::mcp::tools::core::task::repo_context::RepoContext,
     expected_branch: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), TaskLifecycleGateError> {
     let actual = crate::mcp::tools::core::task::repo_context::resolve_path_context(
         path,
         &expected.target_branch,
     )
-    .map_err(|reason| {
-        format!("PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve the task-owned worktree: {reason}")
+    .map_err(|reason| TaskLifecycleGateError::PreCloseWorktree {
+        message: format!(
+            "PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve the task-owned worktree: {reason}"
+        ),
     })?;
     // A WorkTarget can be stamped before a checkout gains a project pin, so
     // its durable `remote:` selector may legitimately differ from the
@@ -7849,11 +7877,13 @@ fn validate_pre_close_worktree(
                 &expected.repo_selector,
             );
     if !selector_matches || actual.git_common_dir != expected.git_common_dir {
-        return Err(format!(
-            "PRE-CLOSE HOOK CONTEXT REJECTED: task targets repository `{}`, but its recorded \
+        return Err(TaskLifecycleGateError::PreCloseWorktree {
+            message: format!(
+                "PRE-CLOSE HOOK CONTEXT REJECTED: task targets repository `{}`, but its recorded \
              worktree resolves to `{}`. No close-time executable gate was run.",
-            expected.repo_selector, actual.repo_selector
-        ));
+                expected.repo_selector, actual.repo_selector
+            ),
+        });
     }
     if let Some(expected_branch) = expected_branch {
         let output = std::process::Command::new("git")
@@ -7861,17 +7891,19 @@ fn validate_pre_close_worktree(
             .arg(path)
             .args(["branch", "--show-current"])
             .output()
-            .map_err(|error| {
-                format!(
+            .map_err(|error| TaskLifecycleGateError::PreCloseWorktree {
+                message: format!(
                     "PRE-CLOSE HOOK CONTEXT REJECTED: cannot inspect task worktree branch: {error}"
-                )
+                ),
             })?;
         let actual_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !output.status.success() || actual_branch != expected_branch {
-            return Err(format!(
-                "PRE-CLOSE HOOK CONTEXT REJECTED: expected task worktree branch \
+            return Err(TaskLifecycleGateError::PreCloseWorktree {
+                message: format!(
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: expected task worktree branch \
                  `{expected_branch}`, found `{actual_branch}`. No close-time executable gate was run."
-            ));
+                ),
+            });
         }
     }
     Ok(())

@@ -5,6 +5,9 @@ edition = "2024"
 description = "Factory orchestration for CAS multi-agent coordination"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Core CAS dependencies
 cas-mux = { path = "../cas-mux" }
@@ -22,8 +25,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Error handling
-thiserror = "2"
-anyhow = "1"
+thiserror.workspace = true
+anyhow.workspace = true
 
 # Logging
 tracing = "0.1"

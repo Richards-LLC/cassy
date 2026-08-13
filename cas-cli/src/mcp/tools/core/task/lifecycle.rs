@@ -1,6 +1,53 @@
 use crate::mcp::tools::core::imports::*;
+use thiserror::Error;
+
+/// Typed failures from lifecycle gates. The MCP boundary renders these with
+/// `Display`; lifecycle callers retain the failure kind instead of deriving it
+/// from response text.
+#[derive(Debug, Error)]
+pub(crate) enum TaskLifecycleGateError {
+    #[error(
+        "Epic {epic_id} is owned by epic_verification_owner={owner}; caller identity is unknown — refusing close (fail closed, cas-9fff). Present CAS agent id / CAS_AGENT_NAME / CAS_SESSION_ID matching the owner, or transfer epic_verification_owner first."
+    )]
+    OwnerIdentityUnknown { epic_id: String, owner: String },
+    #[error(
+        "Epic {epic_id} is owned by epic_verification_owner={owner}; this session cannot close it. Update epic_verification_owner if ownership has transferred (cas-9fff)."
+    )]
+    OwnerMismatch { epic_id: String, owner: String },
+    #[error("{message}")]
+    ArtifactPath { message: String },
+    #[error("{message}")]
+    NegativeResultReference { message: String },
+    #[error("{message}")]
+    SupervisorOnly { message: String },
+    #[error("{message}")]
+    MissingGateDecision { message: String },
+    #[error("{message}")]
+    DeliveryState { message: String },
+    #[error("{message}")]
+    UnmergedChildBranch { message: String },
+    #[error("{message}")]
+    PreCloseWorktree { message: String },
+    #[error("{message}")]
+    ProofScope { message: String },
+    #[error("{message}")]
+    RepositoryProof { message: String },
+    #[error("{message}")]
+    PromptDelivery { message: String },
+}
+
+#[cfg(test)]
+impl TaskLifecycleGateError {
+    /// Keeps legacy wording assertions focused on the rendered MCP text while
+    /// production callers use enum variants.
+    fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
 
 pub(crate) mod close_ops;
+#[cfg(test)]
+mod gate_error_tests;
 pub(crate) mod proof_scope;
 pub(crate) mod repository_proof;
 pub(crate) mod stale_close_guard;

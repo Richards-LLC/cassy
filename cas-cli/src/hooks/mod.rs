@@ -70,7 +70,9 @@ pub use cas_core::hooks::transcript::{
 };
 
 // Re-export CLI-specific wrappers
-pub use context::{build_context, build_context_ai, build_plan_context};
+pub use context::{
+    build_context, build_context_ai, build_context_with_token_budget, build_plan_context,
+};
 
 // Re-export handlers
 pub use handlers::{

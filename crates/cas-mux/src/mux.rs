@@ -274,7 +274,9 @@ impl Mux {
             .iter()
             .find(|s| s.name.as_deref() == Some(name))
             .map(|spec| {
-                let effort_str = spec.effort.map(|e| e.as_claude_arg().to_string());
+                let effort_str = spec
+                    .effort
+                    .map(|e| spec.cli.backend().effort_arg(e).to_string());
                 (spec.cli, spec.model.clone(), effort_str)
             })
             .unwrap_or_else(|| {
@@ -666,7 +668,9 @@ impl Mux {
         spec: Option<WorkerSpec>,
     ) -> PtyConfig {
         let effective = self.effective_worker_spec(name, spec);
-        let effort_str = effective.effort.map(|e| e.as_claude_arg().to_string());
+        let effort_str = effective
+            .effort
+            .map(|e| effective.cli.backend().effort_arg(e).to_string());
         let (config_dir, config_dir_source) = match (
             effective.config_dir.as_deref(),
             effective.requester_config_dir.as_deref(),
@@ -737,7 +741,9 @@ impl Mux {
         }
 
         let effective = self.effective_worker_spec(name, spec);
-        let effort_str = effective.effort.map(|e| e.as_claude_arg().to_string());
+        let effort_str = effective
+            .effort
+            .map(|e| effective.cli.backend().effort_arg(e).to_string());
         let (config_dir, config_dir_source) = match (
             effective.config_dir.as_deref(),
             effective.requester_config_dir.as_deref(),
@@ -1082,7 +1088,12 @@ impl Mux {
         let Some(pane) = self.panes.get(pane_id) else {
             return;
         };
-        if pane.harness().capabilities().supports_textbox_submit {
+        if pane
+            .harness()
+            .backend()
+            .capabilities()
+            .supports_textbox_submit
+        {
             tokio::time::sleep(floor).await;
             return;
         }

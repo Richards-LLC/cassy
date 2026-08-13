@@ -105,6 +105,7 @@ for job in fast-validation-preflight fast-validation-suite fast-validation-docs 
 done
 
 classifier="$repo_root/scripts/classify-ci-diff.sh"
+classify_action="$repo_root/.github/actions/classify-required-diff/action.yml"
 if [[ -x "$classifier" ]]; then
     # These committed fixtures pin both directions: the three explicitly safe
     # classes fast-pass, while a real mixed code/release change remains full.
@@ -118,6 +119,24 @@ else
     printf 'FAIL CI diff classifier is executable\n'
     fail=$((fail + 1))
 fi
+
+# GitHub provides an all-zero `before` SHA when a pushed tag has no predecessor.
+# Run the composite action body itself so this contract cannot regress into a
+# `git merge-base 000... HEAD` failure before the required test lanes start.
+tag_push_output="$(mktemp)"
+if BASE_SHA="0000000000000000000000000000000000000000" \
+    GITHUB_OUTPUT="$tag_push_output" \
+    bash < <(awk '
+        /^      run: \|$/ { in_run = 1; next }
+        in_run { sub(/^        /, ""); print }
+    ' "$classify_action"); then
+    require_text "$(<"$tag_push_output")" 'class=full' 'tag push with all-zero BASE_SHA falls back to full tier'
+    require_text "$(<"$tag_push_output")" 'fast-pass=false' 'tag push all-zero BASE_SHA never fast-passes'
+else
+    printf 'FAIL tag push all-zero BASE_SHA runs the shared classifier action\n'
+    fail=$((fail + 1))
+fi
+rm -f "$tag_push_output"
 
 for job in fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check; do
     block="$(job_block "$job")"

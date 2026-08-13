@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS external_task_dependencies (
     target_task_status TEXT,
     resolution_state TEXT NOT NULL,
     resolved_at TEXT,
+    suppressed_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (origin_task_id, proposal_id)
 );
@@ -102,6 +103,11 @@ CREATE TABLE IF NOT EXISTS external_task_dependency_sync_state (
     origin_project_canonical_id TEXT PRIMARY KEY,
     cursor TEXT,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_proposal_request_keys (
+    request_fingerprint TEXT PRIMARY KEY,
+    client_request_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 "#;
 
@@ -861,6 +867,7 @@ impl TaskStore for SqliteTaskStore {
                  SELECT 1 FROM external_task_dependencies external
                  WHERE external.origin_task_id = t.id
                  AND external.resolution_state != 'resolved'
+                 AND external.suppressed_at IS NULL
              )
              ORDER BY t.priority, t.created_at DESC",
         )?;
@@ -894,6 +901,7 @@ impl TaskStore for SqliteTaskStore {
                      SELECT 1 FROM external_task_dependencies external
                      WHERE external.origin_task_id = t.id
                      AND external.resolution_state != 'resolved'
+                     AND external.suppressed_at IS NULL
                  )
              )
              ORDER BY t.priority, t.created_at DESC",

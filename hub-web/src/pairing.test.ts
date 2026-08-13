@@ -8,6 +8,8 @@ import {
   PairingRelayError,
   acknowledgePairing,
   createPairingRequest,
+  normalizeHubOrigin,
+  pairingRelayOrigin,
   pollPairingRequest,
 } from "./pairing-relay";
 import type { StoredMachine } from "./types";
@@ -40,38 +42,48 @@ function response(status: number, body?: unknown, headers?: Record<string, strin
   });
 }
 
+async function fixture(name: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(new URL(`fixtures/hub-reverse-pairing/${name}.json`, import.meta.url), "utf8")) as Record<string, unknown>;
+}
+
+const relayOrigin = "https://petra-stella-cloud.vercel.app";
+
 describe("wire-v1 reverse pairing", () => {
-  it("parses all six section-4 fixtures copied into CAS", async () => {
+  it("loads the seven shared section-4 vectors used by production serializers and parsers", async () => {
     const names = [
-      "create-request", "claim-request", "complete-request", "pending-poll-response",
+      "create-request", "create-response", "claim-request", "complete-request", "pending-poll-response",
       "ready-poll-response", "acknowledge-request",
     ];
-    const fixtures = await Promise.all(names.map(async (name) => JSON.parse(await readFile(new URL(`fixtures/hub-reverse-pairing/${name}.json`, import.meta.url), "utf8"))));
-    expect(fixtures.map((fixture) => fixture.wire_version)).toEqual([1, 1, 1, 1, 1, 1]);
+    const fixtures = await Promise.all(names.map(fixture));
+    expect(fixtures.map((value) => value.wire_version)).toEqual([1, 1, 1, 1, 1, 1, 1]);
     expect(fixtures[0].requested_scopes).toEqual(["machine-read", "session-read", "pane-read"]);
-    expect(fixtures[4].invitation.scopes).toEqual(["machine-read", "session-read", "pane-read"]);
+    expect((fixtures[5].invitation as Record<string, unknown>).scopes).toEqual(["machine-read", "session-read", "pane-read"]);
   });
 
-  it("creates with exact origin/default scopes and credentials omitted", async () => {
-    const fetcher = vi.fn(async () => response(201, {
-      wire_version: 1,
-      pairing_request_id: request.pairingRequestId,
-      user_code: request.userCode,
-      poll_secret: request.pollSecret,
-      controller_origin: request.controllerOrigin,
-      requested_scopes: request.requestedScopes,
-      expires_at: request.expiresAt,
-      expires_in: 600,
-      interval: request.interval,
-      email_sent: false,
-    }));
-    await expect(createPairingRequest(fetcher, request.controllerOrigin)).resolves.toEqual(request);
-    expect(fetcher).toHaveBeenCalledWith("/api/hub/pairing/requests", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "omit",
-      body: JSON.stringify({ wire_version: 1, controller_origin: request.controllerOrigin, requested_scopes: request.requestedScopes }),
+  it.each([
+    ["embedded controller hub", "https://controller.tail.example"],
+    ["hosted static controller", "https://hub.petrastella.io"],
+  ])("routes %s create traffic to the explicit relay, never the controller origin", async (_mode, controllerOrigin) => {
+    const createResponse = { ...await fixture("create-response"), controller_origin: controllerOrigin };
+    const createRequest = { ...await fixture("create-request"), controller_origin: controllerOrigin };
+    const fetcher = vi.fn(async () => response(201, createResponse));
+    await expect(createPairingRequest(fetcher, relayOrigin, controllerOrigin, DEFAULT_PAIRING_SCOPES, "operator@example.com")).resolves.toMatchObject({
+      kind: "relay-request", controllerOrigin,
     });
+    const [target, init] = fetcher.mock.calls[0];
+    expect(String(target)).toBe(`${relayOrigin}/api/hub/pairing/requests`);
+    expect(new URL(String(target)).origin).not.toBe(controllerOrigin);
+    expect(init).toMatchObject({ method: "POST", credentials: "omit" });
+    expect(JSON.parse(String(init?.body))).toEqual(createRequest);
+  });
+
+  it("fails closed when relay metadata is missing or is not an HTTPS origin", () => {
+    expect(pairingRelayOrigin(null)).toBeNull();
+    for (const unsafe of [
+      "", "http://relay.example", "https://user:pass@relay.example", "https://relay.example/path",
+      "https://relay.example?query=1", "https://relay.example/#fragment",
+    ]) expect(pairingRelayOrigin(unsafe)).toBeNull();
+    expect(pairingRelayOrigin(`${relayOrigin}/`)).toBe(relayOrigin);
   });
 
   it.each(["https://commander.example:444", "https://evil.example"])("rejects returned origin %s without exposing the secret", async (returnedOrigin) => {
@@ -80,7 +92,7 @@ describe("wire-v1 reverse pairing", () => {
       poll_secret: request.pollSecret, controller_origin: returnedOrigin,
       requested_scopes: request.requestedScopes, expires_at: request.expiresAt, expires_in: 600, interval: 3, email_sent: false,
     }));
-    const error = await createPairingRequest(fetcher, request.controllerOrigin).catch((caught) => caught);
+    const error = await createPairingRequest(fetcher, relayOrigin, request.controllerOrigin).catch((caught) => caught);
     expect(error).toBeInstanceOf(PairingRelayError);
     expect(String(error)).not.toContain(request.pollSecret);
   });
@@ -91,19 +103,33 @@ describe("wire-v1 reverse pairing", () => {
       poll_secret: request.pollSecret, controller_origin: request.controllerOrigin,
       requested_scopes: request.requestedScopes, expires_at: request.expiresAt, expires_in: 600, interval: 3, email_sent: false,
     }));
-    await expect(createPairingRequest(fetcher, request.controllerOrigin)).rejects.toThrow("invalid pairing code");
+    await expect(createPairingRequest(fetcher, relayOrigin, request.controllerOrigin)).rejects.toThrow("invalid pairing code");
   });
 
-  it("handles pending, claimed, slow-down, denial, and expiry without leaking relay secrets", async () => {
-    const pending = vi.fn(async () => response(202, { wire_version: 1, status: "authorization_pending", expires_at: request.expiresAt, interval: 3 }));
-    await expect(pollPairingRequest(pending, request)).resolves.toEqual({ kind: "pending", interval: 3, expiresAt: request.expiresAt });
+  it("executes pending and ready fixtures through the production poll parser", async () => {
+    const pendingFixture = await fixture("pending-poll-response");
+    const pending = vi.fn(async () => response(202, pendingFixture));
+    await expect(pollPairingRequest(pending, relayOrigin, request)).resolves.toEqual({ kind: "pending", interval: 3, expiresAt: request.expiresAt });
+    expect(String(pending.mock.calls[0][0])).toBe(`${relayOrigin}/api/hub/pairing/requests/poll`);
+    expect(JSON.parse(String(pending.mock.calls[0][1]?.body))).toEqual({
+      wire_version: 1, pairing_request_id: request.pairingRequestId, poll_secret: request.pollSecret,
+    });
+
+    const ready = vi.fn(async () => response(200, await fixture("ready-poll-response")));
+    await expect(pollPairingRequest(ready, relayOrigin, request)).resolves.toMatchObject({
+      kind: "authorized",
+      invitation: { hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin },
+    });
+  });
+
+  it("handles claimed, slow-down, denial, and expiry without leaking relay secrets", async () => {
     const claimed = vi.fn(async () => response(202, { wire_version: 1, status: "machine_claimed", expires_at: request.expiresAt, interval: 3 }));
-    await expect(pollPairingRequest(claimed, request)).resolves.toEqual({ kind: "claimed", interval: 3, expiresAt: request.expiresAt });
+    await expect(pollPairingRequest(claimed, relayOrigin, request)).resolves.toEqual({ kind: "claimed", interval: 3, expiresAt: request.expiresAt });
     const slow = vi.fn(async () => response(429, { error: "slow_down", error_description: "wait" }, { "Retry-After": "7" }));
-    await expect(pollPairingRequest(slow, request)).resolves.toEqual({ kind: "slow-down", interval: 7 });
+    await expect(pollPairingRequest(slow, relayOrigin, request)).resolves.toEqual({ kind: "slow-down", interval: 7 });
     for (const [status, code] of [[403, "request_mismatch"], [410, "expired_request"]] as const) {
       const fetcher = vi.fn(async () => response(status, { error: code, error_description: request.pollSecret }));
-      const error = await pollPairingRequest(fetcher, request).catch((caught) => caught);
+      const error = await pollPairingRequest(fetcher, relayOrigin, request).catch((caught) => caught);
       expect(error).toBeInstanceOf(PairingRelayError);
       expect(String(error)).not.toContain(request.pollSecret);
     }
@@ -119,10 +145,23 @@ describe("wire-v1 reverse pairing", () => {
       { ...base.invitation, controller_origin: "https://evil.example" },
       { ...base.invitation, hub_url: "http://workstation.example" },
       { ...base.invitation, hub_url: "https://workstation.tail.example/path" },
+      { ...base.invitation, hub_url: "https://workstation.tail.example?query=1" },
+      { ...base.invitation, hub_url: "https://workstation.tail.example/#fragment" },
+      { ...base.invitation, hub_url: "https://user:pass@workstation.tail.example/" },
     ]) {
       const fetcher = vi.fn(async () => response(200, { ...base, invitation }));
-      await expect(pollPairingRequest(fetcher, request)).rejects.toBeInstanceOf(PairingRelayError);
+      await expect(pollPairingRequest(fetcher, relayOrigin, request)).rejects.toBeInstanceOf(PairingRelayError);
     }
+  });
+
+  it.each([
+    ["https://workstation.tail.example", "https://workstation.tail.example"],
+    ["https://workstation.tail.example/", "https://workstation.tail.example"],
+    ["https://workstation.tail.example:443/", "https://workstation.tail.example"],
+    ["http://127.0.0.1:4173/", "http://127.0.0.1:4173"],
+    ["http://[::1]:4173/", "http://[::1]:4173"],
+  ])("normalizes safe root hub URL %s to %s", (value, expected) => {
+    expect(normalizeHubOrigin(value)).toBe(expected);
   });
 
   it("restores a pending request after refresh and removes it at authoritative expiry", () => {
@@ -178,12 +217,26 @@ describe("wire-v1 reverse pairing", () => {
     await expect(exchangePendingPairing({
       invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
       fetcher, createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }), persist,
-      acknowledge: (relay) => acknowledgePairing(fetcher, relay),
+      acknowledge: (relay) => acknowledgePairing(fetcher, relayOrigin, relay),
     })).resolves.toMatchObject({ id: invitation.hubId, baseUrl: invitation.hubUrl });
     expect(events).toEqual(["persist", "ack"]);
     const [hubTarget, hubInit] = fetcher.mock.calls[0];
     expect(String(hubTarget)).toBe("https://workstation.tail.example/v1/auth/pairing/exchange");
     expect(JSON.parse(String(hubInit?.body))).toMatchObject({ controller_origin: request.controllerOrigin, requested_scopes: ["machine-read"] });
+  });
+
+  it("serializes acknowledgement from the shared fixture to the explicit relay", async () => {
+    const acknowledge = await fixture("acknowledge-request");
+    const fetcher = vi.fn(async () => response(204));
+    await acknowledgePairing(fetcher, relayOrigin, {
+      pairingRequestId: String(acknowledge.pairing_request_id),
+      pollSecret: String(acknowledge.poll_secret),
+      deliveryId: String(acknowledge.delivery_id),
+    });
+    const [target, init] = fetcher.mock.calls[0];
+    expect(String(target)).toBe(`${relayOrigin}/api/hub/pairing/requests/acknowledge`);
+    expect(JSON.parse(String(init?.body))).toEqual(acknowledge);
+    expect(init).toMatchObject({ method: "POST", credentials: "omit" });
   });
 
   it("lets the hub's one-time exchange choose one winner across two tabs", async () => {

@@ -5,7 +5,7 @@
   "invitation": {
     "token": "base64url-32-random-bytes",
     "hub_id": "machine-uuid",
-    "hub_url": "https://workstation.tail.example",
+    "hub_url": "https://workstation.tail.example:443/",
     "machine_label": "Studio workstation",
     "controller_origin": "https://commander.example",
     "scopes": ["machine-read", "session-read", "pane-read"],

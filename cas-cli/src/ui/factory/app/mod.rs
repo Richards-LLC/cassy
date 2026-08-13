@@ -2088,8 +2088,8 @@ pub(crate) fn queue_supervisor_intro_prompt(
         // OWN cas__ tool prefix rather than Codex's mcp__cs__.
         cas_mux::SupervisorCli::Grok => format!(
             "Grok supervisor startup:\n\
-- Use skills: cas-supervisor (context bundle injection via hooks is NOT \
-  active for Grok yet — SessionStart's stdout is ignored on this harness)\n\
+- Use skills: cas-supervisor, cas-supervisor-checklist (Grok ignores \
+  SessionStart stdout, so the launch intro carries the startup bundle)\n\
 - Tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination), \
   not mcp__cas__ or mcp__cs__\n\
 - Canonical current workers for this session: {worker_list}\n\
@@ -2110,6 +2110,24 @@ pub(crate) fn queue_supervisor_intro_prompt(
             prompt.push_str("\n\n<cas-session-start-fallback>\n");
             prompt.push_str(&context);
             prompt.push_str("\n</cas-session-start-fallback>");
+        }
+    }
+
+    // cas-91df / GH #296, #297: unlike Claude, Grok discards SessionStart
+    // stdout. Its queued launch intro is the actual delivery seam. Include the
+    // normal context and independently bounded ambient-recall packet here,
+    // supplying the child identity explicitly because the parent env is not
+    // the supervisor's env yet.
+    if supervisor_cli == cas_mux::SupervisorCli::Grok {
+        if let Some(context) = grok_supervisor_session_start_bundle(
+            cas_dir,
+            supervisor_name,
+            session_id.unwrap_or(supervisor_name),
+            factory_session.unwrap_or(supervisor_name),
+        ) {
+            prompt.push_str("\n\n<cas-grok-session-start>\n");
+            prompt.push_str(&context);
+            prompt.push_str("\n</cas-grok-session-start>");
         }
     }
 
@@ -2147,6 +2165,38 @@ fn claude_custom_config_context_fallback(
     crate::hooks::build_context(&input, 5, cas_dir)
         .ok()
         .filter(|context| !context.trim().is_empty())
+}
+
+fn grok_supervisor_session_start_bundle(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    session_id: &str,
+    factory_session: &str,
+) -> Option<String> {
+    let input = cas_core::hooks::HookInput {
+        session_id: session_id.to_string(),
+        cwd: cas_dir.parent()?.to_string_lossy().into_owned(),
+        hook_event_name: "SessionStart".to_string(),
+        source: Some("startup".to_string()),
+        agent_role: Some("supervisor".to_string()),
+        ..Default::default()
+    };
+    let mut sections = Vec::new();
+    if let Ok(context) = crate::hooks::build_context(&input, 5, cas_dir)
+        && !context.trim().is_empty()
+    {
+        sections.push(context);
+    }
+    if let Some(packet) = crate::ambient_recall::build_ambient_recall_context_for_factory_launch(
+        &input,
+        cas_dir,
+        None,
+        supervisor_name,
+        factory_session,
+    ) {
+        sections.push(packet.full);
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 pub(crate) fn queue_codex_worker_intro_prompt(
@@ -2647,6 +2697,57 @@ mod tests {
             "custom-config supervisor launch must receive ambient context even when Claude skips SessionStart: {}",
             rows[0].prompt
         );
+    }
+
+    /// Grok discards SessionStart hook stdout. Its queued startup intro is the
+    /// harness-specific delivery path, so it must carry both the explicit
+    /// supervisor skills and a real ambient-recall packet.
+    #[test]
+    fn grok_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
+        use crate::store::{detect::open_prompt_queue_store, init_cas_dir, open_store};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = init_cas_dir(project.path()).unwrap();
+        let _env =
+            TestEnvGuard::with_optional_vars(&[(crate::internal_llm::INTERNAL_LLM_ENV, None)]);
+        let mut entry = Entry::new(
+            "grok-supervisor-ambient".to_string(),
+            "supervisor session start ambient recall sentinel".to_string(),
+        );
+        entry.title = Some("Grok supervisor launch recall".to_string());
+        entry.tags = vec!["grok".to_string(), "supervisor".to_string()];
+        entry.importance = 0.95;
+        open_store(&cas_dir).unwrap().add(&entry).unwrap();
+
+        queue_supervisor_intro_prompt(
+            &cas_dir,
+            "grok-sup",
+            cas_mux::SupervisorCli::Grok,
+            &[],
+            Some("grok-session-start"),
+            Some("grok-factory-session"),
+        );
+
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue
+            .peek_for_targets(&["grok-sup"], Some("grok-factory-session"), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let prompt = &rows[0].prompt;
+        assert!(
+            prompt.contains("[ambient recall v1 role=supervisor"),
+            "Grok's actual SessionStart delivery payload must carry a non-empty ambient packet: {prompt}"
+        );
+        assert!(
+            prompt.contains("grok-supervisor-ambient"),
+            "ambient packet must surface the matched high-importance Grok supervisor memory: {prompt}"
+        );
+        for skill in ["cas-supervisor", "cas-supervisor-checklist"] {
+            assert!(
+                prompt.contains(skill),
+                "Grok's SessionStart payload must load {skill}: {prompt}"
+            );
+        }
     }
 
     fn data_with_changes(git_loaded: bool, changes: Vec<SourceChangesInfo>) -> DirectorData {

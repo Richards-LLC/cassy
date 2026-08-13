@@ -1345,6 +1345,45 @@ pub(crate) fn build_ambient_recall_context(
     prompt: Option<&str>,
     session_start: bool,
 ) -> Option<RecallPacket> {
+    build_ambient_recall_context_with_factory_identity(
+        input,
+        cas_root,
+        prompt,
+        session_start,
+        None,
+        None,
+    )
+}
+
+/// Build an ambient packet for a factory launch before the harness has made
+/// the child process environment available.  Grok ignores SessionStart stdout,
+/// so its launch-intro fallback must supply the supervisor identity explicitly
+/// instead of reading the still-parent process environment.
+pub(crate) fn build_ambient_recall_context_for_factory_launch(
+    input: &cas_core::hooks::types::HookInput,
+    cas_root: &Path,
+    prompt: Option<&str>,
+    agent_name: &str,
+    factory_session: &str,
+) -> Option<RecallPacket> {
+    build_ambient_recall_context_with_factory_identity(
+        input,
+        cas_root,
+        prompt,
+        true,
+        Some(agent_name),
+        Some(factory_session),
+    )
+}
+
+fn build_ambient_recall_context_with_factory_identity(
+    input: &cas_core::hooks::types::HookInput,
+    cas_root: &Path,
+    prompt: Option<&str>,
+    session_start: bool,
+    factory_agent_name: Option<&str>,
+    factory_session: Option<&str>,
+) -> Option<RecallPacket> {
     if crate::internal_llm::is_internal_invocation() {
         eprintln!("cas: ambient recall skipped (internal model identity)");
         return None;
@@ -1364,8 +1403,12 @@ pub(crate) fn build_ambient_recall_context(
     }
     let identity = RecallIdentity {
         session_id: input.session_id.clone(),
-        agent_name: std::env::var("CAS_AGENT_NAME").unwrap_or_default(),
-        factory_session: std::env::var("CAS_FACTORY_SESSION").unwrap_or_default(),
+        agent_name: factory_agent_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| std::env::var("CAS_AGENT_NAME").unwrap_or_default()),
+        factory_session: factory_session
+            .map(str::to_owned)
+            .unwrap_or_else(|| std::env::var("CAS_FACTORY_SESSION").unwrap_or_default()),
         role,
         project_id: crate::cloud::resolve_canonical_id(cas_root).unwrap_or_default(),
         team_id: crate::cloud::CloudConfig::load_from_cas_dir(cas_root)

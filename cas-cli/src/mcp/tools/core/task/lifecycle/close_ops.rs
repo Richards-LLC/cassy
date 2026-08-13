@@ -4091,12 +4091,12 @@ impl CasCore {
         // before they can become receipt evidence. Index every supported text
         // artifact at the same close boundary; a search failure must never
         // roll back a completed task close, and `system reindex` can recover it.
-        let config = crate::config::Config::load(&self.cas_root).ok();
-        let artifacts_root = crate::config::resolved_factory_artifacts_root(
-            config
-                .as_ref()
-                .and_then(|config| config.factory().artifacts_root.as_deref()),
-        );
+        let artifact_config = crate::config::Config::load(&self.cas_root).ok();
+        let configured_artifacts_root = artifact_config
+            .as_ref()
+            .and_then(|config| config.factory().artifacts_root);
+        let artifacts_root =
+            crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref());
         let artifacts =
             crate::hybrid_search::artifacts::discover_task_artifacts(&artifacts_root, &task.id);
         if let Ok(search) = self.open_search_index()

@@ -466,10 +466,11 @@ impl CasCore {
                         }
                     }
                     let config = crate::config::Config::load(&self.cas_root).ok();
+                    let configured_artifacts_root = config
+                        .as_ref()
+                        .and_then(|config| config.factory().artifacts_root);
                     let artifacts_root = crate::config::resolved_factory_artifacts_root(
-                        config
-                            .as_ref()
-                            .and_then(|config| config.factory().artifacts_root.as_deref()),
+                        configured_artifacts_root.as_deref(),
                     );
                     let artifacts = crate::hybrid_search::artifacts::discover_all_task_artifacts(
                         &artifacts_root,

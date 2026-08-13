@@ -3,9 +3,9 @@ use tantivy::schema::*;
 use tantivy::{Index, IndexWriter};
 
 use cas_code::CodeSymbol;
+use cas_core::search::{ArtifactDocument, artifact_document_id};
 
 use crate::error::MemError;
-use crate::hybrid_search::artifacts::{ArtifactDocument, artifact_document_id};
 use crate::hybrid_search::frontmatter::{FrontmatterFields, extract_frontmatter_fields};
 use crate::hybrid_search::{DEFAULT_WRITER_MEMORY, DocType, EXPECTED_FIELD_COUNT, SearchIndex};
 use crate::types::{Entry, Rule, Skill, Spec, Task};
@@ -377,9 +377,8 @@ impl SearchIndex {
                 format!(
                     "{} {} {} {}",
                     artifact.task_id,
-                    artifact.path.display(),
-                    artifact
-                        .path
+                    artifact.path,
+                    std::path::Path::new(&artifact.path)
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or_default(),
@@ -389,7 +388,7 @@ impl SearchIndex {
             doc.add_text(self.tags_field, "");
             doc.add_text(self.type_field, &artifact.task_id);
             doc.add_text(self.doc_type_field, DocType::Artifact.as_str());
-            doc.add_text(self.title_field, artifact.path.to_string_lossy());
+            doc.add_text(self.title_field, &artifact.path);
             writer.add_document(doc)?;
         }
         writer.commit()?;

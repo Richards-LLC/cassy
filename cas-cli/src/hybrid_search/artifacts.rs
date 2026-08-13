@@ -1,27 +1,11 @@
 //! Discovery and normalization of durable factory artifacts for search.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use cas_core::search::ArtifactDocument;
 
 /// Artifacts larger than this are delivery evidence, but not search input.
 pub const MAX_ARTIFACT_BYTES: u64 = 1_048_576;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactDocument {
-    pub task_id: String,
-    pub path: PathBuf,
-    pub content: String,
-}
-
-/// Stable index identifier for one artifact path owned by one task.
-pub fn artifact_document_id(task_id: &str, path: &Path) -> String {
-    format!("artifact::{task_id}::{}", path.display())
-}
-
-/// Decode an artifact index identifier for user-facing search rendering.
-pub fn parse_artifact_document_id(id: &str) -> Option<(&str, &str)> {
-    let remainder = id.strip_prefix("artifact::")?;
-    remainder.split_once("::")
-}
 
 /// Find supported text artifacts beneath every direct task directory.
 pub fn discover_all_task_artifacts(artifacts_root: &Path) -> Vec<ArtifactDocument> {
@@ -76,7 +60,7 @@ pub fn discover_task_artifacts(artifacts_root: &Path, task_id: &str) -> Vec<Arti
         };
         artifacts.push(ArtifactDocument {
             task_id: task_id.to_string(),
-            path,
+            path: path.display().to_string(),
             content,
         });
     }
@@ -110,6 +94,9 @@ mod tests {
 
         let documents = discover_task_artifacts(temp.path(), "cas-artifacts");
         assert_eq!(documents.len(), 1);
-        assert_eq!(documents[0].path, task_root.join("SEND-LOG.md"));
+        assert_eq!(
+            documents[0].path,
+            task_root.join("SEND-LOG.md").display().to_string()
+        );
     }
 }

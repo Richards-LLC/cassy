@@ -342,20 +342,18 @@ mod tests {
 
     #[test]
     fn section_four_claim_fixture_is_byte_faithful() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../hub-web/src/fixtures/hub-reverse-pairing/claim-request.json"
+        )))
+        .unwrap();
         let request = serde_json::to_value(ClaimRequest {
             wire_version: 1,
             user_code: "K7MW-4H2Q",
-            authorize_nonce: "nonce",
+            authorize_nonce: "base64url-32-random-bytes",
         })
         .unwrap();
-        assert_eq!(
-            request,
-            serde_json::json!({
-                "wire_version": 1,
-                "user_code": "K7MW-4H2Q",
-                "authorize_nonce": "nonce"
-            })
-        );
+        assert_eq!(request, expected);
         assert_eq!(
             format!("{RELAY_PREFIX}/authorizations"),
             "/api/hub/pairing/authorizations"
@@ -364,29 +362,23 @@ mod tests {
 
     #[test]
     fn section_four_completion_fixture_uses_kebab_case_scopes() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../hub-web/src/fixtures/hub-reverse-pairing/complete-request.json"
+        )))
+        .unwrap();
         let scopes = Scope::default_read_only();
         let request = serde_json::to_value(CompleteRequest {
             wire_version: 1,
-            authorize_nonce: "nonce",
-            hub_url: "https://workstation.tail.example",
+            authorize_nonce: "base64url-32-random-bytes",
+            hub_url: "https://workstation.tail.example:443/",
             machine_label: "Studio workstation",
-            invitation_url: "https://commander.example/#pair=token&hub=machine-uuid",
+            invitation_url: "https://commander.example/#pair=base64url-32-random-bytes&hub=machine-uuid",
             invitation_expires_at: "2026-08-11T20:11:30Z".parse().unwrap(),
             granted_scopes: &scopes,
         })
         .unwrap();
-        assert_eq!(
-            request,
-            serde_json::json!({
-                "wire_version": 1,
-                "authorize_nonce": "nonce",
-                "hub_url": "https://workstation.tail.example",
-                "machine_label": "Studio workstation",
-                "invitation_url": "https://commander.example/#pair=token&hub=machine-uuid",
-                "invitation_expires_at": "2026-08-11T20:11:30Z",
-                "granted_scopes": ["machine-read", "session-read", "pane-read"]
-            })
-        );
+        assert_eq!(request, expected);
         assert_eq!(
             format!("{RELAY_PREFIX}/authorizations/id/complete"),
             "/api/hub/pairing/authorizations/id/complete"

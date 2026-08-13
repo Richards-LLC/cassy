@@ -66,7 +66,7 @@ describe("wire-v1 reverse pairing", () => {
   ])("routes %s create traffic to the explicit relay, never the controller origin", async (_mode, controllerOrigin) => {
     const createResponse = { ...await fixture("create-response"), controller_origin: controllerOrigin };
     const createRequest = { ...await fixture("create-request"), controller_origin: controllerOrigin };
-    const fetcher = vi.fn(async () => response(201, createResponse));
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(201, createResponse));
     await expect(createPairingRequest(fetcher, relayOrigin, controllerOrigin, DEFAULT_PAIRING_SCOPES, "operator@example.com")).resolves.toMatchObject({
       kind: "relay-request", controllerOrigin,
     });
@@ -108,7 +108,7 @@ describe("wire-v1 reverse pairing", () => {
 
   it("executes pending and ready fixtures through the production poll parser", async () => {
     const pendingFixture = await fixture("pending-poll-response");
-    const pending = vi.fn(async () => response(202, pendingFixture));
+    const pending = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(202, pendingFixture));
     await expect(pollPairingRequest(pending, relayOrigin, request)).resolves.toEqual({ kind: "pending", interval: 3, expiresAt: request.expiresAt });
     expect(String(pending.mock.calls[0][0])).toBe(`${relayOrigin}/api/hub/pairing/requests/poll`);
     expect(JSON.parse(String(pending.mock.calls[0][1]?.body))).toEqual({
@@ -227,7 +227,7 @@ describe("wire-v1 reverse pairing", () => {
 
   it("serializes acknowledgement from the shared fixture to the explicit relay", async () => {
     const acknowledge = await fixture("acknowledge-request");
-    const fetcher = vi.fn(async () => response(204));
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(204));
     await acknowledgePairing(fetcher, relayOrigin, {
       pairingRequestId: String(acknowledge.pairing_request_id),
       pollSecret: String(acknowledge.poll_secret),

@@ -18,6 +18,7 @@ use cas_store::{
 };
 use cas_types::{AgentRole, TaskStatus};
 
+use super::TaskLifecycleGateError;
 use crate::mcp::server::CasCore;
 use crate::store::{open_prompt_queue_store, open_supervisor_queue_store};
 
@@ -470,7 +471,8 @@ pub fn emit_task_lifecycle_transition(
         reason,
         factory_session.as_deref(),
         occurrence_id,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
 
     if already_existed {
         Ok(LifecyclePushResult::Recovered { notification_id })
@@ -499,7 +501,8 @@ fn deliver_prompt_for_notification(
     reason: Option<&str>,
     factory_session: Option<&str>,
     occurrence_id: &str,
-) -> Result<(), String> {
+) -> Result<(), TaskLifecycleGateError> {
+    let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
     let body = build_prompt_body(
         kind,
         task_id,
@@ -527,20 +530,20 @@ fn deliver_prompt_for_notification(
             &dedupe,
         )
         .map_err(|e| {
-            format!(
+            reject(format!(
                 "prompt_queue write failed after durable enqueue \
                  (notification_id={notification_id}, transition_key={transition_key}): {e}"
-            )
+            ))
         })?;
 
     supervisor_queue
         .mark_prompt_delivered(notification_id)
         .map_err(|e| {
-            format!(
+            reject(format!(
                 "failed to stamp prompt_delivered_at for notification_id={notification_id} \
                  (prompt may already be enqueued under dedupe_key={dedupe}; \
                  drain_lifecycle_outbox is safe): {e}"
-            )
+            ))
         })?;
     Ok(())
 }
@@ -565,7 +568,10 @@ fn require_payload_str<'a>(
         })
 }
 
-fn parse_lifecycle_kind(transition: &str, notification_id: i64) -> Result<LifecycleTransition, String> {
+fn parse_lifecycle_kind(
+    transition: &str,
+    notification_id: i64,
+) -> Result<LifecycleTransition, String> {
     match transition {
         "task_started" => Ok(LifecycleTransition::Started),
         "task_blocked" => Ok(LifecycleTransition::Blocked),
@@ -615,13 +621,12 @@ pub fn deliver_lifecycle_outbox_row(
         });
     }
 
-    let payload: serde_json::Value = serde_json::from_str(&notification.payload)
-        .map_err(|e| {
-            format!(
-                "corrupt lifecycle payload id={}: {e} (row left pending)",
-                notification.id
-            )
-        })?;
+    let payload: serde_json::Value = serde_json::from_str(&notification.payload).map_err(|e| {
+        format!(
+            "corrupt lifecycle payload id={}: {e} (row left pending)",
+            notification.id
+        )
+    })?;
 
     let task_id = require_payload_str(&payload, "task_id", notification.id)?;
     // title/actor may be empty string for legacy rows, but keys must be present as strings.
@@ -640,7 +645,10 @@ pub fn deliver_lifecycle_outbox_row(
         .get("transition_key")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .or(notification.transition_key.as_deref().filter(|s| !s.is_empty()))
+        .or(notification
+            .transition_key
+            .as_deref()
+            .filter(|s| !s.is_empty()))
         .ok_or_else(|| {
             format!(
                 "incomplete lifecycle payload id={}: missing transition_key \
@@ -676,7 +684,8 @@ pub fn deliver_lifecycle_outbox_row(
         reason,
         factory_session,
         occurrence_id,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
 
     Ok(LifecyclePushResult::Recovered {
         notification_id: notification.id,
@@ -711,10 +720,9 @@ pub fn drain_lifecycle_outbox(
             }
             Ok(LifecyclePushResult::NoSupervisor) => {
                 report.failed += 1;
-                report.errors.push(format!(
-                    "id={}: unexpected NoSupervisor during drain",
-                    n.id
-                ));
+                report
+                    .errors
+                    .push(format!("id={}: unexpected NoSupervisor during drain", n.id));
             }
             Err(e) => {
                 report.failed += 1;
@@ -800,11 +808,11 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_store::{
         PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore, SqliteSupervisorQueueStore,
         SupervisorQueueStore,
     };
-    use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, AgentStatus};
     use tempfile::TempDir;
 
@@ -988,8 +996,7 @@ mod tests {
         );
         assert_eq!(rows[0].priority, NotificationPriority::High);
         assert!(
-            rows[0].prompt.contains("task_awaiting_merge")
-                && rows[0].prompt.contains("cas-f02b"),
+            rows[0].prompt.contains("task_awaiting_merge") && rows[0].prompt.contains("cas-f02b"),
             "body must self-identify as a lifecycle signal (it is injected into \
              the supervisor pane, so it can never read as operator input): {}",
             rows[0].prompt
@@ -1067,14 +1074,19 @@ mod tests {
         let report = drain_lifecycle_outbox(&sq, &pq, 10).unwrap();
         assert_eq!(report.recovered, 1);
         assert_eq!(report.failed, 0);
-        assert!(sq.get_by_transition_key(key).unwrap().unwrap().prompt_delivered_at.is_some());
+        assert!(
+            sq.get_by_transition_key(key)
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_some()
+        );
         assert_eq!(pq.pending_count().unwrap(), 1);
 
         // Second drain: no duplicate prompt.
         let report2 = drain_lifecycle_outbox(&sq, &pq, 10).unwrap();
         assert_eq!(report2.attempted, 0);
         assert_eq!(pq.pending_count().unwrap(), 1);
-
     }
 
     /// Stamp fails after enqueue: replay must not create a second prompt row.
@@ -1131,13 +1143,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pq.pending_count().unwrap(), 1);
-        assert!(sq.get_by_transition_key(key).unwrap().unwrap().prompt_delivered_at.is_none());
+        assert!(
+            sq.get_by_transition_key(key)
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_none()
+        );
 
         // Drain/replay: must stamp without second prompt row.
         let report = drain_lifecycle_outbox(&sq, &pq, 10).unwrap();
         assert_eq!(report.recovered, 1, "errors={:?}", report.errors);
         assert_eq!(pq.pending_count().unwrap(), 1, "exactly-once prompt");
-        assert!(sq.get_by_transition_key(key).unwrap().unwrap().prompt_delivered_at.is_some());
+        assert!(
+            sq.get_by_transition_key(key)
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_some()
+        );
 
         // emit same occurrence: AlreadyComplete, still one prompt.
         let r = emit_task_lifecycle_transition(
@@ -1156,7 +1180,6 @@ mod tests {
         .unwrap();
         assert!(matches!(r, LifecyclePushResult::AlreadyComplete { .. }));
         assert_eq!(pq.pending_count().unwrap(), 1);
-
     }
 
     /// cas-3a47 AC4: malformed payload stays pending; never fabricates Started/Open→InProgress.
@@ -1190,12 +1213,13 @@ mod tests {
         let err = deliver_lifecycle_outbox_row(&sq, &pq, &row).unwrap_err();
         assert!(err.contains("corrupt lifecycle payload"), "{err}");
         assert!(err.contains("left pending"), "{err}");
-        assert!(sq
-            .get_by_transition_key("key-corrupt")
-            .unwrap()
-            .unwrap()
-            .prompt_delivered_at
-            .is_none());
+        assert!(
+            sq.get_by_transition_key("key-corrupt")
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_none()
+        );
         assert_eq!(pq.pending_count().unwrap(), 0);
 
         let id_inc = match sq
@@ -1229,7 +1253,11 @@ mod tests {
                 .prompt_delivered_at
                 .is_none()
         );
-        assert_eq!(pq.pending_count().unwrap(), 0, "no fabricated prompt delivery");
+        assert_eq!(
+            pq.pending_count().unwrap(),
+            0,
+            "no fabricated prompt delivery"
+        );
 
         let id_unk = match sq
             .notify_idempotent(
@@ -1253,12 +1281,13 @@ mod tests {
         let err = deliver_lifecycle_outbox_row(&sq, &pq, &row).unwrap_err();
         assert!(err.contains("unknown transition"), "{err}");
         assert!(err.contains("will not fabricate Started"), "{err}");
-        assert!(sq
-            .get_by_transition_key("key-unk")
-            .unwrap()
-            .unwrap()
-            .prompt_delivered_at
-            .is_none());
+        assert!(
+            sq.get_by_transition_key("key-unk")
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_none()
+        );
     }
 
     /// cas-3a47: valid drains; malformed stays pending; concurrent drain no dup.
@@ -1302,18 +1331,20 @@ mod tests {
         assert_eq!(report.recovered, 1, "errors={:?}", report.errors);
         assert_eq!(report.failed, 1, "corrupt must fail closed");
         assert_eq!(pq.pending_count().unwrap(), 1);
-        assert!(sq
-            .get_by_transition_key("key-good")
-            .unwrap()
-            .unwrap()
-            .prompt_delivered_at
-            .is_some());
-        assert!(sq
-            .get_by_transition_key("key-bad")
-            .unwrap()
-            .unwrap()
-            .prompt_delivered_at
-            .is_none());
+        assert!(
+            sq.get_by_transition_key("key-good")
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_some()
+        );
+        assert!(
+            sq.get_by_transition_key("key-bad")
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_none()
+        );
 
         let report2 = drain_lifecycle_outbox(&sq, &pq, 20).unwrap();
         assert_eq!(report2.recovered, 0);
@@ -1359,12 +1390,13 @@ mod tests {
             2,
             "concurrent drain must not duplicate"
         );
-        assert!(sq
-            .get_by_transition_key("key-c2")
-            .unwrap()
-            .unwrap()
-            .prompt_delivered_at
-            .is_some());
+        assert!(
+            sq.get_by_transition_key("key-c2")
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_some()
+        );
     }
 
     fn agent_in_session(id: &str, name: &str, role: AgentRole, session: &str) -> Agent {
@@ -1436,8 +1468,7 @@ mod tests {
             "the duplicate same-name rows must be present — that IS the failure shape"
         );
 
-        let resolved =
-            resolve_owning_supervisor(&agents, Some("cas-src-fast-pelican-83")).unwrap();
+        let resolved = resolve_owning_supervisor(&agents, Some("cas-src-fast-pelican-83")).unwrap();
         assert_eq!(
             resolved.agent_id, "z-post-restart-session",
             "an awaiting_merge relay emitted after the restart must be addressed to the \
@@ -1478,9 +1509,7 @@ mod tests {
         };
         let successor_queue = sq.list_pending("z-post-restart-session").unwrap();
         assert!(
-            successor_queue
-                .iter()
-                .any(|row| row.id == notification_id),
+            successor_queue.iter().any(|row| row.id == notification_id),
             "the durable relay must be addressed to the supervisor that exists after the \
              restart, got {successor_queue:?}"
         );
@@ -1488,16 +1517,17 @@ mod tests {
             sq.list_pending("a-pre-restart-session").unwrap().is_empty(),
             "nothing may be queued at the identity the supervisor abandoned"
         );
-        let stored = sq.get_by_transition_key(&transition_key(
-            "cas-fe23",
-            TaskStatus::InProgress,
-            TaskStatus::AwaitingMerge,
-            Some("cas-src-fast-pelican-83"),
-            LifecycleTransition::AwaitingMerge,
-            "2026-08-07T18:51:51+00:00",
-        ))
-        .unwrap()
-        .expect("durable row exists for this occurrence");
+        let stored = sq
+            .get_by_transition_key(&transition_key(
+                "cas-fe23",
+                TaskStatus::InProgress,
+                TaskStatus::AwaitingMerge,
+                Some("cas-src-fast-pelican-83"),
+                LifecycleTransition::AwaitingMerge,
+                "2026-08-07T18:51:51+00:00",
+            ))
+            .unwrap()
+            .expect("durable row exists for this occurrence");
         assert!(
             stored.prompt_delivered_at.is_some(),
             "the prompt half must have been handed to the queue, not left pending"
@@ -1709,7 +1739,6 @@ mod tests {
             0,
             "supervisor must not receive a prompt for its own transition"
         );
-
     }
 
     #[test]
@@ -1756,7 +1785,6 @@ mod tests {
             1,
             "worker transition must still wake the owning supervisor"
         );
-
     }
 
     #[test]
@@ -1852,7 +1880,6 @@ mod tests {
             .collect();
         assert_eq!(started.len(), 2, "two legitimate starts must both emit");
         assert_eq!(pq.pending_count().unwrap(), 4);
-
     }
 
     #[test]
@@ -1904,7 +1931,6 @@ mod tests {
 
         assert_eq!(sq.pending_count("sup-a").unwrap(), 1);
         assert_eq!(sq.pending_count("sup-b").unwrap(), 0);
-
     }
 
     /// Simulate partial failure: durable insert without prompt stamp, then recover.
@@ -1947,7 +1973,13 @@ mod tests {
             NotifyIdempotentResult::Created(id) => id,
             other => panic!("expected Created, got {other:?}"),
         };
-        assert!(sq.get_by_transition_key(key).unwrap().unwrap().prompt_delivered_at.is_none());
+        assert!(
+            sq.get_by_transition_key(key)
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_none()
+        );
 
         // Replay via emit: must deliver prompt + stamp, not insert second durable row.
         let r2 = emit_task_lifecycle_transition(
@@ -1969,7 +2001,13 @@ mod tests {
             "got {r2:?}"
         );
         assert_eq!(sq.pending_count("sup-o").unwrap(), 1);
-        assert!(sq.get_by_transition_key(key).unwrap().unwrap().prompt_delivered_at.is_some());
+        assert!(
+            sq.get_by_transition_key(key)
+                .unwrap()
+                .unwrap()
+                .prompt_delivered_at
+                .is_some()
+        );
         assert_eq!(pq.pending_count().unwrap(), 1);
 
         // Third call: fully complete — no additional prompt row.
@@ -1988,7 +2026,10 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(r3, LifecyclePushResult::AlreadyComplete { .. }));
-        assert_eq!(pq.pending_count().unwrap(), 1, "exactly-once prompt delivery");
-
+        assert_eq!(
+            pq.pending_count().unwrap(),
+            1,
+            "exactly-once prompt delivery"
+        );
     }
 }

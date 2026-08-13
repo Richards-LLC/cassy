@@ -1,6 +1,53 @@
 use crate::mcp::tools::core::imports::*;
+use thiserror::Error;
+
+/// Typed failures from lifecycle gates. The MCP boundary renders these with
+/// `Display`; lifecycle callers retain the failure kind instead of deriving it
+/// from response text.
+#[derive(Debug, Error)]
+pub(crate) enum TaskLifecycleGateError {
+    #[error(
+        "Epic {epic_id} is owned by epic_verification_owner={owner}; caller identity is unknown — refusing close (fail closed, cas-9fff). Present CAS agent id / CAS_AGENT_NAME / CAS_SESSION_ID matching the owner, or transfer epic_verification_owner first."
+    )]
+    OwnerIdentityUnknown { epic_id: String, owner: String },
+    #[error(
+        "Epic {epic_id} is owned by epic_verification_owner={owner}; this session cannot close it. Update epic_verification_owner if ownership has transferred (cas-9fff)."
+    )]
+    OwnerMismatch { epic_id: String, owner: String },
+    #[error("{message}")]
+    ArtifactPath { message: String },
+    #[error("{message}")]
+    NegativeResultReference { message: String },
+    #[error("{message}")]
+    SupervisorOnly { message: String },
+    #[error("{message}")]
+    MissingGateDecision { message: String },
+    #[error("{message}")]
+    DeliveryState { message: String },
+    #[error("{message}")]
+    UnmergedChildBranch { message: String },
+    #[error("{message}")]
+    PreCloseWorktree { message: String },
+    #[error("{message}")]
+    ProofScope { message: String },
+    #[error("{message}")]
+    RepositoryProof { message: String },
+    #[error("{message}")]
+    PromptDelivery { message: String },
+}
+
+#[cfg(test)]
+impl TaskLifecycleGateError {
+    /// Keeps legacy wording assertions focused on the rendered MCP text while
+    /// production callers use enum variants.
+    fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
 
 pub(crate) mod close_ops;
+#[cfg(test)]
+mod gate_error_tests;
 pub(crate) mod proof_scope;
 pub(crate) mod repository_proof;
 pub(crate) mod stale_close_guard;
@@ -105,8 +152,7 @@ fn recent_other_epic_planner(
         .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
         .filter_map(|dependency| {
             let planner = dependency.created_by?;
-            (planner != creator
-                && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
+            (planner != creator && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
         .max_by_key(|(_, created_at)| *created_at);
@@ -184,7 +230,8 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_create_with_target(req, None, None, false).await
+        self.cas_task_create_with_target(req, None, None, false)
+            .await
     }
 
     pub(crate) async fn cas_task_create_with_target(
@@ -261,10 +308,12 @@ impl CasCore {
             }
 
             if let Some((existing_id, existing_title, score)) =
-                open_task_title_overlap(task_store.as_ref(), &req.title).map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
-                    data: None,
+                open_task_title_overlap(task_store.as_ref(), &req.title).map_err(|error| {
+                    McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
+                        data: None,
+                    }
                 })?
             {
                 return Err(McpError {
@@ -742,11 +791,12 @@ impl CasCore {
         // resolver as the other non-delivery terminal outcomes so env-role
         // spoofing cannot authorize the start.
         if task.task_type == crate::types::TaskType::Gate {
-            self.resolve_live_supervisor_authority()
-                .map_err(|error| Self::error(
+            self.resolve_live_supervisor_authority().map_err(|error| {
+                Self::error(
                     ErrorCode::INVALID_PARAMS,
                     close_ops::gate_supervisor_authority_error("START", error),
-                ))?;
+                )
+            })?;
         }
 
         // Check agent role for supervisor/worker-specific logic

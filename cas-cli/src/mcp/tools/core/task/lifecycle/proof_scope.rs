@@ -12,6 +12,7 @@ use cas_types::{
     VerificationStatus, WorkerDeliveryState,
 };
 
+use super::TaskLifecycleGateError;
 use crate::mcp::tools::TaskUpdateRequest;
 
 #[derive(Debug, Clone, Copy)]
@@ -218,14 +219,15 @@ pub(crate) fn guard_task_proof_scope(
     cas_root: &Path,
     task: &Task,
     operation: ProofScopeOperation<'_>,
-) -> Result<(), String> {
+) -> Result<(), TaskLifecycleGateError> {
+    let reject = |message: String| TaskLifecycleGateError::ProofScope { message };
     if matches!(operation, ProofScopeOperation::CompletionReceipt)
         && super::stale_close_guard::is_terminal_closed(task.status)
     {
-        return Err(format!(
+        return Err(reject(format!(
             "DELIVERY RECEIPT REJECTED: task {} is already Closed. A terminal task cannot accept or replay a completion receipt; task, delivery, dispatch, verdict, and event state were left unchanged.",
             task.id
-        ));
+        )));
     }
 
     let locked_fields = operation.locked_fields();
@@ -242,18 +244,18 @@ pub(crate) fn guard_task_proof_scope(
                 ),
                 _ => "Complete or explicitly recover the active exact proof cycle before changing task scope.".to_string(),
             };
-            Err(format!(
+            Err(reject(format!(
                 "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}",
                 task.id,
                 locked_fields.join(", "),
                 remediation,
-            ))
+            )))
         }
-        Err(reason) => Err(format!(
+        Err(reason) => Err(reject(format!(
             "DELIVERY PROOF SCOPE LOCKED: task {} exact proof state is inconsistent ({reason}). Refusing review-relevant update fields [{}] rather than reusing or invalidating ambiguous proof.",
             task.id,
             locked_fields.join(", ")
-        )),
+        ))),
     }
 }
 

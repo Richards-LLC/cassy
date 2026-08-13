@@ -4,7 +4,7 @@ import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
-import { PairingOperationCoordinator } from "./pairing-operation";
+import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
@@ -175,17 +175,20 @@ async function startRelayPairing(email: string): Promise<boolean> {
   pairingStatus = "Creating a pairing code…";
   render();
   const operation = pairingOperations.begin(generation);
-  let created: PendingRelayRequest;
+  let created: PendingRelayRequest | undefined;
   try {
-    created = await createPairingRequest(fetch, relayOrigin, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined, operation.signal);
+    const committed = await commitPairingResult(
+      pairingOperations,
+      operation,
+      createPairingRequest(fetch, relayOrigin, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined, operation.signal),
+      (value) => { created = value; },
+    );
+    if (!committed || !created) return false;
   } catch (error) {
     if (!pairingOperations.isCurrent(operation)) return false;
     pairingCreateInFlight = false;
     throw error;
-  } finally {
-    pairingOperations.finish(operation);
   }
-  if (!pairingOperations.isCurrent(operation)) return false;
   pairingCreateInFlight = false;
   pendingPairing = created;
   pendingPairingStore.save(created);

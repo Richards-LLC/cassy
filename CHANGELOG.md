@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.66.0] - 2026-08-13
+
+### Added
+- **Commander can now begin machine pairing from the page.** A short-lived code lets the target machine authorize the requesting Commander session, with strict controller, relay, and loopback origin boundaries throughout the exchange.
+- **Cross-project work can be proposed and followed without losing ownership.** Proposals carry explicit source and target projects, support auditable acceptance or rejection, and keep local dependent tasks blocked until the external work is resolved.
+
+### Changed
+- **Proposal synchronization now converges across retries, pagination, and reopen cycles.** Creation is idempotent, replayed feed rows are deduplicated, provenance remains authoritative, and external dependency state follows resolution transitions without duplicating local work.
+
+### Fixed
+- **Factory workers now fail closed before starting in the wrong checkout.** Spawn preparation proves the worker's exact worktree and branch, pre-harness validation rejects drift, commit guards deny sibling branches, and binding diagnostics inspect the assigned checkout.
+- **Commander pairing handles cancellation, replacement, and cleanup races safely.** Aborted or failed exchanges roll back only their own state, replacement rotates live credentials, stale cleanup cannot erase a newer pairing, and incomplete browser fragments are scrubbed before startup.
+- **Coordination and operator surfaces retain truthful state under edge cases.** Supervisor roles survive registration, stale reminders stay quarantined, long code snippets truncate on UTF-8 boundaries, stale-skill warnings render cleanly, and tag CI handles an all-zero base SHA.
+
 ## [2.65.0] - 2026-08-13
 
 ### Added

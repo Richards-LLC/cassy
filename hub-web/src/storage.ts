@@ -57,14 +57,23 @@ async function transact<T>(storeName: "machines" | "attention", mode: IDBTransac
 interface PairingCatalogEnvelope {
   id: string;
   pairingInstall: {
-    state: "staged" | "active";
+    state: "staged";
     identity: PairingInstallIdentity;
     candidate: StoredMachine;
     prior?: StoredMachine;
   };
 }
 
-export type MachineCatalogRecord = StoredMachine | PairingCatalogEnvelope;
+type ActivePairingCatalogRecord = StoredMachine & {
+  pairingInstall: {
+    state: "active";
+    identity: PairingInstallIdentity;
+    candidate: StoredMachine;
+    prior?: StoredMachine;
+  };
+};
+
+export type MachineCatalogRecord = StoredMachine | PairingCatalogEnvelope | ActivePairingCatalogRecord;
 
 export interface MachineCatalogBackend {
   list(): Promise<MachineCatalogRecord[]>;
@@ -75,22 +84,26 @@ export interface MachineCatalogBackend {
   ): Promise<void>;
 }
 
-function pairingEnvelope(record: MachineCatalogRecord | undefined): PairingCatalogEnvelope | undefined {
+function pairingEnvelope(record: MachineCatalogRecord | undefined): PairingCatalogEnvelope["pairingInstall"] | ActivePairingCatalogRecord["pairingInstall"] | undefined {
   if (!record || !("pairingInstall" in record)) return undefined;
-  return record;
+  return record.pairingInstall;
 }
 
 function visibleMachine(record: MachineCatalogRecord | undefined): StoredMachine | undefined {
   const envelope = pairingEnvelope(record);
   if (!envelope) return record as StoredMachine | undefined;
-  return envelope.pairingInstall.state === "active" ? envelope.pairingInstall.candidate : envelope.pairingInstall.prior;
+  return envelope.state === "active" ? envelope.candidate : envelope.prior;
 }
 
-function sameInstall(record: MachineCatalogRecord | undefined, identity: PairingInstallIdentity): record is PairingCatalogEnvelope {
-  const installed = pairingEnvelope(record)?.pairingInstall.identity;
+function sameInstall(record: MachineCatalogRecord | undefined, identity: PairingInstallIdentity): record is PairingCatalogEnvelope | ActivePairingCatalogRecord {
+  const installed = pairingEnvelope(record)?.identity;
   return installed?.machineId === identity.machineId
     && installed.credentialId === identity.credentialId
     && installed.generation === identity.generation;
+}
+
+function stagedRecord(pairingInstall: ActivePairingCatalogRecord["pairingInstall"] | PairingCatalogEnvelope["pairingInstall"]): PairingCatalogEnvelope {
+  return { id: pairingInstall.identity.machineId, pairingInstall: { ...pairingInstall, state: "staged" } };
 }
 
 export class MachineCatalog {
@@ -103,7 +116,7 @@ export class MachineCatalog {
         const machine = visibleMachine(record);
         return machine ? [machine] : [];
       }),
-      pendingCleanup: records.filter((record) => pairingEnvelope(record)?.pairingInstall.state === "staged").length,
+      pendingCleanup: records.filter((record) => pairingEnvelope(record)?.state === "staged").length,
     };
   }
 
@@ -111,9 +124,9 @@ export class MachineCatalog {
     const records = await this.backend.list();
     for (const record of records) {
       const envelope = pairingEnvelope(record);
-      if (envelope?.pairingInstall.state !== "staged") continue;
+      if (envelope?.state !== "staged") continue;
       try {
-        await this.rollback(envelope.pairingInstall.identity);
+        await this.rollback(envelope.identity);
       } catch {
         // The staged envelope remains durable and invisible until a later recovery succeeds.
       }
@@ -141,20 +154,32 @@ export class MachineCatalog {
     await this.backend.update(identity.machineId, (current) => {
       if (!sameInstall(current, identity) || current.pairingInstall.state !== "staged") return current;
       activated = true;
-      return { ...current, pairingInstall: { ...current.pairingInstall, state: "active" } };
+      return {
+        ...current.pairingInstall.candidate,
+        pairingInstall: { ...current.pairingInstall, state: "active" },
+      };
     }, signal);
     return activated;
   }
 
   async rollback(identity: PairingInstallIdentity): Promise<boolean> {
     let blocked = false;
-    await this.backend.update(identity.machineId, (current) => {
-      if (!sameInstall(current, identity)) return current;
-      blocked = true;
-      return current.pairingInstall.state === "active"
-        ? { ...current, pairingInstall: { ...current.pairingInstall, state: "staged" } }
-        : current;
-    });
+    try {
+      await this.backend.update(identity.machineId, (current) => {
+        if (!sameInstall(current, identity)) return current;
+        blocked = true;
+        return current.pairingInstall.state === "active" ? stagedRecord(current.pairingInstall) : current;
+      });
+    } catch (error) {
+      // A transient failed active→staged write must not leave a cancelled, active credential
+      // visible on the next boot. Persist the invisible staged form before reporting cleanup
+      // as incomplete; later recovery restores the exact prior row.
+      await this.backend.update(identity.machineId, (current) => {
+        if (!sameInstall(current, identity) || current.pairingInstall.state !== "active") return current;
+        return stagedRecord(current.pairingInstall);
+      });
+      throw error;
+    }
     if (!blocked) return false;
     let rolledBack = false;
     await this.backend.update(identity.machineId, (current) => {

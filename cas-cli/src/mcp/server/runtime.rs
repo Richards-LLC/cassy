@@ -1262,8 +1262,15 @@ mod tests {
             .expect_err("a corrupt migration ledger must refuse MCP startup")
             .to_string();
         assert!(error.contains("binary"), "missing binary version: {error}");
+        // Derived from the migration ledger rather than hardcoded: the refusal
+        // names whichever schema version this binary requires, so adding a
+        // migration must not require editing this assertion.
+        let required = crate::migration::MIGRATIONS
+            .last()
+            .map(|migration| migration.id)
+            .expect("at least one migration");
         assert!(
-            error.contains("requires schema v233"),
+            error.contains(&format!("requires schema v{required}")),
             "missing schema requirement: {error}"
         );
         assert!(

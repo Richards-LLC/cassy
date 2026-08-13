@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::cli::Cli;
 use crate::cli::hub::{HubAuthorizeArgs, record_is_live};
@@ -267,7 +268,23 @@ fn resolve_hub_url(explicit: Option<&str>, controller_origin: &str) -> Result<St
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
-    origin.starts_with("http://127.") || origin.starts_with("http://[::1]")
+    let Ok(url) = Url::parse(origin) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(_)) | None => false,
+    }
 }
 
 fn granted_scopes(

@@ -44,3 +44,15 @@ trust, approval/network hardening, and safer automatic-review defaults.
 0.146.0 pin: prove `mcp__cs__*` readiness/catalog freshness, mirrored
 skill/agent precedence, and non-interactive approval continuity. **Source gaps:**
 none.
+
+## POSTED
+
+Channel: #cas-internal (C0B44GUKDK2)
+Diary sweep: merged to main at 33fb46c9 (PR #283), posted 2026-08-13T13:16:08Z
+
+| Post | UTC | Permalink |
+| --- | --- | --- |
+| Parent (cross-harness) | 2026-08-13T13:15:59Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786626959964829 |
+| Grok reply | 2026-08-13T13:16:07Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786626967629759?thread_ts=1786626959.964829&cid=C0B44GUKDK2 |
+| Claude reply | 2026-08-13T13:16:08Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786626968094259?thread_ts=1786626959.964829&cid=C0B44GUKDK2 |
+| Codex reply | 2026-08-13T13:16:08Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786626968544459?thread_ts=1786626959.964829&cid=C0B44GUKDK2 |

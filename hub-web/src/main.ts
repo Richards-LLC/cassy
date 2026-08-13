@@ -3,7 +3,8 @@ import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } fr
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
-import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
+import { bindPairingDialogCancel } from "./pairing-dialog";
+import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
@@ -45,7 +46,11 @@ function paneKey(machineId: string, session: string, pane: string): string { ret
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
 
 async function boot(): Promise<void> {
-  for (const machine of await catalog.list()) machines.set(machine.id, machine);
+  const stored = await catalog.recoverPending();
+  for (const machine of stored.machines) machines.set(machine.id, machine);
+  if (stored.pendingCleanup > 0) {
+    pairingStatus = "A canceled credential remains blocked while durable local cleanup is pending.";
+  }
   attention = (await attentionStore.list()).toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
   selectedMachineId = machines.keys().next().value;
   render();
@@ -126,15 +131,31 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       requestedScopes: values.getAll("scope") as Scope[],
       fetcher: fetch,
       createKey: createDeviceKey,
-      persist: (candidate) => catalog.put(candidate, operation.signal),
-      removePersisted: (machineId) => catalog.remove(machineId),
+      installationGeneration: operation.generation,
+      stagePersisted: (candidate, identity) => catalog.stage(candidate, identity, operation.signal),
+      activatePersisted: (identity, signal) => catalog.activate(identity, signal),
+      rollbackPersisted: (identity) => catalog.rollback(identity),
       acknowledge: relayOrigin ? (relay, signal) => acknowledgePairing(fetch, relayOrigin, relay, signal) : undefined,
       signal: operation.signal,
       isCurrent: () => pairingOperations.isCurrent(operation),
     });
   } catch (error) {
-    if (!pairingOperations.isCurrent(operation)) return false;
     pairingExchangeInFlight = false;
+    if (error instanceof PairingCleanupError) {
+      pendingPairingStore.clear();
+      pendingPairing = null;
+      pairingDraft = createPairingDraft(location.origin);
+      pairingStatus = error.message;
+      render(false);
+      throw error;
+    }
+    if (!pairingOperations.isCurrent(operation)) {
+      if (!pendingPairing) {
+        pairingStatus = "Pairing cancelled after durable local cleanup completed.";
+        render(false);
+      }
+      return false;
+    }
     if (error instanceof PairingExchangeError) {
       pairingOperations.invalidate();
       pendingPairingStore.clear();
@@ -242,6 +263,7 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
 }
 
 function cancelPendingPairing(): void {
+  const verifiesCleanup = pairingExchangeInFlight;
   document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
   pairingOperations.invalidate();
   pendingPairingStore.clear();
@@ -249,7 +271,7 @@ function cancelPendingPairing(): void {
   pairingCreateInFlight = false;
   pairingExchangeInFlight = false;
   pairingDraft = createPairingDraft(location.origin);
-  pairingStatus = "Pairing cancelled.";
+  pairingStatus = verifiesCleanup ? "Cancelling pairing and verifying durable local cleanup…" : "Pairing cancelled.";
   stopPairingTimers();
   render(false);
 }
@@ -561,6 +583,16 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
   const pairCreate = document.querySelector<HTMLButtonElement>("#pair-create");
+  const pairDialog = document.querySelector<HTMLDialogElement>("#pair-dialog");
+  if (pairDialog) bindPairingDialogCancel(
+    pairDialog,
+    () => ({
+      createInFlight: pairingCreateInFlight,
+      exchangeInFlight: pairingExchangeInFlight,
+      hasPendingPairing: pendingPairing !== null,
+    }),
+    cancelPendingPairing,
+  );
   if (pairCancel) pairCancel.onclick = cancelPendingPairing;
   if (pairClose) pairClose.onclick = pairingCreateInFlight ? cancelPendingPairing : () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).close();
   if (pairCreate) pairCreate.onclick = () => {

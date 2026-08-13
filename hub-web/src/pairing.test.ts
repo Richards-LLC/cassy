@@ -60,6 +60,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 class MemoryMachineCatalogBackend implements MachineCatalogBackend {
   readonly records = new Map<string, MachineCatalogRecord>();
   rejectUpdate = false;
+  rejectDelete = false;
 
   async list(): Promise<MachineCatalogRecord[]> { return [...this.records.values()]; }
 
@@ -67,8 +68,8 @@ class MemoryMachineCatalogBackend implements MachineCatalogBackend {
     id: string,
     change: (current: MachineCatalogRecord | undefined) => MachineCatalogRecord | undefined,
   ): Promise<void> {
-    if (this.rejectUpdate) throw new Error("durable cleanup rejected");
     const next = change(this.records.get(id));
+    if (this.rejectUpdate || (this.rejectDelete && !next)) throw new Error("durable cleanup rejected");
     if (next) this.records.set(id, next);
     else this.records.delete(id);
   }
@@ -316,8 +317,10 @@ describe("wire-v1 reverse pairing", () => {
       invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
       fetcher: async () => response(200, { device_id: "device", credential_id: "credential", credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }),
       createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
-      persist: async (machine) => { persisted.push(machine); persistStarted.resolve(); await releasePersist.promise; },
-      removePersisted: async (id) => { removed.push(id); }, acknowledge,
+      installationGeneration: operation.generation,
+      stagePersisted: async (machine) => { persisted.push(machine); persistStarted.resolve(); await releasePersist.promise; },
+      activatePersisted: async () => true,
+      rollbackPersisted: async (identity) => { removed.push(identity.machineId); return true; }, acknowledge,
       signal: operation.signal, isCurrent: () => operations.isCurrent(operation),
     });
 
@@ -391,7 +394,7 @@ describe("wire-v1 reverse pairing", () => {
 
     await persistStarted.promise;
     operations.invalidate();
-    backend.rejectUpdate = true;
+    backend.rejectDelete = true;
     releasePersist.resolve();
 
     await expect(exchange).rejects.toMatchObject({ name: "PairingCleanupError" });
@@ -408,7 +411,11 @@ describe("wire-v1 reverse pairing", () => {
     const exchange = exchangePendingPairing({
       invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
       fetcher: async () => fetched.promise,
-      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }), persist,
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: operation.generation,
+      stagePersisted: persist,
+      activatePersisted: async () => true,
+      rollbackPersisted: async () => true,
       signal: operation.signal, isCurrent: () => operations.isCurrent(operation),
     });
 
@@ -432,10 +439,15 @@ describe("wire-v1 reverse pairing", () => {
     expect(afterBackgroundRender.deviceLabel).not.toBe("Commander browser");
   });
 
-  it.each(["create", "poll", "persist", "ack"])("routes native dialog Escape through cancellation during deferred %s", (phase) => {
+  it.each([
+    ["create", { createInFlight: true, exchangeInFlight: false, hasPendingPairing: false }],
+    ["poll", { createInFlight: false, exchangeInFlight: false, hasPendingPairing: true }],
+    ["persist", { createInFlight: false, exchangeInFlight: true, hasPendingPairing: true }],
+    ["ack", { createInFlight: false, exchangeInFlight: true, hasPendingPairing: true }],
+  ] as const)("routes native dialog Escape through cancellation during deferred %s", (_phase, state) => {
     const dialog = new EventTarget() as HTMLDialogElement;
     const cancel = vi.fn();
-    bindPairingDialogCancel(dialog, () => phase !== "idle", cancel);
+    bindPairingDialogCancel(dialog, () => state, cancel);
 
     const event = new Event("cancel", { cancelable: true });
     dialog.dispatchEvent(event);
@@ -464,7 +476,11 @@ describe("wire-v1 reverse pairing", () => {
     const persist = vi.fn(async (_machine: StoredMachine) => { events.push("persist"); });
     await expect(exchangePendingPairing({
       invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
-      fetcher, createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }), persist,
+      fetcher, createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: 1,
+      stagePersisted: persist,
+      activatePersisted: async () => true,
+      rollbackPersisted: async () => true,
       acknowledge: (relay) => acknowledgePairing(fetcher, relayOrigin, relay),
     })).resolves.toMatchObject({ id: invitation.hubId, baseUrl: invitation.hubUrl });
     expect(events).toEqual(["persist", "ack"]);
@@ -498,7 +514,11 @@ describe("wire-v1 reverse pairing", () => {
     const persisted: StoredMachine[] = [];
     const run = () => exchangePendingPairing({
       invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
-      fetcher, createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }), persist: async (machine) => { persisted.push(machine); },
+      fetcher, createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: 1,
+      stagePersisted: async (machine) => { persisted.push(machine); },
+      activatePersisted: async () => true,
+      rollbackPersisted: async () => true,
     });
     const settled = await Promise.allSettled([run(), run()]);
     expect(settled.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);

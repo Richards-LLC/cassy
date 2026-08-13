@@ -1,5 +1,5 @@
 import type { PendingInvitation, PairingRelayDelivery } from "./pending-pairing";
-import type { Scope, StoredMachine } from "./types";
+import type { PairingInstallIdentity, Scope, StoredMachine } from "./types";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -13,8 +13,10 @@ interface ExchangeOptions {
   requestedScopes?: Scope[];
   fetcher: Fetcher;
   createKey: () => Promise<{ privateKey: CryptoKey; publicKey: JsonWebKey }>;
-  persist: (machine: StoredMachine) => Promise<unknown>;
-  removePersisted?: (machineId: string) => Promise<unknown>;
+  installationGeneration: number;
+  stagePersisted: (machine: StoredMachine, identity: PairingInstallIdentity) => Promise<unknown>;
+  activatePersisted: (identity: PairingInstallIdentity, signal?: AbortSignal) => Promise<boolean>;
+  rollbackPersisted: (identity: PairingInstallIdentity) => Promise<boolean>;
   acknowledge?: (relay: PairingRelayDelivery, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
@@ -24,6 +26,13 @@ export class PairingExchangeError extends Error {
   constructor(message = "This pairing invitation has expired or was already used.") {
     super(message);
     this.name = "PairingExchangeError";
+  }
+}
+
+export class PairingCleanupError extends PairingExchangeError {
+  constructor(readonly cause: unknown) {
+    super("Pairing cancellation is incomplete: the canceled credential is blocked, but durable cleanup is still pending.");
+    this.name = "PairingCleanupError";
   }
 }
 
@@ -82,11 +91,16 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     publicKey,
     privateKey,
   };
-  let persisted = false;
+  const identity: PairingInstallIdentity = {
+    machineId: machine.id,
+    credentialId: machine.credentialId,
+    generation: options.installationGeneration,
+  };
+  let staged = false;
   try {
     ensureCurrent(options);
-    await options.persist(machine);
-    persisted = true;
+    await options.stagePersisted(machine, identity);
+    staged = true;
     ensureCurrent(options);
     if (invitation.relay && options.acknowledge) {
       await options.acknowledge(invitation.relay, options.signal).catch((error) => {
@@ -95,9 +109,18 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
       });
       ensureCurrent(options);
     }
+    ensureCurrent(options);
+    if (!await options.activatePersisted(identity, options.signal)) {
+      throw new PairingExchangeError("This pairing credential was superseded before installation completed.");
+    }
+    ensureCurrent(options);
   } catch (error) {
-    if (persisted && (options.signal?.aborted || options.isCurrent?.() === false) && options.removePersisted) {
-      await options.removePersisted(machine.id).catch(() => undefined);
+    if (staged) {
+      try {
+        await options.rollbackPersisted(identity);
+      } catch (cleanupError) {
+        throw new PairingCleanupError(cleanupError);
+      }
     }
     throw error;
   }

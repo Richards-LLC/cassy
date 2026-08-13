@@ -1,5 +1,6 @@
 import "./styles.css";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
+import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
@@ -58,10 +59,8 @@ async function boot(): Promise<void> {
   resumePairingPoll();
 }
 
-function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
-  const existing = connections.get(machine.id);
-  if (existing) return existing;
-  const connection = new HubConnectionSupervisor(machine, {
+function createConnection(machine: StoredMachine): HubConnectionSupervisor {
+  return new HubConnectionSupervisor(machine, {
     onState: (state, detail) => {
       connectionStates.set(machine.id, state);
       if (state === "reconnecting" || state === "auth-blocked" || state === "offline") invalidateMachineLeases(machine.id);
@@ -88,9 +87,10 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onSocketError: (session, detail) => void addAttention(machine, session, "session_transport", detail),
   });
-  connections.set(machine.id, connection);
-  connection.start();
-  return connection;
+}
+
+function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
+  return ensureMachineConnection(machine, connections, createConnection);
 }
 
 async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, message: string): Promise<void> {
@@ -179,7 +179,7 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
   selectedMachineId = machine.id;
-  ensureConnection(machine);
+  replaceMachineConnection(machine, connections, connectionStates, createConnection);
   render(false);
   return true;
 }

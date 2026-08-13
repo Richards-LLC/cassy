@@ -38,25 +38,16 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   (`grok 0.2.114 (0c78503879) [stable]`), verified live 2026-07-30 through the
   complete isolated `PtyConfig::grok` worker matrix and recorded in the typed
   `grok-build-0.2.114-2026-07-30` conformance receipt.
-- **Current default symlink:** **0.2.117**
-  (`grok 0.2.117 (f1c0609308) [stable]`, checked 2026-07-30). The validated
-  retained 0.2.114 executable remains installed separately. The typed receipt
-  records this mismatch so unified preflight can surface it as stale/warn rather
-  than silently treating 0.2.117 as validated.
-- **Latest versioned local changelog evidence:** **0.2.114** (2026-07-29). The
-  current `~/.grok/CHANGELOG.md` contains **0.2.113–0.2.114** sections. The current
-  `~/.grok/CHANGELOG.json` is a flat item list with no version or date fields; its
-  items are therefore only **current-install evidence**, not grounds to assign
-  history to 0.2.115–0.2.117 or another guessed release. Earlier host snapshots
-  captured the evidence-backed **0.2.100–0.2.101** and **0.2.104–0.2.106** entries
-  retained below. Versions **0.2.102–0.2.103**, **0.2.107–0.2.111**, and
-  **0.2.115–0.2.117** have no attributable notes on the available local surfaces
-  and remain explicit source gaps. **0.2.100** remains the diary's evidence-backed
-  **seed floor**.
-- **Gap:** the validated binary is **three patches behind** the current default
-  symlink (0.2.114 vs 0.2.117), and versioned changelog evidence also ends at
-  0.2.114. The 0.2.114 touchpoint checklist is a completed live validation;
-  0.2.115–0.2.117 remain unvalidated source gaps.
+- **Locally installed and latest stable:** **1.0.3** (`grok 1.0.3 (1a29d5bc12)
+  [stable]`, checked 2026-08-13). The former 0.2.117 default has been superseded.
+- **Latest release-note evidence:** xAI's official [Grok Build
+  changelog](https://x.ai/build/changelog) covers **0.2.115–0.2.119** and
+  **1.0.0–1.0.3**. The local `~/.grok/CHANGELOG.md` retains the 0.2.115–0.2.117
+  sections; the official page supplies the later release attribution.
+- **Gap:** the validated pin remains 0.2.114 while the current release is 1.0.3.
+  The new notes expose permission, subagent, MCP, worktree, hook, and transcript
+  surfaces, so a fresh complete `PtyConfig::grok` matrix is required before
+  treating 1.0.3 as validated. There are no source gaps in 0.2.115–1.0.3.
 
 ## CAS ↔ Grok touchpoints (what a release can break)
 
@@ -128,6 +119,15 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | CAS verdict | Pointer |
 |--------------|----------|-------------|---------|
+| 1.0.3 | Faster subagent spawning · session-info and high-refresh TUI polish | 🟢 / ⏭ | this doc |
+| 1.0.2 | Startup diagnostics · worktree fetch safety · hook/tool presentation | 🟢 / 👀 | this doc |
+| 1.0.1 | Bounded subagents · read-only tool metadata · MCP/headless lifecycle | 👀 / 🟢 | this doc |
+| 1.0.0 | MCP image reliability · permission visibility · session/task lifecycle | 👀 / 🟢 | this doc |
+| 0.2.119 | Bash allow-list, plan/task, auth, and startup reliability | 👀 / ✅ | this doc |
+| 0.2.118 | Session controls · doctor/compact · background-task correctness | ✅ / ⏭ | this doc |
+| 0.2.117 | TLS roots · background-subagent stop · ACP task reliability | 👀 / 🟢 | this doc |
+| 0.2.116 | Headless streaming JSON · undo · token-refresh reliability | 👀 / ✅ | this doc |
+| 0.2.115 | Tool-result history correctness · prompt-cache reliability | 🟢 direct win | this doc |
 | 0.2.114 | Session deletion · no-free-thread startup crash fix · full CAS factory matrix | ✅ | this doc |
 | 0.2.113 | MCP enable/disable · SessionEnd · auth/process/session reliability · instant cold start | 👀 / ✅ / ⏭ | this doc |
 | 0.2.112 | Version policy · env/provider config · session/resume/transcripts · MCP/subagents · hooks/workflows/background lifecycle | 👀 / ✅ / ⏭ | this doc |
@@ -148,6 +148,34 @@ At minimum, `PtyConfig::grok` sets:
 ---
 
 ## Entries
+
+### 1.0.3–0.2.115 — current release sweep: factory lifecycle and integration boundaries
+
+Reviewed 2026-08-13. Host on **1.0.3**. Sources: the local versioned
+`~/.grok/CHANGELOG.md` for 0.2.115–0.2.117 and xAI's official [Grok Build
+changelog](https://x.ai/build/changelog) for 0.2.118–1.0.3.
+
+- **0.2.115 fixes duplicate/corrupt tool results; 0.2.116 adds headless streaming JSON; 0.2.117
+  stops all prior-turn background subagents and adds a custom TLS-root variable.** → 🟢 / 👀
+  **evidence and lifecycle wins; retain launch-environment watch.** More truthful tool history and
+  stopped background work improve CAS proof and cleanup, while `GROK_EXTRA_CA_BUNDLE` is a separate
+  transport input that must not hide the inherited CAS identity or persistent MCP configuration.
+- **0.2.118–0.2.119 fix background-task completion state, compaction cancellation, startup/doctor
+  behavior, auth recovery, and broad bash allow-list editing.** → ✅ / 👀 **operational wins; watch
+  approval semantics.** CAS continues to set explicit bypass mode and remains the authority for task
+  lifecycle; permissive allow-list changes do not replace the factory’s scope and tool guards.
+- **1.0.0 improves MCP image results and permission-prompt visibility; 1.0.1 bounds wide subagent
+  fan-out, exposes read-only tool metadata, waits for MCP in headless sessions, and stops subagents
+  before deleting sessions.** → 👀 / 🟢 **high-value compatibility gains.** Verify `cas__*`
+  discovery and `--rules`/environment priming on a fresh headless worker, and keep CAS’s own
+  concurrency and state authority; the host bounds are complementary.
+- **1.0.2 makes startup delays diagnosable, preserves worktree fetch safety, and presents hook
+  results with grouped tool calls; 1.0.3 speeds subagent spawning.** → 🟢 / 👀 **isolation and
+  observability wins.** Re-run the full PTY matrix before advancing the validated pin, particularly
+  for fresh session UUIDs, inherited identity, persistent MCP discovery, rules precedence,
+  transcript/liveness, and worktree containment.
+- **Source gaps:** none for 0.2.115–1.0.3; the official page and retained local changelog provide
+  attributable notes for every release in this reviewed range.
 
 ### 0.2.114 — session deletion and startup thread-exhaustion fix
 
@@ -435,14 +463,14 @@ changelog; no pre-0.2.100 entries inventable from this host.
 
 ## Backlog of opportunities (not required, tracked)
 
-- **0.2.115–0.2.117 validation:** the default symlink is newer than the retained,
-  validated 0.2.114 binary. Re-run the complete live checklist before advancing
-  the typed receipt or validated pin.
+- **1.0.3 validation:** the installed/latest release is materially newer than the
+  retained, validated 0.2.114 binary. Re-run the complete live checklist before
+  advancing the typed receipt or validated pin.
 - **Changelog history depth:** find an authoritative release surface for the missing
-  0.2.102–0.2.103, 0.2.107–0.2.111, and 0.2.115–0.2.117 notes, plus any
-  pre-0.2.100 history, before backfilling them. The companion JSON remains
-  unversioned; keep every gap and the 0.2.100 evidence-backed seed floor explicit
-  until attributable sources exist.
+  0.2.102–0.2.103 and 0.2.107–0.2.111 notes, plus any pre-0.2.100 history,
+  before backfilling them. The companion JSON remains unversioned; keep every gap
+  and the 0.2.100 evidence-backed seed floor explicit until attributable sources
+  exist.
 - **SessionStart stdout:** if a future Grok release starts delivering SessionStart
   stdout like Claude, re-evaluate whether `--rules` remains the sole context path or
   becomes defense-in-depth (would be a deliberate EPIC, not a silent drop of `--rules`).

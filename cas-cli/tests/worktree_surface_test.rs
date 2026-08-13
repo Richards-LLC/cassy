@@ -59,6 +59,32 @@ fn process_home_mutation_uses_the_canonical_test_env_guard() {
     );
 }
 
+/// cas-f211: integration-test binaries inherit the factory session that ran
+/// `cargo test`. Prove the public authority boundary has the same result when
+/// its parent is a live supervisor as it does in a clean shell.
+#[test]
+fn authority_boundary_test_is_hermetic_against_inherited_factory_env() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "public_registration_cannot_mint_or_capture_supervisor_verification_authority",
+            "--nocapture",
+        ])
+        .env("CAS_AGENT_ROLE", "supervisor")
+        .env("CAS_AGENT_NAME", "inherited-supervisor")
+        .env("CAS_SESSION_ID", "inherited-session")
+        .env("CAS_FACTORY_SESSION", "inherited-factory")
+        .output()
+        .expect("run authority-boundary test under inherited factory env");
+
+    assert!(
+        output.status.success(),
+        "authority-boundary test must be hermetic under inherited CAS_* env\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 /// Initialize a project fixture while keeping the host-level known-repo
 /// registry inside this test binary's private HOME. Several System-A tests
 /// intentionally exercise registry resolution, so simply suppressing the
@@ -86,6 +112,15 @@ fn test_env() -> TestEnvGuard {
         // which harness launched `cargo test`.
         ("CAS_FACTORY_WORKER_CLI", Some("claude")),
         ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+        // Authority-boundary fixtures must begin without a caller identity.
+        // A live factory supervisor exports these into `cargo test`; leaving
+        // them ambient lets public registration inherit privileged authority
+        // and makes clean-shell and factory-shell results disagree.
+        ("CAS_AGENT_ROLE", None),
+        ("CAS_AGENT_NAME", None),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+        ("CAS_FACTORY_MODE", None),
     ])
 }
 

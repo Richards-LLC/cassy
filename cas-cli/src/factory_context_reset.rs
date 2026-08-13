@@ -92,7 +92,7 @@ pub fn unsupported_reason(cli: SupervisorCli) -> String {
         "harness '{}' has no verified in-place context-reset command, so CAS cannot reset it \
          and will not report a reset it did not perform. Use shutdown_workers + spawn_workers \
          (same name/worktree) to recycle the worker instead.",
-        cli.as_str()
+        cli.backend().name()
     )
 }
 

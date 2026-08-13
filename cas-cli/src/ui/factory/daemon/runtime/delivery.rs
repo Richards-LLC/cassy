@@ -855,7 +855,7 @@ impl FactoryDaemon {
             target: "cas::coordination",
             stage = "context_reset_inject",
             target_agent = %pane_target,
-            harness = harness.as_str(),
+            harness = harness.backend().name(),
             command = %command,
             settle_ms = settle.as_millis() as u64,
             "cas-dffe: typing the harness's own context-reset command into the pane"

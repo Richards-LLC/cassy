@@ -21,8 +21,9 @@ runs:
       run: |
         # checkout fetch-depth: 0 makes this a true merge-base comparison,
         # including an ancestry-only merge with no content changes.
-        if [[ -z "$BASE_SHA" ]]; then
-          # Schedules and manual dispatches do not have a comparison event.
+        if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+          # Schedules, manual dispatches, and tag pushes without a predecessor
+          # do not have a comparison event.
           # They are intentionally never eligible to fast-pass.
           class=full
         else

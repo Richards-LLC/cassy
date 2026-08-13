@@ -866,7 +866,7 @@ impl DirectorEventDetector {
                     .map(|(_, old_assignee)| old_assignee.as_ref() == Some(assignee))
                     .unwrap_or(false);
 
-                if dispatchable && !was_assigned && self.is_factory_agent(assignee, data) {
+                if dispatchable && !was_assigned && self.is_factory_worker(assignee, data) {
                     // State-guard (cas-55dc): suppress re-emission if this
                     // (task, assignee) pair was already announced. Oscillation
                     // (lease churn causes the task to temporarily leave and
@@ -902,7 +902,7 @@ impl DirectorEventDetector {
 
                 if !was_blocked {
                     if let Some(assignee) = new_assignee {
-                        if self.is_factory_agent(assignee, data) {
+                        if self.is_factory_worker(assignee, data) {
                             let task_title = task_info
                                 .get(task_id.as_str())
                                 .map(|t| t.title.clone())
@@ -1572,6 +1572,19 @@ impl DirectorEventDetector {
 
         // Check if name matches any worker or supervisor
         self.worker_names.contains(&name.to_string()) || name == self.supervisor_name
+    }
+
+    /// True only for a worker in this factory, never for the supervisor. Task
+    /// assignment/completion templates are worker-directed lifecycle traffic;
+    /// accepting the supervisor here turns a supervisor-owned gate into a
+    /// self-assignment followed by a bogus worker-complete notice.
+    fn is_factory_worker(&self, agent_id: &str, data: &DirectorData) -> bool {
+        let name = data
+            .agent_id_to_name
+            .get(agent_id)
+            .map(|name| name.as_str())
+            .unwrap_or(agent_id);
+        self.is_worker_agent_name(name)
     }
 
     /// Check if an agent name belongs to this factory session

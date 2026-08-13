@@ -43,6 +43,13 @@ const PROMPT_DUPLICATE_WINDOW_SECS: i64 = 30;
 /// delivery that motivated this bound.
 pub const PROMPT_QUEUE_STALE_TTL_SECS: i64 = 24 * 60 * 60;
 
+/// Structural idempotency marker for the sender-side delivery-stalled notice.
+///
+/// This is intentionally not inferred from `source`: prompt sources are free
+/// text supplied by callers, whereas a dedupe key identifies the watchdog row
+/// that must not bounce itself.
+const DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX: &str = "delivery-stalled:";
+
 /// Rows the daemon terminally quarantined are not deliverable content.
 const TERMINAL_NON_DELIVERY_STAGES: &str = "('dropped', 'suppressed', 'abandoned')";
 
@@ -1202,6 +1209,7 @@ pub trait PromptQueueStore: Send + Sync {
     /// Find direct messages that are still unread past their priority threshold.
     fn delivery_stalled_candidates(
         &self,
+        factory_session: &str,
         priority_threshold_secs: i64,
         normal_threshold_secs: i64,
         limit: usize,
@@ -1213,6 +1221,7 @@ pub trait PromptQueueStore: Send + Sync {
     fn enqueue_delivery_stalled_bounce(
         &self,
         prompt_id: i64,
+        factory_session: &str,
         notice: &str,
         summary: &str,
     ) -> Result<Option<i64>>;
@@ -2402,6 +2411,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn delivery_stalled_candidates(
         &self,
+        factory_session: &str,
         priority_threshold_secs: i64,
         normal_threshold_secs: i64,
         limit: usize,
@@ -2411,11 +2421,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             (Utc::now() - chrono::Duration::seconds(priority_threshold_secs.max(0))).to_rfc3339();
         let normal_cutoff =
             (Utc::now() - chrono::Duration::seconds(normal_threshold_secs.max(0))).to_rfc3339();
+        let stale_cutoff =
+            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
         let mut stmt = conn.prepare(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
-               AND q.source <> 'delivery-watchdog'
+               AND q.source <> 'all_workers'
+               AND q.source NOT LIKE 'lifecycle:%'
+               AND q.source NOT LIKE 'lifecycle-wake:%'
+               AND q.factory_session = ?
+               AND q.created_at >= ?
+               AND (q.dedupe_key IS NULL OR q.dedupe_key NOT LIKE 'delivery-stalled:%')
+               AND EXISTS (
+                   SELECT 1 FROM agents sender
+                    WHERE sender.name = q.source
+                      AND sender.factory_session = q.factory_session
+               )
                AND q.delivery_stalled_notified_at IS NULL
                AND q.acked_at IS NULL
                AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
@@ -2430,7 +2452,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         )?;
         Ok(stmt
             .query_map(
-                params![priority_cutoff, normal_cutoff, limit as i64],
+                params![
+                    factory_session,
+                    stale_cutoff,
+                    priority_cutoff,
+                    normal_cutoff,
+                    limit as i64
+                ],
                 Self::prompt_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?)
@@ -2439,18 +2467,31 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn enqueue_delivery_stalled_bounce(
         &self,
         prompt_id: i64,
+        factory_session: &str,
         notice: &str,
         summary: &str,
     ) -> Result<Option<i64>> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let stale_cutoff =
+                (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
             let original = tx
                 .query_row(
                     "SELECT source, factory_session FROM prompt_queue q
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
-                       AND q.source <> 'delivery-watchdog'
+                       AND q.source <> 'all_workers'
+                       AND q.source NOT LIKE 'lifecycle:%'
+                       AND q.source NOT LIKE 'lifecycle-wake:%'
+                       AND q.factory_session = ?
+                       AND q.created_at >= ?
+                       AND (q.dedupe_key IS NULL OR q.dedupe_key NOT LIKE 'delivery-stalled:%')
+                       AND EXISTS (
+                           SELECT 1 FROM agents sender
+                            WHERE sender.name = q.source
+                              AND sender.factory_session = q.factory_session
+                       )
                        AND q.delivery_stalled_notified_at IS NULL
                        AND q.acked_at IS NULL
                        AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
@@ -2458,7 +2499,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                            SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
                        )",
-                    params![prompt_id],
+                    params![prompt_id, factory_session, stale_cutoff],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
                 )
                 .optional()?;
@@ -2467,7 +2508,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             };
 
             let now = Utc::now().to_rfc3339();
-            let dedupe_key = format!("delivery-stalled:{prompt_id}");
+            let dedupe_key = format!("{DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX}{prompt_id}");
             tx.execute(
                 "INSERT OR IGNORE INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key)
@@ -4189,6 +4230,18 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    fn register_bounce_sender(store: &SqlitePromptQueueStore, name: &str, session: &str) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(crate::AGENT_SCHEMA).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agents (id, name, factory_session, registered_at, last_heartbeat)
+             VALUES (?, ?, ?, ?, ?)",
+            params![format!("bounce-{name}-{session}"), name, session, now, now],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -6381,6 +6434,7 @@ mod tests {
     #[test]
     fn delivery_stalled_bounce_uses_priority_threshold_once_and_cancels_on_read() {
         let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
         let urgent = store
             .enqueue_full(
                 "supervisor",
@@ -6413,7 +6467,7 @@ mod tests {
             .unwrap();
 
         let candidates = store
-            .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+            .delivery_stalled_candidates("session", 10 * 60, 30 * 60, 10)
             .unwrap();
         assert_eq!(
             candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -6422,6 +6476,7 @@ mod tests {
         let bounce = store
             .enqueue_delivery_stalled_bounce(
                 urgent,
+                "session",
                 "delivery stalled: notification_id=urgent; recipient_harness=claude; delivery_state=enqueued",
                 "delivery stalled",
             )
@@ -6429,13 +6484,13 @@ mod tests {
             .expect("eligible urgent row should bounce");
         assert!(
             store
-                .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+                .delivery_stalled_candidates("session", 10 * 60, 30 * 60, 10)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
             store
-                .enqueue_delivery_stalled_bounce(urgent, "duplicate", "duplicate")
+                .enqueue_delivery_stalled_bounce(urgent, "session", "duplicate", "duplicate")
                 .unwrap(),
             None,
             "the original row can create only one sender bounce"
@@ -6455,7 +6510,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+                .delivery_stalled_candidates("session", 10 * 60, 30 * 60, 10)
                 .unwrap()
                 .len(),
             1
@@ -6465,10 +6520,144 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .delivery_stalled_candidates(10 * 60, 30 * 60, 10)
+                .delivery_stalled_candidates("session", 10 * 60, 30 * 60, 10)
                 .unwrap()
                 .is_empty(),
             "a recipient read cancels the pending sender bounce"
+        );
+    }
+
+    #[test]
+    fn delivery_stalled_bounce_requires_live_same_session_direct_sender() {
+        let (_temp, store) = create_test_store();
+        const SESSION: &str = "factory-a";
+        const OTHER_SESSION: &str = "factory-b";
+
+        register_bounce_sender(&store, "supervisor", SESSION);
+        register_bounce_sender(&store, "delivery-watchdog", SESSION);
+        register_bounce_sender(&store, "lifecycle-wake:42", SESSION);
+        register_bounce_sender(&store, "foreign-supervisor", OTHER_SESSION);
+
+        let genuine = store
+            .enqueue_with_session("supervisor", "worker-a", "genuine aged direct", SESSION)
+            .unwrap();
+        let broadcast = store
+            .enqueue_with_session("supervisor", "all_workers", "broadcast", SESSION)
+            .unwrap();
+        let synthetic = store
+            .enqueue_with_session("lifecycle-wake:42", "worker-a", "synthetic", SESSION)
+            .unwrap();
+        let unregistered = store
+            .enqueue_with_session("unknown-sender", "worker-a", "unregistered", SESSION)
+            .unwrap();
+        let cross_session = store
+            .enqueue_with_session(
+                "foreign-supervisor",
+                "worker-a",
+                "foreign session",
+                OTHER_SESSION,
+            )
+            .unwrap();
+        let stale = store
+            .enqueue_with_session("supervisor", "worker-a", "historical", SESSION)
+            .unwrap();
+        let spoofed_watchdog_source = store
+            .enqueue_with_session(
+                "delivery-watchdog",
+                "worker-a",
+                "spoofed source is not a watchdog marker",
+                SESSION,
+            )
+            .unwrap();
+        let structural_watchdog = match store
+            .enqueue_idempotent(
+                "delivery-watchdog",
+                "supervisor",
+                "real watchdog row",
+                Some(SESSION),
+                None,
+                Some(NotificationPriority::High),
+                "delivery-stalled:prior-message",
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+
+        let aged = (Utc::now() - chrono::Duration::minutes(11)).to_rfc3339();
+        let historical =
+            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS + 60)).to_rfc3339();
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE prompt_queue SET created_at = ? WHERE id <> ?",
+            params![aged, stale],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+            params![historical, stale],
+        )
+        .unwrap();
+        drop(conn);
+
+        let candidates = store
+            .delivery_stalled_candidates(SESSION, 10 * 60, 10 * 60, 20)
+            .unwrap();
+        let candidate_ids: std::collections::HashSet<i64> =
+            candidates.iter().map(|row| row.id).collect();
+        assert!(candidate_ids.contains(&genuine));
+        assert!(candidate_ids.contains(&spoofed_watchdog_source));
+        for excluded in [
+            broadcast,
+            synthetic,
+            unregistered,
+            cross_session,
+            stale,
+            structural_watchdog,
+        ] {
+            assert!(
+                !candidate_ids.contains(&excluded),
+                "ineligible row {excluded} must not become a delivery-stalled bounce candidate"
+            );
+        }
+        assert_eq!(
+            store
+                .enqueue_delivery_stalled_bounce(stale, SESSION, "stale", "stalled")
+                .unwrap(),
+            None,
+            "the atomic bounce recheck must still reject a row past the stale TTL"
+        );
+        assert_eq!(
+            store
+                .enqueue_delivery_stalled_bounce(
+                    structural_watchdog,
+                    SESSION,
+                    "watchdog",
+                    "stalled",
+                )
+                .unwrap(),
+            None,
+            "the atomic bounce recheck must identify the watchdog structurally"
+        );
+
+        let first_bounce = store
+            .enqueue_delivery_stalled_bounce(genuine, SESSION, "genuine bounce", "stalled")
+            .unwrap()
+            .expect("the genuine same-session direct message must bounce");
+        assert_eq!(
+            store
+                .message_delivery_report(first_bounce)
+                .unwrap()
+                .unwrap()
+                .target,
+            "supervisor"
+        );
+        assert_eq!(
+            store
+                .enqueue_delivery_stalled_bounce(genuine, SESSION, "duplicate", "stalled")
+                .unwrap(),
+            None,
+            "a genuine row still bounces exactly once"
         );
     }
 

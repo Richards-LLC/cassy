@@ -352,8 +352,18 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     }
 
     let conn = Connection::open(&db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
+    check_migrations_on_connection(&conn)
+}
+
+/// Check migration status through an already-open connection.
+///
+/// The migration runner calls this while it owns SQLite's write lock, so a
+/// second process cannot observe a half-bootstrapped ledger and derive a
+/// stale pending list.
+fn check_migrations_on_connection(conn: &Connection) -> Result<MigrationStatus> {
     // Ensure migrations table exists
     ensure_migrations_table(&conn)?;
 
@@ -437,8 +447,18 @@ pub fn bootstrap_migrations(cas_dir: &Path) -> Result<usize> {
     }
 
     let conn = Connection::open(&db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
+    bootstrap_migrations_on_connection(&conn)
+}
+
+/// Bootstrap the migration ledger using a caller-owned connection.
+///
+/// Keeping this on the same connection as the startup lock is important: a
+/// concurrent server must not race a ledger bootstrap with its own migration
+/// detection and then attempt DDL based on stale observations.
+fn bootstrap_migrations_on_connection(conn: &Connection) -> Result<usize> {
     // Ensure migrations table exists
     ensure_migrations_table(&conn)?;
 
@@ -656,6 +676,7 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
     let db_path = cas_dir.join("cas.db");
 
     let conn = Connection::open(&db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
     // Check that base tables exist (cas init has been run)
@@ -663,20 +684,32 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
         return Err(CasError::NotInitialized);
     }
 
-    // Ensure migrations table exists
-    ensure_migrations_table(&conn)?;
+    // Serialize the base-schema bootstrap and status snapshot. Without this,
+    // two freshly spawned MCP servers can independently bootstrap/detect the
+    // ledger and retain stale pending lists before either reaches its first
+    // per-migration BEGIN IMMEDIATE.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let status = (|| {
+        ensure_migrations_table(&conn)?;
 
-    // Ensure every subsystem's base schema exists before any ALTER migration
-    // runs. Fix for cas-bdb9: `cas doctor --fix` previously failed with
-    // `no such table: skills` on databases that had never had
-    // `SqliteSkillStore` / `SqliteAgentStore` constructed.
-    ensure_base_schemas(&conn)?;
-
-    // Bootstrap if needed (detect already-applied migrations)
-    bootstrap_migrations(cas_dir)?;
-
-    // Get pending migrations
-    let status = check_migrations(cas_dir)?;
+        // Ensure every subsystem's base schema exists before any ALTER
+        // migration runs. Fix for cas-bdb9: `cas doctor --fix` previously
+        // failed with `no such table: skills` on databases that had never had
+        // `SqliteSkillStore` / `SqliteAgentStore` constructed.
+        ensure_base_schemas(&conn)?;
+        bootstrap_migrations_on_connection(&conn)?;
+        check_migrations_on_connection(&conn)
+    })();
+    let status = match status {
+        Ok(status) => {
+            conn.execute("COMMIT", [])?;
+            status
+        }
+        Err(error) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(error);
+        }
+    };
 
     if dry_run {
         return Ok(MigrationResult {
@@ -701,6 +734,15 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
             [migration.id],
             |row| row.get::<_, i64>(0),
         )? > 0;
+
+        // A concurrent runner may have applied this migration after our
+        // serialized status snapshot but before we acquired this migration's
+        // write lock. It is complete, not a recorded-but-broken migration to
+        // reconcile, so leave its ledger receipt untouched and move on.
+        if already_recorded && migration_is_detected(&conn, migration) {
+            conn.execute("COMMIT", [])?;
+            continue;
+        }
 
         if already_recorded {
             match reconcile_recorded_migration(&conn, migration) {
@@ -1649,6 +1691,62 @@ mod tests {
             .as_str(),
             "BOOTSTRAP" | "DETECTED"
         ));
+    }
+
+    #[test]
+    fn concurrent_runners_apply_a_pending_migration_once_without_lock_errors() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        {
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute("ALTER TABLE tasks DROP COLUMN terminal_outcome", [])
+                .unwrap();
+            conn.execute("DELETE FROM cas_migrations WHERE id = 233", [])
+                .unwrap();
+        }
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let cas_dir = cas_dir.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    run_migrations(&cas_dir, false)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("migration thread must not panic")
+                .expect("concurrent migration runner must not return a lock error");
+        }
+
+        let status = check_migrations(&cas_dir).unwrap();
+        assert!(status.pending.is_empty());
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migrations WHERE id = 233",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "the concurrent stale runner must not duplicate the migration ledger receipt"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migration_reconciliations WHERE migration_id = 233",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0,
+            "a runner that loses the race must skip the now-complete migration, not reconcile it"
+        );
     }
 
     /// cas-cbf1: the knowledge store lands on a DB that predates it — the

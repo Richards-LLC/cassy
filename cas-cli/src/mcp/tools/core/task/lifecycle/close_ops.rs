@@ -4087,6 +4087,24 @@ impl CasCore {
             data: None,
         })?;
 
+        // Artifacts are validated under this task's configured durable root
+        // before they can become receipt evidence. Index every supported text
+        // artifact at the same close boundary; a search failure must never
+        // roll back a completed task close, and `system reindex` can recover it.
+        let artifact_config = crate::config::Config::load(&self.cas_root).ok();
+        let configured_artifacts_root = artifact_config
+            .as_ref()
+            .and_then(|config| config.factory().artifacts_root);
+        let artifacts_root =
+            crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref());
+        let artifacts =
+            crate::hybrid_search::artifacts::discover_task_artifacts(&artifacts_root, &task.id);
+        if let Ok(search) = self.open_search_index()
+            && let Err(error) = search.index_artifacts(&artifacts)
+        {
+            tracing::warn!(task_id = %task.id, error = %error, "close-time artifact indexing failed");
+        }
+
         // GH #276: reminders armed while working a task carry frozen context.
         // Once the task closes, default reminders must not wake a successor
         // with obsolete draft IDs or decisions. `cross_session` is the explicit
@@ -9255,7 +9273,7 @@ pub(crate) fn render_epic_status_report_with_stack(
             "| {task} | {status} | {assignee} | {branch} | {checked} | {unmerged} | {last} |\n",
             task = s.task_id,
             status = status_str,
-                assignee = assignee,
+            assignee = assignee,
             branch = branch,
             checked = s.checked_refs_label(),
             unmerged = unmerged,
@@ -19009,10 +19027,7 @@ mod zero_change_close_tests {
             &["remote", "add", "origin", origin.path().to_str().unwrap()],
         );
         git(dir.path(), &["push", "-q", "origin", "main"]);
-        git(
-            dir.path(),
-            &["push", "-q", "origin", "factory/test-worker"],
-        );
+        git(dir.path(), &["push", "-q", "origin", "factory/test-worker"]);
         git(dir.path(), &["fetch", "-q", "origin"]);
         (dir, origin)
     }

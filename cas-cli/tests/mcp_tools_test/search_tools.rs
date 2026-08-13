@@ -139,6 +139,53 @@ async fn test_search_with_content() {
 }
 
 #[tokio::test]
+async fn artifact_fixture_content_is_searchable_after_backfill() {
+    let (temp, service) = setup_cas();
+    let artifacts_root = temp.path().join("durable-artifacts");
+    let task_id = "cas-artifact-fixture";
+    let artifact = artifacts_root.join(task_id).join("SEND-LOG.md");
+    std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    std::fs::write(
+        &artifact,
+        "SES MessageId: artifact-fixture-unique-message-id-292",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join(".cas/config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n",
+            artifacts_root.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    service
+        .cas_reindex(Parameters(ReindexRequest {
+            bm25: true,
+            embeddings: false,
+            missing_only: false,
+        }))
+        .await
+        .expect("artifact backfill should succeed");
+
+    let result = service
+        .cas_search(Parameters(SearchRequest {
+            scope: "project".to_string(),
+            query: "artifact-fixture-unique-message-id-292".to_string(),
+            doc_type: Some("artifact".to_string()),
+            limit: 10,
+            tags: None,
+        }))
+        .await
+        .expect("artifact search should succeed");
+
+    let output = extract_text(result);
+    assert!(output.contains("[Artifact]"));
+    assert!(output.contains(task_id));
+    assert!(output.contains(artifact.to_str().unwrap()));
+}
+
+#[tokio::test]
 async fn cas_4caa_expired_memory_is_excluded_from_search_recall() {
     let (_temp, service) = setup_cas();
     let request = RememberRequest {

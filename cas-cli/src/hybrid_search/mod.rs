@@ -52,6 +52,8 @@
 pub mod background;
 pub use background::{BackgroundIndexer, IndexingConfig, IndexingResult};
 
+pub mod artifacts;
+
 // Query and results caching
 pub mod cache;
 
@@ -79,8 +81,8 @@ pub mod scorer;
 pub mod semantic;
 
 pub use hybrid::{HistoryFilter, HybridSearch, HybridSearchOptions};
-pub use semantic::{SemanticChannel, open_semantic_channel};
 pub use metrics::{LatencyTimer, MetricsStore, SearchEvent, SearchMethod, generate_event_id};
+pub use semantic::{SemanticChannel, open_semantic_channel};
 
 pub mod filter_grammar;
 pub mod frontmatter;
@@ -91,9 +93,9 @@ mod search_index_query;
 use std::sync::Mutex;
 
 use chrono::Duration;
-use tantivy::{Index, IndexReader};
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
+use tantivy::{Index, IndexReader};
 
 pub use id_utils::extract_id_patterns;
 
@@ -116,6 +118,8 @@ pub enum DocType {
     /// channel's two row classes are distinguishable from the first response
     /// that can carry either; the table itself lands in M6.
     HistoryDoc,
+    /// A durable factory artifact under `[factory] artifacts_root/<task-id>/`.
+    Artifact,
 }
 
 impl DocType {
@@ -131,6 +135,7 @@ impl DocType {
             DocType::KnowledgePage => "knowledge_page",
             DocType::HistoryCommit => "history_commit",
             DocType::HistoryDoc => "history_doc",
+            DocType::Artifact => "artifact",
         }
     }
 
@@ -150,6 +155,7 @@ impl DocType {
                 Some(DocType::HistoryCommit)
             }
             "history_doc" | "historydoc" | "history" => Some(DocType::HistoryDoc),
+            "artifact" | "artifacts" => Some(DocType::Artifact),
             _ => None,
         }
     }
@@ -206,7 +212,7 @@ pub struct SearchOptions {
     pub tags: Vec<String>,
     /// Filter by entry types
     pub types: Vec<String>,
-    /// Filter by document types (entry, task, rule, skill, code_symbol)
+    /// Filter by document types (entry, task, rule, skill, artifact, code_symbol)
     pub doc_types: Vec<DocType>,
     /// Include archived entries
     pub include_archived: bool,

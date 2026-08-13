@@ -5,7 +5,7 @@
 //! JSON advisory, matching the contract in
 //! `docs/specs/2026-08-11-cross-project-task-proposals.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -16,6 +16,13 @@ use crate::types::AgentRole;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const ROLE_REQUIREMENT: &str =
     "Cross-project task creation requires a registered supervisor or director session.";
+
+/// Cloud pagination is additive and opt-in: a request carrying neither `limit`
+/// nor `cursor` is answered in the legacy shape with no `next_cursor`, which
+/// would silently truncate a drain at the server default. CAS therefore always
+/// sends an explicit in-range `limit` (server accepts 1..=500) so every listing
+/// receives a `next_cursor` it can follow to exhaustion.
+const PAGE_LIMIT_PARAM: &str = "100";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateTaskProposalRequest {
@@ -188,7 +195,7 @@ impl TaskProposalClient {
 
         loop {
             let mut url = format!(
-                "{}?target_project_id={}&state=proposed",
+                "{}?target_project_id={}&state=proposed&limit={PAGE_LIMIT_PARAM}",
                 self.team_url("task-proposals"),
                 urlencoding::encode(target)
             );
@@ -248,7 +255,7 @@ impl TaskProposalClient {
 
         loop {
             let mut url = format!(
-                "{}?origin_project_id={}",
+                "{}?origin_project_id={}&limit={PAGE_LIMIT_PARAM}",
                 self.team_url("cross-project-task-dependencies"),
                 urlencoding::encode(origin)
             );
@@ -280,7 +287,7 @@ impl TaskProposalClient {
             page_cursor = Some(next);
         }
         Ok(DependencyFeed {
-            dependencies,
+            dependencies: dedupe_by_proposal_id(dependencies),
             cursor: watermark,
         })
     }
@@ -382,6 +389,28 @@ impl DependencyPage {
                 .flatten()
         })
     }
+}
+
+/// `since=` feed reads deliberately replay a 5-second safety window so a
+/// late-committing transaction cannot fall permanently behind an observed
+/// cursor. That makes duplicates an expected, contractual outcome rather than a
+/// server bug, so CAS collapses them by `proposal_id`. The most recently
+/// observed row wins (feed order is the server's, and later rows carry the
+/// newer resolution state), while first-seen ordering is preserved so the
+/// reconciler reports a stable, truthful edge count.
+fn dedupe_by_proposal_id(dependencies: Vec<ExternalTaskDependency>) -> Vec<ExternalTaskDependency> {
+    let mut position: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<ExternalTaskDependency> = Vec::with_capacity(dependencies.len());
+    for dependency in dependencies {
+        match position.get(&dependency.proposal_id) {
+            Some(&index) => deduped[index] = dependency,
+            None => {
+                position.insert(dependency.proposal_id.clone(), deduped.len());
+                deduped.push(dependency);
+            }
+        }
+    }
+    deduped
 }
 
 fn required_explicit<'a>(field: &str, value: &'a str) -> Result<&'a str, TaskProposalError> {
@@ -687,6 +716,143 @@ mod tests {
         assert_eq!(feed.dependencies.len(), 1);
         assert_eq!(feed.dependencies[0].resolution_state, "handoff_rejected");
         assert_eq!(feed.cursor.as_deref(), Some("server-watermark"));
+    }
+
+    /// Pagination is opt-in on production: a request carrying neither `limit`
+    /// nor `cursor` is answered in the legacy shape with no `next_cursor`, so a
+    /// client that never opts in cannot discover page 2 and silently truncates
+    /// at the server default. CAS must send an explicit in-range `limit`.
+    #[tokio::test]
+    async fn inbox_opts_into_pagination_so_later_pages_are_not_silently_dropped() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/teams/team-1/task-proposals"))
+            .and(query_param("target_project_id", "target-project"))
+            .and(query_param("limit", PAGE_LIMIT_PARAM))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "proposals": [proposal("proposed")],
+                "next_cursor": "opaque-page-2"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/teams/team-1/task-proposals"))
+            .and(query_param("limit", PAGE_LIMIT_PARAM))
+            .and(query_param("cursor", "opaque-page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "proposals": [{
+                    "proposal_id": "proposal-2",
+                    "target_task_id": "cas-89abcdef01234567",
+                    "state": "proposed",
+                    "origin_project_canonical_id": "origin-project",
+                    "target_project_canonical_id": "target-project",
+                    "received_at": "2026-08-13T15:01:00.000Z",
+                    "decided_by_user_id": null,
+                    "decided_at": null,
+                    "rejection_reason": null,
+                    "task": null,
+                    "provenance": provenance()
+                }],
+                "next_cursor": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let proposals =
+            tokio::task::spawn_blocking(move || client(&server).inbox_all("target-project"))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(proposals.len(), 2, "second page must not be dropped");
+        assert_eq!(proposals[1].proposal_id, "proposal-2");
+    }
+
+    /// `since` reads deliberately replay a 5-second safety window, so the feed
+    /// can return the same `proposal_id` more than once within a single drain.
+    /// The contract requires de-duplication by `proposal_id`, with the most
+    /// recently observed state winning.
+    #[tokio::test]
+    async fn dependency_feed_deduplicates_replayed_rows_by_proposal_id() {
+        let server = MockServer::start().await;
+        let unresolved = json!({
+            "origin_task_id": "cas-origin",
+            "proposal_id": "proposal-1",
+            "target_task_id": "cas-0123456789abcdef",
+            "proposal_state": "accepted",
+            "target_task_status": "open",
+            "resolution_state": "unresolved",
+            "resolved_at": null
+        });
+        let resolved = json!({
+            "origin_task_id": "cas-origin",
+            "proposal_id": "proposal-1",
+            "target_task_id": "cas-0123456789abcdef",
+            "proposal_state": "accepted",
+            "target_task_status": "closed",
+            "resolution_state": "resolved",
+            "resolved_at": "2026-08-13T16:00:00.000Z"
+        });
+        let other = json!({
+            "origin_task_id": "cas-origin-2",
+            "proposal_id": "proposal-2",
+            "target_task_id": "cas-89abcdef01234567",
+            "proposal_state": "accepted",
+            "target_task_status": "open",
+            "resolution_state": "unresolved",
+            "resolved_at": null
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/teams/team-1/cross-project-task-dependencies"))
+            .and(query_param("origin_project_id", "origin-project"))
+            .and(query_param("limit", PAGE_LIMIT_PARAM))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "dependencies": [unresolved, other],
+                "next_cursor": "opaque-page-2"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/teams/team-1/cross-project-task-dependencies"))
+            .and(query_param("limit", PAGE_LIMIT_PARAM))
+            .and(query_param("cursor", "opaque-page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "dependencies": [resolved],
+                "cursor": "server-watermark",
+                "next_cursor": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let feed = tokio::task::spawn_blocking(move || {
+            client(&server).dependency_feed_all("origin-project", None)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            feed.dependencies.len(),
+            2,
+            "replayed proposal_id must collapse to one edge"
+        );
+        let replayed = feed
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.proposal_id == "proposal-1")
+            .expect("replayed edge retained");
+        assert_eq!(
+            replayed.resolution_state, "resolved",
+            "most recently observed state wins"
+        );
+        assert_eq!(
+            replayed.resolved_at.as_deref(),
+            Some("2026-08-13T16:00:00.000Z")
+        );
     }
 
     #[test]

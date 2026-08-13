@@ -240,6 +240,60 @@ mod tests {
         );
     }
 
+    /// Cloud contract: closing an accepted target task resolves the edge;
+    /// reopening it returns the edge to `unresolved` with a null `resolved_at`
+    /// (never contradictory fields), and a later close re-resolves with a fresh
+    /// timestamp. The local projection must track that round trip, including
+    /// clearing a previously stored `resolved_at`.
+    #[test]
+    fn reopened_target_returns_edge_to_unresolved_and_reclose_reresolves() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ExternalTaskDependencyStore::open(temp.path()).unwrap();
+        let mut dependency = ExternalTaskDependencyProjection {
+            origin_task_id: "cas-origin".into(),
+            proposal_id: "proposal-1".into(),
+            target_project_canonical_id: "target".into(),
+            target_task_id: "cas-0123456789abcdef".into(),
+            proposal_state: "accepted".into(),
+            target_task_status: Some("closed".into()),
+            resolution_state: "resolved".into(),
+            resolved_at: Some("2026-08-13T12:00:00Z".into()),
+        };
+        store.upsert(&dependency).unwrap();
+        assert!(
+            store
+                .list_blocking_for_task("cas-origin")
+                .unwrap()
+                .is_empty(),
+            "resolved edge does not block"
+        );
+
+        // Target reopened: back to unresolved, resolved_at cleared.
+        dependency.target_task_status = Some("open".into());
+        dependency.resolution_state = "unresolved".into();
+        dependency.resolved_at = None;
+        store.upsert(&dependency).unwrap();
+        let blocking = store.list_blocking_for_task("cas-origin").unwrap();
+        assert_eq!(blocking, vec![dependency.clone()], "reopen re-blocks");
+        assert!(
+            blocking[0].resolved_at.is_none(),
+            "stale resolved_at must be cleared, not retained"
+        );
+
+        // Closed again: re-resolves with a fresh timestamp.
+        dependency.target_task_status = Some("closed".into());
+        dependency.resolution_state = "resolved".into();
+        dependency.resolved_at = Some("2026-08-13T18:30:00Z".into());
+        store.upsert(&dependency).unwrap();
+        assert!(
+            store
+                .list_blocking_for_task("cas-origin")
+                .unwrap()
+                .is_empty(),
+            "re-close resolves again"
+        );
+    }
+
     #[test]
     fn ready_and_blocked_queries_consider_external_projection() {
         let temp = tempfile::tempdir().unwrap();

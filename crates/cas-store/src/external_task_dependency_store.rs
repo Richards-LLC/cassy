@@ -237,7 +237,7 @@ mod tests {
         store.upsert(&dependency).unwrap();
         assert_eq!(
             store.list_blocking_for_task("cas-origin").unwrap(),
-            vec![dependency]
+            vec![dependency.clone()]
         );
         assert!(store.remove("cas-origin", "cas-0123456789abcdef").unwrap());
         assert!(

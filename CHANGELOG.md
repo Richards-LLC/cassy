@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.65.0] - 2026-08-13
+
+### Added
+- **Silent coordination failures now become visible, recoverable outcomes.** Aged unread messages return a one-shot notice to their sender, stalled sessions escalate durable attention signals, and status output includes recent progress timestamps.
+- **Concurrent planning now warns before work is duplicated.** Session startup surfaces simultaneous planning activity, sibling titles are checked without collapsing meaningful distinctions, and duplicate plans are identified early.
+
+### Changed
+- **Startup and launch checks fail earlier with actionable context.** Configuration directories are validated before launch, registration failures preserve the relevant terminal tail and reap abandoned processes, and MCP startup applies pending schema migrations only after arming its parent-death watchdog.
+- **Close verification handles real delivery shapes without weakening proof.** No-code work can close with portable evidence, target-branch and squash receipts retain a non-empty lint range, merge receipts receive useful correction hints, and merged delivery facts remain immutable.
+
+### Fixed
+- **Dead or stale sessions no longer leave work looking active.** Held work is returned to a recoverable state with an audit trail, and epic status marks stale ownership instead of presenting it as live progress.
+- **Claude session progress and interrupts are now observable.** Transcript turn watermarks feed stall detection, explicit interrupts report confirmed delivery or a clear failure, and status reports distinguish recent output from recent file changes.
+- **Delivery-stall thresholds and bounce eligibility are fail-safe.** Oversized thresholds return a clean error instead of panicking or wrapping, while broadcasts, synthetic traffic, stale rows, cross-session senders, and prior watchdog notices cannot create false bounces.
+
 ## [2.64.0] - 2026-08-12
 
 ### Added

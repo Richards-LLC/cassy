@@ -63,6 +63,38 @@ fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
 
+/// Sender-visible details for a message whose recipient never read it. Keep
+/// this as one rendered envelope so a sender can switch channels without
+/// separately polling `message_status` during an incident.
+fn delivery_stalled_notice(
+    queued: &cas_store::QueuedPrompt,
+    recipient_harness: cas_mux::SupervisorCli,
+    report: Option<&cas_store::MessageDeliveryReport>,
+) -> String {
+    let age_secs = (chrono::Utc::now() - queued.created_at)
+        .num_seconds()
+        .max(0);
+    let summary = queued.summary.as_deref().unwrap_or("(no summary)");
+    let delivery_state = report.map_or_else(
+        || "delivery state unavailable".to_string(),
+        |report| {
+            format!(
+                "stage={}, legacy_status={:?}, wake_attempt={}, wake={}",
+                report.stage, report.legacy_status, report.wake_attempt, report.wake
+            )
+        },
+    );
+    format!(
+        "<system-notice>Delivery stalled: notification_id={}; recipient='{}'; recipient_harness={}; age_secs={}; summary='{}'; delivery_state={}. The recipient has not acknowledged or read this message. Switch to another channel if this is time-critical.</system-notice>",
+        queued.id,
+        queued.target,
+        recipient_harness.as_str(),
+        age_secs,
+        summary,
+        delivery_state,
+    )
+}
+
 fn report_stale_reminder_expiry(result: cas_store::Result<cas_store::ReminderExpiryOutcome>) {
     match result {
         Ok(cas_store::ReminderExpiryOutcome::Expired(_)) => {}
@@ -1155,6 +1187,61 @@ pub(crate) struct InboxDeferredWrite {
 }
 
 impl FactoryDaemon {
+    /// Bounce aged direct messages to their original sender. The prompt store
+    /// owns the read/ack race and one-shot marker; this daemon layer adds the
+    /// live recipient harness and the authoritative delivery-state context.
+    fn enqueue_delivery_stalled_bounces(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        let config = crate::config::Config::load(self.app.cas_dir()).unwrap_or_default();
+        let factory = config.factory();
+        let candidates = match queue.delivery_stalled_candidates(
+            factory.delivery_stalled_priority_secs as i64,
+            factory.delivery_stalled_normal_secs as i64,
+            50,
+        ) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "failed to scan aged unread coordination messages");
+                return;
+            }
+        };
+
+        for queued in candidates {
+            let report = match queue.message_delivery_report(queued.id) {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::warn!(message_id = queued.id, %error, "failed to read delivery state for sender bounce");
+                    None
+                }
+            };
+            let notice = delivery_stalled_notice(
+                &queued,
+                self.app.harness_for(&queued.target),
+                report.as_ref(),
+            );
+            match queue.enqueue_delivery_stalled_bounce(
+                queued.id,
+                &notice,
+                "delivery stalled — recipient unread",
+            ) {
+                Ok(Some(bounce_id)) => tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "delivery_stalled_bounced",
+                    message_id = queued.id,
+                    bounce_id,
+                    sender = %queued.source,
+                    recipient = %queued.target,
+                    "aged unread message bounced to its sender"
+                ),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    message_id = queued.id,
+                    %error,
+                    "failed to queue sender-side delivery-stalled bounce"
+                ),
+            }
+        }
+    }
+
     /// cas-ceae: drop every per-row delivery clock/marker for a row that is no
     /// longer pending. Both maps are keyed by `prompt_queue.id`, so leaving an
     /// entry behind leaks one record per terminalized row.
@@ -2363,6 +2450,7 @@ impl FactoryDaemon {
         let now = Instant::now();
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
+            self.enqueue_delivery_stalled_bounces(queue.as_ref());
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &valid_targets,
                 &self.session_name,

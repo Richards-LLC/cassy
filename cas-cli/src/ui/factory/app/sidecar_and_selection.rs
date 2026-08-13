@@ -1869,17 +1869,17 @@ mod tests {
     #[test]
     fn turn_cancel_bytes_follow_harness_cas_7f6f() {
         assert_eq!(
-            cas_mux::SupervisorCli::Claude.turn_cancel_bytes(),
+            cas_mux::SupervisorCli::Claude.backend().turn_cancel_bytes(),
             &[0x1b],
             "Claude cancel = Esc"
         );
         assert_eq!(
-            cas_mux::SupervisorCli::Codex.turn_cancel_bytes(),
+            cas_mux::SupervisorCli::Codex.backend().turn_cancel_bytes(),
             &[0x1b],
             "Codex cancel = Esc"
         );
         assert_eq!(
-            cas_mux::SupervisorCli::Grok.turn_cancel_bytes(),
+            cas_mux::SupervisorCli::Grok.backend().turn_cancel_bytes(),
             &[0x03],
             "Grok cancel = Ctrl+C (Esc is mid-turn no-op since 0.2.93)"
         );

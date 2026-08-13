@@ -27,6 +27,7 @@
 //! - **portable-pty**: Manages PTY processes
 //! - **ratatui**: Renders the TUI output
 
+mod backend;
 mod error;
 mod harness;
 mod input_stream;
@@ -36,6 +37,7 @@ mod pty;
 mod render;
 mod spec;
 
+pub use backend::{Backend, SupervisorLaunchConfig, WorkerLaunchConfig};
 pub use error::{Error, Result};
 pub use harness::{HarnessCapabilities, SupervisorCli};
 pub use input_stream::{BracketedPasteTracker, StreamByteClass, key_stream_marks_submit};

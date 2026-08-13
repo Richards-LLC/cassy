@@ -197,13 +197,13 @@ pub fn mirror_receipts_across_aliases(
 /// - Subtasks: required only when worker harness supports subagents.
 /// - Epics: required only when supervisor harness supports subagents.
 pub fn verification_policy(supervisor: SupervisorCli, worker: SupervisorCli) -> VerificationPolicy {
-    let task_mode = if worker.capabilities().supports_subagents {
+    let task_mode = if worker.backend().capabilities().supports_subagents {
         VerificationMode::Required
     } else {
         VerificationMode::Bypassed
     };
 
-    let epic_mode = if supervisor.capabilities().supports_subagents {
+    let epic_mode = if supervisor.backend().capabilities().supports_subagents {
         VerificationMode::Required
     } else {
         VerificationMode::Bypassed
@@ -224,7 +224,11 @@ pub fn verification_required_for_task_type(task_type: TaskType) -> bool {
 }
 
 pub fn is_worker_without_subagents_from_env() -> bool {
-    is_worker_from_env() && !worker_harness_from_env().capabilities().supports_subagents
+    is_worker_from_env()
+        && !worker_harness_from_env()
+            .backend()
+            .capabilities()
+            .supports_subagents
 }
 
 /// Returns the MCP coordination tool name appropriate for the current factory
@@ -318,7 +322,7 @@ pub fn own_harness_from_env() -> SupervisorCli {
 /// that will read its own output, so this process's own env always describes
 /// the real reader correctly.
 pub fn own_tool_prefix() -> &'static str {
-    own_harness_from_env().capabilities().tool_prefix
+    own_harness_from_env().backend().capabilities().tool_prefix
 }
 
 #[cfg(test)]

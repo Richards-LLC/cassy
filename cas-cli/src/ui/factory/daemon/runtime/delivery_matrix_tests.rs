@@ -199,7 +199,10 @@ fn delivery_matrix_all_combos_both_directions() {
     // Every (supervisor, worker) pair appears exactly once.
     let mut seen = std::collections::BTreeSet::new();
     for shape in SHAPES {
-        let key = (shape.supervisor.as_str(), shape.worker.as_str());
+        let key = (
+            shape.supervisor.backend().name(),
+            shape.worker.backend().name(),
+        );
         assert!(
             seen.insert(key),
             "duplicate factory shape in SHAPES: {}",
@@ -209,10 +212,10 @@ fn delivery_matrix_all_combos_both_directions() {
     for sup in [Claude, Codex, Grok] {
         for worker in [Claude, Codex, Grok] {
             assert!(
-                seen.contains(&(sup.as_str(), worker.as_str())),
+                seen.contains(&(sup.backend().name(), worker.backend().name())),
                 "missing factory shape: {}-sup / {}-worker",
-                sup.as_str(),
-                worker.as_str()
+                sup.backend().name(),
+                worker.backend().name()
             );
         }
     }

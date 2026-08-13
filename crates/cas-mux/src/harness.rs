@@ -18,58 +18,6 @@ pub enum SupervisorCli {
     Grok,
 }
 
-impl SupervisorCli {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Grok => "grok",
-        }
-    }
-
-    pub fn capabilities(self) -> HarnessCapabilities {
-        match self {
-            Self::Claude => HarnessCapabilities {
-                supports_hooks: true,
-                supports_subagents: true,
-                supports_textbox_submit: true,
-                requires_bracketed_paste_injection: false,
-                tool_prefix: "mcp__cas__",
-            },
-            Self::Codex => HarnessCapabilities {
-                supports_hooks: false,
-                supports_subagents: false,
-                supports_textbox_submit: false,
-                requires_bracketed_paste_injection: true,
-                tool_prefix: "mcp__cs__",
-            },
-            Self::Grok => HarnessCapabilities {
-                supports_hooks: true,
-                supports_subagents: true,
-                supports_textbox_submit: true,
-                requires_bracketed_paste_injection: false,
-                tool_prefix: "cas__",
-            },
-        }
-    }
-
-    /// Bytes that cancel the current in-flight turn for this harness.
-    ///
-    /// Used by factory turn-break (`Pane::break_turn`, Escape routing, and the
-    /// urgent interrupt-and-redirect path) so Stop / Esc / programmatic cancel
-    /// share one harness-aware payload (cas-7f6f):
-    ///
-    /// - **Claude / Codex**: Esc (`0x1b`) — Claude Code's cancel-turn key.
-    /// - **Grok**: Ctrl+C (`0x03`) — since 0.2.93 Esc is a mid-turn no-op and
-    ///   cancel is Ctrl+C (empty prompt; non-empty draft clears first).
-    pub fn turn_cancel_bytes(self) -> &'static [u8] {
-        match self {
-            Self::Claude | Self::Codex => &[0x1b],
-            Self::Grok => &[0x03],
-        }
-    }
-}
-
 impl FromStr for SupervisorCli {
     type Err = String;
 
@@ -141,7 +89,11 @@ pub const PASTE_END: &[u8] = b"\x1b[201~";
 /// between the normal and urgent injection paths, both of which funnel
 /// through `Pane::inject_prompt`.
 pub fn injection_payload_bytes(harness: SupervisorCli, text: &str) -> Vec<u8> {
-    if harness.capabilities().requires_bracketed_paste_injection {
+    if harness
+        .backend()
+        .capabilities()
+        .requires_bracketed_paste_injection
+    {
         let mut out = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
         out.extend_from_slice(PASTE_START);
         out.extend_from_slice(text.as_bytes());
@@ -159,7 +111,7 @@ mod tests {
 
     #[test]
     fn grok_as_str_and_from_str_round_trip() {
-        assert_eq!(SupervisorCli::Grok.as_str(), "grok");
+        assert_eq!(SupervisorCli::Grok.backend().name(), "grok");
         assert_eq!(SupervisorCli::from_str("grok"), Ok(SupervisorCli::Grok));
         // Case/whitespace tolerance, matching Claude/Codex's existing contract.
         assert_eq!(SupervisorCli::from_str("Grok"), Ok(SupervisorCli::Grok));
@@ -168,7 +120,7 @@ mod tests {
 
     #[test]
     fn grok_capabilities_match_claude_tier_with_its_own_tool_prefix() {
-        let caps = SupervisorCli::Grok.capabilities();
+        let caps = SupervisorCli::Grok.backend().capabilities();
         assert!(
             caps.supports_hooks,
             "Grok's SessionStart/PreToolUse/PostToolUse/Stop hooks are fully wired \
@@ -205,12 +157,16 @@ mod tests {
     #[test]
     fn claude_and_codex_capabilities_unchanged_by_the_grok_addition() {
         // Regression pin: adding Grok must not perturb the existing two.
-        let claude = SupervisorCli::Claude.capabilities();
-        assert!(claude.supports_hooks && claude.supports_subagents && claude.supports_textbox_submit);
+        let claude = SupervisorCli::Claude.backend().capabilities();
+        assert!(
+            claude.supports_hooks && claude.supports_subagents && claude.supports_textbox_submit
+        );
         assert_eq!(claude.tool_prefix, "mcp__cas__");
 
-        let codex = SupervisorCli::Codex.capabilities();
-        assert!(!codex.supports_hooks && !codex.supports_subagents && !codex.supports_textbox_submit);
+        let codex = SupervisorCli::Codex.backend().capabilities();
+        assert!(
+            !codex.supports_hooks && !codex.supports_subagents && !codex.supports_textbox_submit
+        );
         assert_eq!(codex.tool_prefix, "mcp__cs__");
     }
 
@@ -221,16 +177,19 @@ mod tests {
     fn only_codex_requires_bracketed_paste_injection() {
         assert!(
             SupervisorCli::Codex
+                .backend()
                 .capabilities()
                 .requires_bracketed_paste_injection
         );
         assert!(
             !SupervisorCli::Claude
+                .backend()
                 .capabilities()
                 .requires_bracketed_paste_injection
         );
         assert!(
             !SupervisorCli::Grok
+                .backend()
                 .capabilities()
                 .requires_bracketed_paste_injection
         );
@@ -243,8 +202,14 @@ mod tests {
         let text = "Message from supervisor: re-close cas-ae2f\n\nSecond paragraph.";
 
         let codex = injection_payload_bytes(SupervisorCli::Codex, text);
-        assert!(codex.starts_with(PASTE_START), "codex payload must open the paste");
-        assert!(codex.ends_with(PASTE_END), "codex payload must close the paste");
+        assert!(
+            codex.starts_with(PASTE_START),
+            "codex payload must open the paste"
+        );
+        assert!(
+            codex.ends_with(PASTE_END),
+            "codex payload must close the paste"
+        );
         assert_eq!(
             &codex[PASTE_START.len()..codex.len() - PASTE_END.len()],
             text.as_bytes(),
@@ -281,8 +246,8 @@ mod tests {
     /// cas-7f6f: Grok cancels with Ctrl+C; Claude/Codex keep Esc.
     #[test]
     fn turn_cancel_bytes_are_harness_aware() {
-        assert_eq!(SupervisorCli::Claude.turn_cancel_bytes(), &[0x1b]);
-        assert_eq!(SupervisorCli::Codex.turn_cancel_bytes(), &[0x1b]);
-        assert_eq!(SupervisorCli::Grok.turn_cancel_bytes(), &[0x03]);
+        assert_eq!(SupervisorCli::Claude.backend().turn_cancel_bytes(), &[0x1b]);
+        assert_eq!(SupervisorCli::Codex.backend().turn_cancel_bytes(), &[0x1b]);
+        assert_eq!(SupervisorCli::Grok.backend().turn_cancel_bytes(), &[0x03]);
     }
 }

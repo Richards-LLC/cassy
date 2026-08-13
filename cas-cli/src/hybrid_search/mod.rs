@@ -297,6 +297,62 @@ mod tests {
     }
 
     #[test]
+    fn unknown_field_like_tokens_are_literal_terms_in_unified_search() {
+        let index = SearchIndex::in_memory().unwrap();
+        let entry = create_test_entry(
+            "001",
+            "test colon handling 12:49 https://example.invalid/path foo::bar",
+        );
+        index.index_entry(&entry).unwrap();
+
+        for query in [
+            "test colon handling 12:49",
+            "https://example.invalid/path",
+            "foo::bar",
+        ] {
+            let results = index
+                .search_unified(&SearchOptions {
+                    query: query.to_string(),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap_or_else(|error| panic!("{query:?} must parse as literal text: {error}"));
+            assert!(
+                results.iter().any(|result| result.id == "001"),
+                "expected literal query {query:?} to match the indexed entry"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_search_keeps_registered_fields_strict() {
+        let index = SearchIndex::in_memory().unwrap();
+        let entry = create_test_entry("001", "a searchable entry");
+        index.index_entry(&entry).unwrap();
+
+        let results = index
+            .search_unified(&SearchOptions {
+                query: "doc_type:entry".to_string(),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "001");
+
+        assert!(
+            index
+                .search_unified(&SearchOptions {
+                    query: "doc_type:".to_string(),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .is_err(),
+            "registered fields must retain Tantivy's strict syntax validation"
+        );
+    }
+
+    #[test]
     fn test_feedback_boost() {
         let index = SearchIndex::in_memory().unwrap();
 

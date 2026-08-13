@@ -111,7 +111,8 @@ fn registered_field_queries_remain_strict() {
     index.index(&doc).unwrap();
 
     let results = index.search("doc_type:entry", 10).unwrap();
-    assert_eq!(results, vec![("001".to_string(), results[0].1)]);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "001");
 
     assert!(
         index.search("doc_type:", 10).is_err(),

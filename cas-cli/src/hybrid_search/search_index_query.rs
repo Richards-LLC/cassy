@@ -68,6 +68,29 @@ impl SearchIndex {
         *guard = Some(parser.clone());
         parser
     }
+
+    /// Quote field-like tokens whose field name is not registered in this
+    /// index schema so Tantivy treats them as free text instead of rejecting
+    /// the whole query. Registered fields are left untouched to retain
+    /// Tantivy's strict syntax validation.
+    fn literalize_unknown_field_tokens(&self, query: &str) -> String {
+        query
+            .split_whitespace()
+            .map(|token| {
+                let Some((field, _)) = token.split_once(':') else {
+                    return token.to_string();
+                };
+
+                if self.schema.get_field(field).is_ok() {
+                    return token.to_string();
+                }
+
+                let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{escaped}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 impl SearchIndex {
@@ -131,7 +154,7 @@ impl SearchIndex {
 
         let query_parser = self.query_parser();
         let query = query_parser
-            .parse_query(&opts.query)
+            .parse_query(&self.literalize_unknown_field_tokens(&opts.query))
             .map_err(|e| MemError::Parse(e.to_string()))?;
 
         // Get more results than needed for post-filtering
@@ -294,12 +317,10 @@ impl SearchIndex {
 
         // 2. Text search for remaining query terms (if any), with optional
         //    structured filters parsed from `key:value` tokens (cas-7b1e).
-        //    Sanitize any stray colons from unknown-key tokens so they
-        //    don't trip Tantivy's QueryParser (which interprets `foo:` as
-        //    a field reference).
-        let sanitized_residual = remaining_query.replace(':', " ");
+        //    Quote unknown field-like tokens so Tantivy searches their text
+        //    literally instead of treating them as invalid field references.
         let parsed = super::filter_grammar::ParsedQuery {
-            residual: sanitized_residual.split_whitespace().collect::<Vec<_>>().join(" "),
+            residual: self.literalize_unknown_field_tokens(&remaining_query),
             filters: filters.clone(),
         };
         if !parsed.residual.is_empty() || !parsed.filters.is_empty() {
@@ -512,7 +533,7 @@ impl SearchIndex {
             let parser = self.query_parser();
             Some(
                 parser
-                    .parse_query(query)
+                    .parse_query(&self.literalize_unknown_field_tokens(query))
                     .map_err(|e| MemError::Parse(e.to_string()))?,
             )
         };

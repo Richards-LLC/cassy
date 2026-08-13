@@ -456,6 +456,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub depth: Option<String>,
 
+    /// Explicit acknowledgement of a planning-race or duplicate-task warning on create.
+    #[schemars(description = "For action=create, confirm creation after CAS reports a recent competing epic plan or a high-similarity open task.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub confirm_warning: Option<bool>,
+
     /// Explicit repository containing this task's code changes.
     #[schemars(
         description = "Repository path containing this task's code changes (create/update)."

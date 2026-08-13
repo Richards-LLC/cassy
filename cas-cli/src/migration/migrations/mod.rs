@@ -210,6 +210,7 @@ mod m231_sync_conflicts_create_table;
 mod m232_worker_completion_receipts_add_artifact_path;
 mod m233_tasks_add_terminal_outcome;
 mod m234_external_task_dependencies;
+mod m235_external_task_dependency_suppressions;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -453,6 +454,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m232_worker_completion_receipts_add_artifact_path::MIGRATION,
     m233_tasks_add_terminal_outcome::MIGRATION,
     m234_external_task_dependencies::MIGRATION,
+    m235_external_task_dependency_suppressions::MIGRATION,
 ];
 
 #[cfg(test)]

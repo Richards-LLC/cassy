@@ -370,32 +370,37 @@ impl CasCore {
         let task_store = self.open_task_store()?;
 
         // If epic filter specified, get subtasks and filter to blocked ones
-        let mut blocked: Vec<(cas_types::Task, Vec<cas_types::Task>)> =
-            if let Some(ref epic_id) = req.epic {
-                let subtasks = task_store.get_subtasks(epic_id).map_err(|e| McpError {
+        let mut blocked: Vec<(cas_types::Task, Vec<cas_types::Task>)> = if let Some(ref epic_id) =
+            req.epic
+        {
+            let subtask_ids = task_store
+                .get_subtasks(epic_id)
+                .map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!("Failed to get subtasks for epic {epic_id}: {e}")),
                     data: None,
-                })?;
-                // Filter to blocked tasks and get their blockers
-                subtasks
-                    .into_iter()
-                    .filter_map(|t| {
-                        if t.status == cas_types::TaskStatus::Blocked {
-                            let blockers = task_store.get_blockers(&t.id).unwrap_or_default();
-                            Some((t, blockers))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                task_store.list_blocked().map_err(|e| McpError {
+                })?
+                .into_iter()
+                .map(|task| task.id)
+                .collect::<std::collections::HashSet<_>>();
+            // list_blocked is the canonical externally-aware view.
+            task_store
+                .list_blocked()
+                .map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!("Failed to list blocked: {e}")),
                     data: None,
                 })?
-            };
+                .into_iter()
+                .filter(|(task, _)| subtask_ids.contains(&task.id))
+                .collect()
+        } else {
+            task_store.list_blocked().map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to list blocked: {e}")),
+                data: None,
+            })?
+        };
 
         // Apply sorting to the task field of each tuple. cas-06f9 (GH #104):
         // same defaulting as `ready` — this is the same triage surface, and it

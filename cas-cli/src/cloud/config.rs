@@ -823,7 +823,7 @@ impl CloudConfig {
     /// semantics to `load_from` for a missing file.  This is the user-scope
     /// counterpart to `load()` (project scope).
     pub fn load_user() -> Result<Self, CasError> {
-        match Self::user_config_path() {
+        match user_level_cloud_json_path() {
             Some(path) => Self::load_from(&path),
             None => Ok(Self::default()),
         }

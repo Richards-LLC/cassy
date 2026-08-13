@@ -124,6 +124,15 @@ fn test_extract_id_patterns() {
     let (ids, remaining) = extract_id_patterns("open cas-0123456789abcdef now");
     assert_eq!(ids, vec!["cas-0123456789abcdef"]);
     assert_eq!(remaining, "open now");
+
+    // The cloud form is intentionally stricter than the legacy short form.
+    let (ids, remaining) =
+        extract_id_patterns("cas-0123456789abcdeg cas-0123456789ABCDEF cas-0123456789abcdef0");
+    assert!(ids.is_empty());
+    assert_eq!(
+        remaining,
+        "cas-0123456789abcdeg cas-0123456789ABCDEF cas-0123456789abcdef0"
+    );
 }
 
 #[test]

@@ -1,20 +1,26 @@
 use crate::mcp::tools::core::imports::*;
 
 use cas_store::{ExternalTaskDependencyProjection, ExternalTaskDependencyStore};
+use sha2::{Digest, Sha256};
 
 use crate::cloud::task_proposals::{
     CreateTaskProposalRequest, ProposalProvenance, TaskProposal, TaskProposalClient,
     authorize_registered_role, render_proposal,
 };
-use crate::cloud::{CloudConfig, canonical_id_from_config_toml};
+use crate::cloud::{CloudConfig, canonical_id_from_config_toml, is_acceptable_endpoint};
 
 const EXPLICIT_ORIGIN_REQUIRED: &str = "Cross-project task proposals require an explicit [project] canonical_id in .cas/config.toml; nothing is inferred from cwd, folder name, or git remote.";
+const TRUSTED_PRODUCTION_ENDPOINT: &str = "https://petra-stella-cloud.vercel.app";
 
 impl CasCore {
     fn proposal_authority(&self) -> Result<cas_types::Agent, McpError> {
         // This lookup and registered-store role check intentionally happen
         // before CloudConfig loading or any network-capable client exists.
-        let agent_id = self.get_agent_id().map_err(|_| {
+        // Do not use get_agent_id here: that API deliberately auto-registers
+        // and revives sessions for ordinary MCP operations. Proposal creation
+        // is privileged, so authority must be proven by an already-registered
+        // live identity before configuration or network I/O is considered.
+        let agent_id = self.get_registered_agent_id_read_only().map_err(|_| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
                 crate::cloud::task_proposals::ROLE_REQUIREMENT,
@@ -26,6 +32,12 @@ impl CasCore {
                 crate::cloud::task_proposals::ROLE_REQUIREMENT,
             )
         })?;
+        if agent.status != cas_types::AgentStatus::Active {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                crate::cloud::task_proposals::ROLE_REQUIREMENT,
+            ));
+        }
         authorize_registered_role(Some(agent.role))
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         Ok(agent)
@@ -39,10 +51,13 @@ impl CasCore {
             )
         })?;
         let user_config = CloudConfig::load_user().unwrap_or_default();
-        let token = project_config
+        // The workspace-local config selects an explicit team, but it never
+        // selects where a user credential is sent. Keep endpoint + bearer as
+        // one user-owned trust bundle so a cloned project cannot redirect a
+        // locally configured credential to an arbitrary origin.
+        let token = user_config
             .token
             .clone()
-            .or(user_config.token.clone())
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
                 Self::error(
@@ -58,11 +73,18 @@ impl CasCore {
                     "Cross-project task creation requires membership in a team shared by the origin and target projects.",
                 )
             })?;
-        let endpoint = if project_config.endpoint.trim().is_empty() {
-            user_config.endpoint
-        } else {
-            project_config.endpoint
-        };
+        let endpoint = user_config.endpoint.trim_end_matches('/').to_string();
+        let is_trusted_production = endpoint == TRUSTED_PRODUCTION_ENDPOINT;
+        let is_local_test_endpoint = endpoint.starts_with("http://localhost")
+            || endpoint.starts_with("http://127.0.0.1")
+            || endpoint.starts_with("http://0.0.0.0");
+        if !is_acceptable_endpoint(&endpoint) || (!is_trusted_production && !is_local_test_endpoint)
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Cross-project task proposals require the trusted Petra Stella Cloud endpoint configured with the authenticated user credential.",
+            ));
+        }
         Ok(TaskProposalClient::new(endpoint, token, team_id))
     }
 
@@ -119,8 +141,31 @@ impl CasCore {
                 })?;
         }
 
+        let task = serde_json::json!({
+            "title": req.title,
+            "description": req.description.unwrap_or_default(),
+            "priority": req.priority,
+            "task_type": req.task_type,
+            "labels": req.labels.as_deref().unwrap_or_default().split(',')
+                .map(str::trim).filter(|label| !label.is_empty()).collect::<Vec<_>>(),
+            "design": req.design.unwrap_or_default(),
+            "acceptance_criteria": req.acceptance_criteria.unwrap_or_default(),
+            "external_ref": req.external_ref.unwrap_or_default(),
+        });
+        let request_fingerprint = proposal_request_fingerprint(
+            &agent.id,
+            &origin_project,
+            target_project,
+            &task,
+            blocks_origin_task_id,
+        )?;
+        let projection_store = ExternalTaskDependencyStore::open(&self.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let client_request_id = projection_store
+            .client_request_id(&request_fingerprint, &uuid::Uuid::new_v4().to_string())
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let request = CreateTaskProposalRequest {
-            client_request_id: uuid::Uuid::new_v4().to_string(),
+            client_request_id,
             origin_project_canonical_id: origin_project,
             target_project_canonical_id: target_project.to_string(),
             origin_session_id: agent
@@ -132,17 +177,7 @@ impl CasCore {
             origin_agent_role: agent.role.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             client_build: option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string(),
-            task: serde_json::json!({
-                "title": req.title,
-                "description": req.description.unwrap_or_default(),
-                "priority": req.priority,
-                "task_type": req.task_type,
-                "labels": req.labels.as_deref().unwrap_or_default().split(',')
-                    .map(str::trim).filter(|label| !label.is_empty()).collect::<Vec<_>>(),
-                "design": req.design.unwrap_or_default(),
-                "acceptance_criteria": req.acceptance_criteria.unwrap_or_default(),
-                "external_ref": req.external_ref.unwrap_or_default(),
-            }),
+            task,
             blocks_origin_task_id: blocks_origin_task_id.map(ToString::to_string),
         };
         let response = tokio::task::spawn_blocking(move || client.create(&request))
@@ -166,8 +201,8 @@ impl CasCore {
                 resolution_state: "unresolved".to_string(),
                 resolved_at: None,
             };
-            ExternalTaskDependencyStore::open(&self.cas_root)
-                .and_then(|store| store.upsert(&projection))
+            projection_store
+                .upsert(&projection)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("Proposal was created, but local external blocker projection failed: {error}")))?;
             let task_store = self.open_task_store()?;
             let mut origin = task_store
@@ -300,10 +335,6 @@ impl CasCore {
                 })
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         }
-        projection_store
-            .set_cursor(&origin_project, feed.cursor.as_deref())
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-
         let mut reopened = Vec::new();
         let mut rejected = Vec::new();
         for task_id in touched {
@@ -346,6 +377,13 @@ impl CasCore {
                 }
             }
         }
+        // Cursor advancement is the commit point for a reconciliation page.
+        // Projection writes and task transitions above are idempotent; if any
+        // one fails, leaving the old cursor guarantees the next attempt
+        // re-evaluates the same cloud signals instead of skipping them.
+        projection_store
+            .set_cursor(&origin_project, feed.cursor.as_deref())
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         rejected.sort();
         rejected.dedup();
         Ok(Self::success(format!(
@@ -364,6 +402,24 @@ impl CasCore {
             },
         )))
     }
+}
+
+fn proposal_request_fingerprint(
+    agent_id: &str,
+    origin_project: &str,
+    target_project: &str,
+    task: &serde_json::Value,
+    blocks_origin_task_id: Option<&str>,
+) -> Result<String, McpError> {
+    let canonical = serde_json::to_vec(&serde_json::json!({
+        "agent_id": agent_id,
+        "origin_project": origin_project,
+        "target_project": target_project,
+        "task": task,
+        "blocks_origin_task_id": blocks_origin_task_id,
+    }))
+    .map_err(|error| CasCore::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
 fn proposal_from_create(provenance: ProposalProvenance, state: String) -> TaskProposal {

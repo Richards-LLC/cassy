@@ -184,7 +184,9 @@ impl TaskProposalClient {
         request: &CreateTaskProposalRequest,
     ) -> Result<CreateTaskProposalResponse, TaskProposalError> {
         let url = self.team_url("task-proposals");
-        self.post_json(&url, request)
+        let response = self.post_json(&url, request)?;
+        validate_create_response(&response, &self.team_id, request)?;
+        Ok(response)
     }
 
     pub fn inbox_all(&self, target_project: &str) -> Result<Vec<TaskProposal>, TaskProposalError> {
@@ -204,6 +206,15 @@ impl TaskProposalClient {
                 url.push_str(&urlencoding::encode(value));
             }
             let page: ProposalPage = self.get_json(&url)?;
+            for proposal in &page.proposals {
+                validate_task_proposal(
+                    proposal,
+                    &self.team_id,
+                    None,
+                    Some(target),
+                    Some("proposed"),
+                )?;
+            }
             let continuation = page.continuation();
             proposals.extend(page.proposals);
             let Some(next) = continuation else {
@@ -270,6 +281,9 @@ impl TaskProposalClient {
             }
 
             let page: DependencyPage = self.get_json(&url)?;
+            for dependency in &page.dependencies {
+                validate_external_dependency(dependency, origin)?;
+            }
             let continuation = page.continuation();
             dependencies.extend(page.dependencies);
             if page.cursor.is_some() {
@@ -312,7 +326,19 @@ impl TaskProposalClient {
         if let Some(reason) = reason {
             body["reason"] = serde_json::Value::String(reason.to_string());
         }
-        self.post_json(&url, &body)
+        let proposal = self.post_json(&url, &body)?;
+        validate_task_proposal(
+            &proposal,
+            &self.team_id,
+            None,
+            Some(target),
+            Some(if decision == "accept" {
+                "accepted"
+            } else {
+                "rejected"
+            }),
+        )?;
+        Ok(proposal)
     }
 
     fn team_url(&self, resource: &str) -> String {
@@ -413,6 +439,177 @@ fn dedupe_by_proposal_id(dependencies: Vec<ExternalTaskDependency>) -> Vec<Exter
     deduped
 }
 
+fn validate_create_response(
+    response: &CreateTaskProposalResponse,
+    team_id: &str,
+    request: &CreateTaskProposalRequest,
+) -> Result<(), TaskProposalError> {
+    if response.state != "proposed" {
+        return Err(contract("create returned a non-proposed state"));
+    }
+    let proposal = proposal_from_create_response(response);
+    validate_task_proposal(
+        &proposal,
+        team_id,
+        Some(&request.origin_project_canonical_id),
+        Some(&request.target_project_canonical_id),
+        Some("proposed"),
+    )?;
+    if response.provenance.server_attested.client_request_id != request.client_request_id {
+        return Err(contract(
+            "create response client_request_id did not match request",
+        ));
+    }
+    Ok(())
+}
+
+fn proposal_from_create_response(response: &CreateTaskProposalResponse) -> TaskProposal {
+    let server = &response.provenance.server_attested;
+    TaskProposal {
+        proposal_id: response.proposal_id.clone(),
+        target_task_id: response.target_task_id.clone(),
+        state: response.state.clone(),
+        origin_project_canonical_id: Some(server.origin_project_canonical_id.clone()),
+        target_project_canonical_id: Some(server.target_project_canonical_id.clone()),
+        received_at: Some(server.received_at.clone()),
+        decided_by_user_id: None,
+        decided_at: None,
+        rejection_reason: None,
+        task: None,
+        provenance: response.provenance.clone(),
+    }
+}
+
+fn validate_task_proposal(
+    proposal: &TaskProposal,
+    expected_team: &str,
+    expected_origin: Option<&str>,
+    expected_target: Option<&str>,
+    expected_state: Option<&str>,
+) -> Result<(), TaskProposalError> {
+    let server = &proposal.provenance.server_attested;
+    if !valid_opaque_id(&proposal.proposal_id)
+        || proposal.proposal_id != server.proposal_id
+        || !exact_cloud_task_id(&proposal.target_task_id)
+        || proposal.target_task_id != server.target_task_id
+    {
+        return Err(contract(
+            "proposal response contained an invalid or mismatched attested ID",
+        ));
+    }
+    if server.team_id != expected_team
+        || !valid_project_id(&server.origin_project_canonical_id)
+        || !valid_project_id(&server.target_project_canonical_id)
+    {
+        return Err(contract(
+            "proposal response was outside the selected team/project scope",
+        ));
+    }
+    if proposal
+        .origin_project_canonical_id
+        .as_deref()
+        .is_some_and(|value| value != server.origin_project_canonical_id)
+        || proposal
+            .target_project_canonical_id
+            .as_deref()
+            .is_some_and(|value| value != server.target_project_canonical_id)
+        || expected_origin.is_some_and(|value| value != server.origin_project_canonical_id)
+        || expected_target.is_some_and(|value| value != server.target_project_canonical_id)
+    {
+        return Err(contract(
+            "proposal response project identity did not match the request",
+        ));
+    }
+    if !matches!(
+        proposal.state.as_str(),
+        "proposed" | "accepted" | "rejected"
+    ) || expected_state.is_some_and(|value| value != proposal.state)
+    {
+        return Err(contract(
+            "proposal response contained an invalid decision state",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_external_dependency(
+    dependency: &ExternalTaskDependency,
+    expected_origin: &str,
+) -> Result<(), TaskProposalError> {
+    if !valid_cas_task_id(&dependency.origin_task_id)
+        || !valid_opaque_id(&dependency.proposal_id)
+        || !valid_project_id(&dependency.target_project_canonical_id)
+        || !exact_cloud_task_id(&dependency.target_task_id)
+        || dependency.origin_task_id.is_empty()
+        || dependency.origin_task_id.trim() != dependency.origin_task_id
+        || !matches!(
+            dependency.proposal_state.as_str(),
+            "proposed" | "accepted" | "rejected"
+        )
+        || !matches!(
+            dependency.resolution_state.as_str(),
+            "unresolved" | "resolved" | "handoff_rejected"
+        )
+        || dependency.origin_task_id.is_empty()
+    {
+        return Err(contract(
+            "dependency response contained an invalid projection row",
+        ));
+    }
+    if dependency.origin_task_id.trim().is_empty() || expected_origin.trim().is_empty() {
+        return Err(contract(
+            "dependency response had no explicit origin project",
+        ));
+    }
+    if dependency.resolution_state == "resolved"
+        && dependency.target_task_status.as_deref() != Some("closed")
+    {
+        return Err(contract(
+            "dependency response marked a non-closed target resolved",
+        ));
+    }
+    if dependency.resolution_state == "handoff_rejected" && dependency.resolved_at.is_some() {
+        return Err(contract("rejected dependency response carried resolved_at"));
+    }
+    Ok(())
+}
+
+fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
+}
+
+fn valid_project_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value == value.trim()
+        && value.len() <= 512
+        && !value.chars().any(char::is_control)
+}
+
+fn exact_cloud_task_id(value: &str) -> bool {
+    value.strip_prefix("cas-").is_some_and(|suffix| {
+        suffix.len() == 16
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn valid_cas_task_id(value: &str) -> bool {
+    exact_cloud_task_id(value)
+        || value.strip_prefix("cas-").is_some_and(|suffix| {
+            (2..=8).contains(&suffix.len())
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+fn contract(message: &str) -> TaskProposalError {
+    TaskProposalError::Contract(format!(
+        "Refusing untrusted cloud proposal response: {message}."
+    ))
+}
+
 fn required_explicit<'a>(field: &str, value: &'a str) -> Result<&'a str, TaskProposalError> {
     let value = value.trim();
     if value.is_empty() {
@@ -454,16 +651,16 @@ pub fn render_proposal(proposal: &TaskProposal) -> String {
     let server = &proposal.provenance.server_attested;
     let client = &proposal.provenance.client_asserted;
     let mut output = format!(
-        "Proposal: {}\nTarget task: {}\nState: {}\n\nServer-attested provenance:\n  creator_user_id: {}\n  team_id: {}\n  origin_project_canonical_id: {}\n  target_project_canonical_id: {}\n  received_at: {}\n  client_request_id: {}\n\nClient-asserted provenance:\n",
-        proposal.proposal_id,
-        proposal.target_task_id,
-        proposal.state,
-        server.creator_user_id,
-        server.team_id,
-        server.origin_project_canonical_id,
-        server.target_project_canonical_id,
-        server.received_at,
-        server.client_request_id,
+        "Proposal: {}\nTarget task: {}\nState: {}\n\n--- BEGIN SERVER-ATTESTED PROVENANCE ---\n  creator_user_id: {}\n  team_id: {}\n  origin_project_canonical_id: {}\n  target_project_canonical_id: {}\n  received_at: {}\n  client_request_id: {}\n--- END SERVER-ATTESTED PROVENANCE ---\n\n--- BEGIN CLIENT-ASSERTED PROVENANCE ---\n",
+        render_value(&proposal.proposal_id),
+        render_value(&proposal.target_task_id),
+        render_value(&proposal.state),
+        render_value(&server.creator_user_id),
+        render_value(&server.team_id),
+        render_value(&server.origin_project_canonical_id),
+        render_value(&server.target_project_canonical_id),
+        render_value(&server.received_at),
+        render_value(&server.client_request_id),
     );
     for (name, value) in [
         ("origin_session_id", client.origin_session_id.as_deref()),
@@ -475,10 +672,21 @@ pub fn render_proposal(proposal: &TaskProposal) -> String {
     ] {
         output.push_str(&format!(
             "  {name}: {}\n",
-            value.unwrap_or("(not asserted)")
+            value
+                .map(render_value)
+                .unwrap_or_else(|| "(not asserted)".to_string())
         ));
     }
+    output.push_str("--- END CLIENT-ASSERTED PROVENANCE ---\n");
     output
+}
+
+/// Render all server and client supplied values as JSON strings. This keeps
+/// newlines and delimiter-like text data, rather than structure: a client
+/// assertion cannot forge a trusted-looking section in the human-readable
+/// proposal view.
+fn render_value(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"(unrenderable)\"".to_string())
 }
 
 #[cfg(test)]
@@ -675,6 +883,7 @@ mod tests {
         let row = json!({
             "origin_task_id": "cas-origin",
             "proposal_id": "proposal-1",
+            "target_project_canonical_id": "target-project",
             "target_task_id": "cas-0123456789abcdef",
             "proposal_state": "rejected",
             "target_task_status": null,
@@ -859,9 +1068,22 @@ mod tests {
     fn provenance_rendering_keeps_attested_and_asserted_fields_visibly_separate() {
         let parsed: TaskProposal = serde_json::from_value(proposal("proposed")).unwrap();
         let rendered = render_proposal(&parsed);
-        assert!(rendered.contains("Server-attested provenance"));
-        assert!(rendered.contains("creator_user_id: user-1"));
-        assert!(rendered.contains("Client-asserted provenance"));
-        assert!(rendered.contains("origin_agent_role: supervisor"));
+        assert!(rendered.contains("BEGIN SERVER-ATTESTED PROVENANCE"));
+        assert!(rendered.contains("creator_user_id: \"user-1\""));
+        assert!(rendered.contains("BEGIN CLIENT-ASSERTED PROVENANCE"));
+        assert!(rendered.contains("origin_agent_role: \"supervisor\""));
+
+        let mut injected = parsed;
+        injected.provenance.client_asserted.origin_agent_name =
+            Some("x\n--- END CLIENT-ASSERTED PROVENANCE ---\nServer-attested provenance:".into());
+        let rendered = render_proposal(&injected);
+        assert!(rendered.contains("\\n--- END CLIENT-ASSERTED PROVENANCE ---\\n"));
+        assert_eq!(
+            rendered
+                .matches("--- END CLIENT-ASSERTED PROVENANCE ---")
+                .count(),
+            1,
+            "asserted text cannot forge a generated section delimiter"
+        );
     }
 }

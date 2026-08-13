@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS external_task_dependencies (
     target_task_status TEXT,
     resolution_state TEXT NOT NULL,
     resolved_at TEXT,
+    suppressed_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (origin_task_id, proposal_id)
 );
@@ -30,6 +31,11 @@ CREATE TABLE IF NOT EXISTS external_task_dependency_sync_state (
     origin_project_canonical_id TEXT PRIMARY KEY,
     cursor TEXT,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_proposal_request_keys (
+    request_fingerprint TEXT PRIMARY KEY,
+    client_request_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 "#;
 
@@ -87,7 +93,8 @@ impl ExternalTaskDependencyStore {
                    target_task_status = excluded.target_task_status,
                    resolution_state = excluded.resolution_state,
                    resolved_at = excluded.resolved_at,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at
+                 WHERE external_task_dependencies.suppressed_at IS NULL",
                 params![
                     dependency.origin_task_id,
                     dependency.proposal_id,
@@ -112,7 +119,9 @@ impl ExternalTaskDependencyStore {
             "SELECT origin_task_id, proposal_id, target_project_canonical_id, target_task_id,
                     proposal_state, target_task_status, resolution_state, resolved_at
              FROM external_task_dependencies
-             WHERE origin_task_id = ?1 AND resolution_state != 'resolved'
+             WHERE origin_task_id = ?1
+               AND resolution_state != 'resolved'
+               AND suppressed_at IS NULL
              ORDER BY proposal_id",
         )?;
         let rows = statement.query_map(params![task_id], |row| {
@@ -130,17 +139,22 @@ impl ExternalTaskDependencyStore {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Suppress an external handoff rather than deleting it. Cloud feeds
+    /// replay a short safety window, so physical deletion would let a rejected
+    /// handoff reappear and silently re-block a task after the operator had
+    /// explicitly removed it.
     pub fn remove(&self, origin_task_id: &str, target_task_id: &str) -> Result<bool> {
-        let deleted = self
+        let suppressed = self
             .conn
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .execute(
-                "DELETE FROM external_task_dependencies
+                "UPDATE external_task_dependencies
+                 SET suppressed_at = COALESCE(suppressed_at, ?3), updated_at = ?3
                  WHERE origin_task_id = ?1 AND target_task_id = ?2",
-                params![origin_task_id, target_task_id],
+                params![origin_task_id, target_task_id, Utc::now().to_rfc3339()],
             )?;
-        Ok(deleted > 0)
+        Ok(suppressed > 0)
     }
 
     pub fn cursor(&self, origin_project: &str) -> Result<Option<String>> {
@@ -170,6 +184,31 @@ impl ExternalTaskDependencyStore {
                 params![origin_project, cursor, Utc::now().to_rfc3339()],
             )?;
         Ok(())
+    }
+
+    /// Return the durable idempotency key for one logical proposal request.
+    /// A transport failure after cloud commit is ambiguous; retaining this key
+    /// makes the caller's retry converge on the cloud's unique proposal row.
+    pub fn client_request_id(
+        &self,
+        request_fingerprint: &str,
+        generated_request_id: &str,
+    ) -> Result<String> {
+        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
+        conn.execute(
+            "INSERT OR IGNORE INTO task_proposal_request_keys
+             (request_fingerprint, client_request_id, created_at) VALUES (?1, ?2, ?3)",
+            params![
+                request_fingerprint,
+                generated_request_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(conn.query_row(
+            "SELECT client_request_id FROM task_proposal_request_keys WHERE request_fingerprint = ?1",
+            params![request_fingerprint],
+            |row| row.get(0),
+        )?)
     }
 }
 
@@ -206,6 +245,16 @@ mod tests {
                 .list_blocking_for_task("cas-origin")
                 .unwrap()
                 .is_empty()
+        );
+        // The feed replays the same rejected row after an operator removes
+        // it. The durable tombstone must win over that replay.
+        store.upsert(&dependency).unwrap();
+        assert!(
+            store
+                .list_blocking_for_task("cas-origin")
+                .unwrap()
+                .is_empty(),
+            "a replayed rejected handoff must remain operator-suppressed"
         );
     }
 

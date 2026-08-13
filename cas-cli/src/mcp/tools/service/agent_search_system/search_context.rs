@@ -97,6 +97,13 @@ impl CasService {
         &self,
         req: SearchContextRequest,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(task_id) = req.task_id.as_deref() {
+            return self
+                .inner
+                .cas_context_for_task(task_id, req.limit.unwrap_or(5), req.max_tokens)
+                .await;
+        }
+
         use crate::mcp::tools::LimitRequest;
         let inner_req = LimitRequest {
             limit: req.limit,

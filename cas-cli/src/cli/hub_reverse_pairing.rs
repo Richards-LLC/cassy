@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::cli::Cli;
 use crate::cli::hub::{HubAuthorizeArgs, record_is_live};
@@ -267,7 +268,23 @@ fn resolve_hub_url(explicit: Option<&str>, controller_origin: &str) -> Result<St
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
-    origin.starts_with("http://127.") || origin.starts_with("http://[::1]")
+    let Ok(url) = Url::parse(origin) else {
+        return false;
+    };
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(_)) | None => false,
+    }
 }
 
 fn granted_scopes(
@@ -400,5 +417,32 @@ mod tests {
         assert_eq!(reduced, [Scope::MachineRead].into_iter().collect());
         let escalation = granted_scopes(&requested, Some(&["hub:admin".to_owned()])).unwrap_err();
         assert!(escalation.to_string().contains("may reduce"));
+    }
+
+    #[test]
+    fn loopback_fallback_requires_a_literal_http_loopback_origin() {
+        for origin in [
+            "http://127.0.0.1",
+            "http://127.42.0.1:42759",
+            "http://[::1]:42759",
+        ] {
+            assert!(is_loopback_origin(origin), "{origin}");
+        }
+
+        for origin in [
+            "http://127.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1@evil.example",
+            "http://attacker@127.0.0.1",
+            "http://127.0.0.1/pair",
+            "http://[::1]/pair",
+            "http://127.0.0.1?next=https://evil.example",
+            "http://127.0.0.1#fragment",
+            "http://localhost:42759",
+            "http://192.168.1.1:42759",
+            "https://127.0.0.1:42759",
+        ] {
+            assert!(!is_loopback_origin(origin), "{origin}");
+        }
     }
 }

@@ -5,6 +5,7 @@
 //! JSON advisory, matching the contract in
 //! `docs/specs/2026-08-11-cross-project-task-proposals.md`.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
@@ -135,9 +136,7 @@ impl std::error::Error for TaskProposalError {}
 /// registered CAS agent store; environment strings alone are not authority.
 pub fn authorize_registered_role(role: Option<AgentRole>) -> Result<AgentRole, TaskProposalError> {
     match role {
-        Some(AgentRole::Supervisor | AgentRole::Director) => Err(TaskProposalError::Contract(
-            "red boundary: supervisor/director authorization is not implemented".to_string(),
-        )),
+        Some(role @ (AgentRole::Supervisor | AgentRole::Director)) => Ok(role),
         _ => Err(TaskProposalError::Authorization(
             ROLE_REQUIREMENT.to_string(),
         )),
@@ -173,54 +172,282 @@ impl TaskProposalClient {
 
     pub fn create(
         &self,
-        _request: &CreateTaskProposalRequest,
+        request: &CreateTaskProposalRequest,
     ) -> Result<CreateTaskProposalResponse, TaskProposalError> {
-        let _ = (&self.endpoint, &self.token, &self.team_id, self.timeout);
-        Err(TaskProposalError::Contract(
-            "red boundary: proposal create is not implemented".to_string(),
-        ))
+        let url = self.team_url("task-proposals");
+        self.post_json(&url, request)
     }
 
-    pub fn inbox_all(&self, _target_project: &str) -> Result<Vec<TaskProposal>, TaskProposalError> {
-        Err(TaskProposalError::Contract(
-            "red boundary: proposal inbox is not implemented".to_string(),
-        ))
+    pub fn inbox_all(&self, target_project: &str) -> Result<Vec<TaskProposal>, TaskProposalError> {
+        let target = required_explicit("target project", target_project)?;
+        let mut proposals = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+
+        loop {
+            let mut url = format!(
+                "{}?target_project_id={}&state=proposed",
+                self.team_url("task-proposals"),
+                urlencoding::encode(target)
+            );
+            if let Some(value) = cursor.as_deref() {
+                url.push_str("&cursor=");
+                url.push_str(&urlencoding::encode(value));
+            }
+            let page: ProposalPage = self.get_json(&url)?;
+            let continuation = page.continuation();
+            proposals.extend(page.proposals);
+            let Some(next) = continuation else {
+                break;
+            };
+            // Cursor contents are opaque. Equality is the only operation CAS
+            // performs, solely to prevent a stable/repeated token loop.
+            if next.is_empty()
+                || next == cursor.as_deref().unwrap_or_default()
+                || !seen.insert(next.clone())
+            {
+                break;
+            }
+            cursor = Some(next);
+        }
+        Ok(proposals)
     }
 
     pub fn accept(
         &self,
-        _proposal_id: &str,
-        _target_project: &str,
+        proposal_id: &str,
+        target_project: &str,
     ) -> Result<TaskProposal, TaskProposalError> {
-        Err(TaskProposalError::Contract(
-            "red boundary: proposal accept is not implemented".to_string(),
-        ))
+        self.decide(proposal_id, target_project, "accept", None)
     }
 
     pub fn reject(
         &self,
-        _proposal_id: &str,
-        _target_project: &str,
-        _reason: Option<&str>,
+        proposal_id: &str,
+        target_project: &str,
+        reason: Option<&str>,
     ) -> Result<TaskProposal, TaskProposalError> {
-        Err(TaskProposalError::Contract(
-            "red boundary: proposal reject is not implemented".to_string(),
-        ))
+        self.decide(proposal_id, target_project, "reject", reason)
     }
 
     pub fn dependency_feed_all(
         &self,
-        _origin_project: &str,
-        _since: Option<&str>,
+        origin_project: &str,
+        since: Option<&str>,
     ) -> Result<DependencyFeed, TaskProposalError> {
-        Err(TaskProposalError::Contract(
-            "red boundary: dependency feed is not implemented".to_string(),
-        ))
+        let origin = required_explicit("origin project", origin_project)?;
+        let mut dependencies = Vec::new();
+        let mut page_cursor: Option<String> = None;
+        let mut watermark = since.map(ToString::to_string);
+        let mut seen = HashSet::new();
+        if let Some(value) = since {
+            seen.insert(value.to_string());
+        }
+
+        loop {
+            let mut url = format!(
+                "{}?origin_project_id={}",
+                self.team_url("cross-project-task-dependencies"),
+                urlencoding::encode(origin)
+            );
+            if let Some(value) = page_cursor.as_deref() {
+                url.push_str("&cursor=");
+                url.push_str(&urlencoding::encode(value));
+            } else if let Some(value) = since {
+                // `since` is the current production high-watermark contract.
+                // It is passed through byte-for-byte and never parsed.
+                url.push_str("&since=");
+                url.push_str(&urlencoding::encode(value));
+            }
+
+            let page: DependencyPage = self.get_json(&url)?;
+            let continuation = page.continuation();
+            dependencies.extend(page.dependencies);
+            if page.cursor.is_some() {
+                watermark = page.cursor.clone();
+            }
+            let Some(next) = continuation else {
+                break;
+            };
+            if next.is_empty()
+                || next == page_cursor.as_deref().unwrap_or_default()
+                || !seen.insert(next.clone())
+            {
+                break;
+            }
+            page_cursor = Some(next);
+        }
+        Ok(DependencyFeed {
+            dependencies,
+            cursor: watermark,
+        })
+    }
+
+    fn decide(
+        &self,
+        proposal_id: &str,
+        target_project: &str,
+        decision: &str,
+        reason: Option<&str>,
+    ) -> Result<TaskProposal, TaskProposalError> {
+        let proposal = required_explicit("proposal id", proposal_id)?;
+        let target = required_explicit("target project", target_project)?;
+        let url = format!(
+            "{}/api/teams/{}/task-proposals/{}/{}",
+            self.endpoint,
+            urlencoding::encode(&self.team_id),
+            urlencoding::encode(proposal),
+            decision
+        );
+        let mut body = serde_json::json!({ "target_project_id": target });
+        if let Some(reason) = reason {
+            body["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        self.post_json(&url, &body)
+    }
+
+    fn team_url(&self, resource: &str) -> String {
+        format!(
+            "{}/api/teams/{}/{}",
+            self.endpoint,
+            urlencoding::encode(&self.team_id),
+            resource
+        )
+    }
+
+    fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, TaskProposalError> {
+        let response = ureq::get(url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(self.timeout)
+            .call();
+        decode_response(response)
+    }
+
+    fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        body: &impl Serialize,
+    ) -> Result<T, TaskProposalError> {
+        let response = ureq::post(url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(self.timeout)
+            .send_json(body);
+        decode_response(response)
     }
 }
 
-pub fn render_proposal(_proposal: &TaskProposal) -> String {
-    String::new()
+#[derive(Debug, Deserialize)]
+struct ProposalPage {
+    #[serde(default)]
+    proposals: Vec<TaskProposal>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    has_more: Option<bool>,
+}
+
+impl ProposalPage {
+    fn continuation(&self) -> Option<String> {
+        self.next_cursor.clone().or_else(|| {
+            self.has_more
+                .unwrap_or(false)
+                .then(|| self.cursor.clone())
+                .flatten()
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DependencyPage {
+    #[serde(default)]
+    dependencies: Vec<ExternalTaskDependency>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
+    has_more: Option<bool>,
+}
+
+impl DependencyPage {
+    fn continuation(&self) -> Option<String> {
+        self.next_cursor.clone().or_else(|| {
+            self.has_more
+                .unwrap_or(false)
+                .then(|| self.cursor.clone())
+                .flatten()
+        })
+    }
+}
+
+fn required_explicit<'a>(field: &str, value: &'a str) -> Result<&'a str, TaskProposalError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TaskProposalError::Contract(format!(
+            "Cross-project task proposals require an explicit {field}; nothing is inferred from cwd."
+        )));
+    }
+    Ok(value)
+}
+
+fn decode_response<T: for<'de> Deserialize<'de>>(
+    response: Result<ureq::Response, ureq::Error>,
+) -> Result<T, TaskProposalError> {
+    match response {
+        Ok(response) => response
+            .into_json::<T>()
+            .map_err(|error| TaskProposalError::Decode(format!("Invalid cloud response: {error}"))),
+        Err(ureq::Error::Status(status, response)) => {
+            let raw = response.into_string().unwrap_or_default();
+            let message = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| body.get("message").and_then(serde_json::Value::as_str))
+                        .map(ToString::to_string)
+                })
+                .filter(|message| !message.is_empty())
+                .unwrap_or(raw);
+            Err(TaskProposalError::Http { status, message })
+        }
+        Err(ureq::Error::Transport(error)) => Err(TaskProposalError::Transport(format!(
+            "Cloud request failed: {error}"
+        ))),
+    }
+}
+
+pub fn render_proposal(proposal: &TaskProposal) -> String {
+    let server = &proposal.provenance.server_attested;
+    let client = &proposal.provenance.client_asserted;
+    let mut output = format!(
+        "Proposal: {}\nTarget task: {}\nState: {}\n\nServer-attested provenance:\n  creator_user_id: {}\n  team_id: {}\n  origin_project_canonical_id: {}\n  target_project_canonical_id: {}\n  received_at: {}\n  client_request_id: {}\n\nClient-asserted provenance:\n",
+        proposal.proposal_id,
+        proposal.target_task_id,
+        proposal.state,
+        server.creator_user_id,
+        server.team_id,
+        server.origin_project_canonical_id,
+        server.target_project_canonical_id,
+        server.received_at,
+        server.client_request_id,
+    );
+    for (name, value) in [
+        ("origin_session_id", client.origin_session_id.as_deref()),
+        ("origin_agent_id", client.origin_agent_id.as_deref()),
+        ("origin_agent_name", client.origin_agent_name.as_deref()),
+        ("origin_agent_role", client.origin_agent_role.as_deref()),
+        ("client_version", client.client_version.as_deref()),
+        ("client_build", client.client_build.as_deref()),
+    ] {
+        output.push_str(&format!(
+            "  {name}: {}\n",
+            value.unwrap_or("(not asserted)")
+        ));
+    }
+    output
 }
 
 #[cfg(test)]

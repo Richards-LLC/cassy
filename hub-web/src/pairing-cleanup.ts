@@ -1,6 +1,6 @@
 import type { PairingDraft } from "./pairing-draft";
 import type { PairingOperation, PairingOperationCoordinator } from "./pairing-operation";
-import type { PendingPairing } from "./pending-pairing";
+import type { PendingPairing, PendingPairingClearResult } from "./pending-pairing";
 
 export interface PairingCleanupState {
   pendingPairing: PendingPairing | null;
@@ -29,4 +29,11 @@ export function pairingCleanupFailureUpdate(options: {
     exchangeInFlight: false,
     status: options.cleanupMessage,
   };
+}
+
+/** Preserve the exchange failure while making reload safety explicit. */
+export function pairingStorageClearFailureMessage(message: string, cleared: PendingPairingClearResult): string {
+  return cleared.failClosed
+    ? message
+    : `${message} Browser storage could not durably block this pairing request; keep this page open and retry after storage access is restored.`;
 }

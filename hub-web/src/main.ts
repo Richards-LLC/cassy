@@ -5,7 +5,7 @@ import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { pairingCleanupFailureUpdate } from "./pairing-cleanup";
+import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
@@ -171,10 +171,10 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
     pairingExchangeInFlight = false;
     if (error instanceof PairingExchangeError) {
       pairingOperations.invalidate();
-      pendingPairingStore.clear();
+      const cleared = pendingPairingStore.clear();
       pendingPairing = null;
       pairingDraft = createPairingDraft(location.origin);
-      pairingStatus = error.message;
+      pairingStatus = pairingStorageClearFailureMessage(error.message, cleared);
       render(false);
     } else {
       render();

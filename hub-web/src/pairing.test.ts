@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
+import { bindPairingDialogCancel } from "./pairing-dialog";
 import { exchangePendingPairing, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { PendingPairingStore, pendingPairingStoreFor } from "./pending-pairing";
@@ -14,7 +15,8 @@ import {
   pairingRelayOrigin,
   pollPairingRequest,
 } from "./pairing-relay";
-import type { StoredMachine } from "./types";
+import { MachineCatalog, type MachineCatalogBackend, type MachineCatalogRecord } from "./storage";
+import type { PairingInstallIdentity, StoredMachine } from "./types";
 
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
@@ -53,6 +55,36 @@ const relayOrigin = "https://petra-stella-cloud.vercel.app";
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
+}
+
+class MemoryMachineCatalogBackend implements MachineCatalogBackend {
+  readonly records = new Map<string, MachineCatalogRecord>();
+  rejectUpdate = false;
+
+  async list(): Promise<MachineCatalogRecord[]> { return [...this.records.values()]; }
+
+  async update(
+    id: string,
+    change: (current: MachineCatalogRecord | undefined) => MachineCatalogRecord | undefined,
+  ): Promise<void> {
+    if (this.rejectUpdate) throw new Error("durable cleanup rejected");
+    const next = change(this.records.get(id));
+    if (next) this.records.set(id, next);
+    else this.records.delete(id);
+  }
+}
+
+function storedMachine(credentialId: string, credential = `opaque-${credentialId}`): StoredMachine {
+  return {
+    id: "machine-uuid", label: credentialId, baseUrl: "https://workstation.tail.example",
+    deviceId: `device-${credentialId}`, credentialId, credential,
+    expiresAt: "2027-01-01T00:00:00Z", scopes: ["machine-read"],
+    publicKey: { kty: "EC" }, privateKey: {} as CryptoKey,
+  };
+}
+
+function installIdentity(credentialId: string, generation: number): PairingInstallIdentity {
+  return { machineId: "machine-uuid", credentialId, generation };
 }
 
 describe("wire-v1 reverse pairing", () => {
@@ -299,6 +331,73 @@ describe("wire-v1 reverse pairing", () => {
     expect(acknowledge).not.toHaveBeenCalled();
   });
 
+  it("keeps a cleanup-rejected credential non-activatable after reload, then restores the exact prior row", async () => {
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const prior = storedMachine("prior");
+    const candidate = storedMachine("cancelled");
+    const identity = installIdentity(candidate.credentialId, 7);
+    backend.records.set(prior.id, prior);
+
+    await catalog.stage(candidate, identity);
+    backend.rejectUpdate = true;
+    await expect(catalog.rollback(identity)).rejects.toThrow("durable cleanup rejected");
+
+    const reloaded = new MachineCatalog(backend);
+    await expect(reloaded.snapshot()).resolves.toEqual({ machines: [prior], pendingCleanup: 1 });
+    backend.rejectUpdate = false;
+    await expect(reloaded.recoverPending()).resolves.toEqual({ machines: [prior], pendingCleanup: 0 });
+    expect(backend.records.get(prior.id)).toEqual(prior);
+  });
+
+  it("lets only the exact same-hub credential generation activate or roll back", async () => {
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const prior = storedMachine("prior");
+    const first = storedMachine("first");
+    const replacement = storedMachine("replacement");
+    const firstIdentity = installIdentity(first.credentialId, 8);
+    const replacementIdentity = installIdentity(replacement.credentialId, 9);
+    backend.records.set(prior.id, prior);
+
+    await catalog.stage(first, firstIdentity);
+    await catalog.stage(replacement, replacementIdentity);
+    await expect(catalog.rollback(firstIdentity)).resolves.toBe(false);
+    await expect(catalog.activate(firstIdentity)).resolves.toBe(false);
+    await expect(catalog.snapshot()).resolves.toEqual({ machines: [prior], pendingCleanup: 1 });
+    await expect(catalog.activate(replacementIdentity)).resolves.toBe(true);
+    await expect(catalog.snapshot()).resolves.toEqual({ machines: [replacement], pendingCleanup: 0 });
+  });
+
+  it("surfaces rejected post-persist cleanup while leaving reload fail-closed", async () => {
+    const operations = new PairingOperationCoordinator();
+    const operation = operations.begin(operations.replace());
+    const backend = new MemoryMachineCatalogBackend();
+    const catalog = new MachineCatalog(backend);
+    const persistStarted = deferred<void>();
+    const releasePersist = deferred<void>();
+    const invitation = { kind: "invitation" as const, token: "one-time-token", hubId: "machine-uuid", hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] as const };
+    const identity = installIdentity("credential", operation.generation);
+    const exchange = exchangePendingPairing({
+      invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => response(200, { device_id: "device", credential_id: identity.credentialId, credential: "opaque", expires_at: "2027-01-01T00:00:00Z", scopes: ["machine-read"] }),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: operation.generation,
+      stagePersisted: async (machine, install) => { await catalog.stage(machine, install); persistStarted.resolve(); await releasePersist.promise; },
+      activatePersisted: (install, signal) => catalog.activate(install, signal),
+      rollbackPersisted: (install) => catalog.rollback(install),
+      signal: operation.signal, isCurrent: () => operations.isCurrent(operation),
+    });
+
+    await persistStarted.promise;
+    operations.invalidate();
+    backend.rejectUpdate = true;
+    releasePersist.resolve();
+
+    await expect(exchange).rejects.toMatchObject({ name: "PairingCleanupError" });
+    await expect(catalog.snapshot()).resolves.toMatchObject({ machines: [], pendingCleanup: 1 });
+  });
+
   it("does not persist a credential when a deferred exchange response arrives after cancellation", async () => {
     const operations = new PairingOperationCoordinator();
     const generation = operations.replace();
@@ -331,6 +430,18 @@ describe("wire-v1 reverse pairing", () => {
 
     expect(afterBackgroundRender).toEqual(captured);
     expect(afterBackgroundRender.deviceLabel).not.toBe("Commander browser");
+  });
+
+  it.each(["create", "poll", "persist", "ack"])("routes native dialog Escape through cancellation during deferred %s", (phase) => {
+    const dialog = new EventTarget() as HTMLDialogElement;
+    const cancel = vi.fn();
+    bindPairingDialogCancel(dialog, () => phase !== "idle", cancel);
+
+    const event = new Event("cancel", { cancelable: true });
+    dialog.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it("persists before acknowledgement and keeps local success when acknowledgement fails", async () => {

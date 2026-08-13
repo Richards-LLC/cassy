@@ -1149,6 +1149,38 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
     // without CAS_CLONE_PATH running in the shared checkout must not commit to main.
     let worker_name =
         std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
+
+    // DENY: the branch here belongs to a DIFFERENT worker (cas-30c6).
+    //
+    // The denylist above only protects the trunk, and `factory/*` is an
+    // allowed prefix (cas-7e7b), so a worker whose harness was bound to a
+    // sibling's worktree passed every check and could commit onto that
+    // sibling's branch — respawn 1034. Resolve the canonical binding from the
+    // worker's own registered identity instead; `my_context` reports the same
+    // classification from the same module, so the two never disagree.
+    //
+    // Only fires when the worker's identity is actually known: without
+    // CAS_AGENT_NAME there is no canonical branch to compare against, and
+    // guessing would deny every legitimate `factory/*` commit.
+    if let Some(registered_name) = std::env::var("CAS_AGENT_NAME")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+    {
+        if let crate::factory_isolation::WorkerBinding::Sibling { owner } =
+            crate::factory_isolation::classify_worker_binding(
+                &registered_name,
+                get_branch_at_cwd(cwd).as_deref(),
+            )
+        {
+            return Some(crate::factory_isolation::sibling_misbinding_message(
+                &registered_name,
+                &owner,
+                cwd,
+            ));
+        }
+    }
+
     match get_branch_at_cwd(cwd) {
         None => {
             return Some(format!(
@@ -2058,6 +2090,30 @@ mod worker_commit_guard_tests {
         );
     }
 
+    /// Without a registered identity there is no canonical branch to compare
+    /// against, so the sibling check must stand down rather than guess and
+    /// deny every `factory/*` commit.
+    #[test]
+    fn unknown_identity_does_not_trigger_the_sibling_check() {
+        let tmp = make_git_repo();
+        let p = tmp.path().to_string_lossy().to_string();
+        std::process::Command::new("git")
+            .args(["switch", "-c", "factory/some-other-worker"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("switch branch");
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&p)),
+            ("CAS_AGENT_NAME", None),
+        ]);
+
+        assert!(
+            check_worker_git_commit_scope(&p).is_none(),
+            "an unidentified worker must not be denied by the identity comparison"
+        );
+    }
+
     /// A worker on its OWN factory branch is untouched by the sibling check.
     #[test]
     fn own_factory_branch_commit_is_still_allowed() {
@@ -2189,7 +2245,12 @@ mod worker_commit_guard_tests {
             .output()
             .unwrap();
         let ps = p.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);
+        // cas-30c6: the branch must belong to THIS worker. Pinning the identity
+        // also makes the case hermetic against an inherited CAS_AGENT_NAME.
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", None),
+            ("CAS_AGENT_NAME", Some("test-worker")),
+        ]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(
@@ -2319,7 +2380,11 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
+        // cas-30c6: factory/worker1 is allowed because this IS worker1.
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("worker1")),
+        ]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(
@@ -2447,10 +2512,14 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
+        // cas-30c6: factory/guards is this worker's own branch — name it so the
+        // canonical binding check has an identity to compare against instead of
+        // whatever CAS_AGENT_NAME the test process inherited.
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("guards")),
         ]);
 
         let mut input = crate::hooks::handlers::HookInput::default();

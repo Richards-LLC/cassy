@@ -3163,12 +3163,31 @@ impl CasService {
         output.push_str(&format!("**Role**: {role_str}\n"));
         output.push_str(&format!("**ID**: {}\n\n", agent.id));
 
-        // Clone path (from environment)
-        if let Ok(cwd) = std::env::var("CAS_CLONE_PATH") {
-            output.push_str(&format!("**Clone Path**: {cwd}\n"));
-        } else if let Ok(cwd) = std::env::current_dir() {
-            output.push_str(&format!("**Working Directory**: {}\n", cwd.display()));
-        }
+        // Worktree binding (cas-30c6).
+        //
+        // The branch must be resolved AT the directory this session is bound to
+        // — previously it came from wherever the MCP server process happened to
+        // be running, so my_context and the PreToolUse commit guard could report
+        // different repositories. Both now classify the same canonical binding
+        // through `factory_isolation`, and a worker bound to a sibling's
+        // worktree or to the shared checkout is told so explicitly instead of
+        // being shown a branch line that looks fine.
+        let bound_path = std::env::var("CAS_CLONE_PATH")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok());
+        let branch = bound_path
+            .as_deref()
+            .and_then(crate::factory_isolation::branch_at);
+        output.push_str(&crate::factory_isolation::render_worker_binding(
+            &agent.name,
+            agent.role == AgentRole::Worker,
+            bound_path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .as_deref(),
+            branch.as_deref(),
+        ));
 
         // Current task(s)
         let leases = agent_store.list_agent_leases(&agent_id).unwrap_or_default();
@@ -3188,19 +3207,6 @@ impl CasService {
                 for lease in &leases {
                     output.push_str(&format!("  - {}\n", lease.task_id));
                 }
-            }
-        }
-
-        // Git branch info
-        if let Ok(branch_output) = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-        {
-            if branch_output.status.success() {
-                let branch = String::from_utf8_lossy(&branch_output.stdout)
-                    .trim()
-                    .to_string();
-                output.push_str(&format!("\n**Git Branch**: {branch}\n"));
             }
         }
 

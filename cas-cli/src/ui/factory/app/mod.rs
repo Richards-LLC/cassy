@@ -296,6 +296,19 @@ impl WorkerSpawnPrep {
                 // directory itself (not in wt.repo_root).  In a valid worktree the
                 // answer is the worktree's branch; in a plain directory git climbs to
                 // the nearest ancestor repo and reports its HEAD instead.
+                //
+                // cas-30c6: the branch answer alone is forgeable. When the shared
+                // checkout is itself parked on `factory/<name>` (the GH #120 /
+                // cas-5bef shape), a stale plain directory *matches* the expected
+                // branch while every git operation in it resolves to that shared
+                // checkout — the exact misbinding of spawn request 1031. Prove the
+                // full canonical binding (working-tree root AND branch) first and
+                // fail the spawn closed, so no harness is ever started on it.
+                crate::factory_isolation::verify_worker_worktree_binding(
+                    &self.worker_name,
+                    &wt.worktree_path,
+                    Some(&wt.branch_name),
+                )?;
                 let wt_git = GitOperations::new(wt.worktree_path.clone());
                 match wt_git.current_branch() {
                     Ok(ref actual_branch) if actual_branch == &wt.branch_name => {

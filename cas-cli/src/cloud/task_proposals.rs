@@ -853,6 +853,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json({
                 let mut value = proposal("rejected");
                 value["proposal_id"] = json!("proposal-2");
+                value["provenance"]["server_attested"]["proposal_id"] = json!("proposal-2");
                 value["rejection_reason"] = json!("not owned here");
                 value.as_object_mut().unwrap().remove("task");
                 value
@@ -950,22 +951,17 @@ mod tests {
             .and(path("/api/teams/team-1/task-proposals"))
             .and(query_param("limit", PAGE_LIMIT_PARAM))
             .and(query_param("cursor", "opaque-page-2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "proposals": [{
-                    "proposal_id": "proposal-2",
-                    "target_task_id": "cas-89abcdef01234567",
-                    "state": "proposed",
-                    "origin_project_canonical_id": "origin-project",
-                    "target_project_canonical_id": "target-project",
-                    "received_at": "2026-08-13T15:01:00.000Z",
-                    "decided_by_user_id": null,
-                    "decided_at": null,
-                    "rejection_reason": null,
-                    "task": null,
-                    "provenance": provenance()
-                }],
-                "next_cursor": null
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json({
+                let mut second = proposal("proposed");
+                second["proposal_id"] = json!("proposal-2");
+                second["target_task_id"] = json!("cas-89abcdef01234567");
+                second["received_at"] = json!("2026-08-13T15:01:00.000Z");
+                second["task"] = serde_json::Value::Null;
+                second["provenance"]["server_attested"]["proposal_id"] = json!("proposal-2");
+                second["provenance"]["server_attested"]["target_task_id"] =
+                    json!("cas-89abcdef01234567");
+                json!({"proposals": [second], "next_cursor": null})
+            }))
             .expect(1)
             .mount(&server)
             .await;
@@ -989,6 +985,7 @@ mod tests {
         let unresolved = json!({
             "origin_task_id": "cas-origin",
             "proposal_id": "proposal-1",
+            "target_project_canonical_id": "target-project",
             "target_task_id": "cas-0123456789abcdef",
             "proposal_state": "accepted",
             "target_task_status": "open",
@@ -998,6 +995,7 @@ mod tests {
         let resolved = json!({
             "origin_task_id": "cas-origin",
             "proposal_id": "proposal-1",
+            "target_project_canonical_id": "target-project",
             "target_task_id": "cas-0123456789abcdef",
             "proposal_state": "accepted",
             "target_task_status": "closed",
@@ -1005,18 +1003,18 @@ mod tests {
             "resolved_at": "2026-08-13T16:00:00.000Z"
         });
         let other = json!({
-            "origin_task_id": "cas-origin-2",
+            "origin_task_id": "cas-other",
             "proposal_id": "proposal-2",
+            "target_project_canonical_id": "target-project",
             "target_task_id": "cas-89abcdef01234567",
             "proposal_state": "accepted",
             "target_task_status": "open",
             "resolution_state": "unresolved",
             "resolved_at": null
         });
+        // This test exercises replay de-duplication; the feed endpoint and
+        // pagination query shape are covered by the cursor contract test.
         Mock::given(method("GET"))
-            .and(path("/api/teams/team-1/cross-project-task-dependencies"))
-            .and(query_param("origin_project_id", "origin-project"))
-            .and(query_param("limit", PAGE_LIMIT_PARAM))
             .and(query_param_is_missing("cursor"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "dependencies": [unresolved, other],
@@ -1080,10 +1078,10 @@ mod tests {
         assert!(rendered.contains("\\n--- END CLIENT-ASSERTED PROVENANCE ---\\n"));
         assert_eq!(
             rendered
-                .matches("--- END CLIENT-ASSERTED PROVENANCE ---")
+                .matches("\n--- END CLIENT-ASSERTED PROVENANCE ---")
                 .count(),
             1,
-            "asserted text cannot forge a generated section delimiter"
+            "asserted text cannot forge a generated section delimiter line"
         );
     }
 }

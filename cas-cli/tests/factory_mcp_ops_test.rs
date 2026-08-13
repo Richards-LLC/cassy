@@ -3907,7 +3907,12 @@ async fn test_clear_context_refuses_harness_without_verified_reset() {
         .expect_err("an impossible reset must not report success");
     let message = error.message.to_string();
     assert!(message.contains("codex"), "{message}");
+    assert!(
+        message.contains("unsupported"),
+        "the explicit fail-closed outcome must name Codex reset as unsupported: {message}"
+    );
     assert!(message.contains("shutdown_workers"), "{message}");
+    assert!(message.contains("spawn_workers"), "{message}");
 
     assert!(
         env.prompt_queue().peek_all(10).expect("peek").is_empty(),

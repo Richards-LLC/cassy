@@ -89,7 +89,7 @@ pub fn context_reset_command(cli: SupervisorCli) -> Option<&'static str> {
 /// Why a context reset is impossible for `cli`, phrased for the supervisor.
 pub fn unsupported_reason(cli: SupervisorCli) -> String {
     format!(
-        "harness '{}' has no verified in-place context-reset command, so CAS cannot reset it \
+        "context reset is unsupported for harness '{}': it has no verified in-place reset command, so CAS cannot reset it \
          and will not report a reset it did not perform. Use shutdown_workers + spawn_workers \
          (same name/worktree) to recycle the worker instead.",
         cli.backend().name()

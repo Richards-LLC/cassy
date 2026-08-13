@@ -8,7 +8,7 @@ use rusqlite::{OptionalExtension, params};
 
 impl RuleStore for SqliteRuleStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(ENTRIES_RULES_SCHEMA)?;
         // NOTE: Column migrations are handled by `cas update --schema-only`
         // See cas-cli/src/migration/migrations.rs for migration definitions (IDs 51-56)
@@ -16,7 +16,7 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         loop {
             let next = crate::shared_db::next_sequence_val(&conn, "rule")?;
             let id = format!("rule-{next:03}");
@@ -55,7 +55,7 @@ impl RuleStore for SqliteRuleStore {
 
     fn add(&self, rule: &Rule) -> Result<()> {
         let timer = TraceTimer::new();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.execute(
             "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after, hook_command,
@@ -107,7 +107,7 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn get(&self, id: &str) -> Result<Rule> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rule = conn
             .query_row(
                 "SELECT id, created, source_ids, helpful_count, harmful_count,
@@ -161,7 +161,7 @@ impl RuleStore for SqliteRuleStore {
 
     fn update(&self, rule: &Rule) -> Result<()> {
         let timer = TraceTimer::new();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.execute(
             "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
              tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
@@ -217,7 +217,7 @@ impl RuleStore for SqliteRuleStore {
 
     fn delete(&self, id: &str) -> Result<()> {
         let timer = TraceTimer::new();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.execute("DELETE FROM rules WHERE id = ?", params![id]);
 
         // Record trace
@@ -245,7 +245,7 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn list(&self) -> Result<Vec<Rule>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after, hook_command,

@@ -294,7 +294,7 @@ impl SqliteStore {
 
     /// Start a new session
     pub fn start_session(&self, session: &cas_types::Session) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO sessions (session_id, cwd, started_at, permission_mode, team_id)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -311,7 +311,7 @@ impl SqliteStore {
 
     /// End a session and compute duration
     pub fn end_session(&self, session_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now();
 
         // Get session start time
@@ -343,7 +343,7 @@ impl SqliteStore {
         tasks_delta: i32,
         tool_uses_delta: i32,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "UPDATE sessions SET
                 entries_created = entries_created + ?1,
@@ -357,7 +357,7 @@ impl SqliteStore {
 
     /// Get a session by ID
     pub fn get_session(&self, session_id: &str) -> Result<Option<cas_types::Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT session_id, cwd, started_at, ended_at, duration_secs,
                     permission_mode, entries_created, tasks_closed, tool_uses, team_id, title,
@@ -393,7 +393,7 @@ impl SqliteStore {
 
     /// List recent sessions (for sync)
     pub fn list_sessions_since(&self, since: DateTime<Utc>) -> Result<Vec<cas_types::Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT session_id, cwd, started_at, ended_at, duration_secs,
                     permission_mode, entries_created, tasks_closed, tool_uses, team_id, title,
@@ -431,7 +431,7 @@ impl SqliteStore {
 
     /// Update session title
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "UPDATE sessions SET title = ?1 WHERE session_id = ?2",
             params![title, session_id],
@@ -445,7 +445,7 @@ impl SqliteStore {
         session_id: &str,
         outcome: cas_types::SessionOutcome,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "UPDATE sessions SET outcome = ?1 WHERE session_id = ?2",
             params![outcome.to_string(), session_id],
@@ -455,7 +455,7 @@ impl SqliteStore {
 
     /// Update session friction score
     pub fn update_session_friction_score(&self, session_id: &str, score: f32) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let clamped = score.clamp(0.0, 1.0);
         conn.execute(
             "UPDATE sessions SET friction_score = ?1 WHERE session_id = ?2",
@@ -466,7 +466,7 @@ impl SqliteStore {
 
     /// Increment session delight count
     pub fn increment_session_delight(&self, session_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "UPDATE sessions SET delight_count = COALESCE(delight_count, 0) + 1 WHERE session_id = ?",
             params![session_id],
@@ -482,7 +482,7 @@ impl SqliteStore {
         friction_score: Option<f32>,
         delight_count: Option<u32>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Single UPDATE using COALESCE to only set provided values,
         // replacing up to 3 separate UPDATEs.
@@ -511,7 +511,7 @@ impl SqliteStore {
     ///
     /// Returns: Vec<(friction_type, count, avg_severity)>
     pub fn friction_summary(&self, days: i64) -> Result<Vec<(String, i64, f64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
         let mut stmt = conn.prepare_cached(
@@ -551,7 +551,7 @@ impl SqliteStore {
         threshold: usize,
         limit: usize,
     ) -> Result<Vec<(String, i64, f64, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
         let mut stmt = conn.prepare_cached(
@@ -593,7 +593,7 @@ impl SqliteStore {
     ///
     /// Returns: Vec<(outcome, count, percentage)>
     pub fn outcome_summary(&self, days: i64) -> Result<Vec<(String, i64, f64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
         // Single query using window function to compute percentage inline,
@@ -627,7 +627,7 @@ impl SqliteStore {
     ///
     /// Returns: Vec<(outcome, avg_friction_score, avg_friction_count, session_count)>
     pub fn outcome_correlation(&self, days: i64) -> Result<Vec<(String, f64, f64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
         let mut stmt = conn.prepare_cached(
@@ -668,7 +668,7 @@ impl SqliteStore {
     ///
     /// Returns: Vec<(friction_type, count, avg_severity, affected_sessions)>
     pub fn friction_by_type(&self, days: i64) -> Result<Vec<(String, i64, f64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
         let mut stmt = conn.prepare_cached(
@@ -770,7 +770,7 @@ impl SqliteRuleStore {
 
     /// List only proven rules (status = 'proven')
     pub fn list_proven(&self) -> Result<Vec<Rule>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after, hook_command,
@@ -824,7 +824,7 @@ impl SqliteRuleStore {
 
     /// List critical rules (priority = 0, proven or draft)
     pub fn list_critical(&self) -> Result<Vec<Rule>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after, hook_command,

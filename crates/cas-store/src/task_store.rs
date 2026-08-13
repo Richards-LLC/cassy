@@ -227,7 +227,7 @@ impl SqliteTaskStore {
         let chars: Vec<char> = format!("{hash:016x}").chars().collect();
 
         // Try 4-char, then 5-char, then 6-char IDs
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         for len in 4..=6 {
             let id = format!("cas-{}", chars[..len].iter().collect::<String>());
             let exists: bool = conn
@@ -427,7 +427,7 @@ impl SqliteTaskStore {
     /// Prevents read skew where a task exists but its epic link is invisible (or vice
     /// versa) due to a concurrent write between two separate queries.
     pub fn list_with_parent_deps(&self) -> Result<(Vec<Task>, Vec<Dependency>)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Both queries run under the same mutex hold, guaranteeing a consistent snapshot
         let tasks = {
@@ -483,7 +483,7 @@ pub fn clear_pending_verification_with_conn(conn: &Connection, task_id: &str) ->
 
 impl TaskStore for SqliteTaskStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(TASK_SCHEMA)?;
         // `task_leases` is owned by the agent lifecycle (`AGENT_SCHEMA`), but
         // `SqliteTaskStore::delete` issues `DELETE FROM task_leases WHERE
@@ -503,7 +503,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn add(&self, task: &Task) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::add_with_conn(&conn, task, None)
         })
     }
@@ -516,7 +516,7 @@ impl TaskStore for SqliteTaskStore {
         created_by: Option<&str>,
     ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now();
             let epic_id = epic_id.map(str::trim).filter(|id| !id.is_empty());
@@ -576,7 +576,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn get(&self, id: &str) -> Result<Task> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
@@ -592,7 +592,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
 
             // cas-ec74: read the clock ONCE and return that same instant. The
             // caller's `task.updated_at` is deliberately ignored (updated_at is
@@ -744,7 +744,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn delete(&self, id: &str) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().unwrap();
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
 
             // Get task title before deleting for event summary
@@ -786,7 +786,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let (sql, params): (&str, Vec<String>) = match status {
             Some(s) => (
@@ -820,7 +820,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn list_ready(&self) -> Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Ready = open tasks with no open blocking dependencies
         let mut stmt = conn.prepare_cached(
@@ -848,7 +848,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn list_blocked(&self) -> Result<Vec<(Task, Vec<Task>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Fetch blocked tasks
         let mut stmt = conn.prepare_cached(
@@ -963,7 +963,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn list_pending_verification(&self) -> Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
@@ -978,7 +978,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn list_pending_worktree_merge(&self) -> Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
@@ -999,12 +999,12 @@ impl TaskStore for SqliteTaskStore {
     // Dependency operations
 
     fn add_dependency(&self, dep: &Dependency) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         Self::add_dependency_with_conn(&conn, dep, true)
     }
 
     fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "DELETE FROM dependencies WHERE from_id = ? AND to_id = ?",
             params![from_id, to_id],
@@ -1019,7 +1019,7 @@ impl TaskStore for SqliteTaskStore {
         dep_type: DependencyType,
     ) -> Result<bool> {
         let dep_type_str = dep_type.to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows_deleted = conn.execute(
             "DELETE FROM dependencies WHERE from_id = ? AND to_id = ? AND dep_type = ?",
             params![from_id, to_id, dep_type_str],
@@ -1028,7 +1028,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn get_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT from_id, to_id, dep_type, created_at, created_by
              FROM dependencies WHERE from_id = ?",
@@ -1042,7 +1042,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn get_dependents(&self, task_id: &str) -> Result<Vec<Dependency>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT from_id, to_id, dep_type, created_at, created_by
              FROM dependencies WHERE to_id = ?",
@@ -1056,7 +1056,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn get_blockers(&self, task_id: &str) -> Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
@@ -1076,7 +1076,7 @@ impl TaskStore for SqliteTaskStore {
 
     fn would_create_cycle(&self, from_id: &str, to_id: &str) -> Result<bool> {
         // Use recursive CTE to check if to_id can reach from_id through blocking deps
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let count: i64 = conn.query_row(
             "WITH RECURSIVE reachable(node) AS (
                  SELECT ?1
@@ -1093,7 +1093,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn list_dependencies(&self, dep_type: Option<DependencyType>) -> Result<Vec<Dependency>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let (sql, params): (&str, Vec<String>) = match dep_type {
             Some(t) => (
@@ -1123,7 +1123,7 @@ impl TaskStore for SqliteTaskStore {
     fn get_subtasks(&self, parent_id: &str) -> Result<Vec<Task>> {
         // Use recursive CTE to fetch all descendants in a single query
         // ParentChild dependency: from_id (child) -> to_id (parent)
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "WITH RECURSIVE subtree(task_id) AS (
                  SELECT from_id FROM dependencies
@@ -1153,7 +1153,7 @@ impl TaskStore for SqliteTaskStore {
         epic_id: &str,
         exclude_task_id: &str,
     ) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Get direct subtasks of the epic that have non-empty notes
         // excluding the specified task
@@ -1182,7 +1182,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn get_parent_epic(&self, task_id: &str) -> Result<Option<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Find parent via ParentChild dependency where the parent is an epic
         let mut stmt = conn.prepare_cached(

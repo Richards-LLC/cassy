@@ -908,7 +908,7 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         .unwrap();
     assert_eq!(
         relay_response.status(),
-        StatusCode::NOT_FOUND,
+        StatusCode::METHOD_NOT_ALLOWED,
         "the controller hub must not grow a pairing relay or control proxy"
     );
 }

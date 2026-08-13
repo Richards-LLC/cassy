@@ -4,7 +4,7 @@
 //! text search combined with temporal scoring for context selection.
 //! Semantic/embedding-based scoring has been removed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use cas_core::hooks::{BasicContextScorer, ContextQuery, ContextScorer};
@@ -70,6 +70,51 @@ impl HybridContextScorer {
     }
 }
 
+/// Reward an entry that matches several distinctive terms from the active
+/// context query. Hybrid search already blends lexical relevance with recency
+/// and importance, but a recently-created generic entry can otherwise crowd a
+/// task-specific memory out of the compact ambient-memory window.
+fn contextual_overlap_bonus(entry: &Entry, query: &str) -> f32 {
+    const COMMON_CONTEXT_TERMS: &[&str] = &[
+        "about", "after", "against", "and", "are", "for", "from", "into", "must", "not", "the",
+        "that", "this", "with",
+    ];
+    let query_terms: HashSet<String> = query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .filter(|term| !COMMON_CONTEXT_TERMS.contains(&term.as_str()))
+        .collect();
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+
+    let mut entry_text = entry.content.clone();
+    if let Some(title) = &entry.title {
+        entry_text.push(' ');
+        entry_text.push_str(title);
+    }
+    let entry_terms: HashSet<String> = entry_text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect();
+    let matching_terms = query_terms.intersection(&entry_terms).count();
+
+    // One common word such as "report" is not enough to make a memory
+    // task-specific. Multiple overlapping terms are durable evidence that it
+    // belongs in the focused ambient context.
+    if matching_terms < 2 {
+        return 0.0;
+    }
+
+    // Score the evidence itself rather than diluting it by the full query
+    // length. Task context commonly repeats title terms in the description and
+    // appends the cwd, neither of which should weaken a genuine lexical match.
+    // Cap the boost so preferences retain their stronger type weighting.
+    (0.2 * matching_terms as f32).min(1.0)
+}
+
 impl ContextScorer for HybridContextScorer {
     fn score_entries(&self, entries: &[Entry], context: &ContextQuery) -> Vec<(Entry, f32)> {
         let query = context.to_query_string();
@@ -79,8 +124,8 @@ impl ContextScorer for HybridContextScorer {
             return BasicContextScorer.score_entries(entries, context);
         }
 
-        // Try hybrid search scoring
-        match self.score_with_hybrid(entries, &query) {
+        // Try hybrid search scoring.
+        let mut scored = match self.score_with_hybrid(entries, &query) {
             Ok(hybrid_scores) if !hybrid_scores.is_empty() => {
                 // Build lookup map for hybrid scores
                 let hybrid_map: HashMap<&str, f32> = hybrid_scores
@@ -89,7 +134,7 @@ impl ContextScorer for HybridContextScorer {
                     .collect();
 
                 // Combine hybrid scores with basic scores for entries not in hybrid results
-                let mut scored: Vec<(Entry, f32)> = entries
+                let scored: Vec<(Entry, f32)> = entries
                     .iter()
                     .map(|e| {
                         let hybrid_score = hybrid_map.get(e.id.as_str()).copied();
@@ -115,16 +160,21 @@ impl ContextScorer for HybridContextScorer {
                     })
                     .collect();
 
-                // Sort by score descending
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
                 scored
             }
             Ok(_) | Err(_) => {
                 // Hybrid search returned empty or failed - use basic scoring
                 BasicContextScorer.score_entries(entries, context)
             }
+        };
+
+        // Apply this after either hybrid or basic scoring, so task-focused
+        // context remains reliable while an index is warming or unavailable.
+        for (entry, score) in &mut scored {
+            *score += contextual_overlap_bonus(entry, &query);
         }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
     }
 
     fn name(&self) -> &'static str {
@@ -173,5 +223,32 @@ mod tests {
         let scored = BasicContextScorer.score_entries(&entries, &context);
         assert_eq!(scored.len(), 1);
         assert!(scored[0].1 > 0.0);
+    }
+
+    #[test]
+    fn contextual_overlap_bonus_prioritizes_multi_term_task_matches() {
+        let task_memory = Entry {
+            content: "Gate restoration must preserve the dual identity report contract.".into(),
+            importance: 0.1,
+            ..Default::default()
+        };
+        let generic_memory = Entry {
+            content: "Generic historical process note with no report-specific guidance.".into(),
+            importance: 0.95,
+            ..Default::default()
+        };
+        let query = "Gate 2D restoration report with dual-identity checks Produce HTML report \
+                     deliverables covering Gate 2D restoration and dual-identity .tmp-project";
+
+        let task_score = BasicContextScorer::calculate_score(&task_memory)
+            + contextual_overlap_bonus(&task_memory, query);
+        let generic_score = BasicContextScorer::calculate_score(&generic_memory)
+            + contextual_overlap_bonus(&generic_memory, query);
+
+        assert!(
+            task_score > generic_score,
+            "a multi-term task match ({task_score}) must outrank a high-importance generic memory ({generic_score}) when hybrid search falls back"
+        );
+        assert_eq!(contextual_overlap_bonus(&generic_memory, query), 0.0);
     }
 }

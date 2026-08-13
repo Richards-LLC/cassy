@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Structural guardrails for the `cas-code-review` orchestrator SKILL.md
 //! (Phase 1 Subsystem A, Unit 4 — task cas-71ed).
 //!
@@ -37,8 +39,7 @@ fn workflow_script_path() -> PathBuf {
 }
 
 fn read(path: &Path) -> String {
-    fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
 /// Required headings for the Phase C thin-wrapper skill (as substring matches
@@ -52,10 +53,10 @@ fn read(path: &Path) -> String {
 /// the Workflow). The test now checks that the combined handoff section is
 /// present AND that the Workflow owns the structural invariants for Steps 1-4.
 const REQUIRED_SECTIONS: &[&str] = &[
-    "Step 0",        // Tiny-diff bypass (still in skill)
-    "Step 5",        // Mode-specific output (still in skill)
+    "Step 0",         // Tiny-diff bypass (still in skill)
+    "Step 5",         // Mode-specific output (still in skill)
     "Mode reference", // Four-mode table (still in skill)
-    "Workflow",      // Skill must reference the Workflow call-site
+    "Workflow",       // Skill must reference the Workflow call-site
 ];
 
 fn assert_sections_present(skill: &str, label: &str) {
@@ -256,14 +257,18 @@ fn fixer_prompt_exists_in_both_mirrors() {
     }
 
     // Both mirrors must be byte-identical.
-    let claude_fixer = read(&claude_skill_path()
-        .parent()
-        .unwrap()
-        .join("references/fixer.md"));
-    let codex_fixer = read(&codex_skill_path()
-        .parent()
-        .unwrap()
-        .join("references/fixer.md"));
+    let claude_fixer = read(
+        &claude_skill_path()
+            .parent()
+            .unwrap()
+            .join("references/fixer.md"),
+    );
+    let codex_fixer = read(
+        &codex_skill_path()
+            .parent()
+            .unwrap()
+            .join("references/fixer.md"),
+    );
     assert_eq!(
         claude_fixer, codex_fixer,
         "claude and codex fixer.md mirrors must be byte-identical"

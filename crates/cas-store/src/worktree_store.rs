@@ -157,7 +157,7 @@ impl SqliteWorktreeStore {
 impl WorktreeStore for SqliteWorktreeStore {
     fn init(&self) -> Result<()> {
         // Ensure schema exists for tests/standalone usage (migrations in production).
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(WORKTREE_SCHEMA)?;
         Ok(())
     }
@@ -167,7 +167,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn add(&self, worktree: &Worktree) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO worktrees (id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit)
@@ -190,7 +190,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn get(&self, id: &str) -> Result<Worktree> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit
@@ -203,7 +203,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn get_by_epic(&self, epic_id: &str) -> Result<Option<Worktree>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit
@@ -216,7 +216,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn get_by_branch(&self, branch: &str) -> Result<Option<Worktree>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit
@@ -229,7 +229,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn get_by_path(&self, path: &Path) -> Result<Option<Worktree>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let path_str = path.to_string_lossy().to_string();
         conn.query_row(
             "SELECT id, epic_id, branch, parent_branch, path, status,
@@ -243,7 +243,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn update(&self, worktree: &Worktree) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE worktrees SET epic_id = ?1, branch = ?2, parent_branch = ?3,
              path = ?4, status = ?5, merged_at = ?6, removed_at = ?7,
@@ -271,7 +271,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn list(&self) -> Result<Vec<Worktree>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit
@@ -286,7 +286,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn list_active(&self) -> Result<Vec<Worktree>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit
@@ -301,7 +301,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn list_by_status(&self, status: WorktreeStatus) -> Result<Vec<Worktree>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, epic_id, branch, parent_branch, path, status,
              created_at, merged_at, removed_at, created_by_agent, merge_commit
@@ -316,7 +316,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM worktrees WHERE id = ?", params![id])?;
         if rows == 0 {
             return Err(StoreError::Other(format!("Worktree not found: {id}")));
@@ -325,7 +325,7 @@ impl WorktreeStore for SqliteWorktreeStore {
     }
 
     fn prune(&self, older_than_days: i64) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
 
         let rows = conn.execute(

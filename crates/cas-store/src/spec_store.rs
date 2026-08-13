@@ -131,7 +131,7 @@ impl SqliteSpecStore {
         let hash = hasher.finish();
         let chars: Vec<char> = format!("{hash:016x}").chars().collect();
 
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         for len in 4..=8 {
             let id = format!("spec-{}", chars[..len].iter().collect::<String>());
             let exists: bool = conn
@@ -188,7 +188,7 @@ impl SqliteSpecStore {
 
 impl SpecStore for SqliteSpecStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(SPEC_SCHEMA)?;
         Ok(())
     }
@@ -198,7 +198,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn add(&self, spec: &Spec) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO specs (
                 id, scope, title, summary, goals, in_scope, out_of_scope, users,
@@ -240,7 +240,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn get(&self, id: &str) -> Result<Spec> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, scope, title, summary, goals, in_scope, out_of_scope, users,
              technical_requirements, acceptance_criteria, design_notes, additional_notes,
@@ -255,7 +255,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn update(&self, spec: &Spec) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE specs SET
                 scope = ?1, title = ?2, summary = ?3, goals = ?4, in_scope = ?5,
@@ -298,7 +298,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM specs WHERE id = ?", params![id])?;
         if rows == 0 {
             return Err(StoreError::NotFound(format!("spec not found: {id}")));
@@ -307,7 +307,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn list(&self, status: Option<SpecStatus>) -> Result<Vec<Spec>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let (sql, params): (&str, Vec<String>) = match status {
             Some(s) => (
@@ -345,7 +345,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn get_for_task(&self, task_id: &str) -> Result<Vec<Spec>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, scope, title, summary, goals, in_scope, out_of_scope, users,
              technical_requirements, acceptance_criteria, design_notes, additional_notes,
@@ -362,7 +362,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn get_versions(&self, spec_id: &str) -> Result<Vec<Spec>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // First, find the root by traversing backwards through previous_version_id
         let mut current_id = spec_id.to_string();
@@ -425,7 +425,7 @@ impl SpecStore for SqliteSpecStore {
     }
 
     fn search(&self, query: &str) -> Result<Vec<Spec>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let pattern = format!("%{query}%");
 
         let mut stmt = conn.prepare_cached(

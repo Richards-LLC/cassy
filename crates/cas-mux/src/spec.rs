@@ -12,11 +12,8 @@ use crate::SupervisorCli;
 
 /// Reasoning effort level, shared across backends.
 ///
-/// - Claude: passed as `--effort <level>` (see [`Effort::as_claude_arg`]).
-/// - Codex: passed as `--config model_reasoning_effort=<level>` (see
-///   [`Effort::as_codex_config`]).
-///
-/// Both backends accept the same vocabulary: `minimal|low|medium|high|xhigh`.
+/// Backends map this shared value to their own CLI/config syntax through
+/// [`Backend::effort_arg`](crate::Backend::effort_arg).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -30,19 +27,8 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// The string passed to Claude's `--effort` flag.
-    pub fn as_claude_arg(self) -> &'static str {
-        match self {
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-        }
-    }
-
-    /// The value half of Codex's `--config model_reasoning_effort=<v>`.
-    pub fn as_codex_config(self) -> &'static str {
+    /// Canonical configuration spelling shared by serialization and display.
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Minimal => "minimal",
             Self::Low => "low",
@@ -72,7 +58,7 @@ impl FromStr for Effort {
 
 impl std::fmt::Display for Effort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_claude_arg())
+        f.write_str(self.as_str())
     }
 }
 
@@ -159,8 +145,22 @@ mod tests {
             (Effort::XHigh, "xhigh"),
         ];
         for (variant, s) in cases {
-            assert_eq!(variant.as_claude_arg(), s, "claude_arg mismatch for {variant:?}");
-            assert_eq!(variant.as_codex_config(), s, "codex_config mismatch for {variant:?}");
+            assert_eq!(
+                variant.as_str(),
+                s,
+                "canonical spelling mismatch for {variant:?}"
+            );
+            for cli in [
+                SupervisorCli::Claude,
+                SupervisorCli::Codex,
+                SupervisorCli::Grok,
+            ] {
+                assert_eq!(
+                    cli.backend().effort_arg(variant),
+                    s,
+                    "backend effort mismatch for {cli:?}/{variant:?}"
+                );
+            }
             assert_eq!(
                 s.parse::<Effort>().unwrap(),
                 variant,

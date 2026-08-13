@@ -493,7 +493,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message),
+                message: Cow::from(message.to_string()),
                 data: None,
             });
         }
@@ -509,7 +509,7 @@ impl CasCore {
             ) {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
+                    message: Cow::from(message.to_string()),
                     data: None,
                 });
             }
@@ -1073,7 +1073,7 @@ impl CasCore {
                     &task,
                     close_repo_context.as_ref(),
                 ) {
-                    return Ok(Self::tool_error(message));
+                    return Ok(Self::tool_error(message.to_string()));
                 }
             }
             if new_status != task.status {

@@ -421,8 +421,8 @@ fn build_boot_profile(config: &FactoryConfig, worker_count: usize) -> String {
         "shared directory"
     };
 
-    let supervisor_cli = config.supervisor_cli.as_str();
-    let worker_cli = config.worker_cli.as_str();
+    let supervisor_cli = config.supervisor_cli.backend().name();
+    let worker_cli = config.worker_cli.backend().name();
 
     if worker_count == 0 {
         format!("supervisor-only • {mode} • {supervisor_cli}")

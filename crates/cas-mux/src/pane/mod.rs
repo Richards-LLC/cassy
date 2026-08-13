@@ -9,6 +9,7 @@ mod snapshot;
 mod style;
 mod tests;
 
+use crate::backend::{SupervisorLaunchConfig, WorkerLaunchConfig};
 use crate::error::{Error, Result};
 use crate::harness::SupervisorCli;
 use crate::pane::style::{cell_style_to_ratatui, debug_log_enabled};
@@ -328,72 +329,19 @@ impl Pane {
         // default in place.
         active_workers: Option<usize>,
     ) -> PtyConfig {
-        let mut config = match cli {
-            SupervisorCli::Claude => PtyConfig::claude(
-                name,
-                "worker",
-                cwd,
-                cas_root,
-                Some(supervisor_name),
-                None,
-                model,
-                effort,
-                teams,
-            ),
-            SupervisorCli::Codex => PtyConfig::codex(
-                name,
-                "worker",
-                cwd,
-                cas_root,
-                Some(supervisor_name),
-                None,
-                model,
-                effort,
-                teams,
-            ),
-            // cas-6569 (EPIC cas-8888, Phase 2): real driver — see
-            // PtyConfig::grok's doc comment (crates/cas-pty/src/pty.rs) for
-            // the verified flag set and the MCP/context-injection design.
-            SupervisorCli::Grok => PtyConfig::grok(
-                name,
-                "worker",
-                cwd,
-                cas_root,
-                Some(supervisor_name),
-                None,
-                model,
-                effort,
-                teams,
-            ),
-        };
-        if cli == SupervisorCli::Claude {
-            config.apply_claude_config_dir(config_dir, config_dir_source);
-        }
-        config.apply_worker_build_concurrency(active_workers);
-        config.env.push((
-            "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
-            supervisor_cli.as_str().to_string(),
-        ));
-        // cas-6569 (EPIC cas-8888, Phase 2) SILENT SITE — audited and
-        // RESOLVED (was left open in Phase 1): confirmed against the real
-        // grok 0.2.93 binary that it has NO `-c`/config-override flag at
-        // all — `grok mcp add` only writes to persistent
-        // ~/.grok/config.toml, there's no per-launch equivalent. This `-c
-        // mcp_servers.cs.env.*` arg is Codex-specific syntax and stays
-        // `== Codex` intentionally: Grok gets CAS_FACTORY_SUPERVISOR_CLI
-        // the same way Claude already does — as a plain env var on the
-        // process itself (pushed just above), relying on ordinary
-        // child-process env inheritance when Grok spawns `cas serve` per
-        // its resolved MCP config. See PtyConfig::grok's doc comment
-        // (crates/cas-pty/src/pty.rs) for the full verification trail.
-        if cli == SupervisorCli::Codex {
-            config.args.push("-c".to_string());
-            config.args.push(format!(
-                "mcp_servers.cs.env.CAS_FACTORY_SUPERVISOR_CLI=\"{}\"",
-                supervisor_cli.as_str()
-            ));
-        }
-        config
+        cli.backend().build_worker_config(WorkerLaunchConfig {
+            name,
+            cwd,
+            cas_root,
+            supervisor_name,
+            supervisor_cli,
+            model,
+            effort,
+            config_dir,
+            config_dir_source,
+            teams,
+            active_workers,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -414,7 +362,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
     ) -> Result<Self> {
-        Self::pre_trust_codex_workdir(cli, &cwd)?;
+        cli.backend().prepare_workdir(&cwd)?;
         let mut config = Self::build_worker_config(
             name,
             cwd,
@@ -453,55 +401,17 @@ impl Pane {
         effort: Option<&str>,
         teams: Option<&TeamsSpawnConfig>,
     ) -> PtyConfig {
-        let worker_cli_str = worker_cli.as_str();
-        let worker_names_csv = if worker_names.is_empty() {
-            None
-        } else {
-            Some(worker_names.join(","))
-        };
-        let mut config = match cli {
-            SupervisorCli::Claude => PtyConfig::claude(
+        cli.backend()
+            .build_supervisor_config(SupervisorLaunchConfig {
                 name,
-                "supervisor",
                 cwd,
                 cas_root,
-                None,
-                Some(worker_cli_str),
+                worker_cli,
+                worker_names,
                 model,
                 effort,
                 teams,
-            ),
-            SupervisorCli::Codex => PtyConfig::codex(
-                name,
-                "supervisor",
-                cwd,
-                cas_root,
-                None,
-                Some(worker_cli_str),
-                model,
-                effort,
-                teams,
-            ),
-            // cas-6569 (EPIC cas-8888, Phase 2): real driver — see
-            // PtyConfig::grok's doc comment. `cas grok` (the standalone
-            // supervisor launcher CLI command) is still Phase 3's job
-            // (cas-964a); this only wires the underlying PtyConfig so a
-            // grok supervisor pane, however it gets spawned, launches
-            // correctly.
-            SupervisorCli::Grok => PtyConfig::grok(
-                name,
-                "supervisor",
-                cwd,
-                cas_root,
-                None,
-                Some(worker_cli_str),
-                model,
-                effort,
-                teams,
-            ),
-        };
-        Self::push_supervisor_env(&mut config.env, cli, &worker_names_csv);
-        config
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -519,7 +429,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
-        Self::pre_trust_codex_workdir(cli, &cwd)?;
+        cli.backend().prepare_workdir(&cwd)?;
         let mut config = Self::build_supervisor_config(
             name,
             cwd,
@@ -539,50 +449,6 @@ impl Pane {
             pane.set_harness_session_id(sid);
         }
         Ok(pane)
-    }
-
-    /// cas-28a49 (GH #97): make the pane's cwd trusted for Codex **before** the
-    /// process starts.
-    ///
-    /// Codex CLI parks on its interactive "do you trust this folder?" prompt
-    /// when the directory is absent from `[projects]` in
-    /// `$CODEX_HOME/config.toml`. It parks before rendering, before writing a
-    /// session file, and before starting `cas serve` — so the worker never
-    /// registers and the spawn dies at `stage=register` with a generic 60s
-    /// timeout. Verified against codex-cli 0.146.0; see
-    /// `cas_pty::codex_trust` for the measurements and for why the `-c`
-    /// config-override flag cannot be used instead.
-    ///
-    /// This is a launch precondition rather than best effort: Codex reads this
-    /// config once at startup, so launching before the locked write's read-back
-    /// verification completes can park the worker permanently at its trust
-    /// prompt.
-    fn pre_trust_codex_workdir(cli: SupervisorCli, cwd: &std::path::Path) -> Result<()> {
-        if cli != SupervisorCli::Codex {
-            return Ok(());
-        }
-        match cas_pty::ensure_project_trusted(cwd)? {
-            cas_pty::CodexTrustOutcome::Added(_) | cas_pty::CodexTrustOutcome::AlreadyPresent => {
-                Ok(())
-            }
-            cas_pty::CodexTrustOutcome::Skipped(reason) => Err(Error::pty(format!(
-                "refusing to launch Codex before its project trust is verified: {reason}"
-            ))),
-        }
-    }
-
-    fn push_supervisor_env(
-        env: &mut Vec<(String, String)>,
-        cli: SupervisorCli,
-        worker_names_csv: &Option<String>,
-    ) {
-        env.push((
-            "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
-            cli.as_str().to_string(),
-        ));
-        if let Some(csv) = worker_names_csv {
-            env.push(("CAS_FACTORY_WORKER_NAMES".to_string(), csv.clone()));
-        }
     }
 
     pub fn id(&self) -> &str {
@@ -1260,7 +1126,7 @@ impl Pane {
         // Only Grok has an on-disk turn_ended signal we consume here.
         // Claude/Codex clear only on cancel or a caller-provided authoritative
         // completion; no such normal-completion caller currently exists.
-        if self.harness != SupervisorCli::Grok
+        if !self.harness.backend().has_turn_event_stream()
             && self
                 .harness_events_path_override
                 .lock()
@@ -1561,7 +1427,8 @@ impl Pane {
     pub async fn break_turn(&self) -> Result<()> {
         match &self.backend {
             PaneBackend::Pty(pty) => {
-                pty.write(self.harness.turn_cancel_bytes()).await?;
+                pty.write(self.harness.backend().turn_cancel_bytes())
+                    .await?;
                 self.clear_turn_in_flight();
                 self.clear_composer_dirty();
                 Ok(())
@@ -1825,35 +1692,8 @@ pub(crate) fn push_factory_session_env(
     factory_session: Option<&str>,
 ) {
     if let Some(session) = factory_session {
-        config
-            .env
-            .push(("CAS_FACTORY_SESSION".to_string(), session.to_string()));
-        // cas-6569 (EPIC cas-8888, Phase 2) SILENT SITE — audited and
-        // RESOLVED, same rationale as build_worker_config above: Grok has
-        // no `-c`-style flag to mirror, and gets CAS_FACTORY_SESSION via
-        // the plain env var pushed just above (process env inheritance),
-        // same as Claude.
-        if cli == SupervisorCli::Codex {
-            let session = sanitize_factory_session_for_toml_arg(session);
-            config.args.push("-c".to_string());
-            config.args.push(format!(
-                "mcp_servers.cs.env.CAS_FACTORY_SESSION=\"{session}\""
-            ));
-        }
+        cli.backend().push_factory_session(config, session);
     }
-}
-
-fn sanitize_factory_session_for_toml_arg(session: &str) -> String {
-    session
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

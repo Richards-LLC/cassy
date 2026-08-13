@@ -7,7 +7,7 @@ use rusqlite::params;
 
 impl SqliteStore {
     pub(crate) fn store_list_pending(&self, limit: usize) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -25,7 +25,7 @@ impl SqliteStore {
         Ok(entries)
     }
     pub(crate) fn store_mark_extracted(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE entries SET pending_extraction = 0 WHERE id = ?",
             params![id],
@@ -36,7 +36,7 @@ impl SqliteStore {
         Ok(())
     }
     pub(crate) fn store_list_pinned(&self) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -54,7 +54,7 @@ impl SqliteStore {
         Ok(entries)
     }
     pub(crate) fn store_list_helpful(&self, limit: usize) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -74,7 +74,7 @@ impl SqliteStore {
         Ok(entries)
     }
     pub(crate) fn store_list_by_session(&self, session_id: &str) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -93,7 +93,7 @@ impl SqliteStore {
         Ok(entries)
     }
     pub(crate) fn store_list_unreviewed_learnings(&self, limit: usize) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -113,7 +113,7 @@ impl SqliteStore {
         Ok(entries)
     }
     pub(crate) fn store_mark_reviewed(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE entries SET last_reviewed = ? WHERE id = ?",

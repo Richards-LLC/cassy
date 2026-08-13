@@ -127,7 +127,7 @@ impl SqliteSkillStore {
         let chars: Vec<char> = format!("{hash:016x}").chars().collect();
 
         // Try sk + 2-char, then sk + 3-char, then sk + 4-char IDs
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         for len in 2..=4 {
             let id = format!("cas-sk{}", chars[..len].iter().collect::<String>());
             let exists: bool = conn
@@ -217,7 +217,7 @@ impl SqliteSkillStore {
 
 impl SkillStore for SqliteSkillStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(SKILL_SCHEMA)?;
         // NOTE: Column migrations are handled by `cas update --schema-only`
         Ok(())
@@ -228,7 +228,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn add(&self, skill: &Skill) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute(
             "INSERT INTO skills (id, name, description, skill_type, invocation, parameters_schema,
              example, preconditions, postconditions, validation_script, status, tags, summary,
@@ -270,7 +270,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn get(&self, id: &str) -> Result<Skill> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
             "SELECT id, name, description, skill_type, invocation, parameters_schema,
              example, preconditions, postconditions, validation_script, status, tags, summary,
@@ -286,7 +286,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn update(&self, skill: &Skill) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute(
             "UPDATE skills SET name = ?1, description = ?2, skill_type = ?3,
              invocation = ?4, parameters_schema = ?5, example = ?6,
@@ -336,7 +336,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let rows = conn.execute("DELETE FROM skills WHERE id = ?", params![id])?;
         if rows == 0 {
             return Err(StoreError::NotFound(format!("skill not found: {id}")));
@@ -345,7 +345,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn list(&self, status: Option<SkillStatus>) -> Result<Vec<Skill>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let (sql, params): (&str, Vec<String>) = match status {
             Some(s) => (
@@ -385,7 +385,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn search(&self, query: &str) -> Result<Vec<Skill>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let pattern = format!("%{query}%");
 
         let mut stmt = conn.prepare_cached(

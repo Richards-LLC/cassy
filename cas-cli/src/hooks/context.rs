@@ -50,6 +50,19 @@ const HOST_CONSTRAINT_LINE_BUDGET_BYTES: usize = 220;
 /// 4. Records tracing information
 /// 5. Handles feedback nudging
 pub fn build_context(input: &HookInput, limit: usize, cas_root: &Path) -> Result<String, MemError> {
+    build_context_with_token_budget(input, limit, cas_root, None)
+}
+
+/// Build context with an optional per-request token budget.
+///
+/// MCP callers use this for task-focused ambient context so `max_tokens` is
+/// honored without persisting a temporary hook configuration to disk.
+pub fn build_context_with_token_budget(
+    input: &HookInput,
+    limit: usize,
+    cas_root: &Path,
+    token_budget: Option<usize>,
+) -> Result<String, MemError> {
     // Open stores
     let project_store: Option<Arc<dyn Store>> = open_store(cas_root).ok();
     let project_rule_store: Option<Arc<dyn RuleStore>> = open_rule_store(cas_root).ok();
@@ -63,7 +76,13 @@ pub fn build_context(input: &HookInput, limit: usize, cas_root: &Path) -> Result
         .ok()
         .map(|s| Arc::new(s) as Arc<dyn KnowledgeStore>);
 
-    let config = Config::load(cas_root).unwrap_or_default();
+    let mut config = Config::load(cas_root).unwrap_or_default();
+    if let Some(token_budget) = token_budget {
+        config
+            .hooks
+            .get_or_insert_with(Default::default)
+            .token_budget = token_budget;
+    }
 
     // Try to initialize hybrid context scorer for semantic relevance
     // Falls back to basic scoring if search infrastructure isn't available

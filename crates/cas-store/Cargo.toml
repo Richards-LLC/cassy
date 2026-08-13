@@ -6,6 +6,9 @@ rust-version = "1.85"
 description = "Storage layer for CAS (Coding Agent System)"
 license = "MIT"
 
+[lints.clippy]
+unwrap_used = "deny"
+
 [dependencies]
 # Core types
 cas-types = { path = "../cas-types" }
@@ -20,8 +23,8 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # Error handling
-thiserror = "2.0"
-anyhow = "1.0"
+thiserror.workspace = true
+anyhow.workspace = true
 
 # Date/Time
 chrono = { version = "0.4", features = ["serde"] }

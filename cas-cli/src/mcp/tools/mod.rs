@@ -8,7 +8,10 @@
 //! - Search tools (1): Unified search with doc_type filter
 //! - System tools (7): Context, stats, diagnostics, and utilities
 
-use crate::hooks::{HookInput, build_context, handle_session_end, handle_session_start};
+use crate::hooks::{
+    HookInput, build_context, build_context_with_token_budget, handle_session_end,
+    handle_session_start,
+};
 use crate::types::{
     BeliefType, ClaimResult, DEFAULT_LEASE_DURATION_SECS, Dependency, DependencyType, Entry,
     EntryType, LeaseStatus, MemoryTier, ObservationType, Priority, Rule, RuleStatus, Scope, Skill,

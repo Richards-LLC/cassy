@@ -556,7 +556,7 @@ pub fn expire_stale_bounded(
 
 impl ReminderStore for SqliteReminderStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(REMINDER_SCHEMA)?;
         self.migrate(&conn)?;
         Ok(())
@@ -605,7 +605,7 @@ impl ReminderStore for SqliteReminderStore {
         cross_session: bool,
         task_id: Option<&str>,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let trigger_at_str = trigger_at.map(|dt| dt.to_rfc3339());
         let trigger_filter_str = trigger_filter.map(|f| f.to_string());
@@ -647,7 +647,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn list_pending(&self, owner_id: &str) -> Result<Vec<Reminder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let sql = format!(
             "SELECT {} FROM reminders WHERE supervisor_id = ? AND status = 'pending' ORDER BY created_at ASC",
             Self::SELECT_COLUMNS
@@ -662,7 +662,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn list_pending_for_target(&self, target_id: &str) -> Result<Vec<Reminder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let sql = format!(
             "SELECT {} FROM reminders WHERE target_id = ? AND status = 'pending' ORDER BY created_at ASC",
             Self::SELECT_COLUMNS
@@ -677,7 +677,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn list_all_pending(&self) -> Result<Vec<Reminder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let sql = format!(
             "SELECT {} FROM reminders WHERE status = 'pending' ORDER BY created_at ASC",
             Self::SELECT_COLUMNS
@@ -692,7 +692,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn list_recently_fired(&self, within_secs: i64) -> Result<Vec<Reminder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(within_secs)).to_rfc3339();
         let sql = format!(
             "SELECT {} FROM reminders WHERE status = 'fired' AND fired_at >= ? ORDER BY fired_at DESC",
@@ -708,7 +708,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn get_due_time_reminders(&self) -> Result<Vec<Reminder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let sql = format!(
             "SELECT {} FROM reminders WHERE trigger_type = 'time' AND status = 'pending' AND trigger_at <= ? ORDER BY trigger_at ASC",
@@ -724,7 +724,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn get_event_reminders(&self, event_type: &str) -> Result<Vec<Reminder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let sql = format!(
             "SELECT {} FROM reminders WHERE trigger_type = 'event' AND status = 'pending' AND trigger_event = ? ORDER BY created_at ASC",
             Self::SELECT_COLUMNS
@@ -739,7 +739,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn mark_fired(&self, id: i64, fired_event: Option<&serde_json::Value>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let event_str = fired_event.map(|e| e.to_string());
 
@@ -758,7 +758,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn cancel(&self, id: i64, owner_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
 
         let rows = conn.execute(
@@ -776,7 +776,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn cancel_pending_for_target(&self, target_id: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
@@ -787,7 +787,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn cancel_pending_for_origin_session(&self, origin_session_id: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
@@ -799,7 +799,7 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn cancel_pending_for_task(&self, task_id: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
@@ -811,12 +811,12 @@ impl ReminderStore for SqliteReminderStore {
     }
 
     fn expire_stale(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         expire_stale_with_conn(&conn)
     }
 
     fn prune(&self, older_than_days: i64) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
 
         let rows = conn.execute(

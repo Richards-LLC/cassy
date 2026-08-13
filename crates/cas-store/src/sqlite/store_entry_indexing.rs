@@ -8,7 +8,7 @@ use std::path::Path;
 
 impl SqliteStore {
     pub(crate) fn store_list_pending_index(&self, limit: usize) -> Result<Vec<Entry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, type, tags, created, content, title, helpful_count,
              harmful_count, last_accessed, archived, session_id, source_tool,
@@ -28,7 +28,7 @@ impl SqliteStore {
         Ok(entries)
     }
     pub(crate) fn store_mark_indexed(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE entries SET indexed_at = ? WHERE id = ?",
@@ -45,7 +45,7 @@ impl SqliteStore {
         }
 
         const CHUNK_SIZE: usize = 500;
-        let conn = self.conn.lock().unwrap();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
 
         for chunk in ids.chunks(CHUNK_SIZE) {

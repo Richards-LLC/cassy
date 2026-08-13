@@ -105,8 +105,7 @@ fn recent_other_epic_planner(
         .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
         .filter_map(|dependency| {
             let planner = dependency.created_by?;
-            (planner != creator
-                && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
+            (planner != creator && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
         .max_by_key(|(_, created_at)| *created_at);
@@ -184,7 +183,8 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_create_with_target(req, None, None, false).await
+        self.cas_task_create_with_target(req, None, None, false)
+            .await
     }
 
     pub(crate) async fn cas_task_create_with_target(
@@ -261,10 +261,12 @@ impl CasCore {
             }
 
             if let Some((existing_id, existing_title, score)) =
-                open_task_title_overlap(task_store.as_ref(), &req.title).map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
-                    data: None,
+                open_task_title_overlap(task_store.as_ref(), &req.title).map_err(|error| {
+                    McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
+                        data: None,
+                    }
                 })?
             {
                 return Err(McpError {
@@ -550,20 +552,28 @@ impl CasCore {
 
         // If epic filter specified, get subtasks and filter to ready ones
         let mut tasks = if let Some(ref epic_id) = req.epic {
-            let subtasks = task_store.get_subtasks(epic_id).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to get subtasks for epic {epic_id}: {e}")),
-                data: None,
-            })?;
-            // Filter to only ready tasks (open, not blocked)
-            subtasks
+            let subtask_ids = task_store
+                .get_subtasks(epic_id)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to get subtasks for epic {epic_id}: {e}")),
+                    data: None,
+                })?
                 .into_iter()
-                .filter(|t| {
-                    t.status == cas_types::TaskStatus::Open
-                        && task_store
-                            .get_blockers(&t.id)
-                            .map_or(true, |b| b.is_empty())
-                })
+                .map(|task| task.id)
+                .collect::<std::collections::HashSet<_>>();
+            // list_ready is the canonical readiness policy: it combines local
+            // and projected external blockers. Filter that result by the
+            // epic, rather than reimplementing its local-only SQL predicate.
+            task_store
+                .list_ready()
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to list ready tasks: {e}")),
+                    data: None,
+                })?
+                .into_iter()
+                .filter(|task| subtask_ids.contains(&task.id))
                 .collect()
         } else {
             task_store.list_ready().map_err(|e| McpError {
@@ -677,6 +687,7 @@ impl CasCore {
         }
 
         super::ensure_no_open_blockers(task_store.as_ref(), &req.id, "start")?;
+        super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
 
         if let Some(target) = task.deliverables.work_target.as_ref() {
             super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
@@ -742,11 +753,12 @@ impl CasCore {
         // resolver as the other non-delivery terminal outcomes so env-role
         // spoofing cannot authorize the start.
         if task.task_type == crate::types::TaskType::Gate {
-            self.resolve_live_supervisor_authority()
-                .map_err(|error| Self::error(
+            self.resolve_live_supervisor_authority().map_err(|error| {
+                Self::error(
                     ErrorCode::INVALID_PARAMS,
                     close_ops::gate_supervisor_authority_error("START", error),
-                ))?;
+                )
+            })?;
         }
 
         // Check agent role for supervisor/worker-specific logic

@@ -72,8 +72,14 @@ use crate::error::CoreError;
 /// Returns (extracted_ids, remaining_query)
 /// Matches patterns like: cas-XXXX, cas-sk0a, rule-041, etc.
 pub fn extract_id_patterns(query: &str) -> (Vec<String>, String) {
-    let re = Regex::new(r"(?i)\b(cas-[a-z0-9]{2,8}|rule-[a-z0-9]{2,6}|skill-[a-z0-9]{2,6})\b")
-        .unwrap_or_else(|_| Regex::new("$").expect("fallback regex"));
+    // Legacy local IDs remain case-insensitive 2..=8 alphanumerics. Cloud
+    // reserved task IDs are a distinct wire contract: exactly sixteen
+    // *lowercase* hexadecimal characters, with word boundaries preventing a
+    // prefix of a longer invalid token from being accepted.
+    let re = Regex::new(
+        r"\b(cas-[0-9a-f]{16}|(?i:cas-[a-z0-9]{2,8}|rule-[a-z0-9]{2,6}|skill-[a-z0-9]{2,6}))\b",
+    )
+    .unwrap_or_else(|_| Regex::new("$").expect("fallback regex"));
 
     let mut ids = Vec::new();
     let mut remaining = query.to_string();

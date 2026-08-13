@@ -4198,11 +4198,20 @@ impl CasCore {
                     if dependent_task.status != TaskStatus::Blocked {
                         continue;
                     }
-                    let is_unblocked = task_store
+                    let local_blockers_cleared = task_store
                         .get_blockers(&dependent_task.id)
                         .map(|blockers| blockers.is_empty())
                         .unwrap_or(false);
-                    if !is_unblocked {
+                    // A task may be locally clear but still wait on an
+                    // unresolved cloud-owned dependency. Never emit a
+                    // ReadyReopened transition until both blocker domains
+                    // agree; a storage failure is fail-closed here.
+                    let external_blockers_cleared =
+                        cas_store::ExternalTaskDependencyStore::open(&self.cas_root)
+                            .and_then(|store| store.list_blocking_for_task(&dependent_task.id))
+                            .map(|blockers| blockers.is_empty())
+                            .unwrap_or(false);
+                    if !(local_blockers_cleared && external_blockers_cleared) {
                         continue;
                     }
                     dependent_task.status = TaskStatus::Open;

@@ -83,6 +83,32 @@ CREATE TABLE IF NOT EXISTS dependencies (
 CREATE INDEX IF NOT EXISTS idx_deps_from ON dependencies(from_id);
 CREATE INDEX IF NOT EXISTS idx_deps_to ON dependencies(to_id);
 CREATE INDEX IF NOT EXISTS idx_deps_type ON dependencies(dep_type);
+
+CREATE TABLE IF NOT EXISTS external_task_dependencies (
+    origin_task_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    target_project_canonical_id TEXT NOT NULL DEFAULT '',
+    target_task_id TEXT NOT NULL,
+    proposal_state TEXT NOT NULL,
+    target_task_status TEXT,
+    resolution_state TEXT NOT NULL,
+    resolved_at TEXT,
+    suppressed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (origin_task_id, proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_external_task_dependencies_origin_state
+    ON external_task_dependencies(origin_task_id, resolution_state);
+CREATE TABLE IF NOT EXISTS external_task_dependency_sync_state (
+    origin_project_canonical_id TEXT PRIMARY KEY,
+    cursor TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_proposal_request_keys (
+    request_fingerprint TEXT PRIMARY KEY,
+    client_request_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 "#;
 
 /// SQLite-based task store
@@ -837,6 +863,12 @@ impl TaskStore for SqliteTaskStore {
                  AND d.dep_type = 'blocks'
                  AND blocker.status NOT IN ('closed', 'cancelled')
              )
+             AND NOT EXISTS (
+                 SELECT 1 FROM external_task_dependencies external
+                 WHERE external.origin_task_id = t.id
+                 AND external.resolution_state != 'resolved'
+                 AND external.suppressed_at IS NULL
+             )
              ORDER BY t.priority, t.created_at DESC",
         )?;
 
@@ -857,11 +889,21 @@ impl TaskStore for SqliteTaskStore {
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
              t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome
              FROM tasks t
-             JOIN dependencies d ON d.from_id = t.id
-             JOIN tasks blocker ON d.to_id = blocker.id
              WHERE t.status NOT IN ('closed', 'cancelled')
-             AND d.dep_type = 'blocks'
-             AND blocker.status NOT IN ('closed', 'cancelled')
+             AND (
+                 EXISTS (
+                     SELECT 1 FROM dependencies d
+                     JOIN tasks blocker ON d.to_id = blocker.id
+                     WHERE d.from_id = t.id AND d.dep_type = 'blocks'
+                     AND blocker.status NOT IN ('closed', 'cancelled')
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM external_task_dependencies external
+                     WHERE external.origin_task_id = t.id
+                     AND external.resolution_state != 'resolved'
+                     AND external.suppressed_at IS NULL
+                 )
+             )
              ORDER BY t.priority, t.created_at DESC",
         )?;
 

@@ -94,6 +94,16 @@ Open the printed fragment URL in the browser on device A and complete the pairin
 
 Repeat the command on every target. Discovery suggestions from CAS Cloud never pair, trust, proxy, or add a machine automatically.
 
+Alternatively, choose **Create pairing code** in Commander, then run the shown
+`cas hub authorize CODE` command on the target. In both the embedded-controller
+and `https://hub.petrastella.io` static modes, only the short-lived create,
+poll, and acknowledge exchange goes to the reviewed PSC relay origin
+`https://petra-stella-cloud.vercel.app`. The final invitation exchange and all
+hub control traffic still go directly from the browser to the target hub. If
+Commander reports that page-initiated pairing is unavailable, do not add a
+same-origin rewrite or proxy; use `cas hub pair` or deploy a reviewed bundle
+whose relay metadata is present.
+
 ## Detect mixed versions and capabilities
 
 For each paired hub, inspect authenticated `GET /v1/machine`. Compare `version`, `schema_version`, and `capabilities` across machines. The client must report a mismatch instead of assuming that `tailscale_serve`, `cloud_device_suggestions`, or a daemon protocol capability exists. Upgrade the older machine before enabling controls that depend on a missing capability.

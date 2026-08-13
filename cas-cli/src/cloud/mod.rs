@@ -28,6 +28,7 @@ pub mod code_embeddings;
 // anyone running `cas cloud sync`.
 pub mod embed_drain;
 pub(crate) mod me;
+pub mod task_proposals;
 mod sync_queue;
 mod syncer;
 

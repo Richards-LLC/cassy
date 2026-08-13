@@ -1,6 +1,6 @@
 ---
 name: cli-routing
-description: Use when a bounded task needs a one-shot Codex or Claude CLI subprocess, including capacity recovery or release-note posting; Claude is limited to the daniel@petrastella.io account.
+description: Use when a bounded task needs a one-shot Codex or Claude CLI subprocess, including capacity recovery or release-note posting; Claude requires the explicitly approved pippenz@gmail.com profile.
 managed_by: cas
 ---
 
@@ -18,14 +18,16 @@ subprocess, not as a replacement for a factory worker or the current agent.
 2. If Codex actually fails for capacity/auth, preserve its command, exit status,
    and stderr. Do not infer an exhaustion signature from slow output.
 3. Claude is a fallback **only** after `claude auth status --json`, run with the
-   exact `CLAUDE_CONFIG_DIR`, reports `loggedIn: true` and the exact email
-   `daniel@petrastella.io`. Any other email, missing config, malformed JSON, or
-   failed probe is a hard no-Claude result.
+   exact `CLAUDE_CONFIG_DIR`, reports `loggedIn: true`, `authMethod:
+   "claude.ai"`, `apiProvider: "firstParty"`, and the exact email
+   `pippenz@gmail.com`. This is a one-entry allowlist: any other email is an
+   unapproved account, and missing config, malformed JSON, or a failed probe is
+   also a hard no-Claude result.
 4. If eligible Claude also fails for capacity/rate limit, preserve its evidence
    and report blocked. Never spend another Claude account to work around it.
 
 See [routing.md](references/routing.md) for runnable probes, one-shot examples,
-strict Codex output schemas, and the verified local wrong-account result.
+strict Codex output schemas, and the verified local approved-account result.
 
 ## Release-note posting
 

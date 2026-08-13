@@ -202,7 +202,7 @@ pub use prompt_queue_store::{
 pub use reminder_store::{
     Reminder, ReminderExpiryOutcome, ReminderStatus, ReminderStore, ReminderTriggerType,
     SqliteReminderStore, expire_stale_bounded, format_cross_session_reminder_delivery,
-    format_reminder_delivery, parse_reminder_delivery_id,
+    format_reminder_delivery, format_reminder_delivery_with_provenance, parse_reminder_delivery_id,
 };
 
 // Retrieval provenance and explicit outcome feedback

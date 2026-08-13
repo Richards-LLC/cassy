@@ -1084,6 +1084,7 @@ mod session_end_reminder_tests {
                     Some("factory-a"),
                     Some("session-ending"),
                     cross_session,
+                    None,
                 )
                 .unwrap();
         }

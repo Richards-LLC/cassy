@@ -1478,6 +1478,22 @@ impl FactoryApp {
             )
         })?;
 
+        // `graceful_shutdown` revokes leases. Preserve this snapshot so the
+        // death relay can enumerate and park leased tasks even if no assignee
+        // column was populated for them.
+        let held_task_ids = matching_agents
+            .iter()
+            .flat_map(|matching| {
+                agent_store
+                    .list_agent_leases(&matching.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|lease| lease.task_id)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
         // Snapshot task state AFTER release — should be free of this worker's
         // Open/InProgress/Blocked bindings. Remaining non-Closed work (e.g.
         // AwaitingMerge) still blocks worktree reclaim.
@@ -1529,7 +1545,7 @@ impl FactoryApp {
             &cas_dir,
             agent_store.as_ref(),
             agent,
-            &[],
+            &held_task_ids,
             "worker terminated by shutdown request",
         );
 

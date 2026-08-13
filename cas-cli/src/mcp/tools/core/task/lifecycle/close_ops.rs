@@ -8782,6 +8782,7 @@ pub(crate) struct EpicChildBranchStatus {
     pub task_id: String,
     pub task_status: TaskStatus,
     pub assignee: Option<String>,
+    pub dead_or_stale_assignee: bool,
     /// Task-specific commit receipt recorded when the child was parked/closed.
     pub recorded_anchor: Option<String>,
     /// Primary branch checked when the task-specific anchor is unavailable.
@@ -9128,6 +9129,7 @@ pub(crate) fn collect_epic_branch_statuses(
                 task_id: t.id.clone(),
                 task_status: t.status,
                 assignee: t.assignee.clone(),
+                dead_or_stale_assignee: false,
                 recorded_anchor: recorded_anchor.map(str::to_string),
                 factory_branch,
                 additional_factory_branches,
@@ -9203,7 +9205,11 @@ pub(crate) fn render_epic_status_report_with_stack(
         // facing column matches the rest of the CLI's status rendering
         // (e.g., `task list`). Round-1 cas-code-review fix.
         let status_str = s.task_status.to_string();
-        let assignee = s.assignee.as_deref().unwrap_or("—");
+        let assignee = match s.assignee.as_deref() {
+            Some(name) if s.dead_or_stale_assignee => format!("{name} ⚠ dead/stale"),
+            Some(name) => name.to_string(),
+            None => "—".to_string(),
+        };
         let branch = s.factory_branches_label();
         // cas-2a99 (GH #131): a row whose refs resolve nowhere has no
         // measurement to report. Saying so beats printing `0`, which reads as
@@ -9223,7 +9229,7 @@ pub(crate) fn render_epic_status_report_with_stack(
             "| {task} | {status} | {assignee} | {branch} | {checked} | {unmerged} | {last} |\n",
             task = s.task_id,
             status = status_str,
-            assignee = assignee,
+                assignee = assignee,
             branch = branch,
             checked = s.checked_refs_label(),
             unmerged = unmerged,
@@ -18392,6 +18398,7 @@ mod epic_status_gate_tests {
                 task_id: "cas-aaaa".to_string(),
                 task_status: TaskStatus::Closed,
                 assignee: Some("alpha".to_string()),
+                dead_or_stale_assignee: false,
                 recorded_anchor: None,
                 factory_branch: Some("factory/alpha".to_string()),
                 additional_factory_branches: Vec::new(),
@@ -18410,6 +18417,7 @@ mod epic_status_gate_tests {
                 task_id: "cas-bbbb".to_string(),
                 task_status: TaskStatus::InProgress,
                 assignee: Some("bravo".to_string()),
+                dead_or_stale_assignee: false,
                 recorded_anchor: None,
                 factory_branch: Some("factory/bravo".to_string()),
                 additional_factory_branches: Vec::new(),
@@ -18425,6 +18433,7 @@ mod epic_status_gate_tests {
                 task_id: "cas-cccc".to_string(),
                 task_status: TaskStatus::InProgress,
                 assignee: None,
+                dead_or_stale_assignee: false,
                 recorded_anchor: None,
                 factory_branch: None,
                 additional_factory_branches: Vec::new(),

@@ -234,34 +234,31 @@ fn task_branch_if_set(task: &Task) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Session focus epic id: `pinned_epic_id` first, then session default `epic_id`.
-/// Used only as a secondary fallback when the assigned task has no parent epic branch
-/// (cas-44e9). Does not invent a branch from concurrent `epic/*` listings.
-fn session_focus_epic_id() -> Option<String> {
-    let session = std::env::var("CAS_FACTORY_SESSION").ok()?;
-    if session.trim().is_empty() {
-        return None;
-    }
-    let data = std::fs::read_to_string(crate::ui::factory::metadata_path(&session)).ok()?;
-    let meta: crate::ui::factory::SessionMetadata = serde_json::from_str(&data).ok()?;
-    meta.pinned_epic_id
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| meta.epic_id.filter(|s| !s.trim().is_empty()))
-}
-
 /// Resolve the branch the assignment freshness gate should compare against (cas-44e9).
 ///
 /// Order:
-/// 1. If the task itself is an epic with `branch` set → that branch
-/// 2. Parent epic (ParentChild) → `epic.branch`
-/// 3. Session `focus_epic` pin / session default epic → its `branch`
+/// 1. Task's declared WorkTarget → `target_branch`
+/// 2. If the task itself is an epic with `branch` set → that branch
+/// 3. Parent epic (ParentChild) → `epic.branch`
 /// 4. `None` → caller falls through to base/main inside `check_worktree_staleness`
 ///
+/// A session focus pin is intentionally not a source here: it belongs to the
+/// current factory session, not necessarily to this task's delivery contract.
 /// Never returns a branch derived from "most recent / last listed `epic/*`".
 pub(crate) fn resolve_assignment_freshness_branch(
     task_store: &dyn cas_store::TaskStore,
     task: &Task,
 ) -> Option<String> {
+    if let Some(target_branch) = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|branch| !branch.is_empty())
+    {
+        return Some(target_branch.to_string());
+    }
+
     if task.task_type == TaskType::Epic {
         if let Some(branch) = task_branch_if_set(task) {
             return Some(branch);
@@ -278,12 +275,7 @@ pub(crate) fn resolve_assignment_freshness_branch(
         Err(_) => {}
     }
 
-    let focus_id = session_focus_epic_id()?;
-    let epic = task_store.get(&focus_id).ok()?;
-    if epic.task_type != TaskType::Epic {
-        return None;
-    }
-    task_branch_if_set(&epic)
+    None
 }
 
 impl CasCore {
@@ -1939,7 +1931,7 @@ mod epic_owner_transfer_auth_tests {
 mod assignment_freshness_branch_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
-    use cas_types::{Dependency, DependencyType, Task, TaskType};
+    use cas_types::{Dependency, DependencyType, Task, TaskType, WorkTarget};
     use tempfile::TempDir;
 
     fn open_store() -> (TempDir, std::sync::Arc<dyn cas_store::TaskStore>) {
@@ -2011,24 +2003,35 @@ mod assignment_freshness_branch_tests {
     }
 
     #[test]
-    fn falls_back_to_session_focus_pin_branch() {
+    fn declared_work_target_beats_parent_epic_and_focus_pin() {
         let session = format!("test-focus-{}", std::process::id());
         let _env =
             TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", Some(session.as_str()))]);
         let (_tmp, store) = open_store();
 
-        let mut epic_a = Task::new("cas-epinf".into(), "Focused Epic".into());
-        epic_a.task_type = TaskType::Epic;
-        epic_a.branch = Some("epic/focused".into());
-        store.add(&epic_a).unwrap();
+        let mut parent = Task::new("cas-parent".into(), "Parent Epic".into());
+        parent.task_type = TaskType::Epic;
+        parent.branch = Some("epic/parent".into());
+        store.add(&parent).unwrap();
 
-        let mut epic_b = Task::new("cas-epother".into(), "Other Epic".into());
-        epic_b.task_type = TaskType::Epic;
-        epic_b.branch = Some("epic/other".into());
-        store.add(&epic_b).unwrap();
+        let mut focused = Task::new("cas-focused".into(), "Focused Epic".into());
+        focused.task_type = TaskType::Epic;
+        focused.branch = Some("epic/focused".into());
+        store.add(&focused).unwrap();
 
-        let solo = Task::new("cas-solof".into(), "No parent".into());
-        store.add(&solo).unwrap();
+        let mut task = Task::new("cas-solof".into(), "Declared delivery".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "remote:example.invalid/acme/cas".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        store
+            .add_dependency(&Dependency::new(
+                task.id.clone(),
+                parent.id.clone(),
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
 
         // Write session metadata with pinned focus on epic A.
         let meta_path = crate::ui::factory::metadata_path(&session);
@@ -2043,17 +2046,17 @@ mod assignment_freshness_branch_tests {
             "supervisor": { "name": "sup", "pid": null },
             "workers": [],
             "epic_id": null,
-            "pinned_epic_id": "cas-epinf",
+            "pinned_epic_id": "cas-focused",
             "project_dir": null
         });
         std::fs::write(&meta_path, meta.to_string()).unwrap();
-        let branch = resolve_assignment_freshness_branch(store.as_ref(), &solo);
+        let branch = resolve_assignment_freshness_branch(store.as_ref(), &task);
         let _ = std::fs::remove_file(&meta_path);
 
         assert_eq!(
             branch.as_deref(),
-            Some("epic/focused"),
-            "standalone task should fall back to focus_epic pin branch"
+            Some("main"),
+            "the declared WorkTarget is the delivery contract; neither parent nor focus may override it"
         );
     }
 }

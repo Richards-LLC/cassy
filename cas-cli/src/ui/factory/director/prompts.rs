@@ -14,7 +14,7 @@ use crate::mcp::tools::core::task::lifecycle::close_ops::{
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
 use crate::ui::factory::director::events::DirectorEvent;
 use cas_mux::SupervisorCli;
-use cas_types::TaskStatus;
+use cas_types::{TaskStatus, TaskType};
 
 /// Task ids that are Open but have at least one unmet `Blocks` dependency (a
 /// blocker task whose status isn't Closed). Mirrors the exact semantics of
@@ -899,7 +899,7 @@ pub fn check_merge_alert_freshness(
         return MergeAlertFreshness::NotApplicable;
     }
     let factory_branch = format!("factory/{worker}");
-    let (_, epic_branch) = resolve_merge_target_for_task(data, &task.task_id);
+    let (_, epic_branch, _) = resolve_merge_target_for_task(data, &task.task_id);
     let Some(epic_branch) = epic_branch else {
         // No resolvable epic link in this snapshot — can't verify either
         // way, so don't silently drop a possibly-valid alert over a
@@ -961,35 +961,44 @@ pub fn check_merge_alert_freshness_for_task(
         return MergeAlertFreshness::NotApplicable;
     };
     let factory_branch = format!("factory/{worker}");
-    let (_, epic_branch) = resolve_merge_target_for_task(data, task_id);
+    let (_, epic_branch, _) = resolve_merge_target_for_task(data, task_id);
     let Some(epic_branch) = epic_branch else {
         return MergeAlertFreshness::NotApplicable;
     };
     fresh_merge_alert_git_evidence(repo_root, task_id, &factory_branch, &epic_branch)
 }
 
-/// Resolve the focused epic id + branch for a parked task from the current
-/// director snapshot (best-effort; falls back to placeholders when the epic
-/// link is not in this refresh).
+/// Resolve the delivery target for a parked task from the current director
+/// snapshot. A task WorkTarget, projected into its summary branch, wins over
+/// the parent epic; the parent remains only as the legacy fallback.
 fn resolve_merge_target_for_task(
     data: &DirectorData,
     task_id: &str,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, bool) {
     // AwaitingMerge tasks live in `in_progress_tasks` (DirectorData
     // waiting/active bucket). Ready/open rows are chained as a fallback.
-    let epic_id = data
+    let task = data
         .in_progress_tasks
         .iter()
         .chain(data.ready_tasks.iter())
-        .find(|t| t.id == task_id)
-        .and_then(|t| t.epic.clone());
+        .find(|t| t.id == task_id);
+    let declared_target = task
+        .filter(|task| task.task_type != TaskType::Epic)
+        .and_then(|task| task.branch.as_deref())
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string);
+    let epic_id = task.and_then(|task| task.epic.clone());
+    if let Some(target_branch) = declared_target {
+        return (epic_id, Some(target_branch), true);
+    }
     let epic_branch = epic_id.as_ref().and_then(|eid| {
         data.epic_tasks
             .iter()
             .find(|e| e.id == *eid)
             .and_then(|e| e.branch.clone())
     });
-    (epic_id, epic_branch)
+    (epic_id, epic_branch, false)
 }
 
 /// Actionable merge-queue prompt for MERGE REQUIRED / AwaitingMerge idle
@@ -1020,11 +1029,20 @@ fn merge_required_idle_prompt_text(
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = format!("factory/{worker}");
-    let (epic_id, epic_branch) = resolve_merge_target_for_task(data, &task.task_id);
-    let target = epic_branch.as_deref().unwrap_or("the focused epic branch");
-    let epic_status = match epic_id.as_deref() {
-        Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
-        None => format!("`{supervisor_prefix}coordination action=epic_status id=<focused-epic>`"),
+    let (epic_id, epic_branch, declared_target) =
+        resolve_merge_target_for_task(data, &task.task_id);
+    let target = epic_branch
+        .as_deref()
+        .unwrap_or("the task's resolved merge target");
+    let epic_status = if declared_target {
+        format!("`{supervisor_prefix}task action=show id={}`", task.task_id)
+    } else {
+        match epic_id.as_deref() {
+            Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
+            None => {
+                format!("`{supervisor_prefix}coordination action=epic_status id=<focused-epic>")
+            }
+        }
     };
     let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
     let show = format!("`{supervisor_prefix}task action=show id={}`", task.task_id);
@@ -5758,6 +5776,47 @@ mod tests {
                     close_rejected_reason: Some("MERGE REQUIRED".to_string()),
                 }),
             }
+        }
+
+        /// cas-26da / GH #322: the relay must use the task-owned delivery
+        /// target, not the session's unrelated focused epic. `TaskSummary`
+        /// projects WorkTarget into `branch`, the same target branch close_ops
+        /// resolves before its merge gate runs.
+        #[test]
+        fn merge_required_relay_prefers_declared_work_target_over_parent_epic() {
+            let mut data = awaiting_merge_data("recipe-be");
+            data.in_progress_tasks[0].branch = Some("main".to_string());
+            data.epic_tasks[0].branch = Some("epic/pinned-focus".to_string());
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+
+            let (parent_epic, target, declared_target) =
+                resolve_merge_target_for_task(&data, "cas-6883t");
+            assert_eq!(parent_epic.as_deref(), Some("cas-epic-t"));
+            assert_eq!(target.as_deref(), Some("main"));
+            assert!(declared_target);
+
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Claude,
+                SupervisorCli::Claude,
+                &HashSet::new(),
+                None,
+            )
+            .expect("AwaitingMerge task must render a relay");
+            assert!(
+                prompt.text.contains("Merge target: main"),
+                "relay must name the WorkTarget branch: {}",
+                prompt.text
+            );
+            assert!(
+                !prompt.text.contains("epic/pinned-focus"),
+                "an unrelated focused epic must never appear as the merge destination: {}",
+                prompt.text
+            );
         }
 
         #[test]

@@ -2,7 +2,7 @@
 
 Channel: `#cas-internal` (`C0B44GUKDK2`). Deploy label: **Live on production**.
 
-**Status:** Draft. The four message bodies below are postable after validation.
+**Status:** POSTED. Both top-level messages and their single replies were verified against the live channel.
 
 === MESSAGE 1 (user top-level) ===
 Live on production — **User** — Before, everyday searches and completed work could look broken or disappear from view; now, searches understand common punctuation and delivery status stays visible and accurate.
@@ -38,3 +38,14 @@ Live on production — **Dev** — Before, search parsing, artifact indexing, ba
 4. Post MESSAGE 3 as a new top-level message and capture its timestamp.
 5. Post MESSAGE 4 as the one reply to MESSAGE 3.
 6. Append `## POSTED` with UTC timestamps and all four permalinks, then verify both threads.
+
+## POSTED
+
+Channel: `#cas-internal` (`C0B44GUKDK2`).
+
+| Message | UTC timestamp | Permalink |
+| --- | --- | --- |
+| User top-level | 2026-08-13T22:51:49.809929000Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786661509809929 |
+| User reply (Was → Now) | 2026-08-13T22:51:58.024299000Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786661518024299?thread_ts=1786661509.809929&cid=C0B44GUKDK2 |
+| Dev top-level | 2026-08-13T22:52:03.854199000Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786661523854199 |
+| Dev reply (Was → Now) | 2026-08-13T22:52:12.602529000Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786661532602529?thread_ts=1786661523.854199&cid=C0B44GUKDK2 |

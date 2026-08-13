@@ -422,13 +422,26 @@ impl CasCore {
             crate::mcp::tools::truncated_list_header("Blocked tasks", total, shown, &sort_opts);
         for (task, blockers) in blocked.iter().take(limit) {
             let blocker_ids: Vec<_> = blockers.iter().map(|t| t.id.as_str()).collect();
+            let external = cas_store::ExternalTaskDependencyStore::open(&self.cas_root)
+                .and_then(|store| store.list_blocking_for_task(&task.id))
+                .unwrap_or_default();
+            let mut rendered_blockers = blocker_ids
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            rendered_blockers.extend(external.iter().map(|dependency| {
+                format!(
+                    "{} [external: {}]",
+                    dependency.target_task_id, dependency.resolution_state
+                )
+            }));
             output.push_str(&format!(
                 "- [{}] P{} {} - {}\n  Blocked by: {}\n",
                 task.id,
                 task.priority.0,
                 task.task_type,
                 task.title,
-                blocker_ids.join(", ")
+                rendered_blockers.join(", ")
             ));
         }
         output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
@@ -442,6 +455,22 @@ impl CasCore {
         Parameters(req): Parameters<TaskListRequest>,
     ) -> Result<CallToolResult, McpError> {
         use cas_types::TaskSortOptions;
+
+        let scope = req.scope.trim().to_ascii_lowercase();
+        if scope == "global" {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Global task scope is unsupported. Tasks belong to the current CAS project database.",
+            ));
+        }
+        if !matches!(scope.as_str(), "project" | "all") {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Task scope must be `project` or `all`; global tasks are unsupported.",
+            ));
+        }
+        let project_id = crate::cloud::get_project_canonical_id()
+            .unwrap_or_else(|| "(unresolved current project)".to_string());
 
         let task_store = self.open_task_store()?;
 
@@ -507,15 +536,25 @@ impl CasCore {
             TaskSortOptions::from_params(req.sort.as_deref(), req.sort_order.as_deref());
         sort_tasks(&mut filtered, &sort_opts);
 
+        let scope_note = if scope == "all" {
+            format!(
+                "Scope: all (currently equivalent to the current project database `{project_id}`; no multi-project aggregator exists)"
+            )
+        } else {
+            format!("Scope: project `{project_id}` (current CAS database)")
+        };
         if filtered.is_empty() {
-            return Ok(Self::success("No tasks found matching filters"));
+            return Ok(Self::success(format!(
+                "No tasks found matching filters.\n{scope_note}."
+            )));
         }
 
         let limit = req.limit.unwrap_or(20);
         let mut output = format!(
-            "Tasks ({} total, showing {}):\n\n",
+            "Tasks ({} total, showing {})\n{}:\n\n",
             filtered.len(),
-            filtered.len().min(limit)
+            filtered.len().min(limit),
+            scope_note,
         );
         for task in filtered.iter().take(limit) {
             // cas-a844: flag a conflicted awaiting_merge distinctly from a

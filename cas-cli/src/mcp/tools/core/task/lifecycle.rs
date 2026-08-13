@@ -48,17 +48,25 @@ fn title_terms(title: &str) -> std::collections::HashSet<String> {
     title
         .split(|c: char| !c.is_alphanumeric())
         .map(str::to_ascii_lowercase)
-        .filter(|term| term.len() > 2)
+        // Task titles are often short enumerated families (`Task A`, `Task B`,
+        // `List task 0`). Unlike memory text, their short tokens can carry the
+        // only distinction between legitimate sibling tasks.
+        .filter(|term| !term.is_empty())
         .collect()
 }
 
 /// A deliberately small, transparent adaptation of memory overlap scoring for
 /// task titles. Planning titles are short, so a Jaccard score over normalized
 /// terms is less surprising than a search-index score and is stable before the
-/// new task has been indexed.
+/// new task has been indexed. A candidate may add wording to an existing title,
+/// but cannot replace a title term: `Task A` and `Task B` are siblings, not
+/// duplicates, even when their remaining wording is identical.
 fn title_similarity(left: &str, right: &str) -> f64 {
     let left = title_terms(left);
     let right = title_terms(right);
+    if !left.is_subset(&right) && !right.is_subset(&left) {
+        return 0.0;
+    }
     let union = left.union(&right).count();
     if union == 0 {
         return 0.0;
@@ -1288,6 +1296,33 @@ mod related_recall_response_tests {
                 "Add release note Slack publication receipts",
             ) < DUPLICATE_TITLE_SIMILARITY_THRESHOLD
         );
+        assert_eq!(title_similarity("Task A", "Task B"), 0.0);
+        assert_eq!(
+            title_similarity(
+                "Task A — no-dep-found error regression",
+                "Task B — no-dep-found error regression",
+            ),
+            0.0
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_title_warning_keeps_short_distinguishing_tokens() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+
+        for (first, second) in [("Task A", "Task B"), ("List task 0", "List task 1")] {
+            core.cas_task_create(Parameters(plain_task_request(first)))
+                .await
+                .unwrap_or_else(|error| panic!("{first:?} should create: {error}"));
+            core.cas_task_create(Parameters(plain_task_request(second)))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{second:?} must not trigger a duplicate warning after {first:?}: {error}"
+                    )
+                });
+        }
     }
 
     fn epic_request(title: &str, description: &str) -> TaskCreateRequest {
@@ -1326,6 +1361,26 @@ mod related_recall_response_tests {
             demo_statement: None,
             execution_note: None,
             epic: Some(epic),
+            depth: None,
+        }
+    }
+
+    fn plain_task_request(title: &str) -> TaskCreateRequest {
+        TaskCreateRequest {
+            title: title.to_string(),
+            description: None,
+            priority: 2,
+            task_type: "task".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
             depth: None,
         }
     }

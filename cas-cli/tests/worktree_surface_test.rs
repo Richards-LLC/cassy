@@ -112,6 +112,15 @@ fn test_env() -> TestEnvGuard {
         // which harness launched `cargo test`.
         ("CAS_FACTORY_WORKER_CLI", Some("claude")),
         ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+        // Authority-boundary fixtures must begin without a caller identity.
+        // A live factory supervisor exports these into `cargo test`; leaving
+        // them ambient lets public registration inherit privileged authority
+        // and makes clean-shell and factory-shell results disagree.
+        ("CAS_AGENT_ROLE", None),
+        ("CAS_AGENT_NAME", None),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+        ("CAS_FACTORY_MODE", None),
     ])
 }
 

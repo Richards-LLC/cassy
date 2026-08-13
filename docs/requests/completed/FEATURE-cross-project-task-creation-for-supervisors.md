@@ -14,8 +14,10 @@ priority: P2
 > `external_task_dependencies` projection and unblock only after reconciliation reports the accepted
 > target task closed. The cloud contract is tracked at
 > [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44);
-> create/triage/dependency endpoints are live, while authoritative push-side preservation of the
-> materialized task's provenance copy remains a cloud hardening gate. Original CAS issue:
+> the create/triage/dependency endpoints, authoritative push-side preservation of the materialized
+> task's provenance copy, and the final opt-in pagination shape are all live on production, so no
+> cloud gate remains open. Because `since=` feed reads deliberately replay a five-second safety
+> window, reconciliation de-duplicates repeated edges by `proposal_id`. Original CAS issue:
 > [#171](https://github.com/pippenz/cas/issues/171).
 
 # Feature Request: let supervisors create tasks in other projects, when appropriate and authorized

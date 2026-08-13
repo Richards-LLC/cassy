@@ -1408,6 +1408,95 @@ mod related_recall_response_tests {
             .expect("index memory");
     }
 
+    /// cas-3afc (GH #298): an epic's branch must start at the explicitly
+    /// declared target, not the repository default branch.
+    #[tokio::test]
+    async fn epic_create_bases_on_declared_staging_target_cas_3afc() {
+        use std::process::Command;
+
+        let temp = TempDir::new().expect("temp project");
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@cas.test"]);
+        git(&["config", "user.name", "CAS Test"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/staging-target.git",
+        ]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").expect("seed");
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["checkout", "-q", "-b", "staging"]);
+        std::fs::write(repo.join("staging.txt"), "staging-only\n").expect("staging change");
+        git(&["add", "staging.txt"]);
+        git(&["commit", "-q", "-m", "staging baseline"]);
+        let staging_tip = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "staging"])
+                .current_dir(repo)
+                .output()
+                .expect("resolve staging")
+                .stdout,
+        )
+        .expect("staging sha utf8")
+        .trim()
+        .to_string();
+        git(&["checkout", "-q", "main"]);
+
+        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        core.cas_task_create_with_target(
+            epic_request("Staging delivery epic", "must begin at staging"),
+            Some(repo.to_str().expect("repo utf8")),
+            Some("staging"),
+            false,
+        )
+        .await
+        .expect("create staging epic");
+        let epic = core
+            .open_task_store()
+            .expect("open task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Staging delivery epic")
+            .expect("created epic");
+        let branch = epic.branch.expect("epic branch persisted");
+        let branch_tip = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", &branch])
+                .current_dir(repo)
+                .output()
+                .expect("resolve epic branch")
+                .stdout,
+        )
+        .expect("branch sha utf8")
+        .trim()
+        .to_string();
+
+        assert_eq!(branch_tip, staging_tip, "epic must be cut from staging");
+        assert_eq!(
+            epic.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some("staging")
+        );
+    }
+
     #[tokio::test]
     async fn epic_create_surfaces_matching_memory_in_its_response() {
         let temp = TempDir::new().expect("temp project");

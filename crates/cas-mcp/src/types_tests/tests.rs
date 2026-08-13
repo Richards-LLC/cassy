@@ -169,6 +169,24 @@ fn test_task_request_priority_as_string() {
 }
 
 #[test]
+fn cross_project_create_attempt_identity_is_additive_at_mcp_boundary() {
+    let req: TaskRequest = serde_json::from_str(
+        r#"{
+            "action": "create",
+            "title": "Foreign work",
+            "project": "target-project",
+            "proposal_attempt_id": "attempt-2026-08-13:one"
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(req.project.as_deref(), Some("target-project"));
+    assert_eq!(
+        req.proposal_attempt_id.as_deref(),
+        Some("attempt-2026-08-13:one")
+    );
+}
+
+#[test]
 fn test_task_request_priority_null() {
     let req: TaskRequest = serde_json::from_str(
         r#"{

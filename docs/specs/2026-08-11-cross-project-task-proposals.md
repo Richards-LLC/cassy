@@ -166,6 +166,7 @@ It must not pretend to row-filter on a column that does not exist.
 The CLI half now exposes the selected design through the unified `task` MCP tool:
 
 - `create project=<target-canonical-id>` selects the proposal path; omitting `project` preserves local create.
+- Cross-project create requires `proposal_attempt_id=<opaque-attempt-id>` (1–128 portable ASCII characters). Reuse it only for an ambiguous retry; choose a new identity for a later intentionally identical create.
 - `proposal_inbox`, `proposal_accept`, and `proposal_reject` keep receiving triage separate from ordinary task lists.
 - `proposal_reconcile project=<current-canonical-id>` projects cloud dependency signals locally; rejected handoffs remain blockers until an operator removes or replaces them.
 - `list scope=project` names the current canonical project database, `scope=all` documents its current-project equivalence, and `scope=global` is rejected.

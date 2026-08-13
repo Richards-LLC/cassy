@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{Result, shared_db};
+use crate::{Result, StoreError, shared_db};
 
 pub const EXTERNAL_TASK_DEPENDENCY_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS external_task_dependencies (
@@ -55,6 +55,45 @@ impl ExternalTaskDependencyProjection {
     pub fn is_blocking(&self) -> bool {
         self.resolution_state != "resolved"
     }
+
+    fn validate_state_matrix(&self) -> Result<()> {
+        let unresolved = self.resolution_state == "unresolved" && self.resolved_at.is_none();
+        let valid = match self.proposal_state.as_str() {
+            "proposed" => self.target_task_status.is_none() && unresolved,
+            "rejected" => {
+                self.target_task_status.is_none()
+                    && self.resolution_state == "handoff_rejected"
+                    && self.resolved_at.is_none()
+            }
+            "accepted" => match self.target_task_status.as_deref() {
+                Some("closed") => {
+                    self.resolution_state == "resolved"
+                        && self
+                            .resolved_at
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty())
+                }
+                Some(
+                    "open"
+                    | "in_progress"
+                    | "blocked"
+                    | "cancelled"
+                    | "pending_supervisor_review"
+                    | "awaiting_merge",
+                ) => unresolved,
+                _ => false,
+            },
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(StoreError::Parse(
+                "external dependency violated the proposal/target/resolution state matrix"
+                    .to_string(),
+            ))
+        }
+    }
 }
 
 pub struct ExternalTaskDependencyStore {
@@ -78,6 +117,7 @@ impl ExternalTaskDependencyStore {
     }
 
     pub fn upsert(&self, dependency: &ExternalTaskDependencyProjection) -> Result<()> {
+        dependency.validate_state_matrix()?;
         self.conn
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -184,31 +224,6 @@ impl ExternalTaskDependencyStore {
                 params![origin_project, cursor, Utc::now().to_rfc3339()],
             )?;
         Ok(())
-    }
-
-    /// Return the durable idempotency key for one logical proposal request.
-    /// A transport failure after cloud commit is ambiguous; retaining this key
-    /// makes the caller's retry converge on the cloud's unique proposal row.
-    pub fn client_request_id(
-        &self,
-        request_fingerprint: &str,
-        generated_request_id: &str,
-    ) -> Result<String> {
-        let conn = self.conn.lock().unwrap_or_else(|error| error.into_inner());
-        conn.execute(
-            "INSERT OR IGNORE INTO task_proposal_request_keys
-             (request_fingerprint, client_request_id, created_at) VALUES (?1, ?2, ?3)",
-            params![
-                request_fingerprint,
-                generated_request_id,
-                Utc::now().to_rfc3339()
-            ],
-        )?;
-        Ok(conn.query_row(
-            "SELECT client_request_id FROM task_proposal_request_keys WHERE request_fingerprint = ?1",
-            params![request_fingerprint],
-            |row| row.get(0),
-        )?)
     }
 }
 
@@ -341,6 +356,76 @@ mod tests {
                 .is_empty(),
             "re-close resolves again"
         );
+    }
+
+    #[test]
+    fn contradictory_dependency_state_is_rejected_before_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ExternalTaskDependencyStore::open(temp.path()).unwrap();
+        let contradictory = ExternalTaskDependencyProjection {
+            origin_task_id: "cas-origin".into(),
+            proposal_id: "proposal-1".into(),
+            target_project_canonical_id: "target".into(),
+            target_task_id: "cas-0123456789abcdef".into(),
+            proposal_state: "proposed".into(),
+            target_task_status: Some("closed".into()),
+            resolution_state: "resolved".into(),
+            resolved_at: Some("2026-08-13T12:00:00Z".into()),
+        };
+
+        let error = store
+            .upsert(&contradictory)
+            .expect_err("contradictory rows must never reach SQLite");
+        assert!(error.to_string().contains("state matrix"), "{error}");
+        assert!(
+            store
+                .list_blocking_for_task("cas-origin")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_cross_field_state_matrix_contradiction_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ExternalTaskDependencyStore::open(temp.path()).unwrap();
+        let base = ExternalTaskDependencyProjection {
+            origin_task_id: "cas-origin".into(),
+            proposal_id: "proposal-1".into(),
+            target_project_canonical_id: "target".into(),
+            target_task_id: "cas-0123456789abcdef".into(),
+            proposal_state: "accepted".into(),
+            target_task_status: Some("open".into()),
+            resolution_state: "unresolved".into(),
+            resolved_at: None,
+        };
+        let invalid = [
+            ("proposed", Some("open"), "unresolved", None),
+            ("proposed", Some("closed"), "resolved", Some("at")),
+            ("rejected", None, "unresolved", None),
+            ("rejected", Some("closed"), "resolved", Some("at")),
+            ("accepted", None, "unresolved", None),
+            ("accepted", Some("closed"), "unresolved", None),
+            ("accepted", Some("open"), "resolved", Some("at")),
+            ("accepted", Some("closed"), "resolved", None),
+            ("accepted", Some("closed"), "resolved", Some("")),
+            ("accepted", Some("unknown"), "unresolved", None),
+        ];
+        for (index, (proposal, target, resolution, resolved_at)) in
+            invalid.into_iter().enumerate()
+        {
+            let mut dependency = base.clone();
+            dependency.proposal_id = format!("proposal-{index}");
+            dependency.proposal_state = proposal.into();
+            dependency.target_task_status = target.map(str::to_string);
+            dependency.resolution_state = resolution.into();
+            dependency.resolved_at = resolved_at.map(str::to_string);
+            assert!(
+                store.upsert(&dependency).is_err(),
+                "contradictory case {index} unexpectedly persisted: {dependency:?}"
+            );
+        }
+        assert!(store.list_blocking_for_task("cas-origin").unwrap().is_empty());
     }
 
     #[test]

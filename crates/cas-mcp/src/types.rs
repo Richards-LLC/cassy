@@ -182,6 +182,13 @@ pub struct TaskRequest {
     #[serde(default)]
     pub blocks_origin_task_id: Option<String>,
 
+    /// Explicit identity for one cross-project create attempt.
+    #[schemars(
+        description = "For cross-project create: explicit idempotency identity for one logical attempt. Reuse it only when retrying an ambiguous result; use a new value for a later identical create."
+    )]
+    #[serde(default)]
+    pub proposal_attempt_id: Option<String>,
+
     /// Description (for create)
     #[schemars(description = "Task description")]
     #[serde(default)]

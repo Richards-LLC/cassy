@@ -71,14 +71,30 @@ pub struct CodeSearchResult {
 }
 
 impl CodeSearchResult {
-    /// Create a snippet from source (first 3 lines, max 200 chars)
+    /// Create a snippet from source (first 3 lines, max 200 UTF-8 bytes).
     pub fn create_snippet(source: &str) -> String {
+        const MAX_SNIPPET_BYTES: usize = 200;
+        const ELLIPSIS: &str = "...";
+
         let lines: Vec<&str> = source.lines().take(3).collect();
         let snippet = lines.join("\n");
-        if snippet.len() > 200 {
-            format!("{}...", &snippet[..197])
+        if snippet.len() > MAX_SNIPPET_BYTES {
+            let content_limit = MAX_SNIPPET_BYTES - ELLIPSIS.len();
+            let content: String = snippet
+                .chars()
+                .scan(0, |bytes, character| {
+                    let next = *bytes + character.len_utf8();
+                    if next > content_limit {
+                        None
+                    } else {
+                        *bytes = next;
+                        Some(character)
+                    }
+                })
+                .collect();
+            format!("{content}{ELLIPSIS}")
         } else if source.lines().count() > 3 {
-            format!("{snippet}...")
+            format!("{snippet}{ELLIPSIS}")
         } else {
             snippet
         }

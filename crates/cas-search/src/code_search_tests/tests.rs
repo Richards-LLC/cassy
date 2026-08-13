@@ -354,6 +354,65 @@ fn test_create_snippet() {
 }
 
 #[test]
+fn test_create_snippet_truncates_multibyte_text_on_char_boundary() {
+    let mut code_store = MockCodeStore::new();
+    let mut bm25_index = MockBm25Index::new();
+
+    for (index, character) in ['─', '🦀', '界'].into_iter().enumerate() {
+        let source: String = std::iter::repeat_n(character, 201).collect();
+        let symbol = CodeSymbol {
+            id: format!("unicode-{index}"),
+            qualified_name: format!("unicode::fixture_{index}"),
+            name: format!("fixture_{index}"),
+            file_path: "src/unicode_fixture.rs".to_string(),
+            source,
+            ..Default::default()
+        };
+        bm25_index.add(&symbol.id, "unicode fixture");
+        code_store.insert_symbol(symbol);
+    }
+
+    let search = CodeSearch::new(
+        Arc::new(code_store),
+        Arc::new(MockVectorStore::new()),
+        Arc::new(bm25_index),
+        None,
+    );
+    let results = search
+        .search(&CodeSearchOptions {
+            query: "unicode".to_string(),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    for result in results {
+        let snippet = result.snippet.unwrap();
+        let content = snippet.strip_suffix("...").unwrap();
+        let character = content.chars().next().unwrap();
+
+        assert!(
+            snippet.ends_with("..."),
+            "missing ellipsis for {character:?}"
+        );
+        assert!(
+            snippet.len() <= 200,
+            "snippet exceeded the existing 200-byte cap for {character:?}: {} bytes",
+            snippet.len()
+        );
+        assert!(
+            ['─', '🦀', '界'].contains(&character),
+            "unexpected character {character:?}"
+        );
+        assert!(
+            content.chars().all(|value| value == character),
+            "truncation corrupted {character:?}"
+        );
+    }
+}
+
+#[test]
 fn test_code_search_stats_default() {
     let stats = CodeSearchStats::default();
     assert_eq!(stats.file_count, 0);

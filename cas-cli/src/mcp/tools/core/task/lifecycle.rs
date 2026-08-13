@@ -1505,13 +1505,12 @@ mod related_recall_response_tests {
             warning.message
         );
 
-        let mut duplicate_request =
-            child_request("First supervisor child follow-up", epic_id.clone());
+        let mut duplicate_request = child_request("First supervisor child", epic_id.clone());
         duplicate_request.epic = None;
         let duplicate = second
             .cas_task_create(Parameters(duplicate_request))
             .await
-            .expect_err("near-identical open title must require confirmation");
+            .expect_err("identical open title must require confirmation");
         assert!(
             duplicate.message.contains("DUPLICATE TASK WARNING")
                 && duplicate.message.contains("First supervisor child")

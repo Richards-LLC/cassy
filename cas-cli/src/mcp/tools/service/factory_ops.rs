@@ -3832,6 +3832,18 @@ impl CasService {
             GitOperations::new(close_project_root.clone())
                 .unlanded_epic_ancestry(parent_branch, &trunk)
         };
+        if let Ok(agent_store) = crate::store::open_agent_store(&self.inner.cas_root)
+            && let Ok(agents) = agent_store.list(None)
+        {
+            for status in &mut statuses {
+                status.dead_or_stale_assignee = status.assignee.as_ref().is_some_and(|assignee| {
+                    agents.iter().any(|agent| {
+                        (agent.name == *assignee || agent.id == *assignee)
+                            && matches!(agent.status, cas_types::AgentStatus::Stale | cas_types::AgentStatus::Shutdown)
+                    })
+                });
+            }
+        }
         let report =
             render_epic_status_report_with_stack(epic_id, parent_branch, &statuses, &stacked_on);
 

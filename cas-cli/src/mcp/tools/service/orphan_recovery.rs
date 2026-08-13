@@ -81,18 +81,14 @@ pub fn recover_worker_vanished(
 
     let mut candidate_ids: Vec<String> = held_task_ids.to_vec();
 
-    // Also pick up tasks still assigned to this worker whose lease may already
-    // have been reclaimed earlier without recovery.
-    if let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) {
-        for t in in_progress {
-            if task_assigned_to_agent(&t.assignee, agent) {
-                candidate_ids.push(t.id);
-            }
-        }
-    }
-    if let Ok(blocked) = task_store.list(Some(TaskStatus::Blocked)) {
-        for t in blocked {
-            if task_assigned_to_agent(&t.assignee, agent) {
+    // Also pick up every non-terminal task still assigned to this worker.
+    // Shutdown/crash paths can lose the lease before recovery runs; the death
+    // relay must still enumerate that work rather than claim "none".
+    if let Ok(tasks) = task_store.list(None) {
+        for t in tasks {
+            if !matches!(t.status, TaskStatus::Closed | TaskStatus::Cancelled)
+                && task_assigned_to_agent(&t.assignee, agent)
+            {
                 candidate_ids.push(t.id);
             }
         }
@@ -676,8 +672,8 @@ pub fn format_recently_died_while_leased(
 #[cfg(test)]
 mod cas_3dcb_death_relay_tests {
     use super::*;
-    use crate::store::{open_agent_store, open_prompt_queue_store};
-    use cas_types::AgentRole;
+    use crate::store::{open_agent_store, open_prompt_queue_store, open_task_store};
+    use cas_types::{AgentRole, Task};
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -831,6 +827,40 @@ mod cas_3dcb_death_relay_tests {
             1,
             "50 re-detections must not produce 50 durable notices"
         );
+    }
+
+    #[test]
+    fn recovery_enumerates_and_parks_assigned_in_progress_and_blocked_tasks() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("task-holder", 900);
+        let tasks = open_task_store(&fixture.cas_root).expect("task store");
+        for (id, status) in [
+            ("cas-in-progress", TaskStatus::InProgress),
+            ("cas-blocked", TaskStatus::Blocked),
+        ] {
+            let mut task = Task::new(id.to_string(), id.to_string());
+            task.status = status;
+            task.assignee = Some(worker.name.clone());
+            tasks.add(&task).expect("add task");
+        }
+
+        let summary = recover_worker_vanished(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &worker,
+            &[],
+            "test worker death",
+        );
+        assert_eq!(summary.held_task_ids, vec!["cas-blocked", "cas-in-progress"]);
+        assert_eq!(summary.recovered_task_ids, vec!["cas-blocked", "cas-in-progress"]);
+        for id in &summary.recovered_task_ids {
+            let task = tasks.get(id).expect("recovered task");
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_eq!(task.assignee, None);
+            assert!(task.notes.contains("orphan recovery"));
+        }
+        let relay = fixture.prompt_relays().pop().expect("death relay");
+        assert!(relay.prompt.contains("cas-in-progress") && relay.prompt.contains("cas-blocked"));
     }
 
     /// Dedup keys the death INCIDENT, not the agent: a worker that comes back,

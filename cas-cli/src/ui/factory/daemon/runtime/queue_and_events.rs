@@ -1506,12 +1506,20 @@ impl FactoryDaemon {
         if let Some(agent_id) = agent_id {
             if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
                 if let Ok(agent) = agent_store.get(&agent_id) {
+                    // Staling revokes leases. Snapshot first: leased work can
+                    // lack an assignee mirror, but must be named and parked.
+                    let held = agent_store
+                        .list_agent_leases(&agent.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|lease| lease.task_id)
+                        .collect::<Vec<_>>();
                     let _ = agent_store.mark_stale(&agent.id);
                     crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
                         self.app.cas_dir(),
                         agent_store.as_ref(),
                         &agent,
-                        &[],
+                        &held,
                         "worker PTY exited",
                     );
                 }

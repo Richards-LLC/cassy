@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::TaskLifecycleGateError;
+
 fn git_output(worktree: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .arg("-C")
@@ -134,16 +136,19 @@ pub(crate) fn capture_repository_proof(
     })
 }
 
-pub(crate) fn verify_repository_proof(proof: &RepositoryProofBoundary) -> Result<(), String> {
+pub(crate) fn verify_repository_proof(
+    proof: &RepositoryProofBoundary,
+) -> Result<(), TaskLifecycleGateError> {
     let current = capture_repository_proof(
         Path::new(&proof.repository_root),
         Path::new(&proof.worktree_root),
-    )?;
+    )
+    .map_err(|message| TaskLifecycleGateError::RepositoryProof { message })?;
     if &current != proof {
-        return Err(
-            "repository proof changed after dispatch; request a fresh verification cycle"
+        return Err(TaskLifecycleGateError::RepositoryProof {
+            message: "repository proof changed after dispatch; request a fresh verification cycle"
                 .to_string(),
-        );
+        });
     }
     Ok(())
 }

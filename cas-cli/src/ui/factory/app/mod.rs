@@ -5501,6 +5501,49 @@ mod spawn_isolation_tests {
 
     #[cfg(unix)]
     #[test]
+    fn new_worker_worktree_provisions_gitignored_zig_toolchain() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let source_zig = repo.join(".context").join("zig");
+        std::fs::create_dir_all(&source_zig).unwrap();
+        std::fs::write(source_zig.join("zig"), "pinned zig binary").unwrap();
+
+        let cas_dir = repo.join(".cas");
+        let worktree_path = cas_dir.join("worktrees").join("zig-worker");
+        let prep = WorkerSpawnPrep {
+            worker_name: "zig-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/zig-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+
+        let result = prep.run().expect("create worker worktree with Zig support");
+        let worker_zig = result.cwd.join(".context").join("zig");
+        assert!(
+            std::fs::symlink_metadata(&worker_zig)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "new workers must link the gitignored Zig toolchain before their first Cargo build"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worker_zig.join("zig")).unwrap(),
+            "pinned zig binary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn new_worker_target_is_hardlinked_from_published_baseline() {
         use std::os::unix::fs::MetadataExt;
 

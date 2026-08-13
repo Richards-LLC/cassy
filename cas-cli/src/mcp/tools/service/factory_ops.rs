@@ -3798,7 +3798,8 @@ impl CasService {
             )
         })?;
 
-        let statuses = collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
+        let mut statuses =
+            collect_epic_branch_statuses(&subtasks, parent_branch, &close_project_root);
 
         // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
         // cannot land alone. Show that here, where the supervisor decides

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { consumePairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { pairingCleanupFailureUpdate } from "./pairing-cleanup";
+import { pairingCleanupFailureUpdate, pairingStorageClearFailureMessage } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { PendingPairingStore, pendingPairingStoreFor } from "./pending-pairing";
@@ -286,6 +286,13 @@ describe("wire-v1 reverse pairing", () => {
     expect(() => store.save(request)).not.toThrow();
     expect(() => store.clear()).not.toThrow();
     expect(store.load()).toBeNull();
+  });
+
+  it("surfaces when failed exchange cleanup cannot durably block a reload", () => {
+    expect(pairingStorageClearFailureMessage(
+      "This pairing invitation has expired or was already used.",
+      { persistentRemovalFailed: true, failClosed: false },
+    )).toContain("could not durably block");
   });
 
   it("writes a fail-closed tombstone when only sessionStorage removal is denied", () => {

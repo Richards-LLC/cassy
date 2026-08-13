@@ -18270,6 +18270,99 @@ mod epic_status_gate_tests {
     }
 
     #[test]
+    fn squash_merged_child_anchors_reconcile_before_stranded_summary_cas_65e0() {
+        let dir = init_epic_repo(&[("alpha", 1), ("bravo", 1), ("charlie", 1)]);
+        let p = dir.path();
+        let alpha_anchor = epic_git_stdout(p, &["rev-parse", "factory/alpha"]);
+        let bravo_anchor = epic_git_stdout(p, &["rev-parse", "factory/bravo"]);
+        let charlie_anchor = epic_git_stdout(p, &["rev-parse", "factory/charlie"]);
+
+        // GitHub's squash button leaves both factory refs and their recorded
+        // anchors non-ancestral even though their content is now on main.
+        for worker in ["alpha", "bravo"] {
+            git(p, &["merge", "-q", "--squash", &format!("factory/{worker}")]);
+            git(p, &["commit", "-q", "-m", &format!("squash {worker}")]);
+        }
+
+        assert!(count_unmerged_factory_commits(p, &alpha_anchor, "main") > 0);
+        assert!(count_unmerged_factory_commits(p, &bravo_anchor, "main") > 0);
+        assert!(
+            commit_tip_tree_reachable_from(p, &alpha_anchor, "main"),
+            "the first squash preserves alpha's exact tip tree in main history"
+        );
+        assert!(
+            anchor_work_patches_equivalent_on_parent(p, &bravo_anchor, "main"),
+            "the later squash preserves bravo's patch even though main also carries alpha"
+        );
+        assert!(
+            !anchor_work_patches_equivalent_on_parent(p, &charlie_anchor, "main"),
+            "charlie is the genuinely absent control"
+        );
+
+        let mut alpha = child("cas-alpha", TaskStatus::Closed, Some("alpha"));
+        alpha.deliverables.factory_branch_anchor = Some(alpha_anchor);
+        let mut bravo = child("cas-bravo", TaskStatus::Closed, Some("bravo"));
+        bravo.deliverables.factory_branch_anchor = Some(bravo_anchor);
+        let mut charlie = child("cas-charlie", TaskStatus::Closed, Some("charlie"));
+        charlie.deliverables.factory_branch_anchor = Some(charlie_anchor);
+        let children = vec![alpha, bravo, charlie];
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        let by_id: std::collections::HashMap<_, _> =
+            statuses.iter().map(|row| (row.task_id.as_str(), row)).collect();
+        assert_eq!(
+            by_id["cas-alpha"].unmerged_count, 0,
+            "tree-identical squash content must reconcile even while the factory ref stays non-ancestral"
+        );
+        assert_eq!(
+            by_id["cas-bravo"].unmerged_count, 0,
+            "patch-equivalent squash content must reconcile independently for every child"
+        );
+        assert!(
+            by_id["cas-charlie"].unmerged_count > 0,
+            "affirmatively absent content must remain stranded"
+        );
+
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert_eq!(
+            report.matches("merged (squash, ancestry lost)").count(),
+            2,
+            "each proven squash merge must be named explicitly: {report}"
+        );
+        assert!(
+            report.contains("1 child task(s) carry stranded factory commits"),
+            "only the genuinely absent child may receive hard-block wording: {report}"
+        );
+
+        let squash_only = &children[..2];
+        assert!(matches!(
+            run_epic_close_merge_gate(
+                &epic("cas-epic-squash"),
+                &base_req("cas-epic-squash"),
+                "main",
+                p,
+                squash_only,
+            ),
+            EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+
+        match run_epic_close_merge_gate(
+            &epic("cas-epic-mixed"),
+            &base_req("cas-epic-mixed"),
+            "main",
+            p,
+            &children,
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(message.contains("cas-charlie"), "{message}");
+                assert!(!message.contains("cas-alpha"), "{message}");
+                assert!(!message.contains("cas-bravo"), "{message}");
+            }
+            other => panic!("the absent child must still block epic close, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn epic_close_rejects_recycled_worker_branch_that_does_not_prove_old_anchor() {
         let dir = init_epic_repo(&[("worker", 1)]);
         let p = dir.path();

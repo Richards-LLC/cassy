@@ -494,6 +494,7 @@ mod tests {
             SupervisorCli::Claude,
             &["worker-a".to_string()],
             None,
+            None,
         );
         queue_codex_worker_intro_prompt(cas_dir, "worker-a", SupervisorCli::Claude);
         let queue = open_prompt_queue_store(cas_dir).unwrap();

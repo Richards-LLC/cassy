@@ -16,6 +16,41 @@ export class PairingRelayError extends Error {
   }
 }
 
+/**
+ * Validate the reviewed, static-bundle relay boundary. Relay metadata is an
+ * HTTPS origin only: paths, credentials, query strings, and fragments could
+ * redirect pairing capabilities to an unreviewed endpoint and fail closed.
+ */
+export function pairingRelayOrigin(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function relayEndpoint(origin: string, path: string): URL {
+  const canonical = pairingRelayOrigin(origin);
+  if (!canonical) throw new PairingRelayError("relay_unavailable", "Page-initiated pairing is unavailable in this deployment.");
+  return new URL(path, canonical);
+}
+
+/** Normalize a safe hub root URL to the origin used by authenticated traffic. */
+export function normalizeHubOrigin(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) throw new Error("not a root URL");
+    const loopback = parsed.hostname === "[::1]" || parsed.hostname === "::1" || /^127(?:\.\d{1,3}){3}$/.test(parsed.hostname);
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) throw new Error("unsafe origin");
+    return parsed.origin;
+  } catch {
+    throw new PairingRelayError("invalid_response", "The paired machine returned an invalid hub origin.");
+  }
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
 }
@@ -61,13 +96,13 @@ function relayError(status: number, code: unknown): PairingRelayError {
   return new PairingRelayError(typeof code === "string" ? code : "relay_error", "The pairing service refused the request.");
 }
 
-export async function createPairingRequest(fetcher: Fetcher, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string): Promise<PendingRelayRequest> {
+export async function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string): Promise<PendingRelayRequest> {
   if (!requestedScopes.length || new Set(requestedScopes).size !== requestedScopes.length || requestedScopes.some((scope) => !DEFAULT_PAIRING_SCOPES.includes(scope))) {
     throw new PairingRelayError("unsupported_scope", "Page-initiated pairing supports read-only access only.");
   }
   const body: Record<string, unknown> = { wire_version: 1, controller_origin: controllerOrigin, requested_scopes: requestedScopes };
   if (email) body.email = email;
-  const response = await fetcher(CREATE_PATH, {
+  const response = await fetcher(relayEndpoint(relayOrigin, CREATE_PATH), {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", body: JSON.stringify(body),
   });
   const value = await jsonRecord(response);
@@ -100,8 +135,8 @@ export type PollResult =
   | { kind: "slow-down"; interval: number }
   | { kind: "authorized"; invitation: PendingInvitation };
 
-export async function pollPairingRequest(fetcher: Fetcher, request: PendingRelayRequest): Promise<PollResult> {
-  const response = await fetcher(POLL_PATH, {
+export async function pollPairingRequest(fetcher: Fetcher, relayOrigin: string, request: PendingRelayRequest): Promise<PollResult> {
+  const response = await fetcher(relayEndpoint(relayOrigin, POLL_PATH), {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit",
     body: JSON.stringify({ wire_version: 1, pairing_request_id: request.pairingRequestId, poll_secret: request.pollSecret }),
   });
@@ -122,17 +157,7 @@ export async function pollPairingRequest(fetcher: Fetcher, request: PendingRelay
   if (!invitation) throw new PairingRelayError("invalid_response", "The pairing service returned an invalid invitation.");
   const controllerOrigin = stringField(invitation, "controller_origin");
   if (controllerOrigin !== request.controllerOrigin) throw new PairingRelayError("origin_mismatch", "The paired machine returned a different controller origin.");
-  const hubUrl = stringField(invitation, "hub_url");
-  let hubOrigin: string;
-  try {
-    const parsed = new URL(hubUrl);
-    if (parsed.origin !== hubUrl || parsed.username || parsed.password) throw new Error("not an origin");
-    const loopback = parsed.hostname === "[::1]" || parsed.hostname === "::1" || /^127(?:\.\d{1,3}){3}$/.test(parsed.hostname);
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) throw new Error("unsafe origin");
-    hubOrigin = parsed.origin;
-  } catch {
-    throw new PairingRelayError("invalid_response", "The paired machine returned an invalid hub origin.");
-  }
+  const hubOrigin = normalizeHubOrigin(stringField(invitation, "hub_url"));
   const scopes = scopeFields(invitation, "scopes");
   if (scopes.some((scope) => !request.requestedScopes.includes(scope))) throw new PairingRelayError("scope_escalation", "The paired machine returned elevated scopes.");
   return {
@@ -151,8 +176,8 @@ export async function pollPairingRequest(fetcher: Fetcher, request: PendingRelay
   };
 }
 
-export async function acknowledgePairing(fetcher: Fetcher, relay: PairingRelayDelivery): Promise<void> {
-  const response = await fetcher(ACK_PATH, {
+export async function acknowledgePairing(fetcher: Fetcher, relayOrigin: string, relay: PairingRelayDelivery): Promise<void> {
+  const response = await fetcher(relayEndpoint(relayOrigin, ACK_PATH), {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit",
     body: JSON.stringify({ wire_version: 1, pairing_request_id: relay.pairingRequestId, poll_secret: relay.pollSecret, delivery_id: relay.deliveryId }),
   });

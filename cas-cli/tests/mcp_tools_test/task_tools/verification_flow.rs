@@ -8440,6 +8440,52 @@ async fn test_close_unverified_task_still_blocked_by_own_missing_verification_ca
     );
 }
 
+/// cas-9fd4 (GH #341): the direct close gate must tell a supervisor exactly
+/// how to resolve a dispatch whose bound worker/verifier is unavailable.
+#[tokio::test]
+async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() {
+    let (_temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req(
+            "cas-9fd4: direct pending-dispatch recovery guidance",
+        )))
+        .await
+        .expect("create");
+    let id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("start");
+
+    let text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: id.clone(),
+                reason: Some("Ready for supervisor verification".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("direct close returns verification guidance"),
+    );
+    assert!(
+        text.contains("VERIFICATION REQUIRED") && text.contains("vdispatch-"),
+        "direct close must create and name the exact dispatch: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "mcp__cas__verification action=add task_id={id} dispatch_id=vdispatch-"
+        )) && text.contains("status=approved"),
+        "gate must print the registered-supervisor recovery call: {text}"
+    );
+}
+
 /// cas-a3ca (replay sequence): the exact cas-cdee/cas-8236 scenario.
 ///
 /// Worker has task A (verified, merge-ready) and starts task B while A's close

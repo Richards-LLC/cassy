@@ -1872,9 +1872,10 @@ impl CasCore {
                             req.id, timed_out.id, req.id, timed_out.id
                         )));
                     }
+                    let sup_ver = supervisor_verification_tool();
                     return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.",
-                        req.id, dispatch.id
+                        "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict. If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
+                        req.id, dispatch.id, sup_ver, req.id, dispatch.id
                     )));
                 }
                 Ok(Some(dispatch))
@@ -3053,7 +3054,7 @@ impl CasCore {
 
                             let requester_id = self.get_agent_id()?;
                             let owner_id = self.verification_dispatch_owner(&requester_id)?;
-                            let supervisor_recovery = self
+                            let supervisor_direct_recovery = self
                                 .open_agent_store()?
                                 .get(&requester_id)
                                 .is_ok_and(|agent| {
@@ -3068,7 +3069,7 @@ impl CasCore {
                                 &proof_boundary,
                                 chrono::Utc::now()
                                     + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
-                                supervisor_recovery,
+                                supervisor_direct_recovery,
                             )
                             .map_err(|error| McpError {
                                 code: ErrorCode::INTERNAL_ERROR,
@@ -3167,16 +3168,23 @@ impl CasCore {
                                     req.id
                                 )
                             };
+                            let sup_ver = supervisor_verification_tool();
+                            let supervisor_recovery_hint = format!(
+                                "If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
+                                req.id, dispatch.id
+                            );
 
                             return Ok(Self::tool_error(format!(
                                 "⚠️ VERIFICATION REQUIRED\n\n\
                                 Task {} requires verification before closing.\n\n\
                                 {}{}\n\n\
+                                {}\n\n\
                                 {}{}\n\n\
                                 {}",
                                 req.id,
                                 verification_gate,
                                 verification_desc,
+                                supervisor_recovery_hint,
                                 close_reason_section.as_str(),
                                 if is_worker_without_subagents {
                                     // cas-8aaf: harness-appropriate supervisor verification tool.

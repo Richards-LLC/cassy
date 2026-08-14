@@ -1234,7 +1234,9 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
             // register this fixture holder to retain its live-owner contract.
             let mut agent = Agent::new("alpha-agent-id".to_string(), holder.to_string());
             agent.role = AgentRole::Worker;
-            env.agent_store().register(&agent).expect("register live holder");
+            env.agent_store()
+                .register(&agent)
+                .expect("register live holder");
         }
         let task_store = env.task_store();
         let id = task_store.generate_id().expect("generate_id");
@@ -2297,6 +2299,86 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
         done.assignee = None;
         task_store.update(&done).expect("clear");
     }
+}
+
+/// cas-9fd4 (GH #341): the normal AwaitingMerge advice becomes stale after a
+/// supervisor has already landed the parked factory branch. The worker still
+/// has to re-close, so status must name that real blocker instead of asking
+/// the supervisor to merge the same branch again.
+#[tokio::test]
+async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9fd4() {
+    use std::process::Command;
+
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    let worker = "cas-9fd4-wolf";
+    let worker_path = init_sync_repo(&env, worker);
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata(worker, metadata);
+
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    std::fs::write(worker_path.join("delivered.txt"), "delivered\n").expect("write delivery");
+    git(&worker_path, &["add", "delivered.txt"]);
+    git(&worker_path, &["commit", "-m", "deliver cas-9fd4"]);
+
+    let project = env.cas_root.parent().expect("project root");
+    git(project, &["checkout", "epic/requested"]);
+    git(
+        project,
+        &[
+            "merge",
+            "--no-ff",
+            &format!("factory/{worker}"),
+            "-m",
+            "merge delivered worker branch",
+        ],
+    );
+    git(project, &["checkout", "main"]);
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Delivered task awaiting re-close".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some(worker.to_string());
+    task.deliverables.parked_branch = Some(format!("factory/{worker}"));
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "epic/requested".to_string(),
+    });
+    task_store.add(&task).expect("add task");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains("delivered-and-merged, awaiting worker re-close"),
+        "status must report the delivered state, not stale merge work: {text}"
+    );
+    assert!(
+        text.contains("WAITING ON WORKER") && text.contains("retry task close"),
+        "status must name the worker re-close as the blocker: {text}"
+    );
+    assert!(
+        !text.contains("merge its branch, then it can close"),
+        "already-integrated branch must not receive stale merge advice: {text}"
+    );
 }
 
 /// cas-e728 review follow-up: `all_workers` broadcasts are real inbox items

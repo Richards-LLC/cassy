@@ -399,6 +399,191 @@ pub fn execute_parity(jsonl: Option<PathBuf>) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The harness-specific ambient-recall delivery contract for a supervisor
+    /// launch. This is deliberately separate from the skill contract: Codex
+    /// has the same supervisor skills, but no SessionStart delivery channel.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AmbientRecallDelivery {
+        /// Claude reads its SessionStart hook's stdout.
+        SessionStart,
+        /// Grok ignores SessionStart stdout, so the factory's queued launch
+        /// intro is its delivery channel.
+        QueuedSupervisorIntro,
+        /// cas-3413: Codex has no hooks and currently has no ambient-recall
+        /// launch delivery. Its queued intro is a viable future seam; remove
+        /// this exception when cas-3413 wires that packet through it.
+        NoHooksCodexUntilCas3413,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct SupervisorHarnessRequirement {
+        supervisor_skills: [&'static str; 2],
+        ambient_recall: AmbientRecallDelivery,
+    }
+
+    /// The load-bearing exhaustive declaration for supervisor harnesses.
+    ///
+    /// Do not add a catch-all arm: a new `SupervisorCli` variant must fail to
+    /// compile here until its real skill and ambient-recall delivery contract
+    /// are registered and tested below.
+    fn supervisor_harness_requirement(harness: SupervisorCli) -> SupervisorHarnessRequirement {
+        match harness {
+            SupervisorCli::Claude => SupervisorHarnessRequirement {
+                supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
+                ambient_recall: AmbientRecallDelivery::SessionStart,
+            },
+            SupervisorCli::Codex => SupervisorHarnessRequirement {
+                // Codex's checklist is the intentional no-hooks compensation
+                // twin. It is still the universal supervisor-checklist
+                // capability, but its shipped skill name is harness-specific.
+                supervisor_skills: ["cas-supervisor", "cas-codex-supervisor-checklist"],
+                ambient_recall: AmbientRecallDelivery::NoHooksCodexUntilCas3413,
+            },
+            SupervisorCli::Grok => SupervisorHarnessRequirement {
+                supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
+                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
+            },
+        }
+    }
+
+    /// Capture the concrete supervisor instruction launch payload. Claude and
+    /// Grok consume the queued factory intro; Codex consumes its CLI config.
+    /// This is a second exhaustive match so a new backend cannot be quietly
+    /// covered by a generic fallback.
+    fn supervisor_skill_payload(cas_dir: &std::path::Path, harness: SupervisorCli) -> String {
+        match harness {
+            SupervisorCli::Claude | SupervisorCli::Grok => {
+                use crate::store::detect::open_prompt_queue_store;
+                use crate::ui::factory::queue_supervisor_intro_prompt;
+
+                let target = format!("parity-supervisor-{}", harness.backend().name());
+                let session_id = format!("parity-session-{}", harness.backend().name());
+                let factory_session = format!("parity-factory-{}", harness.backend().name());
+                queue_supervisor_intro_prompt(
+                    cas_dir,
+                    &target,
+                    harness,
+                    &[],
+                    Some(&session_id),
+                    Some(&factory_session),
+                );
+                let rows = open_prompt_queue_store(cas_dir)
+                    .unwrap()
+                    .peek_for_targets(&[target.as_str()], Some(&factory_session), 10)
+                    .unwrap();
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "{harness:?} must queue exactly one supervisor launch intro"
+                );
+                rows[0].prompt.clone()
+            }
+            SupervisorCli::Codex => launch_instruction_text(harness, ContractRole::Supervisor)
+                .expect("Codex supervisor must have developer_instructions"),
+        }
+    }
+
+    /// Capture the actual Claude SessionStart payload, whose stdout is the
+    /// declared ambient-recall delivery seam. The fixture is hermetic because
+    /// session start otherwise consults host-scoped context under `HOME`.
+    fn claude_session_start_payload(cas_dir: &std::path::Path) -> String {
+        use crate::hooks::{HookInput, handle_session_start};
+
+        let input = HookInput {
+            session_id: "parity-session".to_string(),
+            cwd: cas_dir.parent().unwrap().to_string_lossy().into_owned(),
+            hook_event_name: "SessionStart".to_string(),
+            agent_role: Some("supervisor".to_string()),
+            ..Default::default()
+        };
+        let output = handle_session_start(&input, Some(cas_dir)).unwrap();
+        serde_json::to_value(output)
+            .unwrap()
+            .pointer("/hookSpecificOutput/additionalContext")
+            .and_then(|value| value.as_str())
+            .expect("Claude SessionStart must emit additional context")
+            .to_string()
+    }
+
+    /// cas-9faa: prove every declared supervisor launch contract against the
+    /// real delivery seam. A new `SupervisorCli` variant fails compilation in
+    /// `supervisor_harness_requirement` and `supervisor_skill_payload` until
+    /// its skill and ambient-recall policy are explicitly declared.
+    #[test]
+    fn supervisor_launch_context_parity_is_exhaustive_and_declared() {
+        use crate::store::{init_cas_dir, open_store};
+        use crate::test_support::TestEnvGuard;
+        use crate::types::Entry;
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "parity-supervisor");
+        env.set("CAS_FACTORY_SESSION", "parity-factory");
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        env.remove("CAS_CLONE_PATH");
+        env.remove("CLAUDE_CONFIG_DIR");
+        env.remove(crate::internal_llm::INTERNAL_LLM_ENV);
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = init_cas_dir(project.path()).unwrap();
+        let mut sentinel = Entry::new(
+            "grok-supervisor-ambient".to_string(),
+            "supervisor session start ambient recall sentinel".to_string(),
+        );
+        sentinel.title = Some("Grok supervisor launch recall".to_string());
+        sentinel.tags = vec!["grok".to_string(), "supervisor".to_string()];
+        sentinel.importance = 0.95;
+        open_store(&cas_dir).unwrap().add(&sentinel).unwrap();
+
+        // Keep this inventory adjacent to the exhaustive declaration above.
+        // The declaration match is the compile fence; this loop makes every
+        // registered supervisor launch policy observable in one focused test.
+        for harness in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+        ] {
+            let requirement = supervisor_harness_requirement(harness);
+            let skill_payload = supervisor_skill_payload(&cas_dir, harness);
+            for skill in requirement.supervisor_skills {
+                assert!(
+                    skill_payload.contains(skill),
+                    "{harness:?} supervisor launch payload is missing required skill {skill:?}: {skill_payload}"
+                );
+            }
+
+            match requirement.ambient_recall {
+                AmbientRecallDelivery::SessionStart => {
+                    let payload = claude_session_start_payload(&cas_dir);
+                    assert!(
+                        payload.contains("[ambient recall v1 role=supervisor"),
+                        "{harness:?} SessionStart payload is missing ambient recall: {payload}"
+                    );
+                    assert!(
+                        payload.contains("grok-supervisor-ambient"),
+                        "{harness:?} SessionStart payload omitted the ambient recall sentinel: {payload}"
+                    );
+                }
+                AmbientRecallDelivery::QueuedSupervisorIntro => {
+                    assert!(
+                        skill_payload.contains("[ambient recall v1 role=supervisor"),
+                        "{harness:?} queued supervisor intro is missing ambient recall: {skill_payload}"
+                    );
+                    assert!(
+                        skill_payload.contains("grok-supervisor-ambient"),
+                        "{harness:?} queued supervisor intro omitted the ambient recall sentinel: {skill_payload}"
+                    );
+                }
+                AmbientRecallDelivery::NoHooksCodexUntilCas3413 => {
+                    assert!(
+                        !harness.backend().capabilities().supports_hooks,
+                        "Codex's cas-3413 exception is valid only while it has no hooks; remove the exception and require ambient recall once that changes"
+                    );
+                }
+            }
+        }
+    }
+
     /// AC-1/AC-2/AC-3: every one of the six cells passes every stage against the
     /// real launch configuration.
     #[test]

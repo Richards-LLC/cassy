@@ -489,6 +489,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         id: None,
         task_id: None,
         merge_request: None,
+        in_reply_to: None,
         target: None,
         message: None,
         summary: None,
@@ -4803,6 +4804,7 @@ fn coord_msg(
         id: None,
         task_id: None,
         merge_request: None,
+        in_reply_to: None,
         target: Some(target.to_string()),
         message: Some(message.to_string()),
         summary: Some("test".to_string()),
@@ -7403,6 +7405,106 @@ async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
         report.confirmation_source,
         cas_store::ConfirmationSource::InferredFromReply,
         "a reply that post-dates a real drain receipt still confirms: {report:?}"
+    );
+}
+
+/// cas-4a27 (GH #334): the field reproduction had both halves at once: a
+/// supervisor's real response was indistinguishable from delayed spawn
+/// boilerplate, while the worker's escalation remained AwaitingAck because
+/// the supervisor's transport had no surfacing receipt. A reply reference is
+/// explicit evidence for that ONE escalation, and every delivered row exposes
+/// durable provenance so the worker can act on the ordering mechanically.
+#[tokio::test]
+async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("cosmic-bear-id", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store()
+        .register(&supervisor)
+        .expect("register calling supervisor");
+    env.register_worker_with_id("koala-agent-id", "watchful-koala-20", None);
+
+    let escalation_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "watchful-koala-20",
+            "cosmic-bear-43",
+            "Blocked: the task needs a policy decision; recommend option A.",
+            None,
+            Some("blocked escalation"),
+            None,
+            false,
+        )
+        .expect("enqueue worker escalation");
+    env.prompt_queue()
+        .mark_transport_delivered(escalation_id)
+        .expect("supervisor transport handoff without a surfacing receipt");
+
+    let spawn_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "director",
+            "watchful-koala-20",
+            "You were spawned for task cas-4a27 — start it now.",
+            None,
+            Some("Assigned task: cas-4a27"),
+            None,
+            false,
+        )
+        .expect("enqueue delayed spawn brief");
+
+    let mut reply = coord_msg(
+        "message",
+        "watchful-koala-20",
+        "I read your escalation, endorse option A, and assigned the follow-up.",
+        None,
+    );
+    reply.summary = Some("escalation acknowledged".to_string());
+    reply.in_reply_to = Some(escalation_id);
+    env.service
+        .coordination(Parameters(reply))
+        .await
+        .expect("explicit supervisor reply");
+
+    let escalation = env
+        .prompt_queue()
+        .message_delivery_report(escalation_id)
+        .expect("escalation delivery report")
+        .expect("escalation exists");
+    assert_eq!(
+        escalation.confirmation_source,
+        cas_store::ConfirmationSource::ExplicitAck,
+        "the precise reply reference must resolve the escalation even without a surfacing receipt: {escalation:?}"
+    );
+
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing("koala-agent-id".to_string());
+    let worker_service = CasService::new(worker_core, None);
+    let text = get_text(
+        &worker_service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("worker inbox poll"),
+    );
+    assert!(
+        text.contains(&format!("notification_id={spawn_id} origin=spawn-boilerplate"))
+            && text.contains("delivery=first-delivery"),
+        "the delayed spawn brief needs machine-readable origin, ID, time, and delivery state: {text}"
+    );
+    assert!(
+        text.contains("origin=supervisor-authored")
+            && text.contains(&format!("notification_id={escalation_id}")),
+        "the actual supervisor reply must be visibly fresh and linked to the escalation: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "[CAS reply: explicitly acknowledges notification_id={escalation_id}]"
+        )),
+        "the reply must name the exact escalation it acknowledges: {text}"
     );
 }
 

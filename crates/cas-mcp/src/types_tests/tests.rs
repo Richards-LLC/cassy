@@ -304,6 +304,17 @@ fn coordination_merge_request_type_survives_agent_mapping() {
 }
 
 #[test]
+fn coordination_reply_reference_survives_agent_mapping() {
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"message","target":"worker-a","in_reply_to":7602,"summary":"acknowledged","message":"I read your escalation."}"#,
+    )
+    .unwrap();
+
+    assert_eq!(req.in_reply_to, Some(7602));
+    assert_eq!(req.to_agent_request("message").in_reply_to, Some(7602));
+}
+
+#[test]
 fn test_factory_older_than_secs_as_string() {
     let req: FactoryRequest =
         serde_json::from_str(r#"{"action": "gc_cleanup", "older_than_secs": "7200"}"#).unwrap();

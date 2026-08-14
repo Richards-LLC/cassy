@@ -20,6 +20,43 @@ fn resolve_inbox_recipient(
 /// means the same thing on both delivery channels.
 pub(crate) const INBOX_REDELIVERY_MARKER: &str = "[redelivery]";
 
+/// Durable provenance rendered with every queue-backed message (cas-4a27).
+///
+/// A plain sender prefix cannot distinguish a late spawn task brief from a
+/// fresh supervisor reply. The queue already knows the facts a worker needs;
+/// keep them visible at the final render boundary instead of asking an agent
+/// to reconstruct them from prose and timing.
+pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> String {
+    let origin = if message.source.eq_ignore_ascii_case("supervisor") {
+        "supervisor-authored"
+    } else if message.source.eq_ignore_ascii_case("director")
+        && message
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.starts_with("Assigned task:"))
+    {
+        "spawn-boilerplate"
+    } else if message.source.eq_ignore_ascii_case("director") {
+        "director-generated"
+    } else if message.source.starts_with("lifecycle-wake:") {
+        "lifecycle-relay"
+    } else {
+        "agent-authored"
+    };
+    let delivery = if message.processed_at.is_some() {
+        "replay"
+    } else {
+        "first-delivery"
+    };
+    format!(
+        "CAS provenance: notification_id={} origin={} queued_at={} delivery={}",
+        message.id,
+        origin,
+        message.created_at.to_rfc3339(),
+        delivery,
+    )
+}
+
 /// cas-99d2 (GH #127): what to do with one row an inbox poll selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InboxRedelivery {
@@ -484,6 +521,65 @@ impl CasService {
                 .unwrap_or_else(|| source.clone())
         };
 
+        // cas-4a27 (GH #334): reply inference intentionally requires a
+        // recipient-surfacing receipt, so it cannot turn an unrelated later
+        // message into proof that an escalation was read. A supervisor that
+        // DID read an escalation needs a precise way to say so. Link this
+        // reply to the durable notification explicitly, validate the two
+        // endpoints, and render the reference on the worker-facing message.
+        // This is strong evidence for exactly one row; the conservative
+        // generic reply-inference rule below remains unchanged.
+        let explicit_reply_to = req.in_reply_to;
+        if let Some(notification_id) = explicit_reply_to {
+            let prior = queue
+                .message_delivery_report(notification_id)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to inspect in_reply_to message {notification_id}: {error}"),
+                    )
+                })?
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!("in_reply_to notification {notification_id} does not exist"),
+                    )
+                })?;
+            let expected_prior_sources = [
+                resolved_target.as_str(),
+                if addressed_logical_supervisor {
+                    "supervisor"
+                } else {
+                    ""
+                },
+            ];
+            let expected_prior_targets = [
+                display_name.as_str(),
+                env_agent_name.as_deref().unwrap_or_default(),
+                if role == "supervisor" { "supervisor" } else { "" },
+            ];
+            let source_matches = expected_prior_sources
+                .iter()
+                .filter(|name| !name.is_empty())
+                .any(|name| prior.source.eq_ignore_ascii_case(name));
+            let target_matches = expected_prior_targets
+                .iter()
+                .filter(|name| !name.is_empty())
+                .any(|name| prior.target.eq_ignore_ascii_case(name));
+            if !source_matches || !target_matches {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "in_reply_to notification {notification_id} is {} -> {}, not a direct message from {resolved_target} to this sender",
+                        prior.source, prior.target
+                    ),
+                ));
+            }
+            message = format!(
+                "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
+            );
+        }
+
         // cas-bc8c: a genuine merge request receives an immutable envelope so
         // transport can suppress it once its requested tip has landed. That
         // envelope is a message type, not a property of the sender's task
@@ -812,6 +908,17 @@ impl CasService {
             enqueue_outcome,
             cas_store::EnqueueOutcome::SuppressedDuplicate(_)
         );
+
+        if let Some(notification_id) = explicit_reply_to {
+            queue.ack(notification_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Reply {message_id} queued but failed to confirm in_reply_to notification {notification_id}: {error}"
+                    ),
+                )
+            })?;
+        }
 
         // cas-85fd: an urgent halt is a course-correction exchange, not a
         // permanent worker state. Once the row exists, bind every halt this
@@ -1370,7 +1477,7 @@ impl CasService {
                     redelivered += 1;
                     body.push_str(&format!(
                         "**[{}] From: {} — {INBOX_REDELIVERY_MARKER} (already delivered {})**\n\
-                         Summary: {}\nCreated: {}\nMessage: {}\n\n",
+                        Summary: {}\n{}\nMessage: {}\n\n",
                         message.id,
                         message.source,
                         message
@@ -1378,17 +1485,17 @@ impl CasService {
                             .map(|at| at.to_rfc3339())
                             .unwrap_or_else(|| "earlier".to_string()),
                         message.summary.as_deref().unwrap_or("(no summary)"),
-                        message.created_at.to_rfc3339(),
+                        queued_message_provenance(message),
                         message.prompt,
                     ));
                 }
                 InboxRedelivery::FirstDelivery => {
                     body.push_str(&format!(
-                        "**[{}] From: {}**\nSummary: {}\nCreated: {}\nMessage: {}\n\n",
+                        "**[{}] From: {}**\nSummary: {}\n{}\nMessage: {}\n\n",
                         message.id,
                         message.source,
                         message.summary.as_deref().unwrap_or("(no summary)"),
-                        message.created_at.to_rfc3339(),
+                        queued_message_provenance(message),
                         message.prompt,
                     ));
                 }

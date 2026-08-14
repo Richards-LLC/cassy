@@ -2961,6 +2961,16 @@ impl FactoryDaemon {
             let inbox_source =
                 self.inbox_source_name(&queued.source, &worker_names, &supervisor_name);
 
+            // cas-4a27 (GH #334): preserve the durable queue facts at the
+            // last shared delivery boundary. In particular, a task brief that
+            // was queued at spawn but reaches the worker after a supervisor
+            // reply must read as old spawn boilerplate, not a fresh reassignment.
+            prompt_with_instructions = format!(
+                "{}\n\n{}",
+                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(&queued),
+                prompt_with_instructions,
+            );
+
             // cas-ceae (GH #124 + #123): before doing anything else with a row
             // we already wrote and left pending, ask whether our copy is still
             // there — if the harness drained it, writing again appends a

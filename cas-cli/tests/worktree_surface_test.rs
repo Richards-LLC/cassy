@@ -210,6 +210,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         id: None,
         task_id: None,
         merge_request: None,
+        in_reply_to: None,
         target: None,
         message: None,
         summary: None,

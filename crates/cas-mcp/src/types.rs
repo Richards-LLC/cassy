@@ -425,7 +425,7 @@ pub struct TaskRequest {
 
     /// Execution note (for create, update) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, no-code. no-code declares an operations/artifact task and requires external_ref proof at close. Pass empty string to clear on update."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, value-only, no-code. value-only permits edits to existing values but rejects added, deleted, copied, or renamed files at close. no-code declares an operations/artifact task and requires external_ref proof at close. Pass empty string to clear on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,

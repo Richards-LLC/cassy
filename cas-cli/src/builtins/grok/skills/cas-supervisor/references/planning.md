@@ -60,7 +60,7 @@ Canonical template:
   - Modify: `path/to/existing_file.rs`
   - Test: `path/to/test_file.rs`
 **Approach:** Key design or sequencing decision
-**Execution note:** test-first | characterization-first | additive-only | (omit)
+**Execution note:** test-first | characterization-first | additive-only | value-only | (omit)
 **Patterns to follow:** Reference existing code to mirror
 **Test scenarios:**
   - Happy path: input X -> expected Y
@@ -76,7 +76,7 @@ Field purposes (write decisions, not code — "Approach" is 1–3 sentences of s
 - **Dependencies** — hard blockers go in `blocked_by`; soft ordering or "after X lands" notes stay as prose.
 - **Files** — the layer boundary. What the worker owns and must not touch outside of. Boundary violation is a rejection condition.
 - **Approach** — the sequencing or design decision already made. Not a code sketch, not a pseudocode draft. If you find yourself writing pseudocode, you are doing the worker's job.
-- **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, or omitted. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. If a task needs to edit existing files, do not set `additive-only`.
+- **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, `value-only`, or omitted. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. Use `value-only` for copy/i18n edits to existing values; it permits M but rejects A/C/D/R and still goes through normal review. For broader edits, omit the field.
 - **Patterns to follow** — pointer to existing code or a prior commit the worker should mirror. Reduces stylistic drift.
 - **Test scenarios** — name the scenarios, including at least one error path. Don't leave test design entirely to the worker.
 - **Verification** — observable outcome. What can be demonstrated when done. Maps to `demo_statement`.

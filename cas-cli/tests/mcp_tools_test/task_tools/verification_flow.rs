@@ -4347,6 +4347,53 @@ enabled = false
         cas::types::TaskStatus::Closed,
         "violation must not transition task to Closed"
     );
+
+    // --- Scenario C: value-only is the accurate posture for a copy/i18n
+    //     change to an existing file. It must close normally, without a
+    //     supervisor bypass or weakening additive-only.
+    git(&["checkout", "-q", "main"]);
+    git(&["checkout", "-q", "-b", "factory/value-only"]);
+    std::fs::write(worktree_path.join("existing.txt"), "localized value\n").unwrap();
+    git(&["add", "existing.txt"]);
+    git(&["commit", "-q", "-m", "fix: localize existing value"]);
+    let id_c = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                execution_note: Some("value-only".to_string()),
+                ..additive_req("cas-8ad8: value-only branch commit")
+            }))
+            .await
+            .expect("task_create"),
+    ))
+    .expect("task id")
+    .to_string();
+    {
+        let mut t = task_store.get(&id_c).expect("task");
+        t.status = cas::types::TaskStatus::InProgress;
+        t.worktree_id = Some(worktree_id.clone());
+        task_store.update(&t).expect("update task");
+    }
+    let resp_c = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: id_c.clone(),
+                reason: Some("localized existing value".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("close returns"),
+    );
+    assert!(
+        resp_c.contains("Closed task:"),
+        "value-only modification must close normally: {resp_c}"
+    );
+    assert_eq!(
+        task_store.get(&id_c).expect("task").status,
+        cas::types::TaskStatus::Closed
+    );
 }
 
 /// cas-895d + cas-bc1b follow-up regression: a task with `worktree_id = None`

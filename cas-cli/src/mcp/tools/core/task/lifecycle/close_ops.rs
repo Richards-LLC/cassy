@@ -3548,6 +3548,41 @@ impl CasCore {
             }
         }
 
+        // cas-8ad8: copy and i18n changes legitimately modify existing
+        // values, but must not be mislabeled as additive-only. value-only is
+        // the complementary constrained posture: committed task changes may
+        // modify existing files, but cannot add, delete, copy, or rename a
+        // file. It intentionally does *not* bypass review or merge-delivery
+        // gates below; unlike an additive-only task, it has a real modified
+        // diff for those gates to inspect.
+        if close_disposition.requires_delivery_gates()
+            && task.execution_note.as_deref() == Some("value-only")
+        {
+            if let Some(worker_wt) = worker_worktree_path.as_ref() {
+                let violations = check_value_only_branch_violations(
+                    worker_wt,
+                    &resolved_parent_branch,
+                    task.deliverables.factory_branch_anchor.as_deref(),
+                    &task_commit_identity,
+                );
+                if !violations.is_empty() {
+                    let file_list = violations
+                        .iter()
+                        .map(|v| format!("  {} ({})", v.path, v.status))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ VALUE-ONLY VIOLATION\n\n\
+                        task close rejected: execution_note=value-only permits only \
+                        modifications to existing files.\n\n\
+                        Added/deleted/copied/renamed files:\n{file_list}\n\n\
+                        Use execution_note=additive-only for new-file-only work, or \
+                        execution_note=null or test-first for broader changes."
+                    )));
+                }
+            }
+        }
+
         // cas-b39f: cas-code-review P0 close gate (Unit 9).
         //
         // This is the integration point for the multi-persona code review
@@ -5944,6 +5979,45 @@ pub(crate) fn check_additive_only_branch_violations(
     factory_branch_anchor: Option<&str>,
     identity: &TaskCommitIdentity,
 ) -> Vec<AdditiveOnlyViolation> {
+    check_branch_violations(
+        worker_worktree_path,
+        parent_branch,
+        factory_branch_anchor,
+        identity,
+        |status| matches!(status, 'M' | 'D' | 'R'),
+    )
+}
+
+/// Return task-attributed changes which violate `execution_note=value-only`.
+/// A value-only task may modify existing files but cannot add, delete, copy,
+/// or rename them. Git cannot prove that a modification is semantically a
+/// copy or translation value, so that intent remains task metadata; this gate
+/// enforces the mechanically observable no-new-file-surface boundary.
+pub(crate) fn check_value_only_branch_violations(
+    worker_worktree_path: &std::path::Path,
+    parent_branch: &str,
+    factory_branch_anchor: Option<&str>,
+    identity: &TaskCommitIdentity,
+) -> Vec<AdditiveOnlyViolation> {
+    check_branch_violations(
+        worker_worktree_path,
+        parent_branch,
+        factory_branch_anchor,
+        identity,
+        |status| status != 'M',
+    )
+}
+
+/// Inspect a task's committed diff and retain entries selected by
+/// `is_violation`. Both constrained execution-note gates share this exact
+/// task-window and post-merge attribution logic.
+fn check_branch_violations(
+    worker_worktree_path: &std::path::Path,
+    parent_branch: &str,
+    factory_branch_anchor: Option<&str>,
+    identity: &TaskCommitIdentity,
+    is_violation: impl Fn(char) -> bool,
+) -> Vec<AdditiveOnlyViolation> {
     use std::process::Command;
 
     // cas-3f7f: once the parked worker tip is integrated, HEAD and the
@@ -5977,7 +6051,10 @@ pub(crate) fn check_additive_only_branch_violations(
                                     worker_worktree_path,
                                     commits[1],
                                     identity,
-                                    parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+                                    parse_name_status_filtered(
+                                        &String::from_utf8_lossy(&o.stdout),
+                                        &is_violation,
+                                    ),
                                 ),
                                 _ => Vec::new(),
                             };
@@ -5999,7 +6076,10 @@ pub(crate) fn check_additive_only_branch_violations(
                     worker_worktree_path,
                     &anchor_parent,
                     identity,
-                    parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+                    parse_name_status_filtered(
+                        &String::from_utf8_lossy(&o.stdout),
+                        &is_violation,
+                    ),
                 ),
                 _ => Vec::new(),
             };
@@ -6031,7 +6111,10 @@ pub(crate) fn check_additive_only_branch_violations(
             worker_worktree_path,
             &merge_base,
             identity,
-            parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+            parse_name_status_filtered(
+                &String::from_utf8_lossy(&o.stdout),
+                &is_violation,
+            ),
         ),
         _ => Vec::new(),
     }
@@ -10767,10 +10850,12 @@ pub(crate) fn has_task_attributable_reviewable_changes(
     }))
 }
 
-/// Parse the output of `git diff --name-status` into violations. Only rows
-/// whose status starts with M, D, or R are returned. A, C, T, U, and ?? are
-/// considered additive or uninteresting.
-fn parse_name_status(output: &str) -> Vec<AdditiveOnlyViolation> {
+/// Parse name-status rows and retain exactly the statuses a constrained
+/// execution-note gate rejects.
+fn parse_name_status_filtered(
+    output: &str,
+    is_violation: &impl Fn(char) -> bool,
+) -> Vec<AdditiveOnlyViolation> {
     let mut violations = Vec::new();
     for line in output.lines() {
         let line = line.trim_end();
@@ -10787,19 +10872,16 @@ fn parse_name_status(output: &str) -> Vec<AdditiveOnlyViolation> {
         };
         let second_path = parts.next();
         let first_char = status.chars().next().unwrap_or(' ');
-        match first_char {
-            'M' | 'D' => violations.push(AdditiveOnlyViolation {
+        if is_violation(first_char) {
+            let path = if matches!(first_char, 'R' | 'C') {
+                second_path.unwrap_or(first_path).to_string()
+            } else {
+                first_path.to_string()
+            };
+            violations.push(AdditiveOnlyViolation {
                 status: status.to_string(),
-                path: first_path.to_string(),
-            }),
-            'R' => {
-                let path = second_path.unwrap_or(first_path).to_string();
-                violations.push(AdditiveOnlyViolation {
-                    status: status.to_string(),
-                    path,
-                });
-            }
-            _ => {}
+                path,
+            });
         }
     }
     violations
@@ -10852,12 +10934,22 @@ mod additive_only_tests {
     #[test]
     fn parse_name_status_mixed() {
         let out = "A\tadded.txt\nM\tmodified.txt\nD\tdeleted.txt\nR100\told.txt\tnew.txt\n";
-        let v = parse_name_status(out);
+        let v = parse_name_status_filtered(out, &|status| matches!(status, 'M' | 'D' | 'R'));
         assert_eq!(v.len(), 3);
         assert_eq!(v[0].path, "modified.txt");
         assert_eq!(v[1].path, "deleted.txt");
         assert_eq!(v[2].path, "new.txt");
         assert!(v[2].status.starts_with('R'));
+    }
+
+    #[test]
+    fn value_only_parser_allows_modifications_but_rejects_new_surface() {
+        let out = "A\tadded.txt\nM\tlocalized.ftl\nD\tdeleted.txt\nR100\told.ftl\tnew.ftl\n";
+        let v = parse_name_status_filtered(out, &|status| status != 'M');
+        assert_eq!(v.len(), 3, "only M is allowed for value-only: {v:?}");
+        assert_eq!(v[0].path, "added.txt");
+        assert_eq!(v[1].path, "deleted.txt");
+        assert_eq!(v[2].path, "new.ftl");
     }
 
     // --- cas-895d: check_uncommitted_work ---------------------------------
@@ -14288,6 +14380,26 @@ mod code_review_gate_tests {
         req.code_review_findings = Some(autofix_envelope(vec![p0_finding()]));
         let out = run_code_review_gate(&t, &req, dir.path(), true);
         assert!(matches!(out, CodeReviewGateOutcome::Proceed));
+    }
+
+    /// cas-8ad8: value-only may modify existing source values, so it must not
+    /// inherit additive-only's review bypass.
+    #[test]
+    fn value_only_task_still_requires_code_review() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/locales.rs", "localized value\n")]);
+        let mut t = base_task();
+        t.execution_note = Some("value-only".to_string());
+        let req = base_req(&t.id);
+        match run_code_review_gate(&t, &req, dir.path(), true) {
+            CodeReviewGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("SUPERVISOR-OWNED REVIEW"),
+                    "{message}"
+                );
+            }
+            other => panic!("value-only must follow the normal review gate, got {other:?}"),
+        }
     }
 
     /// cas-acf83 (GH #108): the reported incident. Every persona failed to

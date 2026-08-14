@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.68.0] - 2026-08-14
+
+### Added
+- **Workers can flag a same-session peer collision without leaving the supervisor blind.** Peer warnings stay scoped to the active factory session and include a supervisor copy, while task notes can now be read directly without loading the full task record.
+
+### Changed
+- **Delivery and merge decisions now prove the work's content is on its declared target.** Freshness, merge relays, close receipts, and diff attribution follow the actual destination and distinguish present work from commits that were rebased, resolved away, or superseded.
+- **Review and recovery state now reflect the real owner and live task state.** Value-only edits retain normal supervisor review, verification recovery names the available escape hatch, and terminal relay backlogs reconcile automatically.
+
+### Fixed
+- **Lifecycle instructions no longer turn stale or uncertain state into a misleading action.** Replayed prompts carry provenance, terminal assignments are withheld only with positive current evidence, declined merge anchors cannot reappear as live requests, and urgent stops expire with their acknowledged exchange.
+- **Workers start and operate in the correct context more reliably.** Spawned work uses a fresher non-divergent epic base, workers receive queued supervisor corrections before starting, the target checkout is protected from foreign Git writes, and missing local prerequisites are made explicit.
+- **Focused recall and memory saving are more dependable under real workloads.** Search opens a consistent schema under concurrency and overlap scoring measures meaningful content similarity rather than shared note structure.
+
 ## [2.67.0] - 2026-08-14
 
 ### Added

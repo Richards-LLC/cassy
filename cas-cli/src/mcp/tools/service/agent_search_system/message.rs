@@ -1213,15 +1213,15 @@ impl CasService {
         if rendered == 0 {
             let ids = withheld
                 .iter()
-                .map(|(id, task)| format!("{id} (assignment for {task})"))
+                .map(|(id, task)| format!("{id} (assignment for {task}, already done)"))
                 .chain(terminal_withheld.iter().map(|(id, task, status)| {
-                    format!("{id} (assignment for {task}, already {status})")
+                    format!("{id} (assignment for {task}, already done: {status})")
                 }))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Ok(Self::success(format!(
-                "No unread messages for {recipient} — withheld {} stale or already-consumed \
-                 assignment message(s): {ids}",
+                "No unread messages for {recipient} — withheld {} assignment message(s) already \
+                 done: {ids}",
                 withheld.len() + terminal_withheld.len()
             )));
         }
@@ -1239,24 +1239,24 @@ impl CasService {
         }
         if !withheld.is_empty() {
             output.push_str(&format!(
-                ". Withheld {} already-delivered message(s) whose requested action is already \
-                 recorded: {}",
+                ". Withheld {} assignment message(s) already done: {}",
                 withheld.len(),
                 withheld
                     .iter()
-                    .map(|(id, task)| format!("{id} (assignment for {task})"))
+                    .map(|(id, task)| format!("{id} (assignment for {task}, already done)"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
         }
         if !terminal_withheld.is_empty() {
             output.push_str(&format!(
-                ". Withheld {} assignment message(s) because their task is already Closed or \
-                 Cancelled: {}",
+                ". Withheld {} terminal assignment message(s) already done: {}",
                 terminal_withheld.len(),
                 terminal_withheld
                     .iter()
-                    .map(|(_, task, status)| format!("{task} ({status})"))
+                    .map(|(id, task, status)| {
+                        format!("{id} (assignment for {task}, already done: {status})")
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

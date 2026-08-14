@@ -550,6 +550,24 @@ impl CasCore {
                         },
                     )
                 }
+                DocType::KnowledgePage => (
+                    format!("[Knowledge] {}", result.id),
+                    scope_filter != ScopeFilter::Global && tags_filter.is_empty(),
+                    HitMetadata {
+                        origin: Some("knowledge_index".to_string()),
+                        scope: "project".to_string(),
+                        ..Default::default()
+                    },
+                ),
+                DocType::HistoryCommit | DocType::HistoryDoc => (
+                    format!("[History] {}", result.id),
+                    scope_filter != ScopeFilter::Global && tags_filter.is_empty(),
+                    HitMetadata {
+                        origin: Some("history_index".to_string()),
+                        scope: "project".to_string(),
+                        ..Default::default()
+                    },
+                ),
             };
 
             if matches_filters {

@@ -54,7 +54,7 @@ async fn test_context() {
 /// lexical task matches instead of filling Helpful Memories with generic picks.
 #[tokio::test]
 async fn task_focused_context_surfaces_preferences_and_task_content_matches() {
-    let (_temp, core) = setup_cas();
+    let (temp, core) = setup_cas();
     let service = CasService::new(core.clone(), None);
 
     let task = TaskCreateRequest {
@@ -146,6 +146,24 @@ async fn task_focused_context_surfaces_preferences_and_task_content_matches() {
         )
         .await;
     }
+
+    // cas-d518: CasCore's write path and task-focused context must use the
+    // same rich search schema. The former once cached cas-core's legacy
+    // six-field index while HybridContextScorer expected cas-cli's 15-field
+    // schema at the same path. Opening context then destructively rebuilt a
+    // live index and could fail with ENOTEMPTY under suite concurrency.
+    let index = tantivy::Index::open_in_dir(temp.path().join(".cas/index/tantivy"))
+        .expect("the production write path should create a readable search index");
+    let field_names: Vec<String> = index
+        .schema()
+        .fields()
+        .map(|(_, field)| field.name().to_string())
+        .collect();
+    assert_eq!(field_names.len(), 15, "unexpected search schema: {field_names:?}");
+    assert!(
+        field_names.iter().any(|field| field == "module"),
+        "rich schema missing: {field_names:?}"
+    );
 
     let request: SearchContextRequest = serde_json::from_value(json!({
         "action": "context",

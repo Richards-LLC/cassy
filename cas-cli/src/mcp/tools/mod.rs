@@ -18,7 +18,7 @@ use crate::types::{
     SkillStatus, SkillType, Task, TaskStatus, TaskType, Verification, VerificationIssue,
     VerificationStatus, VerificationType, WorktreeStatus,
 };
-use cas_core::{DocType, SearchIndex, SearchOptions};
+use crate::hybrid_search::{DocType, SearchIndex, SearchOptions};
 
 // Include all request types
 mod types;

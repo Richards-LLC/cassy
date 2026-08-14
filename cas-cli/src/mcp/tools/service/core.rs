@@ -789,7 +789,7 @@ impl CasService {
         req: RuleRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::store::open_rule_store;
-        use cas_core::{DocType, SearchOptions};
+        use crate::hybrid_search::{DocType, SearchOptions};
 
         let content = req.content.ok_or_else(|| {
             Self::error(

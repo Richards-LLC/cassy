@@ -193,6 +193,35 @@ pub struct SearchIndex {
     cached_query_parser: Mutex<Option<QueryParser>>,
 }
 
+impl Clone for SearchIndex {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index.clone(),
+            schema: self.schema.clone(),
+            id_field: self.id_field,
+            content_field: self.content_field,
+            tags_field: self.tags_field,
+            type_field: self.type_field,
+            title_field: self.title_field,
+            doc_type_field: self.doc_type_field,
+            language_field: self.language_field,
+            kind_field: self.kind_field,
+            file_path_field: self.file_path_field,
+            module_field: self.module_field,
+            track_field: self.track_field,
+            problem_type_field: self.problem_type_field,
+            severity_field: self.severity_field,
+            root_cause_field: self.root_cause_field,
+            mem_date_field: self.mem_date_field,
+            writer_memory: self.writer_memory,
+            // Readers and parsers are cheap, instance-local caches. Rebuilding
+            // them avoids sharing synchronization state between CasCore clones.
+            cached_reader: Mutex::new(None),
+            cached_query_parser: Mutex::new(None),
+        }
+    }
+}
+
 /// Options for search queries
 #[derive(Debug, Clone)]
 pub struct SearchOptions {

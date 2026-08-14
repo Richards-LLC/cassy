@@ -172,7 +172,7 @@ fn recent_other_epic_planner(
 /// noise or friction to task creation/spawning.
 impl CasCore {
     pub(crate) fn related_recall(&self, query: &str) -> Option<String> {
-        use cas_core::search::{DocType, SearchOptions};
+        use crate::hybrid_search::{DocType, SearchOptions};
 
         let query = query.trim();
         if query.is_empty() {

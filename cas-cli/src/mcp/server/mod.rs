@@ -15,9 +15,10 @@ use crate::store::{
     WorktreeStore, open_agent_store, open_entity_store, open_rule_store, open_skill_store,
     open_store, open_task_store, open_verification_store, open_worktree_store,
 };
-use cas_core::SearchIndex;
 use cas_core::{SkillSyncer, Syncer};
 use tracing::{debug, info, warn};
+
+use crate::hybrid_search::SearchIndex;
 
 use crate::mcp::daemon::{ActivityTracker, EmbeddedDaemon, EmbeddedDaemonStatus};
 

@@ -4,114 +4,66 @@ use crate::hooks::handlers::*;
 // detect_and_mark_skill_drift tests (cas-f9ad)
 // =========================================================================
 
-/// Drift detected when sentinel exists but session marker is absent → returns true
-/// and writes the marker so the next call for the same session returns false.
-#[test]
-fn skill_drift_no_marker_returns_true() {
+fn skill_project(body: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
+    let cas_root = tmp.path().join(".cas");
+    let skill = tmp.path().join(".claude/skills/cas-worker/SKILL.md");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, body).unwrap();
+    (tmp, cas_root, skill)
+}
 
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:111").unwrap();
-
-    let result = detect_and_mark_skill_drift(cas_root, "sess-drift-a");
-    assert!(result, "should detect drift when no marker exists");
-
-    // Marker should now exist with the sentinel's content
+/// Initial SessionStart already reads the disk file, so the first fingerprint
+/// is recorded without asking the harness to reload the same bytes.
+#[test]
+fn skill_drift_initial_load_records_disk_fingerprint_without_reload_cas_0efb() {
+    let (_tmp, cas_root, _skill) = skill_project("initial guidance\n");
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-a"));
     let marker = cas_root.join("session_skills_seen_sess-drift-a");
-    assert!(marker.exists(), "marker must be created after drift detected");
-    assert_eq!(
-        std::fs::read_to_string(&marker).unwrap(),
-        "ts:111",
-        "marker must echo sentinel content"
-    );
-}
-
-/// No drift when marker content matches sentinel content → returns false.
-#[test]
-fn skill_drift_marker_matches_returns_false() {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
-
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:222").unwrap();
-    std::fs::write(
-        cas_root.join("session_skills_seen_sess-drift-b"),
-        b"ts:222",
-    )
-    .unwrap();
-
-    let result = detect_and_mark_skill_drift(cas_root, "sess-drift-b");
-    assert!(!result, "no drift when marker matches sentinel");
-}
-
-/// No sentinel file → always false (sync has never run).
-#[test]
-fn skill_drift_no_sentinel_returns_false() {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
-
-    let result = detect_and_mark_skill_drift(cas_root, "sess-drift-c");
-    assert!(!result, "no drift when sentinel absent");
+    let fingerprint = std::fs::read_to_string(marker).unwrap();
+    assert!(fingerprint.starts_with("sha256:"), "{fingerprint}");
 }
 
 #[test]
-fn skill_drift_empty_session_id_does_not_create_bare_marker() {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:empty").unwrap();
+fn skill_drift_unchanged_disk_file_is_quiet_cas_0efb() {
+    let (_tmp, cas_root, _skill) = skill_project("same guidance\n");
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-b"));
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-b"));
+}
 
-    assert!(!detect_and_mark_skill_drift(cas_root, ""));
+#[test]
+fn skill_drift_empty_session_id_does_not_create_bare_marker_cas_0efb() {
+    let (_tmp, cas_root, _skill) = skill_project("guidance\n");
+
+    assert!(!detect_and_mark_skill_drift(&cas_root, ""));
     assert!(
         !cas_root.join("session_skills_seen_").exists(),
         "empty session ids must never create a bare marker"
     );
 }
 
-/// After drift is detected and marker written, a second call returns false
-/// (idempotent within a session lifecycle).
+/// A correction made directly to the working-tree file is detected without a
+/// sentinel or remote-ref change; after acknowledgement it is idempotent.
 #[test]
-fn skill_drift_second_call_returns_false() {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
-
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:333").unwrap();
-
-    let first = detect_and_mark_skill_drift(cas_root, "sess-drift-d");
-    assert!(first, "first call must detect drift");
-
-    let second = detect_and_mark_skill_drift(cas_root, "sess-drift-d");
-    assert!(!second, "second call must NOT detect drift (marker updated)");
+fn skill_drift_detects_working_tree_file_change_then_quiets_cas_0efb() {
+    let (_tmp, cas_root, skill) = skill_project("unsafe old claim\n");
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-d"));
+    std::fs::write(skill, "corrected safety guidance\n").unwrap();
+    assert!(detect_and_mark_skill_drift(&cas_root, "sess-drift-d"));
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-d"));
 }
 
-/// Different sessions track independently: one session acking drift does NOT
-/// suppress it for another session that hasn't seen the sentinel yet.
+/// Different sessions establish independent initial fingerprints. A session
+/// that starts after the edit already loaded the corrected bytes and should
+/// not receive a redundant reload.
 #[test]
-fn skill_drift_independent_per_session() {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
-
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:444").unwrap();
-
-    let _ = detect_and_mark_skill_drift(cas_root, "sess-drift-e1");
-    // Session e2 has its own marker → should still see drift
-    let e2 = detect_and_mark_skill_drift(cas_root, "sess-drift-e2");
-    assert!(e2, "session e2 must detect drift independently of e1");
-}
-
-/// After new sync (sentinel changes), drift is re-detected even for a session
-/// that previously acked.
-#[test]
-fn skill_drift_re_detected_after_new_sync() {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let cas_root = tmp.path();
-
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:555").unwrap();
-    let _ = detect_and_mark_skill_drift(cas_root, "sess-drift-f");
-
-    // Simulate new sync
-    std::fs::write(cas_root.join("skill_sync_sentinel"), b"ts:666").unwrap();
-
-    let again = detect_and_mark_skill_drift(cas_root, "sess-drift-f");
-    assert!(again, "drift must be re-detected after sentinel updated by new sync");
+fn skill_drift_independent_per_session_cas_0efb() {
+    let (_tmp, cas_root, skill) = skill_project("v1\n");
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-e1"));
+    std::fs::write(skill, "v2\n").unwrap();
+    assert!(detect_and_mark_skill_drift(&cas_root, "sess-drift-e1"));
+    assert!(!detect_and_mark_skill_drift(&cas_root, "sess-drift-e2"));
 }
 
 // =========================================================================

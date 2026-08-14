@@ -1555,6 +1555,12 @@ impl TeamsManager {
 # Workers may ONLY commit on their own factory/<name> branch. All other branches
 # (main, master, staging, epic/*, arbitrary branches, and detached HEAD) are denied.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+expected=\"factory/$CAS_AGENT_NAME\"
+if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ]; then
+  echo \"CAS COMMIT GUARD: worker '$CAS_AGENT_NAME' cannot commit from '$branch'.\" >&2
+  echo \"Expected the exact worker branch '$expected'. The checkout may belong to another worker.\" >&2
+  exit 1
+fi
 case \"$branch\" in
   factory/*)
     exit 0
@@ -1569,6 +1575,31 @@ case \"$branch\" in
     exit 1
     ;;
 esac
+";
+
+    /// Push-time hard floor for cas-0efb / GH #337/#339. PreToolUse catches
+    /// the ordinary model-visible path; this hook rechecks at Git's own push
+    /// boundary, after any preceding command in a compound shell invocation.
+    pub const WORKER_PRE_PUSH_HOOK: &'static str = "#!/bin/sh
+# CAS factory worker push guard — installed by cas factory in the worker-private hooksPath.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+expected=\"factory/$CAS_AGENT_NAME\"
+if [ -z \"$CAS_AGENT_NAME\" ]; then
+  echo \"CAS PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns.\" >&2
+  exit 1
+fi
+if [ \"$branch\" != \"$expected\" ]; then
+  echo \"CAS PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch'.\" >&2
+  echo \"Expected the exact worker branch '$expected'. Refusing to graft the current HEAD onto another branch.\" >&2
+  exit 1
+fi
+while read local_ref local_sha remote_ref remote_sha; do
+  if [ \"$remote_ref\" != \"refs/heads/$expected\" ]; then
+    echo \"CAS PUSH GUARD: worker '$CAS_AGENT_NAME' may push only to 'refs/heads/$expected', not '$remote_ref'.\" >&2
+    exit 1
+  fi
+done
+exit 0
 ";
 
     /// Marker string that identifies a CAS-installed guard hook (any version).
@@ -1651,6 +1682,32 @@ esac
         let mut updated = existing_content.to_string();
         updated.push_str(&sourcing_line);
         std::fs::write(hook_path, &updated)?;
+        std::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755))?;
+        Ok(())
+    }
+
+    /// Put the CAS pre-push guard before an existing project hook. Guard-first
+    /// ordering is intentional: a project hook may exit successfully, which
+    /// must not bypass the worker-identity check.
+    fn write_push_guard_alongside(
+        hooks_dir: &std::path::Path,
+        hook_path: &std::path::Path,
+        existing_content: &str,
+    ) -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project_hook = hooks_dir.join("pre-push-project-hook");
+        std::fs::write(&project_hook, existing_content)?;
+        std::fs::set_permissions(&project_hook, std::fs::Permissions::from_mode(0o755))?;
+
+        let guard = Self::WORKER_PRE_PUSH_HOOK
+            .strip_suffix("exit 0\n")
+            .unwrap_or(Self::WORKER_PRE_PUSH_HOOK);
+        let wrapper = format!(
+            "{guard}project_hook=\"$(git rev-parse --git-path hooks 2>/dev/null)/pre-push-project-hook\"\n\
+             [ -f \"$project_hook\" ] && \"$project_hook\" \"$@\"\n"
+        );
+        std::fs::write(hook_path, wrapper)?;
         std::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755))?;
         Ok(())
     }
@@ -1808,9 +1865,42 @@ esac
             }
         }
 
+        let push_hook_path = private_hooks_dir.join("pre-push");
+        if push_hook_path.exists()
+            && std::fs::read_to_string(&push_hook_path)
+                .unwrap_or_default()
+                .contains("CAS factory worker push guard")
+        {
+            tracing::debug!(
+                "CAS pre-push guard already installed at {:?}",
+                push_hook_path
+            );
+        } else {
+            let preexisting_project_hook = effective_hooks_dir.join("pre-push");
+            if preexisting_project_hook.exists() {
+                let existing = std::fs::read_to_string(&preexisting_project_hook)?;
+                Self::write_push_guard_alongside(&private_hooks_dir, &push_hook_path, &existing)?;
+                tracing::info!(
+                    "Installed CAS worker pre-push guard at {:?} (chained to existing project hook {:?})",
+                    push_hook_path,
+                    preexisting_project_hook
+                );
+            } else {
+                std::fs::write(&push_hook_path, Self::WORKER_PRE_PUSH_HOOK)?;
+                std::fs::set_permissions(&push_hook_path, std::fs::Permissions::from_mode(0o755))?;
+                tracing::info!(
+                    "Installed CAS worker pre-push guard at {:?}",
+                    push_hook_path
+                );
+            }
+        }
+
         // Scope core.hooksPath to THIS worktree only, so the guard never
         // leaks into the main checkout or sibling worktrees (cas-2491).
-        Self::run_git_ok(worktree_path, &["config", "extensions.worktreeConfig", "true"])?;
+        Self::run_git_ok(
+            worktree_path,
+            &["config", "extensions.worktreeConfig", "true"],
+        )?;
         Self::run_git_ok(
             worktree_path,
             &[
@@ -3670,6 +3760,7 @@ mod tests {
 
         let result = std::process::Command::new("git")
             .args(["commit", "-m", "wip on worker branch"])
+            .env("CAS_AGENT_NAME", "test-worker")
             .current_dir(p)
             .output()
             .unwrap();
@@ -3915,6 +4006,112 @@ mod tests {
         );
 
         // Best-effort cleanup so temp dirs don't linger as registered worktrees.
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+            .current_dir(repo)
+            .output();
+    }
+
+    /// GH #339: even an explicit refspec must not let a foreign checkout HEAD
+    /// advance this worker's remote branch. The pre-push hook is the
+    /// after-compound-command hard floor beneath the PreToolUse refusal.
+    #[test]
+    fn worker_pre_push_hook_refuses_foreign_head_graft_cas_0efb() {
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+        let remote = repo.join("remote.git");
+        let init_remote = std::process::Command::new("git")
+            .args(["init", "--bare", &remote.to_string_lossy()])
+            .output()
+            .unwrap();
+        assert!(init_remote.status.success());
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", &remote.to_string_lossy()])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        let wt_path = repo.parent().unwrap().join(format!(
+            "{}-push-wt",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        let add_out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "factory/credit-repairs",
+                &wt_path.to_string_lossy(),
+                "main",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(add_out.status.success());
+        TeamsManager::install_worker_pre_commit_hook(&wt_path).unwrap();
+
+        // Establish the legitimate remote worker branch first.
+        let initial_push = std::process::Command::new("git")
+            .args(["push", "origin", "HEAD:refs/heads/factory/credit-repairs"])
+            .env("CAS_AGENT_NAME", "credit-repairs")
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(
+            initial_push.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initial_push.stderr)
+        );
+
+        std::process::Command::new("git")
+            .args(["switch", "-c", "factory/support-triage"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        std::fs::write(wt_path.join("foreign.txt"), "foreign worker commit\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "foreign.txt"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        let foreign_commit = std::process::Command::new("git")
+            .args(["commit", "--no-verify", "-m", "foreign task commit"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(foreign_commit.status.success());
+
+        let rejected = std::process::Command::new("git")
+            .args(["push", "origin", "HEAD:refs/heads/factory/credit-repairs"])
+            .env("CAS_AGENT_NAME", "credit-repairs")
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "foreign HEAD push must be refused"
+        );
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("CAS PUSH GUARD"), "{stderr}");
+        assert!(stderr.contains("support-triage"), "{stderr}");
+        assert!(stderr.contains("credit-repairs"), "{stderr}");
+
+        let remote_tip = std::process::Command::new("git")
+            .args(["rev-parse", "refs/heads/factory/credit-repairs"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let local_parent = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD^"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&remote_tip.stdout).trim(),
+            String::from_utf8_lossy(&local_parent.stdout).trim(),
+            "rejected push must leave the remote worker branch unchanged"
+        );
+
         let _ = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)

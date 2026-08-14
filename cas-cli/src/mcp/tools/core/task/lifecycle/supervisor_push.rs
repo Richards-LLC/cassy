@@ -28,6 +28,7 @@ pub enum LifecycleTransition {
     Started,
     Blocked,
     ReadyReopened,
+    VerificationRejectedReopened,
     CloseRejected,
     AwaitingMerge,
     Closed,
@@ -39,6 +40,7 @@ impl LifecycleTransition {
             Self::Started => "task_started",
             Self::Blocked => "task_blocked",
             Self::ReadyReopened => "task_ready",
+            Self::VerificationRejectedReopened => "task_verification_rejected_reopened",
             Self::CloseRejected => "task_close_rejected",
             Self::AwaitingMerge => "task_awaiting_merge",
             Self::Closed => "task_closed",
@@ -47,7 +49,10 @@ impl LifecycleTransition {
 
     pub fn priority(self) -> NotificationPriority {
         match self {
-            Self::CloseRejected | Self::Blocked | Self::AwaitingMerge => NotificationPriority::High,
+            Self::CloseRejected
+            | Self::Blocked
+            | Self::AwaitingMerge
+            | Self::VerificationRejectedReopened => NotificationPriority::High,
             Self::Started | Self::ReadyReopened | Self::Closed => NotificationPriority::Normal,
         }
     }
@@ -70,7 +75,10 @@ impl LifecycleTransition {
     /// idle-nudge exclusion (cas-dab2) was added to stop.
     pub fn wakes_idle_supervisor(self) -> bool {
         match self {
-            Self::CloseRejected | Self::AwaitingMerge | Self::Blocked => true,
+            Self::CloseRejected
+            | Self::AwaitingMerge
+            | Self::Blocked
+            | Self::VerificationRejectedReopened => true,
             Self::Started | Self::ReadyReopened | Self::Closed => false,
         }
     }
@@ -808,6 +816,7 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_RECOVERY;
     use crate::test_support::TestEnvGuard;
     use cas_store::{
         PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore, SqliteSupervisorQueueStore,
@@ -906,6 +915,10 @@ mod tests {
             "task_ready"
         );
         assert_eq!(
+            LifecycleTransition::VerificationRejectedReopened.as_event_type(),
+            "task_verification_rejected_reopened"
+        );
+        assert_eq!(
             LifecycleTransition::CloseRejected.as_event_type(),
             "task_close_rejected"
         );
@@ -924,6 +937,7 @@ mod tests {
         assert!(LifecycleTransition::AwaitingMerge.wakes_idle_supervisor());
         assert!(LifecycleTransition::CloseRejected.wakes_idle_supervisor());
         assert!(LifecycleTransition::Blocked.wakes_idle_supervisor());
+        assert!(LifecycleTransition::VerificationRejectedReopened.wakes_idle_supervisor());
         assert!(!LifecycleTransition::Started.wakes_idle_supervisor());
         assert!(!LifecycleTransition::ReadyReopened.wakes_idle_supervisor());
         assert!(!LifecycleTransition::Closed.wakes_idle_supervisor());
@@ -1001,6 +1015,46 @@ mod tests {
              the supervisor pane, so it can never read as operator input): {}",
             rows[0].prompt
         );
+    }
+
+    #[test]
+    fn verification_rejection_reopen_wakes_once_and_replay_after_ack_is_quiet() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-reject-wake")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&agent_in_session(
+                "sup-reject-wake",
+                "cosmic-bear-43",
+                AgentRole::Supervisor,
+                "sess-reject-wake",
+            ))
+            .unwrap();
+        let sq = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        sq.init().unwrap();
+        let pq = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        pq.init().unwrap();
+
+        let emit = || emit_task_lifecycle_transition(
+            &sq, Some(&pq as &dyn PromptQueueStore), &agents,
+            "cas-56f8", "Rejected review recovery", TaskStatus::PendingSupervisorReview,
+            TaskStatus::Open, "task-verifier",
+            Some(VERIFICATION_REJECTED_REOPEN_RECOVERY),
+            LifecycleTransition::VerificationRejectedReopened, "reject-occurrence",
+        );
+        let first = emit().expect("rejection reopen wake");
+        let notification_id = match first { LifecyclePushResult::Enqueued { notification_id } => notification_id, other => panic!("unexpected first result: {other:?}") };
+        let rows = pq.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(is_lifecycle_wake_source(&rows[0].source));
+        assert!(rows[0].prompt.contains(VERIFICATION_REJECTED_REOPEN_RECOVERY));
+
+        // Message acknowledgement consumes the prompt; replaying its exact
+        // occurrence must observe the completed durable outbox and add no wake.
+        sq.mark_prompt_delivered(notification_id).unwrap();
+        assert!(matches!(emit().unwrap(), LifecyclePushResult::AlreadyComplete { .. }));
+        assert_eq!(pq.peek_all(10).unwrap().len(), 1, "no duplicate wake storm after ack");
     }
 
     #[test]

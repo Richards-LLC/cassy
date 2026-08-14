@@ -1,4 +1,5 @@
 use crate::mcp::tools::service::imports::*;
+use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 
 /// Resolve and validate an explicit Claude config directory before its spawn
 /// request reaches the daemon.  A partial profile otherwise starts a PTY that
@@ -563,7 +564,7 @@ const SPAWN_HISTORY_WINDOW_SECS: i64 = 1800;
 /// Pure over its inputs so every branch is testable without a store.
 fn format_assigned_task_info(
     in_progress: Option<(&str, &str)>,
-    assigned_open: Option<(&str, &str)>,
+    assigned_open: Option<(&str, &str, bool)>,
     parked: Option<(&str, &str, cas_types::TaskStatus)>,
 ) -> String {
     const TITLE_CAP: usize = 60;
@@ -583,7 +584,11 @@ fn format_assigned_task_info(
         // Assigned but not started: the dispatch grace window, or a worker that
         // never picked the task up. Naming it lets the supervisor tell those
         // apart without opening anything.
-        (None, Some((id, title)), _) => {
+        (None, Some((id, title, true)), _) => format!(
+            "\n    task: {id} (verification rejected; assigned worker inactive) — {} → WAITING ON YOU: resume the existing worker or replace it",
+            truncate(title)
+        ),
+        (None, Some((id, title, false)), _) => {
             format!(
                 "\n    task: {id} (assigned, not started) — {}",
                 truncate(title)
@@ -2602,7 +2607,11 @@ impl CasService {
                         .iter()
                         .find(|t| matches_agent(t.assignee.as_deref()))
                         .map(|t| (t.id.as_str(), t.title.as_str())),
-                    assigned_open_task.map(|t| (t.id.as_str(), t.title.as_str())),
+                    assigned_open_task.map(|t| (
+                        t.id.as_str(),
+                        t.title.as_str(),
+                        t.labels.iter().any(|label| label == VERIFICATION_REJECTED_REOPEN_LABEL),
+                    )),
                     parked_tasks
                         .iter()
                         .find(|t| matches_agent(t.assignee.as_deref()))
@@ -7820,10 +7829,21 @@ mod spawn_lifecycle_tests {
     /// up, and the supervisor must be able to tell those from an idle row.
     #[test]
     fn assigned_but_unstarted_is_distinguished_from_in_progress() {
-        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing")), None);
+        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing", false)), None);
         assert!(out.contains("cas-4242"), "{out}");
         assert!(out.contains("assigned, not started"), "{out}");
         assert!(!out.contains("in progress"), "{out}");
+    }
+
+    #[test]
+    fn rejected_review_reopen_is_waiting_on_supervisor() {
+        let out = format_assigned_task_info(
+            None,
+            Some(("cas-56f8", "Needs rework", true)),
+            None,
+        );
+        assert!(out.contains("WAITING ON YOU"), "{out}");
+        assert!(out.contains("resume the existing worker or replace it"), "{out}");
     }
 
     /// In-progress wins when a worker somehow holds both — the started task is
@@ -7832,7 +7852,7 @@ mod spawn_lifecycle_tests {
     fn in_progress_takes_precedence_over_open_assignment() {
         let out = format_assigned_task_info(
             Some(("cas-1111", "Started work")),
-            Some(("cas-2222", "Also assigned")),
+            Some(("cas-2222", "Also assigned", false)),
             None,
         );
         assert!(out.contains("cas-1111"), "{out}");

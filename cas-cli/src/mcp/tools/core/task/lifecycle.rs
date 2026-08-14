@@ -1,4 +1,5 @@
 use crate::mcp::tools::core::imports::*;
+use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use thiserror::Error;
 
 /// Typed failures from lifecycle gates. The MCP boundary renders these with
@@ -1228,6 +1229,10 @@ impl CasCore {
 
         // Capture old status before mutation for lifecycle push (cas-062d).
         let old_status = task.status;
+        // A worker has acted on the supervisor's recovery choice; remove the
+        // structured rejection-reopen marker so a later unrelated Open state
+        // cannot be rendered as waiting on the supervisor.
+        task.labels.retain(|label| label != VERIFICATION_REJECTED_REOPEN_LABEL);
         task.status = TaskStatus::InProgress;
         task.updated_at = chrono::Utc::now();
 

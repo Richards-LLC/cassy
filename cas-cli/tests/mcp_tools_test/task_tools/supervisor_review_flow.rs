@@ -567,6 +567,13 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
     assert!(!rejected_task.pending_verification);
     assert!(
         rejected_task
+            .labels
+            .iter()
+            .any(|label| label == "verification-rejected-reopen"),
+        "rejection reopen must persist the structured worker-status signal"
+    );
+    assert!(
+        rejected_task
             .notes
             .contains("Decision: supervisor review rejected"),
         "the rejected verdict must leave an audited decision note"
@@ -589,6 +596,16 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
             .unwrap()
             .status,
         TaskStatus::InProgress
+    );
+    assert!(
+        !open_task_store(&cas_dir)
+            .unwrap()
+            .get(&rejected_task_id)
+            .unwrap()
+            .labels
+            .iter()
+            .any(|label| label == "verification-rejected-reopen"),
+        "resuming the worker must clear the recovery marker"
     );
 
     let latest = open_verification_store(&cas_dir)

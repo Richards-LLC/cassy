@@ -79,13 +79,17 @@ impl WorktreeManager {
         let worktree_path = self.worktree_path_for_worker(worker_name);
         let branch_name = self.branch_name_for_worker(worker_name);
         let parent_branch = self.git.current_branch()?;
+        let resolved = self
+            .git
+            .resolve_fresh_base(&parent_branch)
+            .map_err(WorktreeError::Git)?;
 
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         self.git
-            .create_worktree(&worktree_path, &branch_name, Some(&parent_branch))?;
+            .create_worktree(&worktree_path, &branch_name, Some(&resolved.branch_ref))?;
 
         let _ = self.git.mark_config_skip_worktree(&worktree_path);
         symlink_project_config(&self.repo_root, &worktree_path);
@@ -115,13 +119,17 @@ impl WorktreeManager {
 
         let worktree_path = self.worktree_path_for_worker(worker_name);
         let branch_name = self.branch_name_for_worker(worker_name);
+        let resolved = self
+            .git
+            .resolve_fresh_base(parent_branch)
+            .map_err(WorktreeError::Git)?;
 
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         self.git
-            .create_worktree(&worktree_path, &branch_name, Some(parent_branch))?;
+            .create_worktree(&worktree_path, &branch_name, Some(&resolved.branch_ref))?;
 
         let _ = self.git.mark_config_skip_worktree(&worktree_path);
         symlink_project_config(&self.repo_root, &worktree_path);

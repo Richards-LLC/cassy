@@ -531,13 +531,37 @@ impl CasCore {
                         .as_ref()
                         .map(|context| context.target_branch.clone())
                         .unwrap_or_else(|| git_ops.detect_default_branch());
+                    // The supervisor checkout normally never checks out its
+                    // delivery branch. Resolve the fetched tracking ref before
+                    // cutting the epic so its stale local copy cannot backdate
+                    // every worker that later inherits this branch.
+                    let resolved = match git_ops.resolve_fresh_base(&trunk) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            eprintln!(
+                                "Warning: Failed to resolve a fresh epic base '{trunk}': {error}"
+                            );
+                            return Ok(Self::success(format!(
+                                "Created task: {} - {} (P{}){}{}",
+                                id,
+                                task.title,
+                                task.priority.0,
+                                related_context,
+                                no_code_external_ref_guidance(&task),
+                            )));
+                        }
+                    };
                     // cas-a85e (GH #99): trunk stays the default anchor, but a
                     // checkout sitting on the PREVIOUS epic branch must not
                     // silently strand that epic's commits — base from it, or
                     // say plainly what was left out.
-                    let base_choice = git_ops.resolve_epic_base(&trunk);
+                    let base_choice = git_ops.resolve_epic_base(&resolved.branch_ref);
                     let base_ref = base_choice.base_ref.clone();
-                    let base_sha = git_ops.ref_sha(&base_ref).unwrap_or_default();
+                    let base_sha = if base_choice.used_head {
+                        git_ops.ref_sha(&base_ref).unwrap_or_default()
+                    } else {
+                        resolved.sha.clone()
+                    };
                     let sha_preview = &base_sha[..base_sha.len().min(8)];
                     match git_ops.create_branch_from(&branch_name, &base_ref) {
                         Ok(created) => {
@@ -570,8 +594,24 @@ impl CasCore {
                                 .as_deref()
                                 .map(|notice| format!("\n   {notice}"))
                                 .unwrap_or_default();
+                            let freshness = (!base_choice.used_head
+                                && resolved.behind_count > 0)
+                                .then(|| {
+                                    if resolved.used_remote {
+                                        format!(
+                                            "\n   BASE REFRESHED: local '{trunk}' was {} commit(s) behind; used '{}' @ {sha_preview}.",
+                                            resolved.behind_count, resolved.branch_ref
+                                        )
+                                    } else {
+                                        format!(
+                                            "\n   BASE REF DIVERGED: local '{trunk}' has {} local-only and {} remote-only commit(s); used local '{base_ref}' @ {sha_preview}.",
+                                            resolved.ahead_count, resolved.behind_count
+                                        )
+                                    }
+                                })
+                                .unwrap_or_default();
                             Some(format!(
-                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.{divergence}"
+                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.{freshness}{divergence}"
                             ))
                         }
                         Err(e) => {

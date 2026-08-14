@@ -595,6 +595,10 @@ fn prefer_fresher_base_ref(
     if base.starts_with("origin/") {
         return (None, None);
     }
+    // A remote-tracking ref is only evidence of the last fetch. Refresh it
+    // before comparing so a long-running supervisor does not keep cutting
+    // workers from an origin/main snapshot that is stale too.
+    let _ = crate::worktree::GitOperations::new(repo_root.to_path_buf()).fetch_branch(base);
     let remote = format!("origin/{base}");
     if !ref_exists(repo_root, base) || !ref_exists(repo_root, &remote) {
         return (None, None);
@@ -731,6 +735,9 @@ fn freshest_nondivergent_ref(repo_root: &std::path::Path, branch: &str) -> Resul
         return Ok(branch.to_string());
     }
     let local = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    // Keep the fast-forward decision authoritative to the remote observed at
+    // this spawn, rather than an origin/<branch> ref fetched hours earlier.
+    let _ = crate::worktree::GitOperations::new(repo_root.to_path_buf()).fetch_branch(local);
     let remote = format!("origin/{local}");
     if !ref_exists(repo_root, &remote) {
         return Ok(branch.to_string());
@@ -1466,6 +1473,11 @@ impl FactoryApp {
                 if let Some(notice) = freshness_notice {
                     notices.push(notice);
                 }
+                // `parent_branch` remains the local merge-back target, but a
+                // refreshed spawn is actually cut from `base_ref`. Warnings
+                // must assess that effective checkout ref or they contradict
+                // the successful origin-based refresh they just announced.
+                let effective_base = base_ref.as_deref().unwrap_or(&parent_branch);
                 let provenance = spawn_base_provenance_notice(
                     &parent_branch,
                     &base_source,
@@ -1487,7 +1499,7 @@ impl FactoryApp {
                     _ => self.epic_branch.clone(),
                 };
                 if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
-                    worker_base_mismatch_notice(manager, &parent_branch, epic_branch)
+                    worker_base_mismatch_notice(manager, effective_base, epic_branch)
                 }) {
                     notices.push(notice);
                 }
@@ -1508,7 +1520,7 @@ impl FactoryApp {
                 // spawn time instead of leaving it to whoever happens to read
                 // `behind:` in worker_status.
                 if let Some(notice) =
-                    stale_spawn_base_notice(manager.repo_root(), &parent_branch, &trunk)
+                    stale_spawn_base_notice(manager.repo_root(), effective_base, &trunk)
                 {
                     notices.push(notice);
                 }
@@ -2625,6 +2637,11 @@ mod spawn_base_tests {
         assert!(notice.contains(&local_sha), "{notice}");
         assert!(notice.contains(&remote_sha), "{notice}");
         assert!(notice.contains("origin/main"), "{notice}");
+        assert_eq!(
+            stale_spawn_base_notice(&repo, &base_ref, "main"),
+            None,
+            "the stale-base warning must inspect the effective origin checkout, not the old local parent"
+        );
 
         // End to end: the worker's files come from origin's tip while the
         // recorded parent branch stays the local, mergeable branch name.

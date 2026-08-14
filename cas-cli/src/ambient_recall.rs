@@ -1089,16 +1089,31 @@ fn read_surface(
 
 fn query_terms(canonical: &str) -> Vec<String> {
     let mut terms = Vec::new();
-    for raw in canonical
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
-    {
-        let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
-        if !is_content_bearing_term(&term) || terms.contains(&term) {
-            continue;
-        }
-        terms.push(term);
-        if terms.len() == 10 {
-            break;
+    // The submitted turn is the reason this recall is happening.  Prioritize
+    // it over durable task/epic metadata: the lexical retriever has a hard
+    // ten-term work budget, and putting request terms last made an active
+    // supervisor task title silently consume that entire budget (cas-0337).
+    // Preserve the remaining canonical context as a fallback after the turn.
+    let mut lines: Vec<&str> = canonical.lines().collect();
+    if let Some(request_index) = lines.iter().position(|line| {
+        line.strip_prefix("request=")
+            .is_some_and(|request| !request.eq_ignore_ascii_case("session start"))
+    }) {
+        let request = lines.remove(request_index);
+        lines.insert(0, request);
+    }
+    for line in lines {
+        for raw in line
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+        {
+            let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+            if !is_content_bearing_term(&term) || terms.contains(&term) {
+                continue;
+            }
+            terms.push(term);
+            if terms.len() == 10 {
+                return terms;
+            }
         }
     }
     terms

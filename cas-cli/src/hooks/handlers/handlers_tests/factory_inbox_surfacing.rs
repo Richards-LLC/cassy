@@ -15,6 +15,7 @@ use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
 use tempfile::TempDir;
 
 use crate::hooks::handlers::handle_user_prompt_submit;
+use crate::types::{Entry, EntryType, Task, TaskStatus};
 
 const SESSION: &str = "cas-src-happy-jay-91";
 const WORKER: &str = "ready-cheetah-71";
@@ -295,6 +296,54 @@ fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
         !context.contains("[incoming messages]"),
         "an empty inbox must not announce itself: {context}"
     );
+}
+
+/// cas-0337: this is the actual factory supervisor turn path, not a direct
+/// retriever unit seam. A long active-task title must not hide a same-day
+/// Learning whose vocabulary is present in the submitted turn.
+#[test]
+fn supervisor_turn_surfaces_matching_same_day_learnings() {
+    let _lock = super::env_lock();
+    let _env = supervisor_env();
+    let project = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let entries = crate::store::open_store_local(&cas_root).unwrap();
+    let mut stale_refs = Entry::new(
+        "2026-08-14-5".into(),
+        "epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into(),
+    );
+    stale_refs.entry_type = EntryType::Learning;
+    stale_refs.importance = 0.85;
+    entries.add(&stale_refs).unwrap();
+    let mut hermetic_ci = Entry::new(
+        "2026-08-14-3".into(),
+        "Local green is insufficient merge evidence: a populated developer HOME masks inherited git identity and CAS_AGENT_NAME failures that clean CI exposes".into(),
+    );
+    hermetic_ci.entry_type = EntryType::Learning;
+    hermetic_ci.importance = 0.90;
+    entries.add(&hermetic_ci).unwrap();
+
+    let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
+    let mut task = Task::new(
+        "cas-ambient".into(),
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".into(),
+    );
+    task.status = TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+
+    let mut stale_input = input("supervisor");
+    stale_input.cwd = project.path().to_string_lossy().into_owned();
+    stale_input.user_prompt =
+        Some("Investigate epic_status before trusting stale refs on main".into());
+    let stale_context =
+        context_of(&handle_user_prompt_submit(&stale_input, Some(&cas_root)).unwrap());
+    assert!(stale_context.contains("2026-08-14-5"), "{stale_context}");
+
+    let mut ci_input = stale_input;
+    ci_input.user_prompt =
+        Some("Local green diverged from clean CI; audit inherited HOME, git identity, and CAS_AGENT_NAME".into());
+    let ci_context = context_of(&handle_user_prompt_submit(&ci_input, Some(&cas_root)).unwrap());
+    assert!(ci_context.contains("2026-08-14-3"), "{ci_context}");
 }
 
 /// Session isolation must hold on the surfacing path exactly as it does on the

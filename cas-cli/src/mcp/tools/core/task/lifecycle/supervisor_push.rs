@@ -1017,6 +1017,46 @@ mod tests {
     }
 
     #[test]
+    fn verification_rejection_reopen_wakes_once_and_replay_after_ack_is_quiet() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-reject-wake")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&agent_in_session(
+                "sup-reject-wake",
+                "cosmic-bear-43",
+                AgentRole::Supervisor,
+                "sess-reject-wake",
+            ))
+            .unwrap();
+        let sq = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        sq.init().unwrap();
+        let pq = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        pq.init().unwrap();
+
+        let emit = || emit_task_lifecycle_transition(
+            &sq, Some(&pq as &dyn PromptQueueStore), &agents,
+            "cas-56f8", "Rejected review recovery", TaskStatus::PendingSupervisorReview,
+            TaskStatus::Open, "task-verifier",
+            Some("Verification rejected; worker remains assigned but inactive. Resume the existing worker or replace it."),
+            LifecycleTransition::VerificationRejectedReopened, "reject-occurrence",
+        );
+        let first = emit().expect("rejection reopen wake");
+        let notification_id = match first { LifecyclePushResult::Enqueued { notification_id } => notification_id, other => panic!("unexpected first result: {other:?}") };
+        let rows = pq.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(is_lifecycle_wake_source(&rows[0].source));
+        assert!(rows[0].prompt.contains("resume the existing worker or replace it"));
+
+        // Message acknowledgement consumes the prompt; replaying its exact
+        // occurrence must observe the completed durable outbox and add no wake.
+        sq.mark_prompt_delivered(notification_id).unwrap();
+        assert!(matches!(emit().unwrap(), LifecyclePushResult::AlreadyComplete { .. }));
+        assert_eq!(pq.peek_all(10).unwrap().len(), 1, "no duplicate wake storm after ack");
+    }
+
+    #[test]
     fn failure_message_never_claims_task_op_retry_is_safe() {
         let msg = lifecycle_push_failure_message(
             "cas-x",

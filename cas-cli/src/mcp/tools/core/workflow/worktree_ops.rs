@@ -2194,13 +2194,43 @@ impl CasCore {
                     &cwd,
                     &receipt.target_branch,
                 );
-            let already_merged = target_tip.as_deref().is_some_and(|target| {
+            let reachable_from_target = target_tip.as_deref().is_some_and(|target| {
                 crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
                     &cwd,
                     &receipt.commit_sha,
                     target,
                 )
             });
+            let already_merged = if reachable_from_target {
+                match crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+                    &cwd,
+                    &receipt.commit_sha,
+                    target_tip.as_deref().expect("reachable target tip"),
+                ) {
+                    crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. } => true,
+                    crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { paths } => {
+                        return fail(
+                            cas_types::WorkerDeliveryState::Conflict,
+                            "delivery_content_dropped",
+                            format!(
+                                "receipt commit is reachable from the target, but its content is absent from path(s): {}",
+                                paths.join(", ")
+                            ),
+                        );
+                    }
+                    crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Unknown { reason } => {
+                        return fail(
+                            cas_types::WorkerDeliveryState::Conflict,
+                            "delivery_content_unverifiable",
+                            format!(
+                                "receipt commit is reachable from the target, but its content could not be proven: {reason}"
+                            ),
+                        );
+                    }
+                }
+            } else {
+                false
+            };
             let source_tip =
                 crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                     &cwd,
@@ -2432,6 +2462,32 @@ impl CasCore {
                     data: None,
                 });
             }
+            match crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+                &cwd,
+                &receipt.commit_sha,
+                &target_tip,
+            ) {
+                crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. } => {}
+                crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { paths } => {
+                    return Err(McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Transactional delivery refused to mark merged: receipt commit is reachable, but delivery content is absent from path(s): {}.",
+                            paths.join(", ")
+                        )),
+                        data: None,
+                    });
+                }
+                crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Unknown { reason } => {
+                    return Err(McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Transactional delivery refused to mark merged: receipt commit is reachable, but delivery content could not be proven: {reason}."
+                        )),
+                        data: None,
+                    });
+                }
+            }
 
             // cas-0a21: ancestry alone cannot prove the merge was rooted at
             // the *reviewed* target — a merge that swept in a concurrent
@@ -2514,10 +2570,13 @@ impl CasCore {
                 .then(|| manager.git().resolve_commit(&remote_target))
                 .flatten()
                 .filter(|_| {
-                    crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
-                        &cwd,
-                        &receipt.commit_sha,
-                        &remote_target,
+                    matches!(
+                        crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+                            &cwd,
+                            &receipt.commit_sha,
+                            &remote_target,
+                        ),
+                        crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
                     )
                 });
             let push_outcome = match pr_landed_sha {

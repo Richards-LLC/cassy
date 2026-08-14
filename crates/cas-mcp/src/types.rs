@@ -334,13 +334,15 @@ pub struct TaskRequest {
     ///
     /// The close gate accepts a full commit SHA or unambiguous hexadecimal
     /// abbreviation, persists its full immutable ID, and verifies a non-empty
-    /// diff plus reachability from the task's parent branch. It is only needed
+    /// diff, reachability from the task's parent branch, and continued presence
+    /// of that commit's tree effect on the current target. It is only needed
     /// when no commit-time factory anchor was captured.
     #[schemars(
         description = "Full commit SHA or unambiguous hexadecimal abbreviation produced by this \
                        task. On close, CAS resolves it to a full immutable commit ID, validates \
-                       that it carries a non-empty diff and is an ancestor of the task's parent \
-                       branch, and persists only the full ID. Use this for merged-before-close \
+                       that it carries a non-empty diff, is an ancestor of the task's parent \
+                       branch, and still has its tree effect present on the current target; CAS \
+                       persists only the full ID. Use this for merged-before-close \
                        work when no automatic factory anchor was captured."
     )]
     #[serde(default)]

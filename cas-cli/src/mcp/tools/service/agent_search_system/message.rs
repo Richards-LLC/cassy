@@ -60,6 +60,22 @@ pub(crate) fn inbox_redelivery_decision(
     InboxRedelivery::MarkRedelivery
 }
 
+/// Inbox polling is a delivery surface, not an authority to discard a relay.
+/// A failed task read is uncertainty, so only a freshly-read task whose
+/// lifecycle occurrence is positively stale may be withheld.
+pub(crate) fn lifecycle_relay_is_stale_at_inbox_pop(
+    prompt: &str,
+    task: Option<&cas_types::Task>,
+) -> bool {
+    let Some(task) = task else {
+        return false;
+    };
+    matches!(
+        crate::prompt_revalidation::revalidate_lifecycle_prompt(prompt, task.status, task.updated_at),
+        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
+    )
+}
+
 /// cas-99d2 (GH #127): the task id an assignment message solicits a `start`
 /// for, if this message is an assignment at all.
 ///
@@ -1240,25 +1256,16 @@ impl CasService {
             // a queued MERGE REQUIRED relay must not survive request_changes,
             // cancel, reset, or a completed merge merely because no daemon
             // tick ran before the supervisor polled.
-            let stale_lifecycle = crate::prompt_revalidation::parse_lifecycle_envelope(
+            let lifecycle_task = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
+                .and_then(|envelope| {
+                    task_store
+                        .as_ref()
+                        .and_then(|store| store.get(&envelope.task_id).ok())
+                });
+            let stale_lifecycle = lifecycle_relay_is_stale_at_inbox_pop(
                 &message.prompt,
-            )
-            .is_some_and(|envelope| match task_store.as_ref() {
-                Some(store) => match store.get(&envelope.task_id).ok() {
-                    Some(task) => matches!(
-                        crate::prompt_revalidation::revalidate_lifecycle_prompt(
-                            &message.prompt,
-                            task.status,
-                            task.updated_at,
-                        ),
-                        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
-                    ),
-                    None => true,
-                },
-                // Fails open when the store itself is unavailable: inability
-                // to inspect current state is not evidence that a relay died.
-                None => false,
-            });
+                lifecycle_task.as_ref(),
+            );
             if stale_lifecycle {
                 let task_id = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
                     .map(|envelope| envelope.task_id)
@@ -1664,7 +1671,7 @@ fn enrich_report_from_harness_artifact(
 mod inbox_poll_identity_tests {
     use super::{
         enrich_report_from_harness_artifact, interrupt_unconfirmed_message,
-        recipient_transport_warning, resolve_inbox_recipient,
+        lifecycle_relay_is_stale_at_inbox_pop, recipient_transport_warning, resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
 
@@ -1787,6 +1794,15 @@ mod inbox_poll_identity_tests {
             Some("env-worker".to_string())
         );
         assert_eq!(resolve_inbox_recipient(None, Some("  ".to_string())), None);
+    }
+
+    #[test]
+    fn unreadable_task_never_withholds_a_lifecycle_relay_at_inbox_pop() {
+        let prompt = "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-live\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" notification_id=\"1\" occurrence=\"2026-08-14T14:00:00Z\">\nMERGE REQUIRED\n</task-lifecycle>";
+        assert!(
+            !lifecycle_relay_is_stale_at_inbox_pop(prompt, None),
+            "a read failure is uncertainty, not evidence that a live relay is moot"
+        );
     }
 
     #[test]

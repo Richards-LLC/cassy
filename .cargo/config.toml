@@ -14,8 +14,7 @@ rustflags = [
     "-C", "link-arg=-fuse-ld=mold",
 ]
 
-[env]
-# Native C/C++ contributors must use the same portable baseline as rustc.
-# Target-qualified variables keep these flags out of macOS and ARM builds.
-CFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }
-CXXFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }
+# The Rust target baseline is pinned above. Do not force a CFLAGS -march value
+# here: GCC requires x86-64 while the Zig C compiler used for release builds
+# requires x86_64. The cargo-zigbuild release invocation supplies the latter,
+# and the release script audits the finished artifact's ISA.

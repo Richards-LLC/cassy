@@ -128,12 +128,12 @@ while IFS= read -r path; do
                 required_lib_modules+=("$(basename "${path%.rs}")")
             fi
             ;;
-        cas-cli/tests/*.rs)
-            required_test_targets+=("$(basename "${path%.rs}")")
-            ;;
         cas-cli/tests/*/*.rs)
             nested="${path#cas-cli/tests/}"
             required_test_targets+=("$(integration_target_for "$nested")")
+            ;;
+        cas-cli/tests/*.rs)
+            required_test_targets+=("$(basename "${path%.rs}")")
             ;;
     esac
 done < <(git diff --name-only "$merge_base" HEAD)

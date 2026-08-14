@@ -317,6 +317,15 @@ git -C "${surface_repo}" init -q -b main
 } >"${surface_repo}/cas-cli/src/hooks/pre_tool.rs"
 printf '// factory integration target\n' \
     >"${surface_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
+mkdir -p "${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools"
+printf '#[path = "mcp_tools_test/task_tools/mod.rs"]\nmod task_tools;\n' \
+    >"${surface_repo}/cas-cli/tests/mcp_tools_test.rs"
+printf 'mod operations;\nmod verification_flow;\n' \
+    >"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/mod.rs"
+printf '// nested operations module\n' \
+    >"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/operations.rs"
+printf '// nested verification module\n' \
+    >"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/verification_flow.rs"
 git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm base
@@ -346,6 +355,20 @@ expect fail "missing integration target 'factory_mcp_ops_test'" \
 expect pass "SCOPED PROOF SURFACE: covered committed diff" \
     "proof: changed module plus integration target is accepted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test"
+
+printf '// nested operation changed\n' >>"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/operations.rs"
+printf '// nested verification flow changed\n' >>"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/verification_flow.rs"
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm nested-integration-change
+
+expect fail "missing integration target 'mcp_tools_test'" \
+    "proof: changed nested integration module cannot be omitted" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test"
+
+expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+    "proof: nested integration module resolves to its owning binary" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test mcp_tools_test"
 
 docs_repo="${tmpdir}/docs-repo"
 mkdir -p "${docs_repo}/docs"

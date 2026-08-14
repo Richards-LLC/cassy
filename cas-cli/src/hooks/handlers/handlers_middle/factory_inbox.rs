@@ -148,10 +148,11 @@ pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
     );
     for row in rows {
         out.push_str(&format!(
-            "\n--- from {} (message {}{}) ---\n{}\n",
+            "\n--- from {} (message {}{}) ---\n{}\n{}\n",
             row.source,
             row.id,
             if row.urgent { ", urgent" } else { "" },
+            crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(row),
             row.prompt.trim()
         ));
     }
@@ -190,6 +191,12 @@ mod tests {
         let rendered = render_surfaced(&[row(7640, "supervisor", "start cas-7a01")]);
         assert!(rendered.contains("supervisor"), "{rendered}");
         assert!(rendered.contains("7640"), "{rendered}");
+        assert!(
+            rendered.contains("origin=supervisor-authored")
+                && rendered.contains("queued_at=")
+                && rendered.contains("delivery=first-delivery"),
+            "every hook-surfaced message must retain actionable queue provenance: {rendered}"
+        );
         assert!(rendered.contains("start cas-7a01"), "{rendered}");
     }
 

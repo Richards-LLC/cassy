@@ -746,6 +746,13 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub merge_request: Option<bool>,
 
+    /// Explicit notification this message acknowledges or answers.
+    #[schemars(
+        description = "message action only: notification_id of the direct message this response explicitly acknowledges. CAS validates the endpoints, confirms that exact message, and includes the reference in the delivered reply."
+    )]
+    #[serde(default, deserialize_with = "deser::option_i64")]
+    pub in_reply_to: Option<i64>,
+
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind
     #[schemars(
         description = "Target agent name for hold_worker/release_worker/clear_context/message/remind (or 'all_workers' for broadcast where supported). For remind: agent who receives the reminder (defaults to self)"
@@ -1087,6 +1094,7 @@ impl CoordinationRequest {
             session_id: self.session_id.clone(),
             task_id: self.task_id.clone(),
             merge_request: self.merge_request,
+            in_reply_to: self.in_reply_to,
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,
             completion_promise: self.completion_promise.clone(),

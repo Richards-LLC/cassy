@@ -860,6 +860,17 @@ pub struct AgentRequest {
     #[serde(default)]
     pub merge_request: Option<bool>,
 
+    /// Explicit notification this message acknowledges or answers.
+    ///
+    /// The recipient can use this durable queue ID to distinguish a real reply
+    /// from delayed spawn boilerplate; CAS confirms the referenced message
+    /// only after validating that this sender is its intended recipient.
+    #[schemars(
+        description = "message action only: notification_id of the prior direct message this response explicitly acknowledges. CAS validates the two endpoints, marks that exact prior message confirmed, and renders the reply with the durable reference."
+    )]
+    #[serde(default, deserialize_with = "deser::option_i64")]
+    pub in_reply_to: Option<i64>,
+
     /// Loop prompt (for loop_start)
     #[schemars(description = "The prompt to repeat each iteration")]
     #[serde(default)]

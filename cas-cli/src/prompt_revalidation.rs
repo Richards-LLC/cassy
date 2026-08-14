@@ -443,7 +443,26 @@ pub(crate) fn revalidate_merge_request(
         branch_tip,
         &target_tip,
     ) {
-        MergeRequestDecision::AlreadyIntegrated { target_tip }
+        match crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+            repo_path,
+            branch_tip,
+            &target_tip,
+        ) {
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. } => {
+                MergeRequestDecision::AlreadyIntegrated { target_tip }
+            }
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. } => {
+                MergeRequestDecision::AlreadyIntegrated { target_tip }
+            }
+            // cas-b278: a reachable commit with absent hunks is still pending
+            // delivery. Never suppress its supervisor alert as "landed".
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { .. } => {
+                MergeRequestDecision::Pending { target_tip }
+            }
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Unknown { .. } => {
+                MergeRequestDecision::Unverifiable
+            }
+        }
     } else {
         MergeRequestDecision::Pending { target_tip }
     }
@@ -920,6 +939,62 @@ mod tests {
         );
         assert!(guidance.contains("Merge already landed"));
         assert!(guidance.contains("Re-run task close for cas-test now"));
+    }
+
+    #[test]
+    fn reachable_request_with_dropped_content_is_not_suppressed_cas_b278() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "cas-test@example.invalid"],
+        );
+        git(repo.path(), &["config", "user.name", "CAS Test"]);
+        std::fs::write(repo.path().join("base"), "base\n").expect("base file");
+        git(repo.path(), &["add", "base"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("credits.rs"), "restore grant\n").expect("delivery file");
+        git(repo.path(), &["add", "credits.rs"]);
+        git(repo.path(), &["commit", "-m", "restore grant"]);
+        let worker_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        git(repo.path(), &["checkout", "-b", "factory/other", &base]);
+        std::fs::write(repo.path().join("credits.rs"), "competing credits work\n")
+            .expect("competing file");
+        git(repo.path(), &["add", "credits.rs"]);
+        git(repo.path(), &["commit", "-m", "competing credits work"]);
+
+        git(repo.path(), &["checkout", "main"]);
+        git(
+            repo.path(),
+            &["merge", "--no-ff", "factory/test-worker", "-m", "merge"],
+        );
+        let conflict = std::process::Command::new("git")
+            .args(["merge", "--no-ff", "factory/other"])
+            .current_dir(repo.path())
+            .status()
+            .expect("start conflicting merge");
+        assert!(!conflict.success(), "fixture must conflict");
+        std::fs::write(repo.path().join("credits.rs"), "competing credits work\n")
+            .expect("resolve without delivery");
+        git(repo.path(), &["add", "credits.rs"]);
+        git(repo.path(), &["commit", "-m", "merge drops restore"]);
+        let target_tip = git(repo.path(), &["rev-parse", "main"]);
+
+        assert!(
+            crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+                repo.path(),
+                &worker_tip,
+                "main"
+            )
+        );
+        assert_eq!(
+            revalidate_merge_request(repo.path(), &worker_tip, "main"),
+            MergeRequestDecision::Pending { target_tip },
+            "a reachable commit with absent content must keep the supervisor merge/correction relay live"
+        );
     }
 
     #[test]

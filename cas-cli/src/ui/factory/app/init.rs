@@ -68,7 +68,8 @@ impl FactoryApp {
         // Detect the configured trunk once — used both for epic branch creation
         // and as the base for worker worktrees when no epic is active.
         let git_ops = GitOperations::new(config.cwd.clone());
-        let trunk = git_ops.detect_default_branch();
+        let trunk = Config::configured_epic_base_branch(&config.cwd)
+            .unwrap_or_else(|| git_ops.detect_default_branch());
 
         let epic_branch = if let EpicState::Active { .. } = &epic_state {
             let branch_name = epic_branch_for_state(&director_data, &epic_state)
@@ -94,8 +95,15 @@ impl FactoryApp {
                     );
                 }
             }
-            if git_ops.create_branch_from(&branch_name, &trunk)? {
-                tracing::info!("Created epic branch {} from trunk '{}'", branch_name, trunk);
+            let resolved = git_ops.resolve_fresh_base(&trunk)?;
+            if git_ops.create_branch_from(&branch_name, &resolved.branch_ref)? {
+                tracing::info!(
+                    "Created epic branch {} from base '{}' (sha={}, behind={})",
+                    branch_name,
+                    resolved.branch_ref,
+                    &resolved.sha[..resolved.sha.len().min(7)],
+                    resolved.behind_count,
+                );
             } else {
                 tracing::info!("Using existing epic branch: {}", branch_name);
             }

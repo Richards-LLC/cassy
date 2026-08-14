@@ -306,7 +306,7 @@ async fn test_task_create_surfaces_dependency_write_failure() {
 
     let blocker = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Blocking task".to_string(),
             description: None,
             priority: 2,
@@ -342,7 +342,7 @@ async fn test_task_create_surfaces_dependency_write_failure() {
 
     let create_result = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Should fail dependency write".to_string(),
             description: None,
             priority: 2,
@@ -431,7 +431,10 @@ async fn test_task_create_with_light_depth_shows_light() {
             .await
             .expect("show should succeed"),
     );
-    assert!(show.contains("Depth: light"), "expected light depth: {show}");
+    assert!(
+        show.contains("Depth: light"),
+        "expected light depth: {show}"
+    );
 }
 
 #[tokio::test]
@@ -455,7 +458,10 @@ async fn test_task_create_without_depth_defaults_to_deep() {
             .await
             .expect("show should succeed"),
     );
-    assert!(show.contains("Depth: deep"), "expected deep default: {show}");
+    assert!(
+        show.contains("Depth: deep"),
+        "expected deep default: {show}"
+    );
 }
 
 #[tokio::test]
@@ -510,7 +516,10 @@ async fn test_task_update_depth_to_light() {
             .await
             .expect("update should succeed"),
     );
-    assert!(update_text.contains("depth"), "update should report depth change: {update_text}");
+    assert!(
+        update_text.contains("depth"),
+        "update should report depth change: {update_text}"
+    );
 
     let show = extract_text(
         service
@@ -521,7 +530,10 @@ async fn test_task_update_depth_to_light() {
             .await
             .expect("show should succeed"),
     );
-    assert!(show.contains("Depth: light"), "expected light after update: {show}");
+    assert!(
+        show.contains("Depth: light"),
+        "expected light after update: {show}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +563,45 @@ fn init_repo_with_commit(repo: &std::path::Path) {
     std::fs::write(repo.join("README.md"), "# Test").unwrap();
     git_in(repo, &["add", "."]);
     git_in(repo, &["commit", "-q", "-m", "Initial commit"]);
+}
+
+/// Give the task-create fixture a real `origin`, then land a commit there
+/// without advancing the supervisor checkout. `cas_task_create` must fetch
+/// before it chooses a base, so this models the normal long-running factory
+/// session where local trunk is stale while origin/trunk moved remotely.
+fn remote_advance_without_local_fetch(repo: &std::path::Path) -> String {
+    let origin = repo.join("origin.git");
+    git_in(
+        repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            repo.to_str().expect("utf-8 repo path"),
+            origin.to_str().expect("utf-8 origin path"),
+        ],
+    );
+    git_in(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    let trunk = git_in(repo, &["branch", "--show-current"]);
+    git_in(repo, &["push", "-q", "-u", "origin", &trunk]);
+
+    let updater = repo.join("updater");
+    git_in(
+        repo,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().expect("utf-8 origin path"),
+            updater.to_str().expect("utf-8 updater path"),
+        ],
+    );
+    git_in(&updater, &["config", "user.email", "updater@test.com"]);
+    git_in(&updater, &["config", "user.name", "Updater"]);
+    std::fs::write(updater.join("remote-only.txt"), "landed remotely").unwrap();
+    git_in(&updater, &["add", "."]);
+    git_in(&updater, &["commit", "-q", "-m", "remote advance"]);
+    git_in(&updater, &["push", "-q", "origin", &trunk]);
+    git_in(&updater, &["rev-parse", "HEAD"])
 }
 
 fn epic_create_request(title: &str) -> TaskCreateRequest {
@@ -686,5 +737,107 @@ async fn test_epic_create_keeps_trunk_and_warns_when_active_epic_has_diverged() 
     assert!(
         text.contains("DIVERGED") && text.contains("epic/first-cas-aaaa"),
         "divergence must be surfaced for the supervisor to resolve: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_epic_create_uses_fetched_origin_tip_when_local_trunk_is_stale_cas_201e() {
+    let (temp, service) = setup_cas();
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let remote_tip = remote_advance_without_local_fetch(repo);
+    let trunk = git_in(repo, &["branch", "--show-current"]);
+    let stale_local_tip = git_in(repo, &["rev-parse", &trunk]);
+
+    let created = service
+        .cas_task_create(Parameters(epic_create_request("Fresh Remote Base")))
+        .await
+        .expect("epic create should succeed");
+    let text = extract_text(created);
+    let epic_id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/fresh-remote-base-{epic_id}");
+
+    assert_ne!(
+        stale_local_tip, remote_tip,
+        "fixture must leave local trunk stale"
+    );
+    assert_eq!(
+        git_in(repo, &["rev-parse", &branch]),
+        remote_tip,
+        "epic must be cut from the freshly fetched origin tip: {text}"
+    );
+    assert!(
+        git_in(repo, &["ls-tree", "-r", "--name-only", &branch]).contains("remote-only.txt"),
+        "epic must include the commit that existed only on origin: {text}"
+    );
+    assert!(text.contains(&format!("Base: 'origin/{trunk}'")), "{text}");
+    assert!(text.contains("BASE REFRESHED"), "{text}");
+}
+
+#[tokio::test]
+async fn test_epic_create_keeps_equal_local_and_remote_behavior_quiet_cas_201e() {
+    let (temp, service) = setup_cas();
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let origin = repo.join("origin.git");
+    git_in(
+        repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            repo.to_str().unwrap(),
+            origin.to_str().unwrap(),
+        ],
+    );
+    git_in(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    let trunk = git_in(repo, &["branch", "--show-current"]);
+    git_in(repo, &["push", "-q", "-u", "origin", &trunk]);
+    let expected_tip = git_in(repo, &["rev-parse", &trunk]);
+
+    let created = service
+        .cas_task_create(Parameters(epic_create_request("Equal Remote Base")))
+        .await
+        .expect("epic create should succeed");
+    let text = extract_text(created);
+    let epic_id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/equal-remote-base-{epic_id}");
+
+    assert_eq!(git_in(repo, &["rev-parse", &branch]), expected_tip);
+    assert!(
+        !text.contains("BASE REFRESHED") && !text.contains("BASE REF DIVERGED"),
+        "equal refs must not manufacture a warning: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_epic_create_reports_divergent_local_and_remote_base_cas_201e() {
+    let (temp, service) = setup_cas();
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let _remote_tip = remote_advance_without_local_fetch(repo);
+    let trunk = git_in(repo, &["branch", "--show-current"]);
+    std::fs::write(repo.join("local-only.txt"), "keep local work").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "local divergence"]);
+    let local_tip = git_in(repo, &["rev-parse", &trunk]);
+
+    let created = service
+        .cas_task_create(Parameters(epic_create_request("Divergent Remote Base")))
+        .await
+        .expect("epic create should succeed");
+    let text = extract_text(created);
+    let epic_id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/divergent-remote-base-{epic_id}");
+
+    assert_eq!(
+        git_in(repo, &["rev-parse", &branch]),
+        local_tip,
+        "a genuinely divergent local branch must not be silently overridden: {text}"
+    );
+    assert!(text.contains("BASE REF DIVERGED"), "{text}");
+    assert!(
+        text.contains("local-only") && text.contains("remote-only"),
+        "{text}"
     );
 }

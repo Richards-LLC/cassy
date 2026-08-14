@@ -271,7 +271,8 @@ impl DaemonInitPhase {
         let preferred_epic_focus = preferred_epic_focus_from_session_metadata();
         let epic_state = resolve_epic_state_for_focus(&director_data, &preferred_epic_focus);
         let git_ops = GitOperations::new(self.factory_config.cwd.clone());
-        let trunk = git_ops.detect_default_branch();
+        let trunk = Config::configured_epic_base_branch(&self.factory_config.cwd)
+            .unwrap_or_else(|| git_ops.detect_default_branch());
         let epic_branch = if let EpicState::Active { .. } = &epic_state {
             let branch_name = epic_branch_for_state(&director_data, &epic_state)
                 .expect("active epic state must resolve a branch");
@@ -287,8 +288,15 @@ impl DaemonInitPhase {
                     );
                 }
             }
-            if git_ops.create_branch_from(&branch_name, &trunk)? {
-                tracing::info!("Created epic branch {} from trunk '{}'", branch_name, trunk);
+            let resolved = git_ops.resolve_fresh_base(&trunk)?;
+            if git_ops.create_branch_from(&branch_name, &resolved.branch_ref)? {
+                tracing::info!(
+                    "Created epic branch {} from base '{}' (sha={}, behind={})",
+                    branch_name,
+                    resolved.branch_ref,
+                    &resolved.sha[..resolved.sha.len().min(7)],
+                    resolved.behind_count,
+                );
             } else {
                 tracing::info!("Using existing epic branch: {}", branch_name);
             }

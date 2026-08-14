@@ -209,6 +209,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         action: action.to_string(),
         id: None,
         task_id: None,
+        merge_request: None,
         target: None,
         message: None,
         summary: None,

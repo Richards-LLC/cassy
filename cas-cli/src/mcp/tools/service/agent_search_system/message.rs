@@ -519,15 +519,15 @@ impl CasService {
                 .unwrap_or_else(|| source.clone())
         };
 
-        // cas-bc8c: merge requests used to be indistinguishable from ordinary
-        // prose, so a request queued just after the supervisor merged remained
-        // actionable-looking when it eventually arrived. Give the parked task
-        // identity to the send path explicitly when supplied, or infer it only
-        // when this worker has exactly one AwaitingMerge task. CAS then derives
-        // both immutable tips itself; callers cannot forget or stale them.
-        // Untagged messages with zero/ambiguous parked tasks remain completely
-        // unchanged on this shared public surface.
-        if role == "worker" {
+        // cas-bc8c: a genuine merge request receives an immutable envelope so
+        // transport can suppress it once its requested tip has landed. That
+        // envelope is a message type, not a property of the sender's task
+        // state: workers must still be able to report a blocker or rejected
+        // close after their only parked branch lands (cas-89e1 / GH #328).
+        // Therefore an unmarked worker message remains free-form even if it
+        // names the one AwaitingMerge task; only an explicit merge request is
+        // eligible for revalidation and suppression.
+        if role == "worker" && req.merge_request.unwrap_or(false) {
             use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha;
             use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
             use crate::prompt_revalidation::{
@@ -1851,5 +1851,150 @@ mod cas99d2_redelivery_tests {
     #[test]
     fn the_marker_matches_the_teams_inbox_redelivery_token() {
         assert_eq!(INBOX_REDELIVERY_MARKER, "[redelivery]");
+    }
+}
+
+/// Regression coverage for GH #328. A task can remain AwaitingMerge briefly
+/// after its branch lands, precisely when a worker may need supervisor help to
+/// escape a rejected close gate. Only a typed merge request may be withheld in
+/// that state; the same worker's ordinary escalation must still be queued.
+#[cfg(test)]
+mod cas_89e1_post_merge_message_type_tests {
+    use super::*;
+    use cas_types::{Agent, AgentRole, Task, TaskStatus, WorkTarget};
+    use rmcp::model::RawContent;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn response_text(result: CallToolResult) -> String {
+        result
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn message_request(merge_request: bool) -> AgentRequest {
+        serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "supervisor",
+            "task_id": "cas-89e1",
+            "merge_request": merge_request,
+            "summary": if merge_request { "ready to merge" } else { "close gate rejected" },
+            "message": if merge_request {
+                "Fresh worker delivery; please merge the branch."
+            } else {
+                "My close was rejected after the merge landed; please help unblock the gate."
+            },
+        }))
+        .expect("static message request")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "CAS Test"]);
+        std::fs::create_dir(repo.join(".cas")).expect("CAS directory");
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-89e1-message-test\"\n",
+        )
+        .expect("CAS config");
+        std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(repo, &["checkout", "-qb", "factory/worker-a"]);
+        std::fs::write(repo.join("delivery.txt"), "delivery\n").expect("delivery file");
+        git(repo, &["add", "delivery.txt"]);
+        git(repo, &["commit", "-qm", "delivery"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker-a", "-m", "merge"],
+        );
+
+        let cas_root = repo.join(".cas");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).expect("register worker");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).expect("register supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        let tasks = core.open_task_store().expect("task store");
+        let mut task = Task::new(
+            "cas-89e1".to_string(),
+            "post-merge message type".to_string(),
+        );
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.name.clone());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-89e1-message-test".to_string(),
+            target_branch: "main".to_string(),
+        });
+        task.deliverables.parked_branch = Some("factory/worker-a".to_string());
+        tasks.add(&task).expect("add parked task");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+
+        let escalation = response_text(
+            service
+                .message_send(message_request(false))
+                .await
+                .expect("ordinary escalation is delivered"),
+        );
+        assert!(escalation.contains("Message queued"), "{escalation}");
+        assert!(
+            !escalation.contains("Merge already landed"),
+            "an untyped escalation must not be suppressed: {escalation}"
+        );
+        let queued = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued escalation");
+        assert_eq!(queued.len(), 1, "ordinary escalation must reach the queue");
+        assert!(
+            crate::prompt_revalidation::parse_merge_request_envelope(&queued[0].prompt).is_none(),
+            "ordinary escalation must not acquire a merge envelope: {:?}",
+            queued[0].prompt
+        );
+
+        let stale_merge = response_text(
+            service
+                .message_send(message_request(true))
+                .await
+                .expect("stale merge request receives guidance"),
+        );
+        assert!(
+            stale_merge.contains("Merge already landed"),
+            "an explicitly typed stale merge request must still be suppressed: {stale_merge}"
+        );
     }
 }

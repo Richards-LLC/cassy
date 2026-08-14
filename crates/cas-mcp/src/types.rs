@@ -844,6 +844,18 @@ pub struct AgentRequest {
     #[serde(default)]
     pub task_id: Option<String>,
 
+    /// Marks a worker-to-supervisor message as a merge request.
+    ///
+    /// CAS derives and attaches the immutable merge-request envelope only for
+    /// this explicit message type. Ordinary worker escalations that happen to
+    /// mention a task (including after that task's branch merged) must remain
+    /// free-form messages and reach the supervisor unchanged.
+    #[schemars(
+        description = "message action only: mark this worker-to-supervisor message as a merge request. CAS then attaches its immutable cas-merge-request envelope and may suppress it only when the requested branch tip has already landed. Omit or false for blockers, questions, close failures, and every other ordinary message."
+    )]
+    #[serde(default)]
+    pub merge_request: Option<bool>,
+
     /// Loop prompt (for loop_start)
     #[schemars(description = "The prompt to repeat each iteration")]
     #[serde(default)]

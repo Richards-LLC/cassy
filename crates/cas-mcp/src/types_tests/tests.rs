@@ -293,6 +293,17 @@ fn test_coordination_notification_id_as_string() {
 }
 
 #[test]
+fn coordination_merge_request_type_survives_agent_mapping() {
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"message","target":"supervisor","task_id":"cas-89e1","merge_request":true,"summary":"ready to merge","message":"please merge"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(req.merge_request, Some(true));
+    assert_eq!(req.to_agent_request("message").merge_request, Some(true));
+}
+
+#[test]
 fn test_factory_older_than_secs_as_string() {
     let req: FactoryRequest =
         serde_json::from_str(r#"{"action": "gc_cleanup", "older_than_secs": "7200"}"#).unwrap();

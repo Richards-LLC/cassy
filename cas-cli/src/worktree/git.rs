@@ -70,6 +70,19 @@ pub enum GitError {
     #[error("The shared target checkout has pre-existing tracked changes and was not touched: {0}")]
     MergeCheckoutDirty(String),
 
+    /// cas-9415: an in-place merge must name and validate its destination.
+    /// Without this guard, `git merge <source>` commits to implicit HEAD, so
+    /// another process switching the shared checkout after venue selection
+    /// can contaminate an unrelated branch.
+    #[error(
+        "Refusing merge in {checkout}: checkout is on branch '{actual}', but the resolved merge target is '{expected}'"
+    )]
+    MergeTargetMismatch {
+        checkout: PathBuf,
+        expected: String,
+        actual: String,
+    },
+
     /// cas-4702: the ephemeral-worktree merge completed, but the target
     /// branch had moved since it was read, so the compare-and-swap that would
     /// have published the merge declined. A concurrent writer is never
@@ -1046,10 +1059,43 @@ impl GitOperations {
         Ok(paths)
     }
 
-    /// Merge a branch into the current branch of the main checkout.
-    pub fn merge_branch(&self, branch: &str, no_ff: bool) -> Result<Option<String>> {
+    /// Merge `source_branch` into `target_branch` in the main checkout.
+    ///
+    /// Git's merge command always writes implicit HEAD. Validate the live
+    /// symbolic HEAD at the last helper boundary before invoking it, rather
+    /// than trusting an earlier venue decision that another checkout process
+    /// can invalidate (cas-9415).
+    pub fn merge_branch(
+        &self,
+        target_branch: &str,
+        source_branch: &str,
+        no_ff: bool,
+    ) -> Result<Option<String>> {
         let repo_root = self.repo_root.clone();
-        self.merge_branch_in_dir(&repo_root, branch, no_ff)
+        self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff)
+    }
+
+    /// Refuse an in-place merge unless `dir`'s symbolic HEAD is exactly the
+    /// resolved target branch. Detached HEAD is reported as a mismatch too.
+    fn ensure_merge_target_checked_out(&self, dir: &Path, expected: &str) -> Result<()> {
+        let output = Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(dir)
+            .output()?;
+        let actual = if output.status.success() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            "<detached HEAD>".to_string()
+        };
+
+        if actual != expected {
+            return Err(GitError::MergeTargetMismatch {
+                checkout: dir.to_path_buf(),
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+        Ok(())
     }
 
     /// Merge `branch` into whatever `dir`'s HEAD points at.
@@ -1058,7 +1104,13 @@ impl GitOperations {
     /// detached worktree for [`Self::merge_branch_via_temp_worktree`]
     /// (cas-4702 / GH #68) — the merge mechanics, conflict detection and
     /// abort-on-failure guarantees are identical either way.
-    fn merge_branch_in_dir(&self, dir: &Path, branch: &str, no_ff: bool) -> Result<Option<String>> {
+    fn merge_branch_in_dir(
+        &self,
+        dir: &Path,
+        expected_target: Option<&str>,
+        branch: &str,
+        no_ff: bool,
+    ) -> Result<Option<String>> {
         // cas-e18f: a merge left over from a previous, un-aborted failure
         // must be reported distinctly, not surfaced as an opaque failure of
         // *this* (unrelated) merge attempt.
@@ -1069,6 +1121,13 @@ impl GitOperations {
         // Fix symlinked submodules before merge to avoid:
         // "error: expected submodule path 'vendor/...' not to be a symbolic link"
         self.fix_symlinked_submodules(dir)?;
+
+        // This is intentionally the final operation before `git merge`.
+        // Shared-checkout callers must revalidate live symbolic HEAD here;
+        // dedicated detached merge worktrees pass no branch expectation.
+        if let Some(target) = expected_target {
+            self.ensure_merge_target_checked_out(dir, target)?;
+        }
 
         let mut args = vec!["merge"];
         if no_ff {
@@ -1180,7 +1239,7 @@ impl GitOperations {
             .ok_or_else(|| GitError::BranchNotFound(target_branch.to_string()))?;
 
         let guard = self.add_temp_worktree(&old_tip)?;
-        let merged = self.merge_branch_in_dir(guard.path(), source_branch, no_ff)?;
+        let merged = self.merge_branch_in_dir(guard.path(), None, source_branch, no_ff)?;
 
         let new_tip = match merged {
             Some(ref tip) if *tip != old_tip => tip.clone(),

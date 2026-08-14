@@ -67,6 +67,64 @@ fn test_current_branch() {
     assert!(branch == "main" || branch == "master");
 }
 
+/// cas-9415: `git merge` commits to implicit HEAD. If another supervisor
+/// parks the shared checkout on a foreign branch after the target was
+/// resolved, the merge helper must refuse before changing any ref or file.
+#[test]
+fn merge_refuses_when_checkout_head_differs_from_resolved_target_cas_9415() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+    let trunk = git.current_branch().unwrap();
+
+    Command::new("git")
+        .args(["branch", "epic/assembly"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["checkout", "-q", "-b", "factory/worker"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::fs::write(repo_path.join("worker.txt"), "worker change\n").unwrap();
+    Command::new("git")
+        .args(["add", "worker.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-q", "-m", "worker change"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["checkout", "-q", "-b", "scratch/foreign", &trunk])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let epic_before = git.ref_sha("epic/assembly").unwrap();
+    let scratch_before = git.ref_sha("scratch/foreign").unwrap();
+    let error = git
+        .merge_branch("epic/assembly", "factory/worker", true)
+        .expect_err("a foreign checkout branch must abort the merge");
+
+    match error {
+        GitError::MergeTargetMismatch {
+            expected, actual, ..
+        } => {
+            assert_eq!(expected, "epic/assembly");
+            assert_eq!(actual, "scratch/foreign");
+        }
+        other => panic!("expected target mismatch, got {other:?}"),
+    }
+    assert_eq!(git.current_branch().unwrap(), "scratch/foreign");
+    assert_eq!(git.ref_sha("epic/assembly").unwrap(), epic_before);
+    assert_eq!(git.ref_sha("scratch/foreign").unwrap(), scratch_before);
+    assert!(!repo_path.join("worker.txt").exists());
+    assert!(!git.merge_in_progress());
+}
+
 #[test]
 fn test_detect_default_branch_ignores_current_feature_head() {
     let (_temp, repo_path) = create_test_repo();

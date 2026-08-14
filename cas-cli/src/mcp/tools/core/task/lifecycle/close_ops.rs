@@ -1890,7 +1890,8 @@ impl CasCore {
             }
         }
 
-        // cas-b269: urgent stop sets halt_task_work; block close until new start.
+        // cas-b269/cas-85fd: urgent stop sets halt_task_work; block close
+        // until the worker answers that exchange (or starts a new task).
         //
         // cas-60393 (AwaitingMerge) + cas-3894 (widened to InProgress): a
         // pre-existing halt armed by an EARLIER, unrelated urgent stop must
@@ -4511,23 +4512,17 @@ impl CasCore {
             )
         };
 
-        // cas-490f: surface the actual `git diff --stat` for the worker's
-        // committed branch so supervisors see real deltas at close time,
-        // without having to inspect the worktree manually. This is included
-        // unconditionally when a resolved worker worktree is available —
-        // the stat is an objective record of what was committed, independent
-        // of whatever the worker's close reason claims.
+        // cas-490f: surface the actual committed delta for the task so
+        // supervisors see real changes at close time. cas-203e: this must use
+        // the same durable task identity/work-cycle evidence as the gates;
+        // merge-base(HEAD, stale-local-main)..HEAD attributed every commit
+        // inherited from a fresher origin/main to whichever task closed next.
         let diff_stat_msg = if let Some(worker_wt) = worker_worktree_path.as_ref() {
-            // cas-7efe: single close-time resolver, not a bare "main" —
-            // this used to diff against the wrong branch (e.g. the entire
-            // staging/main divergence) whenever `task.worktree_id` was
-            // unset, producing the 110KB diff-stat overflow.
-            let stat = get_worker_diff_stat(worker_wt, &resolved_parent_branch);
-            if stat.is_empty() {
-                String::new()
-            } else {
-                format!("\n\n📊 Committed diff stat (vs {resolved_parent_branch}):\n{stat}")
-            }
+            render_close_diff_stat(
+                worker_wt,
+                &resolved_parent_branch,
+                commit_receipt_window.as_ref(),
+            )
         } else {
             String::new()
         };
@@ -6677,7 +6672,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              {factory_branch} into {parent_branch}, including the current tip \
              and freshness qualifier (e.g. \
              `{coord} action=message \
-             target=supervisor task_id={} summary=\"ready to merge\" message=\"Fresh after \
+             target=supervisor task_id={} merge_request=true summary=\"ready to merge\" message=\"Fresh after \
              draining unread inbox messages until No unread messages: \
              {factory_branch} tip {branch_tip}; please re-check reachability, then \
              merge into {parent_branch} if still needed\"`). \
@@ -8192,6 +8187,166 @@ pub(crate) fn count_worker_branch_commits(
 /// landed.
 const DIFF_STAT_MAX_FILES: usize = 40;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskAttributedDiffStat {
+    stat: String,
+    target_ref: String,
+    basis: &'static str,
+}
+
+/// Prefer the remote-tracking integration target when it exists. Factory
+/// worktrees do not advance their local target ref when a supervisor merges
+/// elsewhere, so the bare ref is routinely stale at successful re-close.
+fn preferred_diff_target_ref(repo_path: &std::path::Path, parent_branch: &str) -> String {
+    let origin_parent = format!("origin/{parent_branch}");
+    if git_ref_exists(repo_path, &origin_parent) {
+        origin_parent
+    } else {
+        parent_branch.to_string()
+    }
+}
+
+fn render_close_diff_stat(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    window: Option<&TaskCommitReceiptWindow>,
+) -> String {
+    match window
+        .and_then(|window| get_task_attributable_diff_stat(repo_path, parent_branch, window))
+    {
+        Some(measurement) if !measurement.stat.is_empty() => format!(
+            "\n\n📊 Task-attributed committed diff stat (target {}; basis: {}):\n{}",
+            measurement.target_ref, measurement.basis, measurement.stat
+        ),
+        Some(_) => String::new(),
+        None => {
+            // Attribution can be unknowable in legacy/corrupt Git state. If
+            // branch context is still available, label it explicitly so it
+            // cannot be mistaken for task authorship.
+            let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
+            let stat = get_worker_diff_stat(repo_path, &target_ref);
+            if stat.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n📊 Branch-wide committed context (vs {target_ref}; task attribution unavailable):\n{stat}"
+                )
+            }
+        }
+    }
+}
+
+/// Return the net stat for the contiguous commits durably attributable to this
+/// task. Commit-message identity (or a recorded anchor/receipt SHA) prevents a
+/// recent inherited target commit from entering the display merely because it
+/// falls inside the task's clock window.
+///
+/// `None` means Git cannot prove a task-only contiguous range. The caller may
+/// show branch-wide context only when it labels that weaker scope explicitly.
+fn get_task_attributable_diff_stat(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<TaskAttributedDiffStat> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(parent_branch) || window.identity.is_empty() {
+        return None;
+    }
+    let since = format!(
+        "@{}",
+        window.task_floor.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+    );
+    let history = Command::new("git")
+        .args([
+            "log",
+            "--reverse",
+            "--first-parent",
+            &format!("--since={since}"),
+            "--format=%H%x1f%B%x1e",
+            "HEAD",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !history.status.success() {
+        return None;
+    }
+    let records = String::from_utf8_lossy(&history.stdout);
+    let commits: Vec<String> = records
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let record = record.trim();
+            if record.is_empty() {
+                return None;
+            }
+            let (commit, message) = record.split_once('\u{1f}').unwrap_or((record, ""));
+            let commit = commit.trim();
+            let attributable = window.identity.matches_known_commit(commit)
+                || window
+                    .identity
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|task_id| message_references_task(message, task_id));
+            attributable.then(|| commit.to_string())
+        })
+        .collect();
+
+    let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
+    let Some((first, last)) = commits.first().zip(commits.last()) else {
+        return Some(TaskAttributedDiffStat {
+            stat: String::new(),
+            target_ref,
+            basis: "durable task commit identity across task lifetime",
+        });
+    };
+    let base_out = Command::new("git")
+        .args(["rev-parse", &format!("{first}^")])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !base_out.status.success() {
+        return None;
+    }
+    let base = String::from_utf8_lossy(&base_out.stdout).trim().to_string();
+    if base.is_empty() {
+        return None;
+    }
+
+    // A net diff is task-only only when every first-parent commit between the
+    // selected endpoints is attributable. Otherwise refuse to relabel a
+    // mixed history as the task's work and let the caller show honest context.
+    let range = format!("{base}..{last}");
+    let contiguous_out = Command::new("git")
+        .args(["rev-list", "--first-parent", "--reverse", &range])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !contiguous_out.status.success() {
+        return None;
+    }
+    let contiguous_stdout = String::from_utf8_lossy(&contiguous_out.stdout);
+    let contiguous: Vec<&str> = contiguous_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|commit| !commit.is_empty())
+        .collect();
+    if contiguous.len() != commits.len()
+        || !contiguous
+            .iter()
+            .zip(&commits)
+            .all(|(actual, expected)| *actual == expected)
+    {
+        return None;
+    }
+
+    Some(TaskAttributedDiffStat {
+        stat: get_diff_stat_for_range(repo_path, &base, last),
+        target_ref,
+        basis: "durable task commit identity across task lifetime",
+    })
+}
+
 /// Return a `git diff --stat` summary for commits on `HEAD` beyond
 /// `parent_branch`, running inside `worker_worktree_path`.
 ///
@@ -8225,14 +8380,20 @@ pub(crate) fn get_worker_diff_stat(
         return String::new();
     }
 
+    get_diff_stat_for_range(worker_worktree_path, &merge_base, "HEAD")
+}
+
+fn get_diff_stat_for_range(repo_path: &std::path::Path, base: &str, tip: &str) -> String {
+    use std::process::Command;
+
     let stat_out = Command::new("git")
         .args([
             "diff",
             "--stat",
             &format!("--stat-count={DIFF_STAT_MAX_FILES}"),
-            &format!("{merge_base}..HEAD"),
+            &format!("{base}..{tip}"),
         ])
-        .current_dir(worker_worktree_path)
+        .current_dir(repo_path)
         .output();
     let raw = match stat_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -19843,6 +20004,69 @@ mod commit_claim_integrity_tests {
     }
 
     // ── cas-e093: bounded diff stat ──────────────────────────────────────────
+
+    #[test]
+    fn stale_local_target_diff_stat_excludes_inherited_remote_commits_cas_203e() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+
+        // The local target stays at seed while origin/main advances with a
+        // different task. The worker is cut from that fresher remote tip.
+        git(p, &["checkout", "-q", "-b", "upstream"]);
+        std::fs::write(p.join("inherited.rs"), "pub fn inherited() {}\n").unwrap();
+        git(p, &["add", "inherited.rs"]);
+        git(p, &["commit", "-q", "-m", "other task"]);
+        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(p, &["checkout", "-q", "-b", "factory/test-worker"]);
+        std::fs::write(p.join("task.rs"), "pub fn task_work() {}\n").unwrap();
+        git(p, &["add", "task.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: task work (cas-203e)"]);
+
+        let fallback = render_close_diff_stat(p, "main", None);
+        assert!(
+            fallback.contains("Branch-wide committed context")
+                && fallback.contains("vs origin/main")
+                && fallback.contains("task.rs")
+                && !fallback.contains("inherited.rs"),
+            "unattributed fallback must name and use the fresher remote target: {fallback}"
+        );
+
+        // Simulate the successful re-close after the task tip landed remotely;
+        // local main remains stale, exactly as in the field report.
+        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let branch_wide = get_worker_diff_stat(p, "main");
+        assert!(
+            branch_wide.contains("inherited.rs"),
+            "precondition: stale-local branch-wide stat sees inherited work: {branch_wide}"
+        );
+        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        let window = TaskCommitReceiptWindow {
+            not_before: epoch,
+            basis: "task creation time (test)",
+            task_floor: epoch,
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-203e".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+        let rendered = render_close_diff_stat(p, "main", Some(&window));
+        assert!(
+            rendered.contains("Task-attributed committed diff stat")
+                && rendered.contains("target origin/main")
+                && rendered.contains("task.rs"),
+            "must show this task's file: {}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("inherited.rs"),
+            "must not attribute the inherited remote-target commit: {}",
+            rendered
+        );
+    }
 
     /// Pure-logic test for the truncation/annotation policy, independent of
     /// git: below-cap input passes through unchanged.

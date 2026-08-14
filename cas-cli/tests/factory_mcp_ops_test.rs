@@ -488,6 +488,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         action: action.to_string(),
         id: None,
         task_id: None,
+        merge_request: None,
         target: None,
         message: None,
         summary: None,
@@ -4801,6 +4802,7 @@ fn coord_msg(
         action: action.to_string(),
         id: None,
         task_id: None,
+        merge_request: None,
         target: Some(target.to_string()),
         message: Some(message.to_string()),
         summary: Some("test".to_string()),
@@ -5243,6 +5245,120 @@ async fn test_worker_response_confirms_consumed_supervisor_message() {
         report.stage,
         cas_store::DeliveryStage::Confirmed,
         "the recipient's response must confirm its consumed instruction"
+    );
+}
+
+/// cas-85fd: an urgent stop is discharged by the worker's demonstrated reply
+/// to that exact urgent prompt. It must not survive as collateral state and
+/// veto a later close that has reached its normal lifecycle gates.
+#[tokio::test]
+async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
+    let mut role_guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_AGENT_NAME", Some("supervisor")),
+        ("CAS_SUPERVISOR_NAME", Some("supervisor")),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker_id = env.register_worker("swift-fox");
+
+    let urgent = coord_msg(
+        "message",
+        "swift-fox",
+        "URGENT: stop and report your current status",
+        Some(true),
+    );
+    let error = env
+        .service
+        .coordination(Parameters(urgent))
+        .await
+        .expect_err("the fixture has no live Claude pane to confirm");
+    assert!(
+        error
+            .message
+            .contains("Could not confirm Claude interrupt delivery"),
+        "unexpected urgent error: {}",
+        error.message
+    );
+    let urgent_id = env
+        .prompt_queue()
+        .peek_all(10)
+        .expect("peek")
+        .into_iter()
+        .next()
+        .expect("urgent row")
+        .id;
+    assert!(env.worker_halted("swift-fox"), "urgent must arm the halt");
+
+    // The worker's inbox drain is the surfacing receipt required before a
+    // reply may count as consuming the instruction.
+    env.prompt_queue()
+        .mark_transport_delivered(urgent_id)
+        .expect("deliver urgent");
+    env.prompt_queue()
+        .poll_unseen_for_recipient("swift-fox", None, 10)
+        .expect("surface urgent to worker");
+
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id);
+    let worker_service = CasService::new(worker_core, None);
+    role_guard._guard.set("CAS_AGENT_ROLE", "worker");
+    role_guard._guard.set("CAS_AGENT_NAME", "swift-fox");
+    worker_service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "supervisor",
+            "ACK: stopped and awaiting direction",
+            None,
+        )))
+        .await
+        .expect("worker reply");
+    let urgent_report = env
+        .prompt_queue()
+        .message_delivery_report(urgent_id)
+        .expect("urgent report")
+        .expect("urgent exists");
+    assert_eq!(
+        urgent_report.stage,
+        cas_store::DeliveryStage::Confirmed,
+        "the reply must confirm the exact urgent before it can discharge the halt: {urgent_report:?}"
+    );
+    assert!(
+        !env.worker_halted("swift-fox"),
+        "a confirmed response must discharge only the urgent exchange it answered; metadata={:?}",
+        env.agent_store()
+            .list(None)
+            .expect("agents")
+            .into_iter()
+            .find(|agent| agent.name == "swift-fox")
+            .expect("worker")
+            .metadata
+    );
+
+    // This task was not the subject of the status check. With the exchange
+    // discharged, close reaches its ordinary gates rather than returning the
+    // stale WORK HALTED veto.
+    let task_id = env.task_store().generate_id().expect("task id");
+    let mut task = Task::new(task_id.clone(), "unrelated merged work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("someone-else".to_string());
+    env.task_store().add(&task).expect("add unrelated task");
+    let close = worker_service
+        .inner
+        .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            id: task_id.clone(),
+            reason: Some("already merged before the urgent status check".to_string()),
+            bypass_code_review: None,
+            code_review_findings: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+        .await
+        .expect("answered urgent must allow the later close to proceed");
+    let close_text = get_text(&close);
+    assert!(
+        !close_text.contains("WORK HALTED"),
+        "answered urgent must not leave a collateral halt: {close_text}"
     );
 }
 

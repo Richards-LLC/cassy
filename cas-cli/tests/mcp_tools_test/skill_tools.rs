@@ -115,7 +115,7 @@ async fn test_skill_show() {
 }
 
 #[tokio::test]
-async fn project_skill_show_marks_a_checkout_behind_its_sync_ref() {
+async fn project_skill_show_serves_current_disk_file_even_when_branch_is_behind_cas_0efb() {
     let (temp, service) = setup_cas();
     let root = temp.path();
     git(root, &["init", "--initial-branch=main"]);
@@ -132,6 +132,11 @@ async fn project_skill_show_marks_a_checkout_behind_its_sync_ref() {
     std::fs::write(root.join("new-guidance.md"), "new guidance\n").unwrap();
     commit(root, "new project guidance");
     git(root, &["checkout", "factory/stale-skill"]);
+    std::fs::write(
+        root.join(".claude/skills/stale-skill/SKILL.md"),
+        "---\nname: stale-skill\ndescription: corrected disk test\n---\n\nCorrected on disk\n",
+    )
+    .unwrap();
 
     let result = service
         .cas_skill_show(Parameters(IdRequest {
@@ -141,12 +146,9 @@ async fn project_skill_show_marks_a_checkout_behind_its_sync_ref() {
         .expect("file-backed skill should be served");
     let text = extract_text(result);
 
-    assert!(
-        text.starts_with(
-            "WARNING: STALE PROJECT SKILL\nServed from checkout ref `factory/stale-skill`, which is 1 commit(s) behind `main`. The file may omit newer project guidance; run `cas factory sync` before relying on it.\n\n"
-        ),
-        "{text}"
-    );
+    assert!(text.starts_with("Skill: stale-skill"), "{text}");
+    assert!(text.contains("Corrected on disk"), "{text}");
+    assert!(!text.contains("STALE PROJECT SKILL"), "{text}");
 }
 
 #[tokio::test]

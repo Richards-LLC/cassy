@@ -7,21 +7,36 @@
 //!
 //! - close of an already-closed task is a no-op success (no re-verify)
 //! - verification against a closed task is rejected
-//! - urgent supervisor/director halt blocks further close/verify until a
-//!   successful new start that does not race a newer halt generation
+//! - urgent supervisor/director halt blocks further close/verify until the
+//!   worker has demonstrably answered the urgent exchange (or a successful
+//!   new start clears a legacy/unanswered halt without racing a newer one)
 //!
 //! Close-merge semantics and product code are out of scope.
 
 use cas_types::TaskStatus;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Agent metadata key: when truthy, the worker must not run task close or
-/// verification MCP until a successful `task start` clears it (urgent stop).
+/// verification MCP until it answers the urgent stop that armed it.
 pub const HALT_TASK_WORK_META: &str = "halt_task_work";
 
 /// Monotonic generation (unix millis) for the halt flag. A concurrent urgent
 /// stop during `task start` writes a newer gen; start must not clear it.
 pub const HALT_TASK_WORK_GEN_META: &str = "halt_task_work_gen";
+
+/// Durable prompt id for the exact urgent exchange that armed the halt.
+///
+/// This makes the release condition evidence-bound: a response may only
+/// discharge the halt after CAS has confirmed this particular prompt was
+/// surfaced and answered. Legacy flags without this key retain the safe
+/// `task start` recovery path.
+pub const HALT_TASK_WORK_PROMPT_META: &str = "halt_task_work_prompt_id";
+
+/// Last process-local urgent-halt generation. Wall-clock milliseconds alone
+/// can collide for two urgent sends in one tick; an exchange binding needs a
+/// strictly newer value so an old reply can never release the newer halt.
+static LAST_HALT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Snapshot of one worker candidate for halt fan-out (pure tests + production).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +62,9 @@ pub fn verification_on_closed_message(task_id: &str) -> String {
 pub fn halt_blocks_task_work_message(tool: &str) -> String {
     format!(
         "WORK HALTED: supervisor issued an urgent stop. \
-         Refusing `{tool}` until a new task is started. \
-         Call `task action=mine` and wait for assignment (cas-b269)."
+         Refusing `{tool}` until you respond to that instruction. \
+         Send `coordination action=message target=supervisor` with your acknowledgement or question, then retry `{tool}`. \
+         If you cannot respond, call `task action=mine` and only start a task that is assigned to you."
     )
 }
 
@@ -68,6 +84,34 @@ pub fn halt_generation(metadata: &HashMap<String, String>) -> u64 {
         .unwrap_or(0)
 }
 
+/// Allocate a strictly increasing urgent-halt generation.
+pub fn next_halt_generation() -> u64 {
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let mut observed = LAST_HALT_GENERATION.load(Ordering::Relaxed);
+    loop {
+        let candidate = now.max(observed.saturating_add(1));
+        match LAST_HALT_GENERATION.compare_exchange_weak(
+            observed,
+            candidate,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
+/// Parse the urgent prompt id that armed a halt. Missing/invalid values are
+/// treated as legacy metadata, which must not be released by an unrelated
+/// reply.
+pub fn halt_prompt_id(metadata: &HashMap<String, String>) -> Option<i64> {
+    metadata
+        .get(HALT_TASK_WORK_PROMPT_META)
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+}
+
 /// Whether `task start` may clear halt given the generation present at clear
 /// time and the ceiling captured after a successful start (unix millis).
 ///
@@ -80,16 +124,40 @@ pub fn should_clear_halt_at_generation(stored_gen: u64, clear_ceiling: u64) -> b
 /// Apply a new halt generation to metadata (sets flag + gen).
 pub fn apply_halt_metadata(metadata: &mut HashMap<String, String>, generation: u64) {
     metadata.insert(HALT_TASK_WORK_META.to_string(), "1".to_string());
+    metadata.insert(HALT_TASK_WORK_GEN_META.to_string(), generation.to_string());
+    // A newer urgent invalidates the prior exchange binding until its queue row
+    // is durably known. This prevents a reply to the old urgent from clearing
+    // the new halt.
+    metadata.remove(HALT_TASK_WORK_PROMPT_META);
+}
+
+/// Bind a just-enqueued urgent prompt to the halt it created.
+///
+/// The generation comparison preserves a later concurrent urgent stop; its
+/// response must release only its own exchange.
+pub fn bind_halt_to_prompt_if_generation(
+    metadata: &mut HashMap<String, String>,
+    generation: u64,
+    prompt_id: i64,
+) -> bool {
+    if prompt_id <= 0
+        || !agent_task_work_halted(metadata)
+        || halt_generation(metadata) != generation
+    {
+        return false;
+    }
     metadata.insert(
-        HALT_TASK_WORK_GEN_META.to_string(),
-        generation.to_string(),
+        HALT_TASK_WORK_PROMPT_META.to_string(),
+        prompt_id.to_string(),
     );
+    true
 }
 
 /// Clear halt metadata keys.
 pub fn clear_halt_metadata(metadata: &mut HashMap<String, String>) {
     metadata.remove(HALT_TASK_WORK_META);
     metadata.remove(HALT_TASK_WORK_GEN_META);
+    metadata.remove(HALT_TASK_WORK_PROMPT_META);
 }
 
 /// Whether the message **source** is authorized to set `halt_task_work`.
@@ -286,9 +354,10 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
 ///   status (`Open`, `Blocked`, `Closed`, `PendingSupervisorReview`), still
 ///   halts.
 /// - It does **not** clear `halt_task_work` — every other close/verify call
-///   remains blocked until a real new `task start` clears the flag. A worker
-///   cannot use this to bootstrap its way into unhalted work on anything
-///   other than the exact task it already owns.
+///   remains blocked until the worker demonstrably answers the urgent
+///   exchange, or a real new `task start` clears a legacy/unanswered halt. A
+///   worker cannot use this to bootstrap its way into unhalted work on
+///   anything other than the exact task it already owns.
 /// - It does **not** touch any other gate. Skipping the halt check only lets
 ///   execution reach the merge-integrity / verification / code-review gates
 ///   that already run after it — an `AwaitingMerge` task whose commit is not
@@ -354,6 +423,44 @@ mod tests {
         assert!(agent_task_work_halted(&meta));
         meta.insert(HALT_TASK_WORK_META.to_string(), "0".to_string());
         assert!(!agent_task_work_halted(&meta));
+    }
+
+    #[test]
+    fn cas_85fd_halt_is_bound_to_only_its_urgent_exchange() {
+        let mut meta = HashMap::new();
+        apply_halt_metadata(&mut meta, 41);
+        assert!(bind_halt_to_prompt_if_generation(&mut meta, 41, 7124));
+        assert_eq!(halt_prompt_id(&meta), Some(7124));
+
+        // A newer urgent replaces the exchange binding, so an old reply
+        // cannot release the new course correction.
+        apply_halt_metadata(&mut meta, 42);
+        assert_eq!(halt_prompt_id(&meta), None);
+        assert!(!bind_halt_to_prompt_if_generation(&mut meta, 41, 7124));
+        assert!(bind_halt_to_prompt_if_generation(&mut meta, 42, 7125));
+        assert_eq!(halt_prompt_id(&meta), Some(7125));
+
+        clear_halt_metadata(&mut meta);
+        assert!(!agent_task_work_halted(&meta));
+        assert_eq!(halt_prompt_id(&meta), None);
+    }
+
+    #[test]
+    fn cas_85fd_halt_generations_do_not_collide_in_one_clock_tick() {
+        let first = next_halt_generation();
+        let second = next_halt_generation();
+        assert!(second > first);
+    }
+
+    #[test]
+    fn cas_85fd_halt_recovery_names_no_unassigned_task() {
+        let message = halt_blocks_task_work_message("task action=close");
+        assert!(message.contains("target=supervisor"));
+        assert!(message.contains("then retry"));
+        assert!(
+            !message.contains("cas-"),
+            "recovery must not name a task the worker may not be able to resolve: {message}"
+        );
     }
 
     #[test]

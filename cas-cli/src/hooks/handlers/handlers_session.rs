@@ -1,5 +1,5 @@
-use crate::hooks::handlers::*;
 use crate::hooks::handlers::session_budget::SessionContextAssembler;
+use crate::hooks::handlers::*;
 
 fn registered_role_mismatch_banner(
     configured_role: Option<AgentRole>,
@@ -209,10 +209,9 @@ pub fn handle_session_start(
     // this at the protected top of supervisor context so it survives the
     // SessionStart preview/budget compaction path.
     if is_supervisor {
-        if let Some(banner) = active_peer_supervisor_banner(
-            cas_root,
-            std::env::var("CAS_AGENT_NAME").ok().as_deref(),
-        ) {
+        if let Some(banner) =
+            active_peer_supervisor_banner(cas_root, std::env::var("CAS_AGENT_NAME").ok().as_deref())
+        {
             assembler.prepend_degradable(banner.clone(), banner);
         }
     }
@@ -604,13 +603,15 @@ mod large_artifact_staging_tests {
         let mut env = staging_env("supervisor");
         env.set("CAS_AGENT_NAME", "current-supervisor");
         let input = session_input(with_peer.path().to_str().unwrap());
-        let context = additional_context(handle_session_start(&input, Some(with_peer.path())).unwrap());
+        let context =
+            additional_context(handle_session_start(&input, Some(with_peer.path())).unwrap());
         assert!(context.contains("CONCURRENT SUPERVISORS ACTIVE: peer-supervisor"));
         assert!(context.contains("Planning under a shared epic can race."));
 
         let no_peer = tempfile::tempdir().unwrap();
         let input = session_input(no_peer.path().to_str().unwrap());
-        let context = additional_context(handle_session_start(&input, Some(no_peer.path())).unwrap());
+        let context =
+            additional_context(handle_session_start(&input, Some(no_peer.path())).unwrap());
         assert!(
             !context.contains("CONCURRENT SUPERVISORS ACTIVE"),
             "a lone supervisor must not receive a false concurrent-supervisor warning: {context}"
@@ -720,56 +721,73 @@ pub(crate) fn compute_session_title(agent_role: &str, active_tasks: &[Task]) -> 
 
 // ─── Skill drift detection (cas-f9ad) ─────────────────────────────────────
 
-/// Check whether synced skill files have changed since *this* session last
-/// loaded them, and if so update the per-session marker so subsequent calls
-/// within the same session return `false`.
+/// Check whether working-tree skill files have changed since *this* session
+/// last loaded them. Each session marker stores a content fingerprint of the
+/// actual `SKILL.md` paths and bytes under the project harness directories.
 ///
-/// ## Mechanism
+/// A missing marker is the initial load: record the fingerprint without
+/// requesting another reload. A later mismatch means the files served from
+/// disk moved mid-session, so update the marker and emit `reloadSkills`.
 ///
-/// `cas update --sync` writes a **sentinel** file at
-/// `<cas_root>/skill_sync_sentinel` containing an opaque timestamp token
-/// that changes on every sync run.
-///
-/// Each session tracks the last sentinel token it acknowledged in a
-/// **per-session marker** file `<cas_root>/session_skills_seen_<session_id>`.
-///
-/// On every `SessionStart`:
-/// - No sentinel → no sync has ever run → `false`.
-/// - No marker   → session hasn't loaded skills yet → `true`, write marker.
-/// - Marker content matches sentinel → `false`.
-/// - Marker content differs          → `true`, update marker.
-///
-/// The comparison is content-based (not mtime-based) to be resilient to
-/// filesystem clock skew and backup/restore workflows.  The token written by
-/// the sync step is a nanosecond-resolution UNIX timestamp, so collisions are
-/// negligible in practice.
-///
-/// Failures (unreadable sentinel, unwritable marker, etc.) are silently
-/// treated as "no drift" so `SessionStart` never blocks on I/O errors.
+/// This deliberately does not compare HEAD with origin/staging. In a shared
+/// checkout another worker can correct a safety-critical skill on disk while
+/// the remote relationship stays unchanged; the disk file is authoritative.
+/// Read/write failures remain best-effort and never block `SessionStart`.
 pub(crate) fn detect_and_mark_skill_drift(cas_root: &Path, session_id: &str) -> bool {
     if session_id.trim().is_empty() {
         return false;
     }
 
-    let sentinel_path = cas_root.join("skill_sync_sentinel");
     let marker_path = cas_root.join(format!("session_skills_seen_{session_id}"));
-
-    // Read sentinel — absent means sync has never run, no drift.
-    let sentinel = match std::fs::read_to_string(&sentinel_path) {
-        Ok(s) if !s.is_empty() => s,
-        _ => return false,
+    let Some(fingerprint) = working_tree_skill_fingerprint(cas_root) else {
+        return false;
     };
+    let marker = std::fs::read_to_string(&marker_path).ok();
 
-    // Read per-session marker — absent means session hasn't acked any sync.
-    let marker = std::fs::read_to_string(&marker_path).unwrap_or_default();
-
-    if sentinel == marker {
+    if marker.as_deref() == Some(fingerprint.as_str()) {
         return false;
     }
+    let first_load = marker.is_none();
+    let _ = std::fs::write(&marker_path, fingerprint.as_bytes());
+    !first_load
+}
 
-    // Drift detected: update marker and report.
-    let _ = std::fs::write(&marker_path, sentinel.as_bytes());
-    true
+fn working_tree_skill_fingerprint(cas_root: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                collect(&path, out)?;
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let project_root = cas_root.parent()?;
+    let mut files = Vec::new();
+    for relative in [".claude/skills", ".codex/skills", ".grok/skills"] {
+        collect(&project_root.join(relative), &mut files).ok()?;
+    }
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas-working-tree-skills-v1\0");
+    for path in files {
+        let relative = path.strip_prefix(project_root).ok()?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(std::fs::read(&path).ok()?);
+        hasher.update(b"\0");
+    }
+    Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
 /// Build the opt-in Phase 3 (cas-3efe) integrations banner.
@@ -1695,8 +1713,8 @@ mod session_learn_tests {
 // ── Worker worktree assertion tests (cas-bea2, LAYER 3) ───────────────────
 #[cfg(test)]
 mod worker_worktree_assertion_tests {
-    use crate::test_support::TestEnvGuard;
     use super::*;
+    use crate::test_support::TestEnvGuard;
 
     fn make_git_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1738,7 +1756,10 @@ mod worker_worktree_assertion_tests {
     /// Worker with no CAS_CLONE_PATH → pass-through (not isolated)
     #[test]
     fn no_clone_path_passes_through() {
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("worker")), ("CAS_CLONE_PATH", None)]);
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_CLONE_PATH", None),
+        ]);
         let ctx = "some context".to_string();
         let result = build_worker_worktree_assertion("/tmp/foo", ctx.clone());
         assert_eq!(result, ctx);

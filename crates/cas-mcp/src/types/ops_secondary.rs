@@ -446,7 +446,9 @@ pub struct KnowledgeRequest {
     pub rel_path: Option<String>,
 
     /// Page title (for write)
-    #[schemars(description = "Page title — with page_type it determines the canonical path (write)")]
+    #[schemars(
+        description = "Page title — with page_type it determines the canonical path (write)"
+    )]
     #[serde(default)]
     pub title: Option<String>,
 
@@ -565,7 +567,9 @@ pub struct FactoryRequest {
     pub force: Option<bool>,
 
     /// Preview target-cache reclamation without deleting artifacts.
-    #[schemars(description = "gc_cleanup: preview exact target-cache candidates and bytes without deleting them (target-cache cleanup defaults to dry-run unless explicitly false)")]
+    #[schemars(
+        description = "gc_cleanup: preview exact target-cache candidates and bytes without deleting them (target-cache cleanup defaults to dry-run unless explicitly false)"
+    )]
     #[serde(default)]
     pub dry_run: Option<bool>,
 
@@ -586,7 +590,7 @@ pub struct FactoryRequest {
 
     /// Whether spawned workers need isolated worktrees (git worktree per worker)
     #[schemars(
-        description = "Whether workers need to be isolated in their own git worktrees. When true, each worker gets its own branch and working directory. When false or omitted, workers share the main working directory."
+        description = "Whether workers need isolated git worktrees. true gives each worker its own branch and directory. false or omitted shares one mutable checkout/HEAD across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change on disk mid-session. Prefer true; non-isolated spawn receipts warn explicitly."
     )]
     #[serde(default)]
     pub isolate: Option<bool>,
@@ -724,14 +728,23 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// Task ID (for loop_start, worktree_create, spawn_workers, or remind).
+    /// Task ID (for loop_start, worktree_create, spawn_workers, remind, or a
+    /// merge_request message).
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
+        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. For message with merge_request=true: identify the parked merge delivery. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Explicit worker merge-request message type. Only this type receives
+    /// CAS's structured merge envelope and stale-merge suppression.
+    #[schemars(
+        description = "message action only: mark this worker-to-supervisor message as a merge request. CAS attaches the cas-merge-request envelope and suppresses it only if its branch tip is already integrated. Omit or false for blockers, questions, close failures, and all other free-form messages."
+    )]
+    #[serde(default)]
+    pub merge_request: Option<bool>,
 
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind
     #[schemars(
@@ -902,7 +915,7 @@ pub struct CoordinationRequest {
 
     /// Whether workers need isolated git worktrees
     #[schemars(
-        description = "Whether workers need to be isolated in their own git worktrees. When true, each worker gets its own branch and working directory. When false or omitted, workers share the main working directory."
+        description = "Whether workers need isolated git worktrees. true gives each worker its own branch and directory. false or omitted shares one mutable checkout/HEAD across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change on disk mid-session. Prefer true; non-isolated spawn receipts warn explicitly."
     )]
     #[serde(default)]
     pub isolate: Option<bool>,
@@ -1003,7 +1016,9 @@ pub struct CoordinationRequest {
     pub orphans: Option<bool>,
 
     /// Preview cleanup without making changes.
-    #[schemars(description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)")]
+    #[schemars(
+        description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)"
+    )]
     #[serde(default)]
     pub dry_run: Option<bool>,
 
@@ -1071,6 +1086,7 @@ impl CoordinationRequest {
             parent_id: self.parent_id.clone(),
             session_id: self.session_id.clone(),
             task_id: self.task_id.clone(),
+            merge_request: self.merge_request,
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,
             completion_promise: self.completion_promise.clone(),

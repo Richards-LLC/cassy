@@ -3208,18 +3208,29 @@ mod tests {
             .spawn()
             .expect("spawn short-lived child");
         let pid = child.id();
-        // Give it a moment to exit — a zombie exists once the process exits
-        // but before THIS process (its parent) reaps it via wait().
-        std::thread::sleep(Duration::from_millis(100));
+        // A zombie exists once the child exits but before THIS process (its
+        // parent) reaps it via wait(). Do not assume a fixed delay is enough:
+        // factory churn can defer scheduling this short-lived child beyond an
+        // arbitrary 100ms sleep. Poll only this test-owned PID for a bounded
+        // interval, so unrelated host zombies cannot affect the assertion.
+        let mut became_zombie = false;
+        for _ in 0..100 {
+            if pid_is_zombie(pid) {
+                became_zombie = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let confirmed_dead = became_zombie && verify_death(pid);
+        let _ = child.wait(); // reap even when an assertion below fails
         assert!(
-            pid_is_zombie(pid),
-            "child should be a zombie by now (exited, not yet reaped)"
+            became_zombie,
+            "owned child should become a zombie within one second (exited, not yet reaped)"
         );
         assert!(
-            verify_death(pid),
+            confirmed_dead,
             "a zombie must be treated as confirmed-dead, not timed-out-alive"
         );
-        let _ = child.wait(); // reap so no zombie leaks past the test
     }
 
     #[test]

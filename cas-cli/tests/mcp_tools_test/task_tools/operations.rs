@@ -281,9 +281,37 @@ async fn test_execution_note_invalid_enum_rejected() {
     assert!(
         msg.contains("test-first")
             && msg.contains("characterization-first")
-            && msg.contains("additive-only"),
+            && msg.contains("additive-only")
+            && msg.contains("value-only"),
         "error must list allowed values, got: {msg}"
     );
+}
+
+/// cas-8ad8: value-only is an accepted declaration for copy/i18n work that
+/// modifies existing values without claiming a new-file-only posture.
+#[tokio::test]
+async fn test_execution_note_value_only_create_and_show() {
+    let (_temp, service) = setup_cas();
+
+    let created = service
+        .cas_task_create(Parameters(basic_create(
+            "Copy-value correction",
+            Some("value-only".to_string()),
+        )))
+        .await
+        .expect("value-only must be accepted");
+    let id = extract_task_id(&extract_text(created))
+        .expect("id")
+        .to_string();
+
+    let shown = service
+        .cas_task_show(Parameters(TaskShowRequest {
+            id,
+            with_deps: false,
+        }))
+        .await
+        .expect("show should succeed");
+    assert!(extract_text(shown).contains("Execution Note: value-only"));
 }
 
 /// Update path: create without execution_note, then set it via update.

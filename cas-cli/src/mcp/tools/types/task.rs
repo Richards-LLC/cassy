@@ -17,6 +17,7 @@ pub const EXECUTION_NOTE_VALUES: &[&str] = &[
     "test-first",
     "characterization-first",
     "additive-only",
+    "value-only",
     "no-code",
 ];
 
@@ -134,7 +135,7 @@ pub struct TaskCreateRequest {
 
     /// Execution methodology note
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, no-code. no-code declares an operations/artifact task and requires an external_ref proof reference at close. Omit or leave null if no methodology is declared."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, value-only, no-code. value-only permits edits to existing values but rejects added, deleted, copied, or renamed files at close. no-code declares an operations/artifact task and requires an external_ref proof reference at close. Omit or leave null if no methodology is declared."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
@@ -352,7 +353,7 @@ pub struct TaskUpdateRequest {
 
     /// Update execution note
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, no-code. no-code declares an operations/artifact task and requires an external_ref proof reference at close. Pass an empty string to clear."
+        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, value-only, no-code. value-only permits edits to existing values but rejects added, deleted, copied, or renamed files at close. no-code declares an operations/artifact task and requires an external_ref proof reference at close. Pass an empty string to clear."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,

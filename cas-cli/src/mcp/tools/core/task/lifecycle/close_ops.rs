@@ -67,8 +67,12 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
 }
 
 fn delivery_audit_text_is_portable(value: &str) -> bool {
+    delivery_audit_text_rejection(value).is_none()
+}
+
+fn delivery_audit_text_rejection(value: &str) -> Option<&'static str> {
     if value.chars().any(char::is_control) {
-        return false;
+        return Some("contains control characters");
     }
     let lower = value.to_ascii_lowercase();
     if [
@@ -85,15 +89,18 @@ fn delivery_audit_text_is_portable(value: &str) -> bool {
     .iter()
     .any(|marker| lower.contains(marker))
     {
-        return false;
+        return Some("is secret-shaped");
     }
-    !value.split_whitespace().any(|token| {
+    if value.split_whitespace().any(|token| {
         let token = token.trim_matches(|ch: char| "(),[]{}<>\"'".contains(ch));
         token.starts_with('/')
             || (token.len() >= 3
                 && token.as_bytes()[1] == b':'
                 && matches!(token.as_bytes()[2], b'/' | b'\\'))
-    })
+    }) {
+        return Some("contains a local absolute path");
+    }
+    None
 }
 
 fn no_code_close_proof<'a>(
@@ -105,20 +112,42 @@ fn no_code_close_proof<'a>(
     if execution_note != Some("no-code") {
         return Ok(None);
     }
-    let proof_reference = external_ref
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && delivery_audit_text_is_portable(value))
-        .ok_or_else(|| {
-            format!(
-                "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code. Record a non-empty portable artifact/proof reference with `task action=update id={task_id} external_ref=<reference>` before closing. Local absolute paths and secret-shaped values are not accepted as durable audit references."
-            )
-        })?;
+    let proof_reference = external_ref.map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
+        format!(
+            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but no external_ref was supplied inline or persisted on the task. Retry close with `external_ref=<portable-reference>` (or record it first with task update)."
+        )
+    })?;
+    if let Some(reason) = delivery_audit_text_rejection(proof_reference) {
+        return Err(format!(
+            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but the supplied external_ref {reason}. Supply a non-empty portable artifact/proof reference and retry close."
+        ));
+    }
     if has_reviewable_code {
         return Err(format!(
             "⚠️ NO-CODE INTENT VIOLATED\n\nTask {task_id} declares execution_note=no-code, but its task-attributed branch history contains reviewable code changes. Clear or change execution_note and complete the ordinary review/merge gates; no-code cannot be used to bypass code delivery proof."
         ));
     }
     Ok(Some(proof_reference))
+}
+
+fn apply_no_code_close_proof(
+    task: &mut cas_types::Task,
+    inline_external_ref: Option<&str>,
+    has_reviewable_code: bool,
+) -> Result<(), String> {
+    let inline = inline_external_ref.map(str::to_string);
+    let persisted = task.external_ref.clone();
+    let effective = inline.as_deref().or(persisted.as_deref());
+    let proof = no_code_close_proof(
+        &task.id,
+        task.execution_note.as_deref(),
+        effective,
+        has_reviewable_code,
+    )?;
+    if inline.is_some() {
+        task.external_ref = proof.map(str::to_string);
+    }
+    Ok(())
 }
 
 /// Return a durable-proof path under tmpfs cited in a task-close reason.
@@ -340,9 +369,10 @@ fn request_changes_role_gate(
 #[cfg(test)]
 mod delivery_audit_text_tests {
     use super::{
-        delivery_audit_text_is_portable, negative_result_missing_receipts, no_code_close_proof,
-        request_changes_role_gate, tmpfs_receipt_path_in_close_reason,
-        validate_completion_artifact_path, validate_negative_result_reference,
+        apply_no_code_close_proof, delivery_audit_text_is_portable,
+        negative_result_missing_receipts, no_code_close_proof, request_changes_role_gate,
+        tmpfs_receipt_path_in_close_reason, validate_completion_artifact_path,
+        validate_negative_result_reference,
     };
 
     #[test]
@@ -379,8 +409,26 @@ mod delivery_audit_text_tests {
         assert!(
             no_code_close_proof("cas-ops", Some("no-code"), None, false)
                 .unwrap_err()
-                .contains("NO-CODE PROOF REQUIRED")
+                .contains("no external_ref was supplied")
         );
+        let absolute = no_code_close_proof(
+            "cas-ops",
+            Some("no-code"),
+            Some("proof at /home/alice/report.json"),
+            false,
+        )
+        .unwrap_err();
+        assert!(absolute.contains("local absolute path"));
+        assert!(!absolute.contains("secret-shaped"));
+        let secret = no_code_close_proof(
+            "cas-ops",
+            Some("no-code"),
+            Some("token=secret-value"),
+            false,
+        )
+        .unwrap_err();
+        assert!(secret.contains("secret-shaped"));
+        assert!(!secret.contains("absolute path"));
         assert!(
             no_code_close_proof(
                 "cas-ops",
@@ -390,6 +438,25 @@ mod delivery_audit_text_tests {
             )
             .unwrap_err()
             .contains("NO-CODE INTENT VIOLATED")
+        );
+    }
+
+    #[test]
+    fn inline_external_ref_is_accepted_and_persisted_without_prior_update_cas_102c() {
+        let mut task = cas_types::Task::new("cas-ops".into(), "refunds".into());
+        task.execution_note = Some("no-code".into());
+        assert!(task.external_ref.is_none());
+
+        apply_no_code_close_proof(
+            &mut task,
+            Some("80a8d559d docs/release-notes/refunds.md"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            task.external_ref.as_deref(),
+            Some("80a8d559d docs/release-notes/refunds.md")
         );
     }
 
@@ -1650,7 +1717,7 @@ impl CasCore {
         &self,
         params: Parameters<TaskCloseRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_close_with_completion(params, None, None)
+        self.cas_task_close_with_completion(params, None, None, None)
             .await
     }
 
@@ -1659,6 +1726,7 @@ impl CasCore {
         Parameters(req): Parameters<TaskCloseRequest>,
         completion_receipt: Option<String>,
         negative_result: Option<NegativeResultCloseRequest>,
+        inline_external_ref: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -3536,7 +3604,18 @@ impl CasCore {
         // (code tasks with no no-code declaration, and unknowable git state,
         // keep the previous signal).
         let effective_has_reviewable = if let Some(worker_wt) = worker_worktree_path.as_ref() {
-            has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
+            commit_receipt_window
+                .as_ref()
+                .and_then(|window| {
+                    has_task_attributable_reviewable_changes(
+                        worker_wt,
+                        &resolved_parent_branch,
+                        window,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
+                })
         } else {
             shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
                 task_type: task.task_type,
@@ -3561,10 +3640,9 @@ impl CasCore {
             && task.execution_note.as_deref() == Some("no-code")
             && !bypass_close_gates
         {
-            if let Err(message) = no_code_close_proof(
-                &task.id,
-                task.execution_note.as_deref(),
-                task.external_ref.as_deref(),
+            if let Err(message) = apply_no_code_close_proof(
+                &mut task,
+                inline_external_ref.as_deref(),
                 effective_has_reviewable,
             ) {
                 return Ok(Self::tool_error(message));
@@ -21356,6 +21434,34 @@ mod zero_diff_spike_close_tests {
             has_task_attributable_reviewable_changes(p, "main", &window()),
             Some(false),
             "another task's earlier commits must not be attributed to this close"
+        );
+    }
+
+    #[test]
+    fn isolated_zero_commit_task_does_not_inherit_reviewable_spawn_base_cas_102c() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"], PRIOR_CYCLE);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"], PRIOR_CYCLE);
+        git(p, &["commit", "-q", "-m", "seed"], PRIOR_CYCLE);
+        git(p, &["branch", "epic/refunds"], PRIOR_CYCLE);
+
+        // Supervisor hotfix lands before the task worktree is cut. The task
+        // branch inherits it but authors no commit of its own.
+        std::fs::write(p.join("hotfix.rs"), "pub fn hotfix() {}\n").unwrap();
+        git(p, &["add", "hotfix.rs"], PRIOR_CYCLE);
+        git(p, &["commit", "-q", "-m", "supervisor hotfix"], PRIOR_CYCLE);
+        git(p, &["checkout", "-q", "-b", "factory/refunds"], PRIOR_CYCLE);
+
+        assert!(
+            has_worker_committed_reviewable_changes(p, "epic/refunds"),
+            "precondition: branch-wide attribution falsely sees the inherited hotfix"
+        );
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "epic/refunds", &window()),
+            Some(false),
+            "the no-code task authored zero commits after its work-cycle base"
         );
     }
 

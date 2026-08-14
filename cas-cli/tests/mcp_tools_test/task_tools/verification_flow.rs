@@ -1717,6 +1717,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     artifact_path: None,
                     reference: None,
                 }),
+                None,
             )
             .await
             .unwrap(),
@@ -1766,6 +1767,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     artifact_path: None,
                     reference: None,
                 }),
+                None,
             )
             .await
             .unwrap(),
@@ -1803,6 +1805,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
                     artifact_path: Some(proof.display().to_string()),
                     reference: Some(reference.to_string()),
                 }),
+                None,
             )
             .await
             .unwrap(),
@@ -6008,6 +6011,121 @@ impl FactoryWorkerEnv {
 /// don't have to list every Optional field on the struct.
 fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
     serde_json::from_value(value).expect("TaskRequest should deserialize from test JSON")
+}
+
+/// cas-102c (GH #330 + #333): exercise both field failures through the public
+/// unified task service. The worker branch is cut from a main tip containing
+/// a recent supervisor hotfix while its declared parent remains behind. It then
+/// authors zero commits and supplies its proof only on the close call.
+#[tokio::test]
+async fn no_code_close_ignores_inherited_base_and_accepts_inline_external_ref_cas_102c() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .expect("write config");
+
+    let worker_path = temp.path().join("refund-worker");
+    std::fs::create_dir_all(&worker_path).expect("create worker checkout");
+    let inherited_commit_date = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&worker_path)
+            .env("GIT_AUTHOR_NAME", "Supervisor")
+            .env("GIT_AUTHOR_EMAIL", "supervisor@example.test")
+            .env("GIT_COMMITTER_NAME", "Supervisor")
+            .env("GIT_COMMITTER_EMAIL", "supervisor@example.test")
+            .env("GIT_AUTHOR_DATE", &inherited_commit_date)
+            .env("GIT_COMMITTER_DATE", &inherited_commit_date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(worker_path.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["branch", "epic/refunds"]);
+    std::fs::write(worker_path.join("hotfix.rs"), "pub fn hotfix() {}\n").unwrap();
+    git(&["add", "hotfix.rs"]);
+    git(&["commit", "-q", "-m", "supervisor hotfix"]);
+    git(&["checkout", "-q", "-b", "factory/refund-worker"]);
+    let starting_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worker_path)
+        .output()
+        .expect("read HEAD");
+
+    let worktree_store = open_worktree_store(&cas_dir).expect("open worktree store");
+    worktree_store.init().expect("init worktree store");
+    let worktree_id = Worktree::generate_id();
+    worktree_store
+        .add(&Worktree::new(
+            worktree_id.clone(),
+            "factory/refund-worker".to_string(),
+            "epic/refunds".to_string(),
+            worker_path.clone(),
+        ))
+        .expect("record worktree");
+
+    let service = CasService::new(core, None);
+    let created = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Issue refunds without repository changes",
+            "priority": 2,
+            "task_type": "chore",
+            "execution_note": "no-code"
+        }))))
+        .await
+        .expect("create task");
+    let id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut task = task_store.get(&id).expect("task exists");
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("refund-worker".to_string());
+    task.worktree_id = Some(worktree_id);
+    task_store.update(&task).expect("attach worker checkout");
+
+    let proof = "80a8d559d docs/release-notes/refunds.md";
+    let closed = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": id,
+            "reason": "Refunds issued and credits granted",
+            "external_ref": proof
+        }))))
+        .await
+        .expect("close task");
+    let response = extract_text(closed);
+    assert!(
+        response.contains("Closed task:"),
+        "zero-commit task must close cleanly: {response}"
+    );
+    let stored = task_store.get(&id).expect("closed task exists");
+    assert_eq!(stored.status, TaskStatus::Closed);
+    assert_eq!(stored.external_ref.as_deref(), Some(proof));
+    let ending_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worker_path)
+        .output()
+        .expect("read HEAD");
+    assert_eq!(
+        starting_head.stdout, ending_head.stdout,
+        "task authored no commit"
+    );
 }
 
 /// Narrowed jail — positive case.

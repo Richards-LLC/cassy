@@ -416,6 +416,7 @@ impl CasService {
 
     pub(super) async fn task_close(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskCloseRequest;
+        let inline_external_ref = req.external_ref.clone();
         let negative_result = req.negative_result.unwrap_or(false).then(|| {
             crate::mcp::tools::NegativeResultCloseRequest {
                 artifact_path: req.negative_result_artifact_path,
@@ -437,6 +438,7 @@ impl CasService {
                 Parameters(inner_req),
                 req.completion_receipt,
                 negative_result,
+                inline_external_ref,
             )
             .await
     }

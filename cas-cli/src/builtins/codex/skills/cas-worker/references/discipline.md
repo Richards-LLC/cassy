@@ -106,6 +106,7 @@ then prove only the affected target:
 - `cargo check -p <crate> --lib --tests` — inner-loop compile feedback, no test execution
 - `scripts/run-scoped-tests.sh -p cas --lib <module>` — one library target/filter via nextest
 - `scripts/run-scoped-tests.sh -p cas --test <name>` — one integration-test file via nextest
+- `scripts/run-scoped-tests.sh --proof ...` — final receipt only; refuses a filter that misses a committed changed test module or integration target
 - `CARGO_CMD=test scripts/run-scoped-tests.sh ...` — diagnostic fallback only, not the default
 
 Package selection alone (`-p cas`) is not a scope here: that one package owns dozens of test
@@ -172,12 +173,13 @@ author (GH #173):
 Run your final-proof suite through the guard, which enforces all of that mechanically:
 
 ```bash
-make -C cas-cli test-scoped SCOPED_ARGS='-p cas --lib my_module'
-scripts/run-scoped-tests.sh -p cas --test cli_test        # same thing, directly
+make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --lib my_module'
+scripts/run-scoped-tests.sh --proof -p cas --test cli_test # same thing, directly
 ```
 
-It fails the run unless cargo exited 0, **a test harness actually reported**, and the passed
-count is greater than zero. The middle condition is the one that matters: a wrapper or a
+It fails the run unless cargo exited 0, **a test harness actually reported**, the passed
+count is greater than zero, and (with `--proof`) the committed diff's changed test modules and
+integration targets are covered. The middle condition is the one that matters: a wrapper or a
 pipeline can drop a nonzero status, but nothing can invent a `test result:` line. It also
 rejects a relative `$ZIG` before spending a build on it, and reads `cargo nextest run`'s
 `Summary` line as well as `cargo test`'s.

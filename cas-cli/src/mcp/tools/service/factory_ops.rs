@@ -1299,6 +1299,11 @@ impl CasService {
         let spec_summary = spawn_spec_summary(&spec_json_owned);
         let spec_warning =
             spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned);
+        let isolation_warning = if isolate {
+            String::new()
+        } else {
+            "\nWARNING — NON-ISOLATED SHARED-CHECKOUT RISK: every spawned worker uses the same working directory and mutable HEAD. Another worker can switch HEAD between tool calls, causing commits to land on a foreign factory branch; an explicit HEAD:<mine> push can graft that worker's commits onto the caller's remote branch; and SKILL.md guidance can change on disk mid-session. Prefer isolate=true. Commit/merge/push guards will refuse unless the checkout is still on the calling worker's exact factory/<name> branch.".to_string()
+        };
 
         let factory_session = current_factory_session();
         // Capture the requesting supervisor's account now. The daemon may run
@@ -1374,11 +1379,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -7864,7 +7869,7 @@ mod spawn_lifecycle_tests {
     /// receipt must carry a matching project memory, not require a separate
     /// pull/search after the worker request was already made.
     #[tokio::test]
-    async fn spawn_response_surfaces_related_recall_for_active_epic() {
+    async fn spawn_response_surfaces_related_recall_for_active_epic_cas_0efb() {
         use cas_types::{Entry, Task, TaskType};
 
         let temp = tempfile::tempdir().expect("temp project");
@@ -7926,6 +7931,11 @@ mod spawn_lifecycle_tests {
         assert!(text.contains("Related prior context:"), "{text}");
         assert!(text.contains("m-spawn-recall"), "{text}");
         assert!(text.contains("Reuse timeline rollout plan"), "{text}");
+        assert!(text.contains("NON-ISOLATED SHARED-CHECKOUT RISK"), "{text}");
+        assert!(text.contains("foreign factory branch"), "{text}");
+        assert!(text.contains("graft"), "{text}");
+        assert!(text.contains("SKILL.md"), "{text}");
+        assert!(text.contains("Prefer isolate=true"), "{text}");
     }
 }
 

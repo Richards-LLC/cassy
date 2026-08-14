@@ -7,6 +7,8 @@ const SUPERVISOR_DIRECT_RECOVERY_DISPATCH_TIMEOUT_SECS: i64 = 600;
 /// Structured task label marking an Open task that was reopened by a rejected
 /// supervisor review and therefore needs a supervisor recovery decision.
 pub const VERIFICATION_REJECTED_REOPEN_LABEL: &str = "verification-rejected-reopen";
+pub const VERIFICATION_REJECTED_REOPEN_RECOVERY: &str =
+    "Verification rejected; worker remains assigned but inactive. Resume the existing worker or replace it.";
 
 impl CasCore {
     pub async fn cas_verification_add(
@@ -806,7 +808,7 @@ impl CasCore {
                 TaskStatus::PendingSupervisorReview,
                 TaskStatus::Open,
                 &caller_id,
-                Some("Verification rejected; worker remains assigned but inactive. Resume the existing worker or replace it."),
+                Some(VERIFICATION_REJECTED_REOPEN_RECOVERY),
                 LifecycleTransition::VerificationRejectedReopened,
                 &occurrence_from_updated_at(reopened_at),
             )

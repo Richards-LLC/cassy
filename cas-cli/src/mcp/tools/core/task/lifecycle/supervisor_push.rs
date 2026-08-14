@@ -816,6 +816,7 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_RECOVERY;
     use crate::test_support::TestEnvGuard;
     use cas_store::{
         PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore, SqliteSupervisorQueueStore,
@@ -1039,7 +1040,7 @@ mod tests {
             &sq, Some(&pq as &dyn PromptQueueStore), &agents,
             "cas-56f8", "Rejected review recovery", TaskStatus::PendingSupervisorReview,
             TaskStatus::Open, "task-verifier",
-            Some("Verification rejected; worker remains assigned but inactive. Resume the existing worker or replace it."),
+            Some(VERIFICATION_REJECTED_REOPEN_RECOVERY),
             LifecycleTransition::VerificationRejectedReopened, "reject-occurrence",
         );
         let first = emit().expect("rejection reopen wake");
@@ -1047,7 +1048,7 @@ mod tests {
         let rows = pq.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(is_lifecycle_wake_source(&rows[0].source));
-        assert!(rows[0].prompt.contains("resume the existing worker or replace it"));
+        assert!(rows[0].prompt.contains(VERIFICATION_REJECTED_REOPEN_RECOVERY));
 
         // Message acknowledgement consumes the prompt; replaying its exact
         // occurrence must observe the completed durable outbox and add no wake.

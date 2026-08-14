@@ -61,6 +61,26 @@ pub(crate) fn inbox_redelivery_decision(
     InboxRedelivery::MarkRedelivery
 }
 
+/// Inbox polling is a delivery surface, not an authority to discard a relay.
+/// A failed task read is uncertainty, so only a freshly-read task whose
+/// lifecycle occurrence is positively stale may be withheld.
+pub(crate) fn lifecycle_relay_is_stale_at_inbox_pop(
+    prompt: &str,
+    task: Option<&cas_types::Task>,
+) -> bool {
+    let Some(task) = task else {
+        return false;
+    };
+    matches!(
+        crate::prompt_revalidation::revalidate_lifecycle_prompt(
+            prompt,
+            task.status,
+            task.updated_at,
+        ),
+        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
+    )
+}
+
 /// cas-7a01 (GH #155): render the wake evidence pair as a sentence.
 ///
 /// The two fields answer different questions and the failure the issue reported
@@ -1184,8 +1204,12 @@ impl CasService {
         // and mark the rest as repeats.
         let task_store = crate::store::open_task_store_local(&self.inner.cas_root).ok();
         let mut rendered = 0usize;
+        // Every withholding path below follows one policy: first identify the
+        // typed action the row requests, then require fresh positive evidence
+        // that action is moot. Missing/unreadable state delivers. A withheld
+        // row is always retained here with its notification id and an
+        // operator-readable reason; no suppression may disappear silently.
         let mut withheld: Vec<(i64, String)> = Vec::new();
-        let mut terminal_withheld: Vec<(i64, String, cas_types::TaskStatus)> = Vec::new();
         let mut redelivered = 0usize;
         let mut body = String::new();
         for message in &messages {
@@ -1240,7 +1264,10 @@ impl CasService {
                     task_id = %task_id,
                     "withheld a merge request whose delivery anchor no longer holds at inbox pop"
                 );
-                withheld.push((message.id, task_id));
+                withheld.push((
+                    message.id,
+                    format!("merge request for {task_id}, already done"),
+                ));
                 continue;
             }
 
@@ -1248,25 +1275,16 @@ impl CasService {
             // a queued MERGE REQUIRED relay must not survive request_changes,
             // cancel, reset, or a completed merge merely because no daemon
             // tick ran before the supervisor polled.
-            let stale_lifecycle = crate::prompt_revalidation::parse_lifecycle_envelope(
+            let lifecycle_task = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
+                .and_then(|envelope| {
+                    task_store
+                        .as_ref()
+                        .and_then(|store| store.get(&envelope.task_id).ok())
+                });
+            let stale_lifecycle = lifecycle_relay_is_stale_at_inbox_pop(
                 &message.prompt,
-            )
-            .is_some_and(|envelope| match task_store.as_ref() {
-                Some(store) => match store.get(&envelope.task_id).ok() {
-                    Some(task) => matches!(
-                        crate::prompt_revalidation::revalidate_lifecycle_prompt(
-                            &message.prompt,
-                            task.status,
-                            task.updated_at,
-                        ),
-                        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
-                    ),
-                    None => true,
-                },
-                // Fails open when the store itself is unavailable: inability
-                // to inspect current state is not evidence that a relay died.
-                None => false,
-            });
+                lifecycle_task.as_ref(),
+            );
             if stale_lifecycle {
                 let task_id = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
                     .map(|envelope| envelope.task_id)
@@ -1279,7 +1297,10 @@ impl CasService {
                     task_id = %task_id,
                     "withheld a stale lifecycle relay at inbox pop"
                 );
-                withheld.push((message.id, task_id));
+                withheld.push((
+                    message.id,
+                    format!("lifecycle relay for {task_id}, already done"),
+                ));
                 continue;
             }
             let solicited_task = assignment_solicited_task_id(&message.prompt);
@@ -1300,7 +1321,10 @@ impl CasService {
                     status = %status,
                     "cas-8aee: withheld a queued assignment whose task is terminal"
                 );
-                terminal_withheld.push((message.id, task_id, status));
+                withheld.push((
+                    message.id,
+                    format!("assignment for {task_id}, already done: {status}"),
+                ));
                 continue;
             }
             // The transition an assignment solicits: the ADDRESSED recipient
@@ -1336,7 +1360,10 @@ impl CasService {
                         "cas-99d2: withheld an already-delivered assignment whose solicited \
                          task start is already recorded for this recipient"
                     );
-                    withheld.push((message.id, task_id));
+                    withheld.push((
+                        message.id,
+                        format!("assignment for {task_id}, already done"),
+                    ));
                     continue;
                 }
                 InboxRedelivery::MarkRedelivery => {
@@ -1372,16 +1399,13 @@ impl CasService {
         if rendered == 0 {
             let ids = withheld
                 .iter()
-                .map(|(id, task)| format!("{id} (assignment for {task}, already done)"))
-                .chain(terminal_withheld.iter().map(|(id, task, status)| {
-                    format!("{id} (assignment for {task}, already done: {status})")
-                }))
+                .map(|(id, reason)| format!("{id} ({reason})"))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Ok(Self::success(format!(
-                "No unread messages for {recipient} — withheld {} assignment message(s) already \
+                "No unread messages for {recipient} — withheld {} message(s) already \
                  done: {ids}",
-                withheld.len() + terminal_withheld.len()
+                withheld.len()
             )));
         }
 
@@ -1398,24 +1422,11 @@ impl CasService {
         }
         if !withheld.is_empty() {
             output.push_str(&format!(
-                ". Withheld {} assignment message(s) already done: {}",
+                ". Withheld {} message(s) already done: {}",
                 withheld.len(),
                 withheld
                     .iter()
-                    .map(|(id, task)| format!("{id} (assignment for {task}, already done)"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !terminal_withheld.is_empty() {
-            output.push_str(&format!(
-                ". Withheld {} terminal assignment message(s) already done: {}",
-                terminal_withheld.len(),
-                terminal_withheld
-                    .iter()
-                    .map(|(id, task, status)| {
-                        format!("{id} (assignment for {task}, already done: {status})")
-                    })
+                    .map(|(id, reason)| format!("{id} ({reason})"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -1707,7 +1718,7 @@ fn enrich_report_from_harness_artifact(
 mod inbox_poll_identity_tests {
     use super::{
         enrich_report_from_harness_artifact, interrupt_unconfirmed_message,
-        recipient_transport_warning, resolve_inbox_recipient,
+        lifecycle_relay_is_stale_at_inbox_pop, recipient_transport_warning, resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
 
@@ -1830,6 +1841,15 @@ mod inbox_poll_identity_tests {
             Some("env-worker".to_string())
         );
         assert_eq!(resolve_inbox_recipient(None, Some("  ".to_string())), None);
+    }
+
+    #[test]
+    fn unreadable_task_never_withholds_a_lifecycle_relay_at_inbox_pop() {
+        let prompt = "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-live\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" notification_id=\"1\" occurrence=\"2026-08-14T14:00:00Z\">\nMERGE REQUIRED\n</task-lifecycle>";
+        assert!(
+            !lifecycle_relay_is_stale_at_inbox_pop(prompt, None),
+            "a read failure is uncertainty, not evidence that a live relay is moot"
+        );
     }
 
     #[test]

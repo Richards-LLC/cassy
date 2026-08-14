@@ -7472,6 +7472,89 @@ async fn cas99d2_inbox_poll_withholds_a_consumed_assignment_gh127() {
     );
 }
 
+/// cas-8aee (GH #336): a task can reach a terminal state while an assignment
+/// or spawn-intro prompt is queued. `inbox_poll` must name each withheld row
+/// and say it is already done, but must never repeat its task-start imperative.
+#[tokio::test]
+async fn cas8aee_inbox_poll_names_terminal_assignment_and_spawn_intro_gh336() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-koala-20"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("koala-agent-id", None);
+    env.register_worker_with_id("koala-agent-id", "watchful-koala-20", None);
+
+    let (closed_task_id, cancelled_task_id) = {
+        let store = env.task_store();
+        let closed_task_id = store.generate_id().expect("generate closed id");
+        let cancelled_task_id = store.generate_id().expect("generate cancelled id");
+        let mut closed = Task::new(closed_task_id.clone(), "already closed".to_string());
+        closed.status = TaskStatus::Closed;
+        closed.assignee = Some("watchful-koala-20".to_string());
+        store.add(&closed).expect("add closed task");
+        let mut cancelled = Task::new(cancelled_task_id.clone(), "already cancelled".to_string());
+        cancelled.status = TaskStatus::Cancelled;
+        cancelled.assignee = Some("watchful-koala-20".to_string());
+        store.add(&cancelled).expect("add cancelled task");
+        (closed_task_id, cancelled_task_id)
+    };
+
+    let assignment_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            &format!(
+                "You have been assigned a new task:\nTask ID: {closed_task_id}\nStart working: \
+                 mcp__cas__task action=start id={closed_task_id}\nThen send an ACK to supervisor."
+            ),
+            None,
+            Some("terminal assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue terminal assignment");
+    let spawn_intro_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "director",
+            "watchful-koala-20",
+            &format!(
+                "You were spawned for task {cancelled_task_id} — \"already cancelled\" — and it \
+                 is assigned to you now.\nStart with `mcp__cas__task action=show \
+                 id={cancelled_task_id}`, then `mcp__cas__task action=start \
+                 id={cancelled_task_id}` before you change any code."
+            ),
+            None,
+            Some("terminal spawn intro"),
+            None,
+            false,
+        )
+        .expect("enqueue terminal spawn intro");
+
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("inbox_poll"),
+    );
+
+    for id in [assignment_id, spawn_intro_id] {
+        assert!(
+            text.contains(&id.to_string()),
+            "every withheld notification must remain named: {text}"
+        );
+    }
+    assert!(
+        text.contains("already done"),
+        "a terminal assignment must explain why it is not actionable: {text}"
+    );
+    assert!(
+        !text.contains("Start working") && !text.contains("action=start"),
+        "terminal rows must not re-render task-start guidance: {text}"
+    );
+}
+
 /// cas-99d2 AC4 (GH #127): a repeat delivery that IS handed over carries an
 /// explicit machine-checkable marker, so a recipient can discard duplicates
 /// without reasoning about timestamps. A row that was never transport-delivered

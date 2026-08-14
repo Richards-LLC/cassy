@@ -1,4 +1,5 @@
 use crate::mcp::tools::service::imports::*;
+use crate::prompt_revalidation::{assignment_solicited_task_id, assignment_targets_terminal_task};
 
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
@@ -58,62 +59,6 @@ pub(crate) fn inbox_redelivery_decision(
         return InboxRedelivery::WithholdConsumed;
     }
     InboxRedelivery::MarkRedelivery
-}
-
-/// cas-99d2 (GH #127): the task id an assignment message solicits a `start`
-/// for, if this message is an assignment at all.
-///
-/// Two shapes exist in the wild and both must parse:
-/// - the director's generated prompt — `"You have been assigned a new task:\n
-///   Task ID: cas-7587\n…"`;
-/// - a supervisor's hand-written dispatch — `"You are assigned task cas-7587
-///   (P2 bug, …). Run `… action=show id=cas-7587` then `… action=start
-///   id=cas-7587`."` (this is the literal shape of notification 7112).
-///
-/// Requires BOTH an assignment phrase and an explicit task id: a status
-/// question or review note that merely mentions a task id must not be treated
-/// as an assignment, because that would let unrelated task progress silence a
-/// message that was never about assigning work.
-pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
-    let lowered = prompt.to_lowercase();
-    const ASSIGNMENT_PHRASES: [&str; 4] = [
-        "you have been assigned",
-        "you are assigned",
-        "you're assigned",
-        "assigned task",
-    ];
-    if !ASSIGNMENT_PHRASES
-        .iter()
-        .any(|phrase| lowered.contains(phrase))
-    {
-        return None;
-    }
-    // `action=start id=<task>` is the most explicit statement of the solicited
-    // transition; fall back to the declared `Task ID:` field, then to the first
-    // task-shaped token anywhere in the assignment text.
-    for marker in ["action=start id=", "task id:", "assigned task "] {
-        if let Some(index) = lowered.find(marker)
-            && let Some(id) = first_task_id_token(&prompt[index + marker.len()..])
-        {
-            return Some(id);
-        }
-    }
-    first_task_id_token(prompt)
-}
-
-/// First `cas-<hex>` token in `text`, stripped of surrounding punctuation.
-fn first_task_id_token(text: &str) -> Option<String> {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-        .find(|token| {
-            let Some(suffix) = token
-                .strip_prefix("cas-")
-                .or_else(|| token.strip_prefix("CAS-"))
-            else {
-                return false;
-            };
-            suffix.len() >= 4 && suffix.chars().all(|c| c.is_ascii_alphanumeric())
-        })
-        .map(|token| format!("cas-{}", &token[4..]))
 }
 
 /// cas-7a01 (GH #155): render the wake evidence pair as a sentence.
@@ -1236,10 +1181,31 @@ impl CasService {
         let task_store = crate::store::open_task_store_local(&self.inner.cas_root).ok();
         let mut rendered = 0usize;
         let mut withheld: Vec<(i64, String)> = Vec::new();
+        let mut terminal_withheld: Vec<(i64, String, cas_types::TaskStatus)> = Vec::new();
         let mut redelivered = 0usize;
         let mut body = String::new();
         for message in &messages {
             let solicited_task = assignment_solicited_task_id(&message.prompt);
+            let terminal_assignment = match (&solicited_task, task_store.as_ref()) {
+                (Some(task_id), Some(store)) => store.get(task_id).ok().and_then(|task| {
+                    assignment_targets_terminal_task(&message.prompt, task.status)
+                        .map(|task_id| (task_id, task.status))
+                }),
+                _ => None,
+            };
+            if let Some((task_id, status)) = terminal_assignment {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "inbox_withheld_terminal_assignment",
+                    prompt_id = message.id,
+                    recipient = %recipient,
+                    task_id = %task_id,
+                    status = %status,
+                    "cas-8aee: withheld a queued assignment whose task is terminal"
+                );
+                terminal_withheld.push((message.id, task_id, status));
+                continue;
+            }
             // The transition an assignment solicits: the ADDRESSED recipient
             // started that task. `assignee` must match — another worker
             // starting the task says nothing about whether this recipient ever
@@ -1309,13 +1275,16 @@ impl CasService {
         if rendered == 0 {
             let ids = withheld
                 .iter()
-                .map(|(id, task)| format!("{id} (assignment for {task})"))
+                .map(|(id, task)| format!("{id} (assignment for {task}, already done)"))
+                .chain(terminal_withheld.iter().map(|(id, task, status)| {
+                    format!("{id} (assignment for {task}, already done: {status})")
+                }))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Ok(Self::success(format!(
-                "No unread messages for {recipient} — withheld {} already-delivered \
-                 message(s) whose requested action is already done: {ids}",
-                withheld.len()
+                "No unread messages for {recipient} — withheld {} assignment message(s) already \
+                 done: {ids}",
+                withheld.len() + terminal_withheld.len()
             )));
         }
 
@@ -1332,12 +1301,24 @@ impl CasService {
         }
         if !withheld.is_empty() {
             output.push_str(&format!(
-                ". Withheld {} already-delivered message(s) whose requested action is already \
-                 recorded: {}",
+                ". Withheld {} assignment message(s) already done: {}",
                 withheld.len(),
                 withheld
                     .iter()
-                    .map(|(id, task)| format!("{id} (assignment for {task})"))
+                    .map(|(id, task)| format!("{id} (assignment for {task}, already done)"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !terminal_withheld.is_empty() {
+            output.push_str(&format!(
+                ". Withheld {} terminal assignment message(s) already done: {}",
+                terminal_withheld.len(),
+                terminal_withheld
+                    .iter()
+                    .map(|(id, task, status)| {
+                        format!("{id} (assignment for {task}, already done: {status})")
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -1826,10 +1807,8 @@ mod inbox_poll_identity_tests {
 
 #[cfg(test)]
 mod cas99d2_redelivery_tests {
-    use super::{
-        INBOX_REDELIVERY_MARKER, InboxRedelivery, assignment_solicited_task_id,
-        inbox_redelivery_decision,
-    };
+    use super::{INBOX_REDELIVERY_MARKER, InboxRedelivery, inbox_redelivery_decision};
+    use crate::prompt_revalidation::assignment_solicited_task_id;
 
     /// The literal text of notification 7112 (supervisor hand-written dispatch).
     #[test]

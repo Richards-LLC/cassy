@@ -334,6 +334,17 @@ fn preassign_failure_reason(
         }
     };
     match store.get(task_id) {
+        Ok(task)
+            if matches!(
+                task.status,
+                cas_types::TaskStatus::Closed | cas_types::TaskStatus::Cancelled
+            ) =>
+        {
+            Some(format!(
+                "task {task_id} is terminal ({}) and must not be pre-assigned or briefed",
+                task.status
+            ))
+        }
         Ok(task) => match task.assignee.as_deref() {
             Some(assignee) if assignee == worker_name => None,
             Some(assignee) => Some(format!(
@@ -2898,6 +2909,39 @@ impl FactoryDaemon {
                         continue;
                     }
                 }
+            }
+
+            // cas-8aee (GH #336): assignment and spawn-intro prompts carry a
+            // `task start` imperative. They can wait in the durable queue
+            // while that task closes, so inspect its live status at this final
+            // shared transport boundary instead of injecting stale work.
+            // Unreadable/missing tasks fail open; only Closed/Cancelled is
+            // positive evidence that the instruction is unsafe.
+            if let Some(task_id) =
+                crate::prompt_revalidation::assignment_solicited_task_id(&queued.prompt)
+                && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
+                && let Ok(task) = store.get(&task_id)
+                && crate::prompt_revalidation::assignment_targets_terminal_task(
+                    &queued.prompt,
+                    task.status,
+                )
+                .is_some()
+            {
+                let detail = format!(
+                    "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
+                    task.status
+                );
+                let _ = queue.mark_superseded(queued.id, &detail);
+                self.forget_row_delivery_state(queued.id);
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "suppress_terminal_assignment",
+                    prompt_id = queued.id,
+                    task_id = %task_id,
+                    status = %task.status,
+                    "cas-8aee: suppressed a queued assignment/start instruction for a terminal task"
+                );
+                continue;
             }
 
             // Resolve the queue source to a valid team member name for inbox writes.
@@ -8167,6 +8211,32 @@ mod tests {
         assert!(
             ensure_worker_preassignment(&cas_dir, "cas-missing", "young-jay-62").is_err(),
             "a vanished task must surface as a failure, not silence"
+        );
+    }
+
+    /// cas-8aee (GH #336): registration can race a completed/cancelled task.
+    /// Do not treat a terminal same-assignee row as a successful preassignment
+    /// and queue the worker a stale spawn intro with `task action=start`.
+    #[test]
+    fn registration_preassignment_refuses_terminal_task_without_briefing_worker() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-closed".to_string(), "already done".to_string());
+        task.status = TaskStatus::Closed;
+        task.assignee = Some("cosmic-crow-41".to_string());
+        store.add(&task).unwrap();
+
+        let error = ensure_worker_preassignment(&cas_dir, "cas-closed", "cosmic-crow-41")
+            .expect_err("a terminal task must not confirm a spawn-time assignment");
+        assert!(error.contains("terminal (closed)"), "{error}");
+        assert!(
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .is_empty(),
+            "a terminal preassignment must never create a worker start brief"
         );
     }
 

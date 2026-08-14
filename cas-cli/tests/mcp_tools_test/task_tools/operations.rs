@@ -601,6 +601,76 @@ async fn test_task_notes() {
     );
 }
 
+/// GH #342: the unified `notes` action is a read when `notes` is absent and
+/// remains the existing append operation when `notes` is present.
+#[tokio::test]
+async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
+    let (temp, core) = setup_cas();
+    let description_marker = "DESCRIPTION-MUST-NOT-LEAK";
+    let acceptance_marker = "ACCEPTANCE-MUST-NOT-LEAK";
+    let initial_note = "Initial worker progress";
+
+    let created = core
+        .cas_task_create(Parameters(TaskCreateRequest {
+            description: Some(format!("{description_marker}{}", "x".repeat(32_000))),
+            notes: Some(initial_note.to_string()),
+            acceptance_criteria: Some(acceptance_marker.to_string()),
+            ..basic_create("Long task whose notes are read frequently", None)
+        }))
+        .await
+        .expect("create long task");
+    let id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    let service = CasService::new(core, None);
+
+    // `note_type` alone is metadata, not append intent. Without `notes`, this
+    // must stay read-only and return no heavyweight task fields.
+    let read_request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "notes",
+        "id": id,
+        "note_type": "blocker"
+    }))
+    .unwrap();
+    let first_read = extract_text(service.task(Parameters(read_request)).await.unwrap());
+    assert!(first_read.contains(initial_note), "{first_read}");
+    assert!(!first_read.contains(description_marker), "{first_read}");
+    assert!(!first_read.contains(acceptance_marker), "{first_read}");
+    assert!(first_read.len() < 1_024, "notes read was {} bytes", first_read.len());
+
+    let append_request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "notes",
+        "id": id,
+        "notes": "Supervisor-visible decision",
+        "note_type": "decision"
+    }))
+    .unwrap();
+    let appended = extract_text(service.task(Parameters(append_request)).await.unwrap());
+    assert!(appended.contains("Added decision note"), "{appended}");
+
+    let second_read: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "notes",
+        "id": id
+    }))
+    .unwrap();
+    let second_read = extract_text(service.task(Parameters(second_read)).await.unwrap());
+    assert!(second_read.contains(initial_note), "{second_read}");
+    assert!(second_read.contains("✅ DECISION Supervisor-visible decision"), "{second_read}");
+    assert!(!second_read.contains(description_marker), "{second_read}");
+
+    let persisted = open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
+    assert_eq!(persisted.notes.matches(initial_note).count(), 1);
+    assert_eq!(persisted.notes.matches("Supervisor-visible decision").count(), 1);
+    assert!(
+        !persisted.notes.contains("🚫 BLOCKER"),
+        "read with note_type must not append: {}",
+        persisted.notes
+    );
+}
+
 #[tokio::test]
 async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
     let (temp, service) = setup_cas();

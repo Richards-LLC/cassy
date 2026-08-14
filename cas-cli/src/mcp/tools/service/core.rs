@@ -546,23 +546,26 @@ impl CasService {
     }
 
     pub(super) async fn task_notes(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::TaskNotesRequest;
-        let inner_req = TaskNotesRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for notes — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=notes id=cas-abc1"))?,
-            note: req
-                .notes
-                .ok_or_else(|| {
-                    Self::error(
-                        ErrorCode::INVALID_PARAMS,
-                        "notes required — parameter name is `notes` (plural), not `note`. \
-                         Example: mcp__cas__task action=notes id=cas-abc1 notes=\"progress update\" note_type=\"progress\"",
-                    )
-                })?,
-            note_type: req.note_type.unwrap_or_else(|| "progress".to_string()),
-        };
-        self.inner.cas_task_notes(Parameters(inner_req)).await
+        use crate::mcp::tools::{IdRequest, TaskNotesRequest};
+        let id = req
+            .id
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for notes — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=notes id=cas-abc1"))?;
+
+        match req.notes {
+            Some(note) => {
+                let inner_req = TaskNotesRequest {
+                    id,
+                    note,
+                    note_type: req.note_type.unwrap_or_else(|| "progress".to_string()),
+                };
+                self.inner.cas_task_notes(Parameters(inner_req)).await
+            }
+            None => {
+                self.inner
+                    .cas_task_notes_read(Parameters(IdRequest { id }))
+                    .await
+            }
+        }
     }
 
     pub(super) async fn task_dep_add(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {

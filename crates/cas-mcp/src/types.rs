@@ -215,8 +215,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub labels: Option<String>,
 
-    /// Notes (for create, update, notes)
-    #[schemars(description = "Notes content or notes to append")]
+    /// Notes (for create, update, notes). For `action=notes`, omission reads
+    /// only the task's notes; presence appends the supplied value.
+    #[schemars(
+        description = "Notes content. For action=notes: omit to read only the task's notes; supply to append"
+    )]
     #[serde(default)]
     pub notes: Option<String>,
 

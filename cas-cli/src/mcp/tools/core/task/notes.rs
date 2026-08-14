@@ -1,6 +1,32 @@
 use crate::mcp::tools::core::imports::*;
 
 impl CasCore {
+    pub async fn cas_task_notes_read(
+        &self,
+        Parameters(req): Parameters<IdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let task_store = self.open_task_store()?;
+        let task = task_store.get(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Task not found: {e}")),
+            data: None,
+        })?;
+
+        if task.notes.is_empty() {
+            return Ok(Self::success(format!(
+                "No notes recorded for task {}",
+                task.id
+            )));
+        }
+
+        Ok(Self::success(format!(
+            "Notes for task {}\n{}\n\n{}",
+            task.id,
+            "=".repeat(task.id.len() + 15),
+            task.notes
+        )))
+    }
+
     pub async fn cas_task_notes(
         &self,
         Parameters(req): Parameters<TaskNotesRequest>,

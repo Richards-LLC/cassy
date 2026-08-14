@@ -258,7 +258,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes (add progress), dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. For notes: pass only id to read that task's notes without the full task record; supply notes= to append, with optional note_type. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
     )]
     pub async fn task(
         &self,
@@ -278,7 +278,6 @@ impl CasService {
                     | "reopen"
                     | "request_changes"
                     | "delete"
-                    | "notes"
                     | "proposal_accept"
                     | "proposal_reject"
                     | "proposal_reconcile"
@@ -288,7 +287,7 @@ impl CasService {
                     | "release"
                     | "reset"
                     | "transfer"
-            );
+            ) || (req.action == "notes" && req.notes.is_some());
 
             let result = match req.action.as_str() {
                 "create" => this.task_create(req).await,

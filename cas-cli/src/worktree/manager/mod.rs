@@ -656,12 +656,13 @@ impl WorktreeManager {
     // Worker and epic operations are split into dedicated modules.
 }
 
-/// Symlink harness configuration from the main project into a worktree.
+/// Symlink gitignored project support files from the main project into a worktree.
 ///
 /// These files are typically gitignored (`.mcp.json` contains API keys, `.claude/`
 /// and `.codex/` contain local settings), so `git worktree add` doesn't check
-/// them out. Without them, workers have no MCP server config and lose access to
-/// CAS tools and Codex's native hook policy.
+/// them out. The pinned `.context/zig/` toolchain is likewise gitignored. Without
+/// these links, workers lose CAS configuration, Codex's native hook policy, or
+/// the compiler required by the vendored Ghostty build.
 ///
 /// Safe to call on worktrees where the files are already present (tracked in git):
 /// existing paths are silently skipped.
@@ -693,7 +694,75 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
         if codex_src.is_dir() && !codex_dst.exists() {
             let _ = symlink(&codex_src, &codex_dst);
         }
+
+        // .context/zig/ — the pinned Zig toolchain used by ghostty_vt_sys.
+        // Link only the toolchain rather than all of .context/, whose other
+        // contents are not necessarily safe or useful to share with workers.
+        let zig_src = repo_root.join(".context").join("zig");
+        let zig_dst = worktree_path.join(".context").join("zig");
+        if zig_src.is_dir() && !zig_dst.exists() {
+            if let Some(context_dst) = zig_dst.parent() {
+                let _ = std::fs::create_dir_all(context_dst);
+            }
+            let _ = symlink(&zig_src, &zig_dst);
+        }
     }
+}
+
+/// Return the dependency setup instruction an isolated Node worktree needs
+/// before its first JS/TS command.
+///
+/// `node_modules` deliberately is not linked from the primary checkout: unlike
+/// the pinned `.context/zig` compiler, dependency trees vary with the branch's
+/// lockfile and may contain native artifacts tied to the install path. Running
+/// an install during worktree creation would also put network and package-cache
+/// contention on the concurrent spawn path. Instead, the worker receives this
+/// branch-local command in its task brief before it starts work.
+pub fn node_modules_setup_instruction(worktree_path: &Path) -> Option<String> {
+    if !worktree_path.join("package.json").is_file() || worktree_path.join("node_modules").exists()
+    {
+        return None;
+    }
+
+    let command = if worktree_path.join("package-lock.json").is_file()
+        || worktree_path.join("npm-shrinkwrap.json").is_file()
+    {
+        "npm ci"
+    } else if worktree_path.join("pnpm-lock.yaml").is_file() {
+        "pnpm install --frozen-lockfile"
+    } else if worktree_path.join("yarn.lock").is_file() {
+        if worktree_path.join(".yarnrc.yml").is_file() {
+            "yarn install --immutable"
+        } else {
+            "yarn install --frozen-lockfile"
+        }
+    } else if worktree_path.join("bun.lock").is_file() || worktree_path.join("bun.lockb").is_file()
+    {
+        "bun install --frozen-lockfile"
+    } else {
+        let manager = std::fs::read_to_string(worktree_path.join("package.json"))
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+            .and_then(|manifest| {
+                manifest
+                    .get("packageManager")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| value.split('@').next().unwrap_or_default().to_string())
+            });
+        match manager.as_deref() {
+            Some("pnpm") => "pnpm install",
+            Some("yarn") => "yarn install",
+            Some("bun") => "bun install",
+            _ => "npm install",
+        }
+    };
+
+    Some(format!(
+        "Isolated worktree dependency prerequisite: this worktree has package.json but no \
+         node_modules. Before running any JS/TS test or build command, run `{command}` in this \
+         worktree. CAS intentionally does not share node_modules across worktrees because each \
+         branch may require lockfile- and path-specific dependencies."
+    ))
 }
 
 /// Convert a title to a branch-safe slug

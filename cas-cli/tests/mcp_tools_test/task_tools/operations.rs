@@ -4084,6 +4084,107 @@ async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
 // cas-dbbb: factory-mode session UUID → display-name normalization in task.update
 // =============================================================================
 
+#[tokio::test]
+async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[factory]\nwarn_stale_assignment = true\nblock_stale_assignment = true\nstale_threshold_commits = 1\n",
+    )
+    .unwrap();
+
+    let upstream = temp.path().join("assignment-upstream");
+    let worker_checkout = temp.path().join("assignment-worker");
+    std::fs::create_dir_all(&upstream).unwrap();
+    let git = |repo: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&upstream, &["init", "-q", "-b", "main"]);
+    git(&upstream, &["config", "user.email", "test@test.com"]);
+    git(&upstream, &["config", "user.name", "Test"]);
+    std::fs::write(upstream.join("seed.txt"), "seed\n").unwrap();
+    git(&upstream, &["add", "seed.txt"]);
+    git(&upstream, &["commit", "-q", "-m", "seed"]);
+    let clone = std::process::Command::new("git")
+        .args([
+            "clone",
+            "-q",
+            upstream.to_str().unwrap(),
+            worker_checkout.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(clone.status.success());
+    std::fs::write(upstream.join("later.txt"), "later\n").unwrap();
+    git(&upstream, &["add", "later.txt"]);
+    git(&upstream, &["commit", "-q", "-m", "later"]);
+
+    let agent_store = open_agent_store(&cas_dir).unwrap();
+    let mut worker = cas::types::Agent::new(
+        "stale-worker-session".to_string(),
+        "stale-worker".to_string(),
+    );
+    worker.metadata.insert(
+        "clone_path".to_string(),
+        worker_checkout.to_string_lossy().into_owned(),
+    );
+    agent_store.register(&worker).unwrap();
+
+    let created = service
+        .cas_task_create(Parameters(make_task_create_req(
+            "multi-field assignee rejection is explicit",
+        )))
+        .await
+        .unwrap();
+    let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
+    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    let error = service
+        .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
+            depth: None,
+            id: task_id.clone(),
+            title: None,
+            notes: None,
+            priority: None,
+            labels: None,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            demo_statement: None,
+            execution_note: Some("no-code".to_string()),
+            external_ref: None,
+            assignee: Some("stale-worker".to_string()),
+            status: None,
+            epic: None,
+            epic_verification_owner: None,
+        }))
+        .await
+        .expect_err("stale assignment must reject the batch");
+    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+
+    let message = error.message.to_string();
+    assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
+    assert!(
+        message.contains("no requested task fields were applied"),
+        "{message}"
+    );
+    assert!(message.contains("execution_note, assignee"), "{message}");
+    let stored = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
+    assert!(stored.execution_note.is_none());
+    assert!(stored.assignee.is_none());
+}
+
 /// When CAS_FACTORY_MODE is set and a supervisor assigns a task using a
 /// worker's session UUID instead of their display name, `task.update` must
 /// automatically normalize the assignee to the display name so `task mine`

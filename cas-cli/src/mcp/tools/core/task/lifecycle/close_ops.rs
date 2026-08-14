@@ -3236,7 +3236,9 @@ impl CasCore {
         // every close path, independent of review owner/depth/bypass. This
         // keeps normal close aligned with direct update-to-closed: neither
         // may select a process-cwd or merely most-recent worker checkout.
-        let declared_hook_evidence = if !close_disposition.requires_delivery_gates() {
+        let declared_hook_evidence = if !close_disposition.requires_delivery_gates()
+            || task.execution_note.as_deref() == Some("no-code")
+        {
             None
         } else if let Some(context) = declared_repo_context.as_ref() {
             match run_declared_pre_close_hook(

@@ -14,7 +14,7 @@ use crate::mcp::tools::core::task::lifecycle::close_ops::{
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
 use crate::ui::factory::director::events::DirectorEvent;
 use cas_mux::SupervisorCli;
-use cas_types::TaskStatus;
+use cas_types::{TaskStatus, TaskType};
 
 /// Task ids that are Open but have at least one unmet `Blocks` dependency (a
 /// blocker task whose status isn't Closed). Mirrors the exact semantics of
@@ -195,7 +195,10 @@ pub fn route_epic_completion(
         .chain(supervisor_id)
         .collect();
 
-    if let Some(owner) = epic_verification_owner.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(owner) = epic_verification_owner
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let is_owner = self_ids.iter().any(|id| *id == owner);
         if is_owner {
             return EpicCompletionRoute::Deliver {
@@ -353,12 +356,8 @@ pub fn revalidate_event_for_delivery_with_context(
                 return None;
             }
             let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-            let ctx = epic_completion_context(
-                unfiltered_data,
-                epic_id,
-                supervisor_name,
-                focused_epic_id,
-            );
+            let ctx =
+                epic_completion_context(unfiltered_data, epic_id, supervisor_name, focused_epic_id);
             match route_epic_completion(
                 supervisor_name,
                 ctx.supervisor_id.as_deref(),
@@ -490,9 +489,7 @@ pub fn revalidate_event_for_delivery_with_context(
                 // also contains PendingSupervisorReview and AwaitingMerge.
                 // Neither state is worker-actionable, so a stale stall event
                 // must not survive a detect→park race and re-nudge the worker.
-                .filter(|task| {
-                    matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
-                })
+                .filter(|task| matches!(task.status, TaskStatus::Open | TaskStatus::InProgress))
                 .any(|task| {
                     task.id == *task_id && task_assigned_to_worker(unfiltered_data, task, worker)
                 });
@@ -664,9 +661,9 @@ pub(crate) fn prompt_is_still_deliverable(
     epic_is_current
         && merge_is_still_required
         && prompt
-        .drop_if_worker_assigned
-        .as_deref()
-        .is_none_or(|worker| !worker_now_has_real_assignment(data, worker))
+            .drop_if_worker_assigned
+            .as_deref()
+            .is_none_or(|worker| !worker_now_has_real_assignment(data, worker))
 }
 
 /// Wrap a message with response instructions
@@ -834,12 +831,7 @@ fn classify_merge_alert_observations(
                 .unwrap_or_else(|| "<unknown>".to_string());
             Some(format!(
                 "{} at {} reports {} unmerged commit(s); {} at {} reports {} unmerged commit(s)",
-                local.epic_ref,
-                local_sha,
-                local_count,
-                origin.epic_ref,
-                origin_sha,
-                origin_count,
+                local.epic_ref, local_sha, local_count, origin.epic_ref, origin_sha, origin_count,
             ))
         }
         _ => None,
@@ -907,7 +899,7 @@ pub fn check_merge_alert_freshness(
         return MergeAlertFreshness::NotApplicable;
     }
     let factory_branch = format!("factory/{worker}");
-    let (_, epic_branch) = resolve_merge_target_for_task(data, &task.task_id);
+    let (_, epic_branch, _) = resolve_merge_target_for_task(data, &task.task_id);
     let Some(epic_branch) = epic_branch else {
         // No resolvable epic link in this snapshot — can't verify either
         // way, so don't silently drop a possibly-valid alert over a
@@ -969,35 +961,44 @@ pub fn check_merge_alert_freshness_for_task(
         return MergeAlertFreshness::NotApplicable;
     };
     let factory_branch = format!("factory/{worker}");
-    let (_, epic_branch) = resolve_merge_target_for_task(data, task_id);
+    let (_, epic_branch, _) = resolve_merge_target_for_task(data, task_id);
     let Some(epic_branch) = epic_branch else {
         return MergeAlertFreshness::NotApplicable;
     };
     fresh_merge_alert_git_evidence(repo_root, task_id, &factory_branch, &epic_branch)
 }
 
-/// Resolve the focused epic id + branch for a parked task from the current
-/// director snapshot (best-effort; falls back to placeholders when the epic
-/// link is not in this refresh).
+/// Resolve the delivery target for a parked task from the current director
+/// snapshot. A task WorkTarget, projected into its summary branch, wins over
+/// the parent epic; the parent remains only as the legacy fallback.
 fn resolve_merge_target_for_task(
     data: &DirectorData,
     task_id: &str,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, bool) {
     // AwaitingMerge tasks live in `in_progress_tasks` (DirectorData
     // waiting/active bucket). Ready/open rows are chained as a fallback.
-    let epic_id = data
+    let task = data
         .in_progress_tasks
         .iter()
         .chain(data.ready_tasks.iter())
-        .find(|t| t.id == task_id)
-        .and_then(|t| t.epic.clone());
+        .find(|t| t.id == task_id);
+    let declared_target = task
+        .filter(|task| task.task_type != TaskType::Epic)
+        .and_then(|task| task.branch.as_deref())
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string);
+    let epic_id = task.and_then(|task| task.epic.clone());
+    if let Some(target_branch) = declared_target {
+        return (epic_id, Some(target_branch), true);
+    }
     let epic_branch = epic_id.as_ref().and_then(|eid| {
         data.epic_tasks
             .iter()
             .find(|e| e.id == *eid)
             .and_then(|e| e.branch.clone())
     });
-    (epic_id, epic_branch)
+    (epic_id, epic_branch, false)
 }
 
 /// Actionable merge-queue prompt for MERGE REQUIRED / AwaitingMerge idle
@@ -1028,18 +1029,22 @@ fn merge_required_idle_prompt_text(
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = format!("factory/{worker}");
-    let (epic_id, epic_branch) = resolve_merge_target_for_task(data, &task.task_id);
+    let (epic_id, epic_branch, declared_target) =
+        resolve_merge_target_for_task(data, &task.task_id);
     let target = epic_branch
         .as_deref()
-        .unwrap_or("the focused epic branch");
-    let epic_status = match epic_id.as_deref() {
-        Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
-        None => format!(
-            "`{supervisor_prefix}coordination action=epic_status id=<focused-epic>`"
-        ),
+        .unwrap_or("the task's resolved merge target");
+    let epic_status = if declared_target {
+        format!("`{supervisor_prefix}task action=show id={}`", task.task_id)
+    } else {
+        match epic_id.as_deref() {
+            Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
+            None => {
+                format!("`{supervisor_prefix}coordination action=epic_status id=<focused-epic>")
+            }
+        }
     };
-    let list_awaiting =
-        format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
+    let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
     let show = format!("`{supervisor_prefix}task action=show id={}`", task.task_id);
     // Worker re-close uses the *worker's* harness prefix so the supervisor
     // relays a callable alias (cas-c145 review P1).
@@ -1191,7 +1196,12 @@ pub fn generate_prompt_at(
             task_title,
             worker,
         } => {
-            if !config.on_task_assigned {
+            // A supervisor may own a gate task, but is never a worker to be
+            // handed the worker assignment template. Keep this delivery-time
+            // defence even though the detector also excludes supervisors: a
+            // queued event can outlive detector state or be generated by a
+            // direct caller.
+            if !config.on_task_assigned || worker == supervisor_name {
                 return None;
             }
 
@@ -1227,7 +1237,10 @@ pub fn generate_prompt_at(
             task_title,
             worker,
         } => {
-            if !config.on_task_completed {
+            // See TaskAssigned above. A supervisor closing their own gate is
+            // not a worker completion and must not receive advice to assign
+            // another task to themselves or close a still-active epic.
+            if !config.on_task_completed || worker == supervisor_name {
                 return None;
             }
 
@@ -1489,9 +1502,7 @@ pub fn generate_prompt_at(
                 .find(|agent| agent.name == *worker)
                 .is_some_and(|agent| agent.latest_activity.is_some())
             {
-                format!(
-                    "Worker {worker} finished its task and is now free with no assigned tasks."
-                )
+                format!("Worker {worker} finished its task and is now free with no assigned tasks.")
             } else {
                 format!(
                     "Worker {worker} has not started a task yet and is idle with no assigned tasks."
@@ -1730,6 +1741,15 @@ pub fn generate_prompt_at(
                 return None;
             }
 
+            // Direct callers (and a queued event that crossed a state change)
+            // bypass the normal revalidation wrapper. Refuse to render an
+            // all-subtasks-closed template unless the snapshot still proves
+            // that claim; in particular an AwaitingMerge child is neither
+            // terminal nor merged and makes closing the epic false advice.
+            if !epic_completion_is_current(unfiltered_data, epic_id) {
+                return None;
+            }
+
             // cas-9fff: stamp ownership in the payload. Hard suppress only when
             // epic_verification_owner is an explicit other agent — full
             // session-affinity / focus routing lives in
@@ -1868,8 +1888,8 @@ mod tests {
                 epic: None,
                 branch: None,
                 updated_at: None,
-            epic_verification_owner: None,
-        })
+                epic_verification_owner: None,
+            })
             .collect();
 
         DirectorData {
@@ -1924,11 +1944,7 @@ mod tests {
         }
     }
 
-    fn task_with_status(
-        id: &str,
-        assignee: Option<&str>,
-        status: TaskStatus,
-    ) -> TaskSummary {
+    fn task_with_status(id: &str, assignee: Option<&str>, status: TaskStatus) -> TaskSummary {
         TaskSummary {
             status,
             ..open_task(id, assignee)
@@ -2154,8 +2170,7 @@ mod tests {
         let mut data = make_data(0);
         data.ready_tasks = vec![open_task("cas-next", Some("swift-fox"))];
 
-        let rechecked =
-            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None);
+        let rechecked = revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None);
 
         assert!(
             rechecked.is_none(),
@@ -2344,12 +2359,7 @@ mod tests {
         data.ready_tasks[0].assignee = Some("swift-fox".to_string());
         assert!(
             matches!(
-                revalidate_event_for_delivery_with_focus(
-                    &open_event,
-                    &data,
-                    "supervisor",
-                    None,
-                ),
+                revalidate_event_for_delivery_with_focus(&open_event, &data, "supervisor", None,),
                 Some(DirectorEvent::TaskAssigned { .. })
             ),
             "a genuinely Open assignment must remain dispatchable"
@@ -2448,9 +2458,8 @@ mod tests {
         let mut data = make_data(0);
         data.ready_tasks = vec![open_task("cas-9789", Some("swift-fox"))];
 
-        let rechecked =
-            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None)
-                .expect("still-assigned task must survive revalidation");
+        let rechecked = revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None)
+            .expect("still-assigned task must survive revalidation");
 
         match rechecked {
             DirectorEvent::TaskAssigned {
@@ -2526,6 +2535,99 @@ mod tests {
         // Response instructions should be appended
         assert!(prompt.text.contains("To respond to this message, use:"));
         assert!(prompt.text.contains("target=supervisor"));
+    }
+
+    /// A supervisor may close a gate task they own, but that transition must
+    /// never be rendered as a worker assignment or worker completion for the
+    /// same supervisor (GH #302).
+    #[test]
+    fn cas_9d40_supervisor_owned_gate_never_gets_worker_lifecycle_templates() {
+        let data = make_data(0);
+        let config = default_config();
+        let assignment = DirectorEvent::TaskAssigned {
+            task_id: "cas-gate".to_string(),
+            task_title: "Supervisor gate".to_string(),
+            worker: "supervisor".to_string(),
+        };
+        let completion = DirectorEvent::TaskCompleted {
+            task_id: "cas-gate".to_string(),
+            task_title: "Supervisor gate".to_string(),
+            worker: "supervisor".to_string(),
+        };
+
+        for event in [&assignment, &completion] {
+            assert!(
+                generate_prompt(
+                    event,
+                    &data,
+                    &data,
+                    "supervisor",
+                    &config,
+                    SupervisorCli::Grok,
+                    SupervisorCli::Codex,
+                    &HashSet::new(),
+                    None,
+                )
+                .is_none(),
+                "a supervisor-owned gate must not receive worker lifecycle guidance: {event:?}"
+            );
+        }
+    }
+
+    /// Every injected template must take its tool namespace from the receiving
+    /// harness, rather than retaining a literal from a previous CLI flavor.
+    #[test]
+    fn cas_9d40_injected_templates_only_render_the_live_tool_prefix() {
+        let data = make_data(0);
+        let events = [
+            DirectorEvent::TaskAssigned {
+                task_id: "cas-prefix".to_string(),
+                task_title: "Prefix guard".to_string(),
+                worker: "swift-fox".to_string(),
+            },
+            DirectorEvent::TaskCompleted {
+                task_id: "cas-prefix".to_string(),
+                task_title: "Prefix guard".to_string(),
+                worker: "swift-fox".to_string(),
+            },
+        ];
+        for cli in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+        ] {
+            let prefix = cli.backend().capabilities().tool_prefix;
+            for event in &events {
+                let prompt = generate_prompt(
+                    event,
+                    &data,
+                    &data,
+                    "supervisor",
+                    &default_config(),
+                    cli,
+                    cli,
+                    &HashSet::new(),
+                    None,
+                )
+                .expect("worker lifecycle template");
+                assert!(
+                    prompt.text.contains(&format!("{prefix}task"))
+                        || prompt.text.contains(&format!("{prefix}coordination")),
+                    "{cli:?}: {}",
+                    prompt.text
+                );
+                for stale in ["mcp__cas__", "mcp__cs__", "cas__"] {
+                    if stale != prefix {
+                        assert!(
+                            !prompt.text.contains(&format!(" {stale}task"))
+                                && !prompt.text.contains(&format!(" {stale}coordination")),
+                            "{cli:?} template leaked stale prefix {stale}: {}",
+                            prompt.text
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// cas-6aaf: TaskCompleted with task already closed (the normal path).
@@ -2800,10 +2902,7 @@ mod tests {
         .expect("newly registered taskless worker should enqueue a ready prompt");
         assert!(prompt.text.contains("awaiting its first task"));
         assert_eq!(prompt.retract_worker.as_deref(), Some("swift-fox"));
-        assert_eq!(
-            prompt.drop_if_worker_assigned.as_deref(),
-            Some("swift-fox")
-        );
+        assert_eq!(prompt.drop_if_worker_assigned.as_deref(), Some("swift-fox"));
 
         let mut assigned_data = make_data(0);
         assigned_data.in_progress_tasks = vec![task_with_status(
@@ -2859,7 +2958,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(finished_prompt.text.contains("finished its task and is now free"));
+        assert!(
+            finished_prompt
+                .text
+                .contains("finished its task and is now free")
+        );
     }
 
     #[test]
@@ -2955,7 +3058,9 @@ mod tests {
             prompt.text
         );
         assert!(
-            !prompt.text.contains("MERGE REQUIRED — supervisor action needed"),
+            !prompt
+                .text
+                .contains("MERGE REQUIRED — supervisor action needed"),
             "InProgress + stale MERGE REQUIRED echo must not use the actionable \
              alert header (cas-6883): {}",
             prompt.text
@@ -3038,20 +3143,27 @@ mod tests {
             prompt.text
         );
         assert!(
-            prompt.text.contains("cas__coordination action=epic_status id=cas-4c77")
+            prompt
+                .text
+                .contains("cas__coordination action=epic_status id=cas-4c77")
                 || prompt.text.contains("epic_status"),
             "must direct supervisor to epic_status with cas__ prefix for Grok: {}",
             prompt.text
         );
         assert!(
-            prompt.text.contains("cas__task action=list status=awaiting_merge")
+            prompt
+                .text
+                .contains("cas__task action=list status=awaiting_merge")
                 || prompt.text.contains("status=awaiting_merge"),
             "must surface awaiting_merge list: {}",
             prompt.text
         );
         assert!(
             prompt.text.contains("git merge --no-ff factory/recipe-be")
-                || prompt.text.to_lowercase().contains("merge factory/recipe-be"),
+                || prompt
+                    .text
+                    .to_lowercase()
+                    .contains("merge factory/recipe-be"),
             "must include merge next action: {}",
             prompt.text
         );
@@ -5405,6 +5517,39 @@ mod tests {
         );
     }
 
+    /// An awaiting-merge child remains non-terminal until its factory commits
+    /// land. Direct prompt generation must not bypass the delivery wrapper and
+    /// claim the epic is ready to close (GH #307).
+    #[test]
+    fn cas_9d40_epic_completion_template_is_suppressed_for_awaiting_merge_child() {
+        let event = DirectorEvent::EpicAllSubtasksClosed {
+            epic_id: "cas-epic".to_string(),
+            epic_title: "Epic completion currency".to_string(),
+        };
+        let mut data = make_data(0);
+        data.epic_tasks = vec![cas06ca_epic_summary(TaskStatus::InProgress)];
+        let mut parked = open_task("cas-child", Some("subtle-cobra-80"));
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.epic = Some("cas-epic".to_string());
+        data.in_progress_tasks.push(parked);
+
+        assert!(
+            generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Grok,
+                SupervisorCli::Grok,
+                &HashSet::new(),
+                None,
+            )
+            .is_none(),
+            "an awaiting-merge child with unmerged work makes epic-close guidance false"
+        );
+    }
+
     #[test]
     fn cas06ca_last_mile_recheck_uses_the_same_epic_identity() {
         let event = DirectorEvent::EpicAllSubtasksClosed {
@@ -5498,9 +5643,7 @@ mod tests {
             child.title = "Subtask added after the occurrence".to_string();
             child.status = status;
             match status {
-                TaskStatus::Open | TaskStatus::Blocked => {
-                    with_new_child.ready_tasks.push(child)
-                }
+                TaskStatus::Open | TaskStatus::Blocked => with_new_child.ready_tasks.push(child),
                 _ => with_new_child.in_progress_tasks.push(child),
             }
             assert!(
@@ -5587,7 +5730,10 @@ mod tests {
         /// leaving the repo checked out on the epic branch.
         fn merge_worker_into_epic(dir: &std::path::Path, worker: &str) {
             git(dir, &["checkout", "-q", "epic/test-epic"]);
-            git(dir, &["merge", "-q", "--ff-only", &format!("factory/{worker}")]);
+            git(
+                dir,
+                &["merge", "-q", "--ff-only", &format!("factory/{worker}")],
+            );
         }
 
         fn awaiting_merge_data(worker: &str) -> DirectorData {
@@ -5632,6 +5778,47 @@ mod tests {
             }
         }
 
+        /// cas-26da / GH #322: the relay must use the task-owned delivery
+        /// target, not the session's unrelated focused epic. `TaskSummary`
+        /// projects WorkTarget into `branch`, the same target branch close_ops
+        /// resolves before its merge gate runs.
+        #[test]
+        fn merge_required_relay_prefers_declared_work_target_over_parent_epic() {
+            let mut data = awaiting_merge_data("recipe-be");
+            data.in_progress_tasks[0].branch = Some("main".to_string());
+            data.epic_tasks[0].branch = Some("epic/pinned-focus".to_string());
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+
+            let (parent_epic, target, declared_target) =
+                resolve_merge_target_for_task(&data, "cas-6883t");
+            assert_eq!(parent_epic.as_deref(), Some("cas-epic-t"));
+            assert_eq!(target.as_deref(), Some("main"));
+            assert!(declared_target);
+
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Claude,
+                SupervisorCli::Claude,
+                &HashSet::new(),
+                None,
+            )
+            .expect("AwaitingMerge task must render a relay");
+            assert!(
+                prompt.text.contains("Merge target: main"),
+                "relay must name the WorkTarget branch: {}",
+                prompt.text
+            );
+            assert!(
+                !prompt.text.contains("epic/pinned-focus"),
+                "an unrelated focused epic must never appear as the merge destination: {}",
+                prompt.text
+            );
+        }
+
         #[test]
         fn ac1_drops_when_branch_already_fully_merged() {
             let repo = init_repo("recipe-be");
@@ -5655,9 +5842,8 @@ mod tests {
             let remote = init_bare_remote();
             publish_branch(repo.path(), &remote, "epic/test-epic");
             publish_branch(repo.path(), &remote, "factory/recipe-be");
-            let local_epic_before = short_commit_id(
-                &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
-            );
+            let local_epic_before =
+                short_commit_id(&resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap());
 
             let integrator = clone_epic(&remote);
             git(
@@ -5669,9 +5855,7 @@ mod tests {
                 &["push", "-q", "origin", "epic/test-epic"],
             );
             assert_eq!(
-                short_commit_id(
-                    &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
-                ),
+                short_commit_id(&resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),),
                 local_epic_before,
                 "precondition: local epic ref remains stale"
             );
@@ -5851,7 +6035,9 @@ mod tests {
             let outcome = check_merge_alert_freshness(&event, &data, repo.path());
             let evidence = match outcome {
                 MergeAlertFreshness::Fresh(e) => e,
-                other => panic!("expected Fresh evidence for a genuinely unmerged branch: {other:?}"),
+                other => {
+                    panic!("expected Fresh evidence for a genuinely unmerged branch: {other:?}")
+                }
             };
             assert_eq!(evidence.task_id, "cas-6883t");
             assert_eq!(evidence.factory_branch, "factory/recipe-be");
@@ -5937,11 +6123,7 @@ mod tests {
             // but the authoritative remote epic still does not.
             merge_worker_into_epic(repo.path(), "recipe-be");
             assert!(matches!(
-                known_unmerged_factory_commits(
-                    repo.path(),
-                    "factory/recipe-be",
-                    "epic/test-epic",
-                ),
+                known_unmerged_factory_commits(repo.path(), "factory/recipe-be", "epic/test-epic",),
                 KnownUnmergedCount::KnownZero
             ));
             assert!(matches!(
@@ -6001,13 +6183,9 @@ mod tests {
 
         #[test]
         fn unknown_observation_matrix_is_conservative() {
-            let unknown_local =
-                observation("epic/test-epic", None, KnownUnmergedCount::Unknown);
-            let unknown_origin = observation(
-                "origin/epic/test-epic",
-                None,
-                KnownUnmergedCount::Unknown,
-            );
+            let unknown_local = observation("epic/test-epic", None, KnownUnmergedCount::Unknown);
+            let unknown_origin =
+                observation("origin/epic/test-epic", None, KnownUnmergedCount::Unknown);
             assert!(matches!(
                 classify_merge_alert_observations(
                     "cas-6883t",
@@ -6074,11 +6252,10 @@ mod tests {
 
         #[test]
         fn ac3_dedup_suppresses_identical_repeat_but_allows_changed_evidence() {
-            let mut detector =
-                crate::ui::factory::director::events::DirectorEventDetector::new(
-                    vec!["recipe-be".to_string()],
-                    "supervisor".to_string(),
-                );
+            let mut detector = crate::ui::factory::director::events::DirectorEventDetector::new(
+                vec!["recipe-be".to_string()],
+                "supervisor".to_string(),
+            );
 
             assert!(
                 detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 2, "abc1234"),
@@ -6114,8 +6291,7 @@ mod tests {
             merge_worker_into_epic(repo.path(), "recipe-be");
 
             let data = awaiting_merge_data("recipe-be");
-            let outcome =
-                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
                 "landed merge must be Stale (retract the queued row): {outcome:?}"
@@ -6129,9 +6305,8 @@ mod tests {
             let remote = init_bare_remote();
             publish_branch(repo.path(), &remote, "epic/test-epic");
             publish_branch(repo.path(), &remote, "factory/recipe-be");
-            let local_epic_before = short_commit_id(
-                &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
-            );
+            let local_epic_before =
+                short_commit_id(&resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap());
 
             let integrator = clone_epic(&remote);
             git(
@@ -6143,9 +6318,7 @@ mod tests {
                 &["push", "-q", "origin", "epic/test-epic"],
             );
             assert_eq!(
-                short_commit_id(
-                    &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
-                ),
+                short_commit_id(&resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),),
                 local_epic_before,
                 "precondition: queued-row sweep begins with stale local epic"
             );
@@ -6172,8 +6345,7 @@ mod tests {
             let mut data = awaiting_merge_data("recipe-be");
             data.in_progress_tasks.clear();
 
-            let outcome =
-                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
                 "task absent from the current snapshot must be Stale: {outcome:?}"
@@ -6190,8 +6362,7 @@ mod tests {
             let mut data = awaiting_merge_data("recipe-be");
             data.in_progress_tasks[0].status = TaskStatus::InProgress;
 
-            let outcome =
-                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
                 "task no longer AwaitingMerge must be Stale: {outcome:?}"
@@ -6206,8 +6377,7 @@ mod tests {
             commit_file(repo.path(), "b.rs");
 
             let data = awaiting_merge_data("recipe-be");
-            let outcome =
-                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             match outcome {
                 MergeAlertFreshness::Fresh(evidence) => {
                     assert_eq!(evidence.unmerged_count, 2);
@@ -6231,13 +6401,15 @@ mod tests {
             // the epic tip moves, but recipe-be's own commit is still
             // unmerged.
             git(repo.path(), &["checkout", "-q", "epic/test-epic"]);
-            git(repo.path(), &["checkout", "-q", "-b", "factory/other-worker"]);
+            git(
+                repo.path(),
+                &["checkout", "-q", "-b", "factory/other-worker"],
+            );
             commit_file(repo.path(), "unrelated.rs");
             merge_worker_into_epic(repo.path(), "other-worker");
 
             let data = awaiting_merge_data("recipe-be");
-            let outcome =
-                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             match outcome {
                 MergeAlertFreshness::Fresh(evidence) => {
                     assert_eq!(
@@ -6264,8 +6436,7 @@ mod tests {
             let mut data = awaiting_merge_data("recipe-be");
             data.epic_tasks.clear();
 
-            let outcome =
-                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::NotApplicable),
                 "unresolvable epic branch must not silently retract: {outcome:?}"

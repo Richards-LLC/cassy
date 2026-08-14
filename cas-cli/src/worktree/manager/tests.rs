@@ -161,11 +161,14 @@ fn test_create_worker_worktree() {
 
 #[cfg(unix)]
 #[test]
-fn worker_config_symlink_carries_codex_hooks() {
+fn worker_project_support_symlinks_carry_codex_hooks_and_zig_toolchain() {
     let (temp, repo_path) = create_test_repo();
     let source_codex = repo_path.join(".codex");
     std::fs::create_dir_all(&source_codex).unwrap();
     std::fs::write(source_codex.join("hooks.json"), "{\"hooks\": {}}\n").unwrap();
+    let source_zig = repo_path.join(".context").join("zig");
+    std::fs::create_dir_all(&source_zig).unwrap();
+    std::fs::write(source_zig.join("zig"), "pinned zig binary").unwrap();
     let worktree = temp.path().join("worker");
     std::fs::create_dir_all(&worktree).unwrap();
 
@@ -183,6 +186,19 @@ fn worker_config_symlink_carries_codex_hooks() {
     assert_eq!(
         std::fs::read_to_string(worker_codex.join("hooks.json")).unwrap(),
         "{\"hooks\": {}}\n"
+    );
+
+    let worker_zig = worktree.join(".context").join("zig");
+    assert!(
+        std::fs::symlink_metadata(&worker_zig)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "factory workers must inherit the primary checkout's pinned Zig toolchain"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker_zig.join("zig")).unwrap(),
+        "pinned zig binary"
     );
 }
 

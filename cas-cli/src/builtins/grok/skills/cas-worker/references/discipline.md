@@ -162,8 +162,9 @@ author (GH #173):
    errored; the compound command around it swallowed the status.
 2. `cargo test -p cas --lib <filter>` with a **relative** `$ZIG` — ghostty_vt_sys's build
    script panicked. Build scripts run with cwd set to the *crate* directory, so a relative
-   `.context/zig/zig` resolves against the wrong root. A worktree does not have a `.context`
-   at all; the toolchain lives in the main checkout.
+   `.context/zig/zig` resolves against the wrong root. Factory provisioning links the primary
+   checkout's pinned `.context/zig` into new worktrees, so leave `$ZIG` unset unless an
+   absolute override is necessary.
 3. `cargo test -p cas --lib some_module::tests::` where the module had been renamed to
    `some_module::additive_only_tests::`. Output, verbatim: `test result: ok. 0 passed;
    0 failed; 0 ignored; 0 measured; 3929 filtered out`. Exit 0.

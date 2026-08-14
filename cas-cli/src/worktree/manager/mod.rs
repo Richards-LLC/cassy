@@ -656,12 +656,13 @@ impl WorktreeManager {
     // Worker and epic operations are split into dedicated modules.
 }
 
-/// Symlink harness configuration from the main project into a worktree.
+/// Symlink gitignored project support files from the main project into a worktree.
 ///
 /// These files are typically gitignored (`.mcp.json` contains API keys, `.claude/`
 /// and `.codex/` contain local settings), so `git worktree add` doesn't check
-/// them out. Without them, workers have no MCP server config and lose access to
-/// CAS tools and Codex's native hook policy.
+/// them out. The pinned `.context/zig/` toolchain is likewise gitignored. Without
+/// these links, workers lose CAS configuration, Codex's native hook policy, or
+/// the compiler required by the vendored Ghostty build.
 ///
 /// Safe to call on worktrees where the files are already present (tracked in git):
 /// existing paths are silently skipped.
@@ -692,6 +693,18 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
         let codex_dst = worktree_path.join(".codex");
         if codex_src.is_dir() && !codex_dst.exists() {
             let _ = symlink(&codex_src, &codex_dst);
+        }
+
+        // .context/zig/ — the pinned Zig toolchain used by ghostty_vt_sys.
+        // Link only the toolchain rather than all of .context/, whose other
+        // contents are not necessarily safe or useful to share with workers.
+        let zig_src = repo_root.join(".context").join("zig");
+        let zig_dst = worktree_path.join(".context").join("zig");
+        if zig_src.is_dir() && !zig_dst.exists() {
+            if let Some(context_dst) = zig_dst.parent() {
+                let _ = std::fs::create_dir_all(context_dst);
+            }
+            let _ = symlink(&zig_src, &zig_dst);
         }
     }
 }

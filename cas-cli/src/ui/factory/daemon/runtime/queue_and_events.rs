@@ -286,12 +286,27 @@ fn deliver_worker_task_brief(
 ) -> anyhow::Result<i64> {
     let queue = open_prompt_queue_store(cas_dir)?;
     let summary = format!("Assigned task: {task_id}");
-    let message = format!(
+    let mut message = format!(
         "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
          you now.\n\
          Start with `mcp__cas__task action=show id={task_id}`, then \
          `mcp__cas__task action=start id={task_id}` before you change any code."
     );
+    if let Some(clone_path) = open_agent_store(cas_dir)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .and_then(|agents| {
+            agents
+                .into_iter()
+                .find(|agent| agent.name == worker_name)
+                .and_then(|agent| agent.metadata.get("clone_path").cloned())
+        })
+        && let Some(instruction) =
+            crate::worktree::node_modules_setup_instruction(std::path::Path::new(&clone_path))
+    {
+        message.push_str("\n\n");
+        message.push_str(&instruction);
+    }
     Ok(queue.enqueue_with_summary(
         "director",
         worker_name,
@@ -8256,6 +8271,58 @@ mod tests {
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
+        );
+    }
+
+    /// GH #286: an isolated Node worktree has no gitignored `node_modules`.
+    /// The worker must see the branch-local install command in its spawn-time
+    /// task brief, before it starts its task and attempts its first JS command.
+    #[test]
+    fn registration_preassignment_brief_names_node_modules_setup_command() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let worktree = temp.path().join("node-worker-worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join("package.json"), "{\"name\":\"fixture\"}\n").unwrap();
+        std::fs::write(
+            worktree.join("package-lock.json"),
+            "{\"lockfileVersion\":3}\n",
+        )
+        .unwrap();
+
+        let mut worker = cas_types::Agent::new("node-worker-id".into(), "node-worker".into());
+        worker.role = cas_types::AgentRole::Worker;
+        worker
+            .metadata
+            .insert("clone_path".into(), worktree.to_string_lossy().into_owned());
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&worker)
+            .unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "node-worker",
+            "cas-node",
+            "Node worktree fixture",
+        )
+        .unwrap();
+
+        let prompt = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .prompt;
+        assert!(
+            prompt.contains("Before running any JS/TS test or build command, run `npm ci`"),
+            "the task brief must name the lockfile-safe setup command before work begins: {prompt}"
+        );
+        assert!(
+            prompt.contains("does not share node_modules across worktrees"),
+            "the brief must explain why a shared dependency symlink is unsafe: {prompt}"
         );
     }
 

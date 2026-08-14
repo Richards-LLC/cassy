@@ -5499,6 +5499,52 @@ mod spawn_isolation_tests {
     // WorkerSpawnPrep::run() tests
     // -----------------------------------------------------------------
 
+    #[test]
+    fn new_worker_worktree_with_package_json_gets_branch_local_node_setup_guidance() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        std::fs::write(repo.join("package.json"), "{\"name\":\"fixture\"}\n").unwrap();
+        std::fs::write(repo.join("package-lock.json"), "{\"lockfileVersion\":3}\n").unwrap();
+        Command::new("git")
+            .args(["add", "package.json", "package-lock.json"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "node fixture"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let cas_dir = repo.join(".cas");
+        let worktree_path = cas_dir.join("worktrees").join("node-worker");
+        let prep = WorkerSpawnPrep {
+            worker_name: "node-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/node-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+
+        let result = prep.run().expect("create Node worker worktree");
+        assert!(result.cwd.join("package.json").is_file());
+        assert!(
+            !result.cwd.join("node_modules").exists(),
+            "spawn must not link dependencies whose lockfile/native artifacts may belong to another branch"
+        );
+        let instruction = crate::worktree::node_modules_setup_instruction(&result.cwd)
+            .expect("a Node worktree without dependencies must have setup guidance");
+        assert!(instruction.contains("`npm ci`"), "{instruction}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn new_worker_worktree_provisions_gitignored_zig_toolchain() {

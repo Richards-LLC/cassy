@@ -3,13 +3,16 @@
 //! The wire fields here deliberately mirror `docs/specs/hub-reverse-pairing.md` §4.
 
 use std::collections::BTreeSet;
-use std::io::IsTerminal;
+use std::fs::{self, OpenOptions};
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use crate::cli::Cli;
@@ -68,6 +71,23 @@ struct RelayClient {
     token: String,
 }
 
+trait PairingRelay {
+    fn claim(&self, code: &str, nonce: &str) -> Result<ClaimResponse>;
+
+    fn complete(
+        &self,
+        authorization_id: &str,
+        nonce: &str,
+        hub_url: &str,
+        machine_label: &str,
+        invitation_url: &str,
+        invitation_expires_at: DateTime<Utc>,
+        granted_scopes: &BTreeSet<Scope>,
+    ) -> Result<CompleteResponse>;
+
+    fn cancel(&self, authorization_id: &str, nonce: &str) -> Result<()>;
+}
+
 impl RelayClient {
     fn from_config(config: CloudConfig) -> Result<Self> {
         let token = config
@@ -80,6 +100,23 @@ impl RelayClient {
         })
     }
 
+    fn post_json<T: serde::de::DeserializeOwned, B: Serialize>(
+        &self,
+        suffix: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}{}", self.endpoint, RELAY_PREFIX, suffix);
+        let response = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(relay_error)?;
+        let response: T = response.into_json().context("invalid relay response")?;
+        Ok(response)
+    }
+}
+
+impl PairingRelay for RelayClient {
     fn claim(&self, code: &str, nonce: &str) -> Result<ClaimResponse> {
         self.post_json(
             "/authorizations",
@@ -133,21 +170,103 @@ impl RelayClient {
             Err(error) => Err(relay_error(error)),
         }
     }
+}
 
-    fn post_json<T: serde::de::DeserializeOwned, B: Serialize>(
-        &self,
-        suffix: &str,
-        body: &B,
-    ) -> Result<T> {
-        let url = format!("{}{}{}", self.endpoint, RELAY_PREFIX, suffix);
-        let response = ureq::post(&url)
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .set("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(relay_error)?;
-        let response: T = response.into_json().context("invalid relay response")?;
-        Ok(response)
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedAuthorizationAttempt {
+    user_code: String,
+    authorize_nonce: String,
+    created_at: DateTime<Utc>,
+}
+
+struct AuthorizationAttempt {
+    path: PathBuf,
+    nonce: String,
+}
+
+impl AuthorizationAttempt {
+    fn load_or_create(root: &Path, code: &str) -> Result<Self> {
+        let digest = hex::encode(Sha256::digest(code.as_bytes()));
+        let path = root.join(format!(".authorize-{digest}.json"));
+        if path.exists() {
+            ensure_private_attempt_file(&path)?;
+            let saved: SavedAuthorizationAttempt = serde_json::from_slice(&fs::read(&path)?)
+                .context("invalid saved hub authorization attempt")?;
+            anyhow::ensure!(
+                saved.user_code == code,
+                "saved hub authorization attempt does not match its pairing code"
+            );
+            let decoded = URL_SAFE_NO_PAD
+                .decode(saved.authorize_nonce.as_bytes())
+                .context("invalid nonce in saved hub authorization attempt")?;
+            anyhow::ensure!(
+                decoded.len() == 32,
+                "invalid nonce in saved hub authorization attempt"
+            );
+            if Utc::now().signed_duration_since(saved.created_at) >= chrono::Duration::minutes(10) {
+                fs::remove_file(&path).context("remove expired hub authorization attempt")?;
+                return Self::load_or_create(root, code);
+            }
+            return Ok(Self {
+                path,
+                nonce: saved.authorize_nonce,
+            });
+        }
+
+        let nonce = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        let saved = SavedAuthorizationAttempt {
+            user_code: code.to_owned(),
+            authorize_nonce: nonce.clone(),
+            created_at: Utc::now(),
+        };
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(&serde_json::to_vec(&saved)?)?;
+                file.sync_all()?;
+                Ok(Self { path, nonce })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Self::load_or_create(root, code)
+            }
+            Err(error) => Err(error).context("save hub authorization attempt"),
+        }
     }
+
+    fn finish(self) -> Result<()> {
+        match fs::remove_file(self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("remove completed hub authorization attempt"),
+        }
+    }
+}
+
+fn ensure_private_attempt_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "saved hub authorization attempt is not a regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(
+            metadata.mode() & 0o777 == 0o600,
+            "saved hub authorization attempt must have mode 0600"
+        );
+        anyhow::ensure!(
+            metadata.uid() == unsafe { libc::geteuid() },
+            "saved hub authorization attempt has the wrong owner"
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
@@ -158,22 +277,46 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
         CloudConfig::load().unwrap_or_default()
     };
     let relay = RelayClient::from_config(cloud)?;
+    let paths = HubRuntimePaths::default_for_user()?;
+    authorize_with_relay(args, cli, &relay, &paths)
+}
+
+fn authorize_with_relay(
+    args: &HubAuthorizeArgs,
+    cli: &Cli,
+    relay: &impl PairingRelay,
+    paths: &HubRuntimePaths,
+) -> Result<()> {
     let code = args.code.trim().to_ascii_uppercase();
     anyhow::ensure!(!code.is_empty(), "pairing code must not be empty");
-    let nonce = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    let claim = relay.claim(&code, &nonce)?;
+    let override_scopes = parse_override_scopes(args.scopes.as_deref())?;
+    let hub_url = resolve_hub_url(paths, args.hub_url.as_deref())?;
+    let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
+    let auth = AuthStore::open(paths.root(), machine.id)?;
+    let machine_label = hostname::get()
+        .ok()
+        .and_then(|hostname| hostname.into_string().ok())
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "CAS machine".to_owned());
+    let attempt = AuthorizationAttempt::load_or_create(paths.root(), &code)?;
+    let claim = relay.claim(&code, &attempt.nonce)?;
     anyhow::ensure!(
         claim.wire_version == WIRE_VERSION,
         "unsupported relay wire version"
     );
 
-    let granted = granted_scopes(&claim.requested_scopes, args.scopes.as_deref())?;
+    let granted = granted_scopes(&claim.requested_scopes, override_scopes.as_ref())?;
 
     let confirmed = confirm(args.yes, cli, &claim, &granted)?;
     if !confirmed {
         // The lease also self-releases after 120 seconds, but cancelling promptly
         // makes a declined code usable immediately by the intended machine.
-        let _ = relay.cancel(&claim.authorization_id, &nonce);
+        if relay
+            .cancel(&claim.authorization_id, &attempt.nonce)
+            .is_ok()
+        {
+            attempt.finish()?;
+        }
         if cli.json {
             println!("{}", serde_json::json!({"status":"declined"}));
         } else {
@@ -182,19 +325,10 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let hub_url = resolve_hub_url(args.hub_url.as_deref(), &claim.controller_origin)?;
-    let paths = HubRuntimePaths::default_for_user()?;
-    let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
-    let auth = AuthStore::open(paths.root(), machine.id)?;
     let invitation = auth.mint_pairing(&claim.controller_origin, granted.clone(), Utc::now())?;
-    let machine_label = hostname::get()
-        .ok()
-        .and_then(|hostname| hostname.into_string().ok())
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "CAS machine".to_owned());
     let complete = relay.complete(
         &claim.authorization_id,
-        &nonce,
+        &attempt.nonce,
         &hub_url,
         &machine_label,
         &invitation.url,
@@ -209,6 +343,7 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
         complete.pairing_request_id == claim.pairing_request_id,
         "relay completion response did not match the claimed request"
     );
+    attempt.finish()?;
     if cli.json {
         println!("{}", serde_json::to_string(&complete)?);
     } else {
@@ -246,25 +381,35 @@ fn confirm(yes: bool, cli: &Cli, claim: &ClaimResponse, granted: &BTreeSet<Scope
     )
 }
 
-fn resolve_hub_url(explicit: Option<&str>, controller_origin: &str) -> Result<String> {
-    if let Some(url) = explicit {
-        return Ok(url.to_owned());
-    }
-    let paths = HubRuntimePaths::default_for_user()?;
+fn resolve_hub_url(paths: &HubRuntimePaths, explicit: Option<&str>) -> Result<String> {
     let record = paths.read_process_record()?;
     anyhow::ensure!(
         record_is_live(&record),
         "cas hub is not running; start it before authorizing a Commander page"
     );
-    if let Some(url) = record.public_url {
-        return Ok(url);
-    }
-    if is_loopback_origin(controller_origin) {
-        return Ok(format!("http://{}:{}", record.bind, record.port));
-    }
-    anyhow::bail!(
-        "Hub has no public URL. Start it with `cas hub --tailscale-serve start` or pass --hub-url."
-    )
+    let url = explicit.or(record.public_url.as_deref()).context(
+        "Hub has no public URL. Start it with `cas hub --tailscale-serve start` or pass --hub-url.",
+    )?;
+    validate_hub_url(url)?;
+    Ok(url.to_owned())
+}
+
+fn validate_hub_url(url: &str) -> Result<()> {
+    let parsed = Url::parse(url).context("invalid hub URL")?;
+    anyhow::ensure!(
+        parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.host().is_some()
+            && parsed.path() == "/"
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "hub URL must be an HTTPS origin or an HTTP IP-loopback origin"
+    );
+    anyhow::ensure!(
+        parsed.scheme() == "https" || is_loopback_origin(url),
+        "hub URL must be an HTTPS origin or an HTTP IP-loopback origin"
+    );
+    Ok(())
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
@@ -289,15 +434,12 @@ fn is_loopback_origin(origin: &str) -> bool {
 
 fn granted_scopes(
     requested: &[Scope],
-    override_scopes: Option<&[String]>,
+    override_scopes: Option<&BTreeSet<Scope>>,
 ) -> Result<BTreeSet<Scope>> {
     let requested: BTreeSet<Scope> = requested.iter().copied().collect();
     anyhow::ensure!(!requested.is_empty(), "relay returned an empty scope set");
     let granted = match override_scopes {
-        Some(scopes) => scopes
-            .iter()
-            .map(|scope| Scope::parse(scope))
-            .collect::<Result<BTreeSet<_>>>()?,
+        Some(scopes) => scopes.clone(),
         None => requested.clone(),
     };
     anyhow::ensure!(!granted.is_empty(), "granted scopes must not be empty");
@@ -306,6 +448,17 @@ fn granted_scopes(
         "--scopes may reduce the page-requested scopes but may not add scopes"
     );
     Ok(granted)
+}
+
+fn parse_override_scopes(scopes: Option<&[String]>) -> Result<Option<BTreeSet<Scope>>> {
+    scopes
+        .map(|scopes| {
+            scopes
+                .iter()
+                .map(|scope| Scope::parse(scope))
+                .collect::<Result<BTreeSet<_>>>()
+        })
+        .transpose()
 }
 
 fn display_scopes(scopes: impl IntoIterator<Item = impl std::borrow::Borrow<Scope>>) -> String {
@@ -344,7 +497,9 @@ fn relay_error_from_parts(status: Option<u16>, code: &str, description: &str) ->
         }
         (Some(410), "expired_code") => anyhow::anyhow!("The pairing code has expired."),
         (Some(409), "code_claimed") => {
-            anyhow::anyhow!("That pairing code is already claimed by another machine.")
+            anyhow::anyhow!(
+                "That pairing code has a live claim from a different machine or an earlier local attempt whose saved claim state is unavailable. This machine automatically resumes claims whose state is still present."
+            )
         }
         (Some(401), "unauthorized") => {
             anyhow::anyhow!("PSC authorization was refused. Run `cas login` first.")
@@ -413,14 +568,16 @@ mod tests {
     #[test]
     fn scopes_can_reduce_the_claim_but_never_escalate_it() {
         let requested = vec![Scope::MachineRead, Scope::SessionRead, Scope::PaneRead];
-        let reduced = granted_scopes(&requested, Some(&["machine:read".to_owned()])).unwrap();
+        let reduced_override = parse_override_scopes(Some(&["machine:read".to_owned()])).unwrap();
+        let reduced = granted_scopes(&requested, reduced_override.as_ref()).unwrap();
         assert_eq!(reduced, [Scope::MachineRead].into_iter().collect());
-        let escalation = granted_scopes(&requested, Some(&["hub:admin".to_owned()])).unwrap_err();
+        let escalation_override = parse_override_scopes(Some(&["hub:admin".to_owned()])).unwrap();
+        let escalation = granted_scopes(&requested, escalation_override.as_ref()).unwrap_err();
         assert!(escalation.to_string().contains("may reduce"));
     }
 
     #[test]
-    fn loopback_fallback_requires_a_literal_http_loopback_origin() {
+    fn loopback_hub_url_requires_a_literal_http_loopback_origin() {
         for origin in [
             "http://127.0.0.1",
             "http://127.42.0.1:42759",
@@ -444,5 +601,187 @@ mod tests {
         ] {
             assert!(!is_loopback_origin(origin), "{origin}");
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingRelay {
+        claims: std::sync::Mutex<Vec<(String, String)>>,
+        active_claim: std::sync::Mutex<Option<(String, String)>>,
+        fail_first_completion: std::sync::atomic::AtomicBool,
+    }
+
+    impl RecordingRelay {
+        fn failing_first_completion() -> Self {
+            Self {
+                claims: std::sync::Mutex::new(Vec::new()),
+                active_claim: std::sync::Mutex::new(None),
+                fail_first_completion: std::sync::atomic::AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl PairingRelay for RecordingRelay {
+        fn claim(&self, code: &str, nonce: &str) -> Result<ClaimResponse> {
+            let mut active = self.active_claim.lock().unwrap();
+            match active.as_ref() {
+                Some((claimed_code, claimed_nonce))
+                    if claimed_code == code && claimed_nonce == nonce => {}
+                Some(_) => anyhow::bail!("code_claimed"),
+                None => *active = Some((code.to_owned(), nonce.to_owned())),
+            }
+            self.claims
+                .lock()
+                .unwrap()
+                .push((code.to_owned(), nonce.to_owned()));
+            Ok(ClaimResponse {
+                wire_version: 1,
+                authorization_id: "0209c457-4798-413a-8a52-47f7b25e9d61".to_owned(),
+                pairing_request_id: "9ef5a981-0c32-44b4-9c8a-d1f8e4858e77".to_owned(),
+                controller_origin: "https://commander.example".to_owned(),
+                requested_scopes: Scope::default_read_only().into_iter().collect(),
+                claim_expires_at: Utc::now() + chrono::Duration::seconds(120),
+            })
+        }
+
+        fn complete(
+            &self,
+            _authorization_id: &str,
+            _nonce: &str,
+            _hub_url: &str,
+            _machine_label: &str,
+            _invitation_url: &str,
+            _invitation_expires_at: DateTime<Utc>,
+            _granted_scopes: &BTreeSet<Scope>,
+        ) -> Result<CompleteResponse> {
+            if self
+                .fail_first_completion
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                anyhow::bail!("deliberate completion failure");
+            }
+            Ok(CompleteResponse {
+                wire_version: 1,
+                status: "ready".to_owned(),
+                pairing_request_id: "9ef5a981-0c32-44b4-9c8a-d1f8e4858e77".to_owned(),
+                delivery_id: "75128f2d-845b-4d2b-9d42-ffdb74661ca2".to_owned(),
+                relay_expires_at: Utc::now() + chrono::Duration::minutes(10),
+            })
+        }
+
+        fn cancel(&self, _authorization_id: &str, _nonce: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_cli() -> Cli {
+        Cli {
+            json: true,
+            full: false,
+            verbose: false,
+            command: None,
+        }
+    }
+
+    fn authorize_args(code: &str) -> HubAuthorizeArgs {
+        HubAuthorizeArgs {
+            code: code.to_owned(),
+            scopes: None,
+            hub_url: None,
+            yes: true,
+        }
+    }
+
+    fn serve_ready_health_checks(count: usize) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let body = r#"{"schema_version":1,"ready":true}"#;
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        (port, handle)
+    }
+
+    fn write_live_record(paths: &HubRuntimePaths, port: u16, public_url: Option<&str>) {
+        paths
+            .write_process_record(&crate::hub::HubProcessRecord {
+                pid: std::process::id(),
+                bind: "127.0.0.1".to_owned(),
+                port,
+                version: "test".to_owned(),
+                started_at: Utc::now().to_rfc3339(),
+                public_url: public_url.map(str::to_owned),
+                tailscale_serve_port: Some(443),
+                tailscale_cli: None,
+                transport_warning: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn stopped_hub_does_not_consume_code_and_same_code_claims_after_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let relay = RecordingRelay::default();
+        let args = authorize_args("K7MW-4H2Q");
+
+        let stopped = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
+        assert!(stopped.to_string().contains("no cas hub runtime record"));
+        assert!(relay.claims.lock().unwrap().is_empty());
+
+        let (port, health) = serve_ready_health_checks(2);
+        write_live_record(&paths, port, None);
+        let unpublished = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
+        assert!(unpublished.to_string().contains("Hub has no public URL"));
+        assert!(relay.claims.lock().unwrap().is_empty());
+
+        write_live_record(&paths, port, Some("https://workstation.tail.example/"));
+        authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap();
+        health.join().unwrap();
+
+        let claims = relay.claims.lock().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].0, "K7MW-4H2Q");
+    }
+
+    #[test]
+    fn same_machine_retry_reuses_nonce_and_resumes_its_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let relay = RecordingRelay::failing_first_completion();
+        let args = authorize_args("K7MW-4H2Q");
+        let (port, health) = serve_ready_health_checks(2);
+        write_live_record(&paths, port, Some("https://workstation.tail.example/"));
+
+        let first = authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap_err();
+        assert!(first.to_string().contains("deliberate completion failure"));
+        authorize_with_relay(&args, &test_cli(), &relay, &paths).unwrap();
+        health.join().unwrap();
+
+        let claims = relay.claims.lock().unwrap();
+        assert_eq!(claims.len(), 2);
+        assert_eq!(claims[0].1, claims[1].1);
+        assert_eq!(URL_SAFE_NO_PAD.decode(&claims[0].1).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn code_claimed_message_distinguishes_missing_local_state() {
+        let error = relay_error_from_parts(Some(409), "code_claimed", "safe text");
+        let text = error.to_string();
+        assert!(text.contains("different machine or an earlier local attempt"));
+        assert!(text.contains("automatically resumes"));
     }
 }

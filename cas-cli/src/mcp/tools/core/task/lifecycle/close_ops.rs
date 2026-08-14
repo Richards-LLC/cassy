@@ -3647,7 +3647,8 @@ impl CasCore {
         // `shared_checkout_has_reviewable_changes` for the exact fallbacks
         // (code tasks with no no-code declaration, and unknowable git state,
         // keep the previous signal).
-        let effective_has_reviewable = if let Some(worker_wt) = worker_worktree_path.as_ref() {
+        let effective_has_reviewable = task.execution_note.as_deref() == Some("value-only")
+            || if let Some(worker_wt) = worker_worktree_path.as_ref() {
             commit_receipt_window
                 .as_ref()
                 .and_then(|window| {
@@ -10503,9 +10504,13 @@ pub(crate) fn run_code_review_gate(
         }
     }
 
-    // Skip 3: docs-only / test-only / empty diffs. The gate is not a
-    // SPOF for changes it cannot meaningfully review.
-    if !has_reviewable_changes(project_root) {
+    // Skip 3: docs-only / test-only / empty diffs. A value-only declaration
+    // is the explicit exception: it represents a customer-visible existing
+    // value edit and must follow the ordinary review route even when the file
+    // classifier cannot distinguish it from a docs-only asset.
+    if task.execution_note.as_deref() != Some("value-only")
+        && !has_reviewable_changes(project_root)
+    {
         return CodeReviewGateOutcome::Proceed;
     }
 

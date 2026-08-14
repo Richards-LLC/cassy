@@ -10,6 +10,6 @@ mod skills;
 mod system;
 pub(crate) mod task;
 mod task_extensions;
-mod workflow;
+pub(crate) mod workflow;
 
 // truncate_str is defined in the parent module (tools/mod.rs) and re-exported via imports.rs

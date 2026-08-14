@@ -1,4 +1,5 @@
 use crate::mcp::tools::service::imports::*;
+use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 
 /// Resolve and validate an explicit Claude config directory before its spawn
 /// request reaches the daemon.  A partial profile otherwise starts a PTY that
@@ -2609,7 +2610,7 @@ impl CasService {
                     assigned_open_task.map(|t| (
                         t.id.as_str(),
                         t.title.as_str(),
-                        t.labels.iter().any(|label| label == "verification-rejected-reopen"),
+                        t.labels.iter().any(|label| label == VERIFICATION_REJECTED_REOPEN_LABEL),
                     )),
                     parked_tasks
                         .iter()

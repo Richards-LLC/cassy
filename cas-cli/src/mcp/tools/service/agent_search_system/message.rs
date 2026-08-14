@@ -654,11 +654,12 @@ impl CasService {
         // (compensate halt writes if enqueue fails).
         let mut halt_compensation: Vec<(String, std::collections::HashMap<String, String>)> =
             Vec::new();
+        let mut halt_bindings: Vec<(String, u64)> = Vec::new();
         {
             use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
                 HaltWorkerCandidate, apply_halt_metadata, halt_targets_for_urgent,
                 is_merge_reclose_exempt_urgent, may_source_role_set_halt, may_source_set_halt,
-                session_scoped_worker_names, should_persist_urgent_halt,
+                next_halt_generation, session_scoped_worker_names, should_persist_urgent_halt,
             };
             use crate::store::{open_agent_store, open_task_store};
             use cas_types::{AgentRole, TaskStatus};
@@ -752,7 +753,7 @@ impl CasService {
                     &session_workers,
                 ) {
                     let targets = halt_targets_for_urgent(&resolved_target, &session_workers);
-                    let halt_generation = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let halt_generation = next_halt_generation();
                     for target_name in &targets {
                         // Match by name + session so same-name cross-session
                         // peers are not halted.
@@ -785,6 +786,7 @@ impl CasService {
                                 ),
                             ));
                         }
+                        halt_bindings.push((agent.id.clone(), halt_generation));
                     }
                 }
             } else if urgent
@@ -841,6 +843,36 @@ impl CasService {
             enqueue_outcome,
             cas_store::EnqueueOutcome::SuppressedDuplicate(_)
         );
+
+        // cas-85fd: an urgent halt is a course-correction exchange, not a
+        // permanent worker state. Once the row exists, bind every halt this
+        // send armed to its exact prompt id. A later urgent has a newer
+        // generation and is deliberately left untouched by this write.
+        if !halt_bindings.is_empty() {
+            use crate::mcp::tools::core::task::lifecycle::stale_close_guard::bind_halt_to_prompt_if_generation;
+            use crate::store::open_agent_store;
+            if let Ok(agent_store) = open_agent_store(&self.inner.cas_root) {
+                for (agent_id, generation) in &halt_bindings {
+                    let Ok(mut agent) = agent_store.get(agent_id) else {
+                        continue;
+                    };
+                    if bind_halt_to_prompt_if_generation(
+                        &mut agent.metadata,
+                        *generation,
+                        message_id,
+                    ) {
+                        if let Err(error) = agent_store.update(&agent) {
+                            tracing::warn!(
+                                agent_id,
+                                message_id,
+                                error = %error,
+                                "could not bind urgent halt to its prompt; task start remains the recovery path"
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // cas-6ad2: sending a response is a recipient-side consumption signal
         // for prior messages from that counterparty. The old explicit
@@ -902,6 +934,36 @@ impl CasService {
                 error = %error,
                 "failed to confirm prior delivered messages after recipient response"
             );
+        }
+
+        // cas-85fd: release only the halt bound to an urgent that this worker
+        // demonstrably consumed and answered. `Confirmed` is the queue's
+        // existing proof: the urgent had a transport handoff + surfacing
+        // receipt and the worker's reply post-dated both. Do not clear a
+        // legacy/unbound halt or a newer halt that replaced this exchange.
+        if role == "worker" && target_is_supervisor {
+            use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
+                clear_halt_metadata, halt_prompt_id,
+            };
+            use crate::store::open_agent_store;
+            if let Ok(agent_store) = open_agent_store(&self.inner.cas_root)
+                && let Ok(mut agent) = agent_store.get(&source)
+                && let Some(prompt_id) = halt_prompt_id(&agent.metadata)
+                && matches!(
+                    queue.message_status(prompt_id),
+                    Ok(Some(cas_store::MessageStatus::Confirmed))
+                )
+            {
+                clear_halt_metadata(&mut agent.metadata);
+                if let Err(error) = agent_store.update(&agent) {
+                    tracing::warn!(
+                        agent_id = %source,
+                        prompt_id,
+                        error = %error,
+                        "could not release confirmed urgent halt"
+                    );
+                }
+            }
         }
 
         let persist_latency_ms = enqueue_started.elapsed().as_secs_f64() * 1000.0;

@@ -1890,7 +1890,8 @@ impl CasCore {
             }
         }
 
-        // cas-b269: urgent stop sets halt_task_work; block close until new start.
+        // cas-b269/cas-85fd: urgent stop sets halt_task_work; block close
+        // until the worker answers that exchange (or starts a new task).
         //
         // cas-60393 (AwaitingMerge) + cas-3894 (widened to InProgress): a
         // pre-existing halt armed by an EARLIER, unrelated urgent stop must

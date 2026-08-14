@@ -2291,6 +2291,12 @@ pub fn extract_body(content: &str) -> &str {
     content[body_start..].trim_start()
 }
 
+/// Claude Code harness truncation point for inline supervisor guidance.
+pub(crate) const SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES: usize = 8_192;
+
+/// Early-warning margin that preserves room for launch wrappers and banners.
+pub(crate) const SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES: usize = 8_000;
+
 /// Get the supervisor guidance injected at factory SessionStart.
 ///
 /// Returns only the trimmed supervisor SKILL.md body. The checklist
@@ -2556,23 +2562,21 @@ This is the body content."#;
     /// See memory `project_session_start_truncation.md`.
     #[test]
     fn test_supervisor_guidance_under_8kb() {
-        const HARD_CEILING: usize = 8_192; // Claude Code harness truncation point.
-        const SOFT_CAP: usize = 8_000; // early-warning margin below the ceiling.
         let guide = supervisor_guidance();
         assert!(
-            guide.len() < HARD_CEILING,
-            "supervisor_guidance is {} bytes — over the {HARD_CEILING}B SessionStart ceiling. \
+            guide.len() < SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES,
+            "supervisor_guidance is {} bytes — over the {SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES}B SessionStart ceiling. \
              Move content into cas-supervisor/references/ instead of \
              inlining it in cas-supervisor.md.",
             guide.len()
         );
         assert!(
-            guide.len() <= SOFT_CAP,
-            "supervisor_guidance is {} bytes — over the {SOFT_CAP}B soft cap (only \
-             {}B from the {HARD_CEILING}B hard ceiling). Trim body prose or move it \
+            guide.len() <= SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES,
+            "supervisor_guidance is {} bytes — over the {SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES}B soft cap (only \
+             {}B from the {SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES}B hard ceiling). Trim body prose or move it \
              into cas-supervisor/references/ to keep CI headroom.",
             guide.len(),
-            HARD_CEILING - guide.len()
+            SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES - guide.len()
         );
     }
 

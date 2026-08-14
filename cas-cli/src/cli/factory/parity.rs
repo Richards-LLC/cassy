@@ -400,8 +400,9 @@ mod tests {
     use super::*;
 
     /// The harness-specific ambient-recall delivery contract for a supervisor
-    /// launch. This is deliberately separate from the skill contract: Codex
-    /// has the same supervisor skills, but no SessionStart delivery channel.
+    /// launch. This is deliberately separate from the skill contract because
+    /// Claude receives its packet through SessionStart while Codex and Grok
+    /// receive it through their queued launch intros.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum AmbientRecallDelivery {
         /// Claude reads its SessionStart hook's stdout.
@@ -409,10 +410,6 @@ mod tests {
         /// Grok ignores SessionStart stdout, so the factory's queued launch
         /// intro is its delivery channel.
         QueuedSupervisorIntro,
-        /// cas-3413: Codex has no hooks and currently has no ambient-recall
-        /// launch delivery. Its queued intro is a viable future seam; remove
-        /// this exception when cas-3413 wires that packet through it.
-        NoHooksCodexUntilCas3413,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -437,7 +434,7 @@ mod tests {
                 // twin. It is still the universal supervisor-checklist
                 // capability, but its shipped skill name is harness-specific.
                 supervisor_skills: ["cas-supervisor", "cas-codex-supervisor-checklist"],
-                ambient_recall: AmbientRecallDelivery::NoHooksCodexUntilCas3413,
+                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
             },
             SupervisorCli::Grok => SupervisorHarnessRequirement {
                 supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
@@ -446,13 +443,14 @@ mod tests {
         }
     }
 
-    /// Capture the concrete supervisor instruction launch payload. Claude and
-    /// Grok consume the queued factory intro; Codex consumes its CLI config.
+    /// Capture the concrete queued supervisor launch payload. The queued intro
+    /// is the ambient-recall delivery seam for Codex and Grok; Claude's own
+    /// ambient packet is delivered by SessionStart below.
     /// This is a second exhaustive match so a new backend cannot be quietly
     /// covered by a generic fallback.
     fn supervisor_skill_payload(cas_dir: &std::path::Path, harness: SupervisorCli) -> String {
         match harness {
-            SupervisorCli::Claude | SupervisorCli::Grok => {
+            SupervisorCli::Claude | SupervisorCli::Codex | SupervisorCli::Grok => {
                 use crate::store::detect::open_prompt_queue_store;
                 use crate::ui::factory::queue_supervisor_intro_prompt;
 
@@ -478,8 +476,6 @@ mod tests {
                 );
                 rows[0].prompt.clone()
             }
-            SupervisorCli::Codex => launch_instruction_text(harness, ContractRole::Supervisor)
-                .expect("Codex supervisor must have developer_instructions"),
         }
     }
 
@@ -572,12 +568,6 @@ mod tests {
                     assert!(
                         skill_payload.contains("grok-supervisor-ambient"),
                         "{harness:?} queued supervisor intro omitted the ambient recall sentinel: {skill_payload}"
-                    );
-                }
-                AmbientRecallDelivery::NoHooksCodexUntilCas3413 => {
-                    assert!(
-                        !harness.backend().capabilities().supports_hooks,
-                        "Codex's cas-3413 exception is valid only while it has no hooks; remove the exception and require ambient recall once that changes"
                     );
                 }
             }

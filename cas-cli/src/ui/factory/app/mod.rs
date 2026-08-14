@@ -2113,21 +2113,45 @@ pub(crate) fn queue_supervisor_intro_prompt(
         }
     }
 
-    // cas-91df / GH #296, #297: unlike Claude, Grok discards SessionStart
-    // stdout. Its queued launch intro is the actual delivery seam. Include the
-    // normal context and independently bounded ambient-recall packet here,
-    // supplying the child identity explicitly because the parent env is not
-    // the supervisor's env yet.
-    if supervisor_cli == cas_mux::SupervisorCli::Grok {
-        if let Some(context) = grok_supervisor_session_start_bundle(
+    // cas-3413 / cas-91df: Codex has no SessionStart hooks and Grok discards
+    // SessionStart stdout. Their queued launch intro is therefore the real
+    // delivery seam. Reuse one bundle so both receive the normal context and
+    // independently bounded ambient-recall packet, with explicit child
+    // identity because the parent env is not the supervisor's env yet.
+    if matches!(
+        supervisor_cli,
+        cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok
+    ) {
+        if let Some(bundle) = queued_supervisor_session_start_bundle(
             cas_dir,
             supervisor_name,
             session_id.unwrap_or(supervisor_name),
             factory_session.unwrap_or(supervisor_name),
         ) {
-            prompt.push_str("\n\n<cas-grok-session-start>\n");
-            prompt.push_str(&context);
-            prompt.push_str("\n</cas-grok-session-start>");
+            // Reuse the established supervisor-guidance ceiling for queued
+            // delivery. Ambient recall stays protected because it is the
+            // purpose of this fallback; ordinary SessionStart context can
+            // compact to its retrieval command rather than being truncated.
+            use crate::hooks::handlers::session_budget::SessionContextAssembler;
+
+            let mut assembler = SessionContextAssembler::new(format!(
+                "{prompt}\n\n<cas-queued-session-start>"
+            ))
+            .with_budget(crate::builtins::SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES);
+            if let Some(context) = bundle.context {
+                let tool_prefix = supervisor_cli.backend().capabilities().tool_prefix;
+                assembler.append_degradable(
+                    context,
+                    format!(
+                        "[session-start context omitted to fit the queued launch payload — run `{tool_prefix}search action=context`]"
+                    ),
+                );
+            }
+            if let Some(packet) = bundle.ambient_recall {
+                assembler.append_protected(packet.full);
+            }
+            assembler.append_protected("</cas-queued-session-start>".to_string());
+            prompt = assembler.render();
         }
     }
 
@@ -2167,12 +2191,17 @@ fn claude_custom_config_context_fallback(
         .filter(|context| !context.trim().is_empty())
 }
 
-fn grok_supervisor_session_start_bundle(
+struct QueuedSupervisorSessionStartBundle {
+    context: Option<String>,
+    ambient_recall: Option<crate::ambient_recall::RecallPacket>,
+}
+
+fn queued_supervisor_session_start_bundle(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
     session_id: &str,
     factory_session: &str,
-) -> Option<String> {
+) -> Option<QueuedSupervisorSessionStartBundle> {
     let input = cas_core::hooks::HookInput {
         session_id: session_id.to_string(),
         cwd: cas_dir.parent()?.to_string_lossy().into_owned(),
@@ -2181,22 +2210,20 @@ fn grok_supervisor_session_start_bundle(
         agent_role: Some("supervisor".to_string()),
         ..Default::default()
     };
-    let mut sections = Vec::new();
-    if let Ok(context) = crate::hooks::build_context(&input, 5, cas_dir)
-        && !context.trim().is_empty()
-    {
-        sections.push(context);
-    }
-    if let Some(packet) = crate::ambient_recall::build_ambient_recall_context_for_factory_launch(
+    let context = crate::hooks::build_context(&input, 5, cas_dir)
+        .ok()
+        .filter(|context| !context.trim().is_empty());
+    let ambient_recall = crate::ambient_recall::build_ambient_recall_context_for_factory_launch(
         &input,
         cas_dir,
         None,
         supervisor_name,
         factory_session,
-    ) {
-        sections.push(packet.full);
-    }
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
+    );
+    (context.is_some() || ambient_recall.is_some()).then_some(QueuedSupervisorSessionStartBundle {
+        context,
+        ambient_recall,
+    })
 }
 
 pub(crate) fn queue_codex_worker_intro_prompt(
@@ -2696,6 +2723,62 @@ mod tests {
                 .contains("custom profile ambient memory sentinel"),
             "custom-config supervisor launch must receive ambient context even when Claude skips SessionStart: {}",
             rows[0].prompt
+        );
+    }
+
+    /// Codex has no SessionStart hook, so its queued startup intro is the
+    /// delivery path for both explicit supervisor skills and a real
+    /// ambient-recall packet.
+    #[test]
+    fn codex_supervisor_intro_carries_ambient_recall_and_supervisor_skills() {
+        use crate::store::{detect::open_prompt_queue_store, init_cas_dir, open_store};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = init_cas_dir(project.path()).unwrap();
+        let _env =
+            TestEnvGuard::with_optional_vars(&[(crate::internal_llm::INTERNAL_LLM_ENV, None)]);
+        let mut entry = Entry::new(
+            "codex-supervisor-ambient".to_string(),
+            "Codex supervisor session start ambient recall sentinel".to_string(),
+        );
+        entry.title = Some("Codex supervisor launch recall".to_string());
+        entry.tags = vec!["codex".to_string(), "supervisor".to_string()];
+        entry.importance = 0.95;
+        open_store(&cas_dir).unwrap().add(&entry).unwrap();
+
+        queue_supervisor_intro_prompt(
+            &cas_dir,
+            "codex-sup",
+            cas_mux::SupervisorCli::Codex,
+            &[],
+            Some("codex-session-start"),
+            Some("codex-factory-session"),
+        );
+
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue
+            .peek_for_targets(&["codex-sup"], Some("codex-factory-session"), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let prompt = &rows[0].prompt;
+        assert!(
+            prompt.contains("[ambient recall v1 role=supervisor"),
+            "Codex's queued startup intro must carry a non-empty ambient packet: {prompt}"
+        );
+        assert!(
+            prompt.contains("codex-supervisor-ambient"),
+            "ambient packet must surface the matched high-importance Codex supervisor memory: {prompt}"
+        );
+        for skill in ["cas-supervisor", "cas-codex-supervisor-checklist"] {
+            assert!(
+                prompt.contains(skill),
+                "Codex's queued startup payload must load {skill}: {prompt}"
+            );
+        }
+        assert!(
+            prompt.len() <= 8_000,
+            "Codex's measured queued supervisor payload is {} bytes, over the 8KB supervisor-guidance soft ceiling",
+            prompt.len()
         );
     }
 

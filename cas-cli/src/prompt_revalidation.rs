@@ -451,6 +451,9 @@ pub(crate) fn revalidate_merge_request(
             crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. } => {
                 MergeRequestDecision::AlreadyIntegrated { target_tip }
             }
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. } => {
+                MergeRequestDecision::AlreadyIntegrated { target_tip }
+            }
             // cas-b278: a reachable commit with absent hunks is still pending
             // delivery. Never suppress its supervisor alert as "landed".
             crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { .. } => {
@@ -950,19 +953,34 @@ mod tests {
         std::fs::write(repo.path().join("base"), "base\n").expect("base file");
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         std::fs::write(repo.path().join("credits.rs"), "restore grant\n").expect("delivery file");
         git(repo.path(), &["add", "credits.rs"]);
         git(repo.path(), &["commit", "-m", "restore grant"]);
         let worker_tip = git(repo.path(), &["rev-parse", "HEAD"]);
 
+        git(repo.path(), &["checkout", "-b", "factory/other", &base]);
+        std::fs::write(repo.path().join("credits.rs"), "competing credits work\n")
+            .expect("competing file");
+        git(repo.path(), &["add", "credits.rs"]);
+        git(repo.path(), &["commit", "-m", "competing credits work"]);
+
         git(repo.path(), &["checkout", "main"]);
         git(
             repo.path(),
             &["merge", "--no-ff", "factory/test-worker", "-m", "merge"],
         );
-        git(repo.path(), &["rm", "credits.rs"]);
-        git(repo.path(), &["commit", "-m", "later merge drops restore"]);
+        let conflict = std::process::Command::new("git")
+            .args(["merge", "--no-ff", "factory/other"])
+            .current_dir(repo.path())
+            .status()
+            .expect("start conflicting merge");
+        assert!(!conflict.success(), "fixture must conflict");
+        std::fs::write(repo.path().join("credits.rs"), "competing credits work\n")
+            .expect("resolve without delivery");
+        git(repo.path(), &["add", "credits.rs"]);
+        git(repo.path(), &["commit", "-m", "merge drops restore"]);
         let target_tip = git(repo.path(), &["rev-parse", "main"]);
 
         assert!(

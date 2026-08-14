@@ -2207,7 +2207,8 @@ impl CasCore {
                     &receipt.commit_sha,
                     target_tip.as_deref().expect("reachable target tip"),
                 ) {
-                    crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. } => true,
+                    crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                    | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. } => true,
                     crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { paths } => {
                         return fail(
                             cas_types::WorkerDeliveryState::Conflict,
@@ -2467,7 +2468,8 @@ impl CasCore {
                 &receipt.commit_sha,
                 &target_tip,
             ) {
-                crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. } => {}
+                crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. } => {}
                 crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { paths } => {
                     return Err(McpError {
                         code: ErrorCode::INTERNAL_ERROR,
@@ -2577,6 +2579,7 @@ impl CasCore {
                             &remote_target,
                         ),
                         crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                        | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
                     )
                 });
             let push_outcome = match pr_landed_sha {

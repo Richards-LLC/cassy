@@ -347,6 +347,16 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
+    // cas-1219: MCP installation and diagnosis guidance from the field-tested
+    // operator runbook. The linked diagnosis reference ships with it.
+    BuiltinFile {
+        path: "skills/mcp-integration/SKILL.md",
+        content: include_str!("builtins/skills/mcp-integration/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/mcp-integration/references/diagnosis.md",
+        content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
+    },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
         content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
@@ -713,6 +723,15 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-servers/SKILL.md"),
+    },
+    // cas-1219: byte-identical Codex mirror of the field-tested MCP guidance.
+    BuiltinFile {
+        path: "skills/mcp-integration/SKILL.md",
+        content: include_str!("builtins/codex/skills/mcp-integration/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/mcp-integration/references/diagnosis.md",
+        content: include_str!("builtins/codex/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
@@ -1101,6 +1120,15 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-servers/SKILL.md"),
+    },
+    // cas-1219: byte-identical Grok mirror of the field-tested MCP guidance.
+    BuiltinFile {
+        path: "skills/mcp-integration/SKILL.md",
+        content: include_str!("builtins/grok/skills/mcp-integration/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/mcp-integration/references/diagnosis.md",
+        content: include_str!("builtins/grok/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
@@ -3240,6 +3268,94 @@ This is the body content."#;
                 *body, claude_body,
                 "{label} cas-servers SKILL.md must match the claude copy except for the \
                  harness tool prefix — the guidance itself must not drift per harness"
+            );
+        }
+    }
+
+    /// cas-1219: MCP installation guidance is intentionally the same field
+    /// runbook for every harness. Its diagnosis reference is part of the
+    /// skill's contract, not an optional local file, so sync must deliver both
+    /// files for Claude, Codex, and Grok without any content drift.
+    #[test]
+    fn test_builtin_skills_contains_mcp_integration() {
+        use tempfile::tempdir;
+
+        const SKILL: &str = "skills/mcp-integration/SKILL.md";
+        const DIAGNOSIS: &str = "skills/mcp-integration/references/diagnosis.md";
+        let mut shipped = Vec::new();
+
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|entry| entry.path == SKILL)
+                .unwrap_or_else(|| panic!("{SKILL} missing from {label} catalog"));
+            assert!(
+                is_managed_by_cas(skill.content),
+                "{label} {SKILL} must be managed_by: cas"
+            );
+            assert!(
+                skill.content.contains("name: mcp-integration"),
+                "{label} {SKILL} must retain its skill name"
+            );
+            assert!(
+                skill
+                    .content
+                    .contains("[references/diagnosis.md](references/diagnosis.md)"),
+                "{label} {SKILL} must retain the shipped diagnosis link"
+            );
+
+            let diagnosis = catalog
+                .iter()
+                .find(|entry| entry.path == DIAGNOSIS)
+                .unwrap_or_else(|| panic!("{DIAGNOSIS} missing from {label} catalog"));
+            assert!(
+                diagnosis.content.contains("# MCP diagnosis reference"),
+                "{label} {DIAGNOSIS} must retain the diagnosis reference"
+            );
+
+            shipped.push((label, skill.content, diagnosis.content));
+        }
+
+        let (_, claude_skill, claude_diagnosis) = shipped[0];
+        for (label, skill, diagnosis) in &shipped[1..] {
+            assert_eq!(
+                *skill, claude_skill,
+                "{label} {SKILL} must be byte-identical to the Claude copy"
+            );
+            assert_eq!(
+                *diagnosis, claude_diagnosis,
+                "{label} {DIAGNOSIS} must be byte-identical to the Claude copy"
+            );
+        }
+
+        let temp = tempdir().unwrap();
+        for (label, sync) in [
+            (
+                "claude",
+                sync_all_builtins as fn(&Path) -> std::io::Result<SyncResult>,
+            ),
+            (
+                "codex",
+                sync_all_codex_builtins as fn(&Path) -> std::io::Result<SyncResult>,
+            ),
+            (
+                "grok",
+                sync_all_grok_builtins as fn(&Path) -> std::io::Result<SyncResult>,
+            ),
+        ] {
+            let target = temp.path().join(label);
+            sync(&target).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(target.join(SKILL)).unwrap(),
+                claude_skill
+            );
+            assert_eq!(
+                std::fs::read_to_string(target.join(DIAGNOSIS)).unwrap(),
+                claude_diagnosis
             );
         }
     }

@@ -2684,7 +2684,8 @@ impl FactoryDaemon {
                 use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
                 use crate::prompt_revalidation::{
                     MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
-                    merge_request_delivery_decision, merge_request_moot_guidance,
+                    merge_request_anchor_invalidated_guidance, merge_request_delivery_decision,
+                    merge_request_moot_guidance,
                     revalidate_merge_request,
                 };
 
@@ -2723,7 +2724,8 @@ impl FactoryDaemon {
                 );
 
                 let (suppress_detail, guidance, summary) = match merge_request_delivery_decision(
-                    task.as_ref().map(|task| task.status),
+                    task.as_ref(),
+                    &envelope,
                     &git,
                 ) {
                     MergeRequestDelivery::Deliver => {
@@ -2755,6 +2757,15 @@ impl FactoryDaemon {
                         )),
                         Some(merge_request_moot_guidance(&envelope.task_id, status)),
                         "merge request no longer applies",
+                    ),
+                    MergeRequestDelivery::SuppressInvalidatedAnchor { current_anchor } => (
+                        Some("merge request delivery anchor was invalidated".to_string()),
+                        Some(merge_request_anchor_invalidated_guidance(
+                            &envelope.task_id,
+                            &envelope.branch_tip,
+                            current_anchor.as_deref(),
+                        )),
+                        "merge request delivery anchor no longer applies",
                     ),
                 };
 

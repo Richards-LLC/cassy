@@ -557,7 +557,11 @@ impl CasService {
                     .clone()
                     .or_else(|| task.assignee.as_ref().map(|name| format!("factory/{name}")));
                 if let Some(branch) = branch
-                    && let Some(branch_tip) = resolve_branch_sha(&repo.repo_root, &branch)
+                    && let Some(branch_tip) = task
+                        .deliverables
+                        .factory_branch_anchor
+                        .clone()
+                        .or_else(|| resolve_branch_sha(&repo.repo_root, &branch))
                 {
                     match revalidate_merge_request(
                         &repo.repo_root,
@@ -1177,6 +1181,99 @@ impl CasService {
         let mut redelivered = 0usize;
         let mut body = String::new();
         for message in &messages {
+            // A supervisor can claim a queue row directly through inbox_poll,
+            // bypassing the daemon's transport-time check. Re-run the exact
+            // merge-request predicate here so an invalidated delivery anchor
+            // cannot become actionable merely because this is the first
+            // delivery surface the supervisor used.
+            let stale_merge_request = crate::prompt_revalidation::parse_merge_request_envelope(
+                &message.prompt,
+            )
+            .and_then(|envelope| {
+                let store = task_store.as_ref()?;
+                let task = store.get(&envelope.task_id).ok()?;
+                use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+                let repo_root = task
+                    .deliverables
+                    .work_target
+                    .as_ref()
+                    .and_then(|work_target| {
+                        resolve_repo_context(&self.inner.cas_root, work_target).ok()
+                    })
+                    .map(|repo| repo.repo_root)
+                    .unwrap_or_else(|| {
+                        self.inner
+                            .cas_root
+                            .parent()
+                            .unwrap_or(&self.inner.cas_root)
+                            .to_path_buf()
+                    });
+                let git = crate::prompt_revalidation::revalidate_merge_request(
+                    &repo_root,
+                    &envelope.branch_tip,
+                    &envelope.target_branch,
+                );
+                (!matches!(
+                    crate::prompt_revalidation::merge_request_delivery_decision(
+                        Some(&task),
+                        &envelope,
+                        &git,
+                    ),
+                    crate::prompt_revalidation::MergeRequestDelivery::Deliver
+                ))
+                .then_some(envelope.task_id)
+            });
+            if let Some(task_id) = stale_merge_request {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "inbox_withheld_stale_merge_request",
+                    prompt_id = message.id,
+                    recipient = %recipient,
+                    task_id = %task_id,
+                    "withheld a merge request whose delivery anchor no longer holds at inbox pop"
+                );
+                withheld.push((message.id, task_id));
+                continue;
+            }
+
+            // Lifecycle rows have the same direct-poll bypass. In particular,
+            // a queued MERGE REQUIRED relay must not survive request_changes,
+            // cancel, reset, or a completed merge merely because no daemon
+            // tick ran before the supervisor polled.
+            let stale_lifecycle = crate::prompt_revalidation::parse_lifecycle_envelope(
+                &message.prompt,
+            )
+            .is_some_and(|envelope| match task_store.as_ref() {
+                Some(store) => match store.get(&envelope.task_id).ok() {
+                    Some(task) => matches!(
+                        crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                            &message.prompt,
+                            task.status,
+                            task.updated_at,
+                        ),
+                        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
+                    ),
+                    None => true,
+                },
+                // Fails open when the store itself is unavailable: inability
+                // to inspect current state is not evidence that a relay died.
+                None => false,
+            });
+            if stale_lifecycle {
+                let task_id = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
+                    .map(|envelope| envelope.task_id)
+                    .unwrap_or_default();
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "inbox_withheld_stale_merge_relay",
+                    prompt_id = message.id,
+                    recipient = %recipient,
+                    task_id = %task_id,
+                    "withheld a stale lifecycle relay at inbox pop"
+                );
+                withheld.push((message.id, task_id));
+                continue;
+            }
             let solicited_task = assignment_solicited_task_id(&message.prompt);
             // The transition an assignment solicits: the ADDRESSED recipient
             // started that task. `assignee` must match — another worker

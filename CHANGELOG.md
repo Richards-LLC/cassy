@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.67.0] - 2026-08-14
+
+### Added
+- **Task artifacts are now searchable with their work attached.** Bounded Markdown, text, and JSON deliverables enter the shared search index at close and during reindex, while oversized or unsupported files remain safely excluded.
+- **Factory worktrees now surface branch-local prerequisites before work begins.** New checkouts provision the pinned Zig toolchain when available and give lockfile-aware Node installation guidance without sharing path-sensitive dependencies.
+
+### Changed
+- **Factory delivery follows the task's declared target branch end to end.** Epic bases, freshness checks, merge relays, and landing status now resolve against the real destination instead of assuming `main` or counting unrelated commits.
+- **Task-focused recall and core maintenance contracts are more precise.** Relevant saved guidance remains competitive across search fallbacks, workspace dependency and lint policy is centralized, CLI backends share one typed interface, and lifecycle gate failures retain structured meaning internally.
+
+### Fixed
+- **No-code and supervisor-verified work can finish without close-gate deadlocks.** Portable evidence survives parked states, valid updates are no longer discarded alongside one rejected field, stale anchors can be cleared safely, and missing verification dispatches have a bounded recovery path.
+- **Lifecycle notifications now identify and acknowledge the event they actually represent.** Wake relays reach the acknowledgement bridge, supervisor-owned gates do not masquerade as worker events, stale completion prompts are revalidated, and instructions use the receiving harness's live tool namespace.
+- **Search, startup, and delivery edge cases fail safely instead of losing context.** Unknown colon-bearing terms search literally, custom-profile and Grok supervisors receive startup context, spawn-time corrections arrive before assigned work starts, and squash-landed or non-main-target work is reconciled by content.
+- **Harness and checkout setup reports its real capabilities.** Codex context reset names the supported restart path, supervisor launch parity is guarded across harnesses, and worker binding checks reject stale or sibling checkouts before execution.
+
 ## [2.66.0] - 2026-08-13
 
 ### Added

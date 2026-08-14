@@ -3649,34 +3649,34 @@ impl CasCore {
         // keep the previous signal).
         let effective_has_reviewable = task.execution_note.as_deref() == Some("value-only")
             || if let Some(worker_wt) = worker_worktree_path.as_ref() {
-            commit_receipt_window
-                .as_ref()
-                .and_then(|window| {
-                    has_task_attributable_reviewable_changes(
-                        worker_wt,
-                        &resolved_parent_branch,
-                        window,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
-                })
-        } else {
-            shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
-                task_type: task.task_type,
-                execution_note: task.execution_note.as_deref(),
-                attributable_reviewable_changes: commit_receipt_window.as_ref().and_then(
-                    |window| {
+                commit_receipt_window
+                    .as_ref()
+                    .and_then(|window| {
                         has_task_attributable_reviewable_changes(
-                            &close_project_root,
+                            worker_wt,
                             &resolved_parent_branch,
                             window,
                         )
-                    },
-                ),
-                checkout_has_reviewable_changes: has_reviewable_changes(&close_project_root),
-            })
-        };
+                    })
+                    .unwrap_or_else(|| {
+                        has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
+                    })
+            } else {
+                shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
+                    task_type: task.task_type,
+                    execution_note: task.execution_note.as_deref(),
+                    attributable_reviewable_changes: commit_receipt_window.as_ref().and_then(
+                        |window| {
+                            has_task_attributable_reviewable_changes(
+                                &close_project_root,
+                                &resolved_parent_branch,
+                                window,
+                            )
+                        },
+                    ),
+                    checkout_has_reviewable_changes: has_reviewable_changes(&close_project_root),
+                })
+            };
 
         // `no-code` is an explicit operations/artifact contract, not a broad
         // review bypass. It must retain a portable proof pointer, and any code
@@ -6077,10 +6077,7 @@ fn check_branch_violations(
                     worker_worktree_path,
                     &anchor_parent,
                     identity,
-                    parse_name_status_filtered(
-                        &String::from_utf8_lossy(&o.stdout),
-                        &is_violation,
-                    ),
+                    parse_name_status_filtered(&String::from_utf8_lossy(&o.stdout), &is_violation),
                 ),
                 _ => Vec::new(),
             };
@@ -6112,10 +6109,7 @@ fn check_branch_violations(
             worker_worktree_path,
             &merge_base,
             identity,
-            parse_name_status_filtered(
-                &String::from_utf8_lossy(&o.stdout),
-                &is_violation,
-            ),
+            parse_name_status_filtered(&String::from_utf8_lossy(&o.stdout), &is_violation),
         ),
         _ => Vec::new(),
     }
@@ -10508,8 +10502,7 @@ pub(crate) fn run_code_review_gate(
     // is the explicit exception: it represents a customer-visible existing
     // value edit and must follow the ordinary review route even when the file
     // classifier cannot distinguish it from a docs-only asset.
-    if task.execution_note.as_deref() != Some("value-only")
-        && !has_reviewable_changes(project_root)
+    if task.execution_note.as_deref() != Some("value-only") && !has_reviewable_changes(project_root)
     {
         return CodeReviewGateOutcome::Proceed;
     }
@@ -14392,16 +14385,16 @@ mod code_review_gate_tests {
     #[test]
     fn value_only_task_still_requires_code_review() {
         let _g = env_lock();
+        // Value-only worker closes must follow the supervisor-owned route,
+        // not the legacy solo caller path that asks for an envelope.
+        let _role = CallerRoleEnv::factory_worker();
         let dir = repo_with_staged(&[("src/locales.rs", "localized value\n")]);
         let mut t = base_task();
         t.execution_note = Some("value-only".to_string());
         let req = base_req(&t.id);
         match run_code_review_gate(&t, &req, dir.path(), true) {
             CodeReviewGateOutcome::Reject(message) => {
-                assert!(
-                    message.contains("SUPERVISOR-OWNED REVIEW"),
-                    "{message}"
-                );
+                assert!(message.contains("SUPERVISOR-OWNED REVIEW"), "{message}");
             }
             other => panic!("value-only must follow the normal review gate, got {other:?}"),
         }

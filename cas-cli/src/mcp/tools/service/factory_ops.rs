@@ -1,5 +1,5 @@
-use crate::mcp::tools::service::imports::*;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
+use crate::mcp::tools::service::imports::*;
 
 /// Resolve and validate an explicit Claude config directory before its spawn
 /// request reaches the daemon.  A partial profile otherwise starts a PTY that
@@ -566,6 +566,7 @@ fn format_assigned_task_info(
     in_progress: Option<(&str, &str)>,
     assigned_open: Option<(&str, &str, bool)>,
     parked: Option<(&str, &str, cas_types::TaskStatus)>,
+    parked_merge_already_integrated: bool,
 ) -> String {
     const TITLE_CAP: usize = 60;
     let truncate = |title: &str| -> String {
@@ -602,29 +603,33 @@ fn format_assigned_task_info(
         (None, None, Some((id, title, status))) => {
             // Matched exhaustively on purpose: a catch-all would silently
             // relabel any status added to the parked set later.
-            let (label, action) = match status {
+            let (label, waiting) = match status {
+                cas_types::TaskStatus::AwaitingMerge if parked_merge_already_integrated => (
+                    "delivered-and-merged, awaiting worker re-close",
+                    "WAITING ON WORKER: the assigned worker must retry task close",
+                ),
                 cas_types::TaskStatus::AwaitingMerge => (
                     "finished, awaiting merge",
-                    "merge its branch, then it can close",
+                    "WAITING ON YOU: merge its branch, then it can close",
                 ),
                 cas_types::TaskStatus::PendingSupervisorReview => (
                     "finished, awaiting supervisor review",
-                    "review it, then it can close",
+                    "WAITING ON YOU: review it, then it can close",
                 ),
                 cas_types::TaskStatus::Blocked => (
                     "blocked",
-                    "clear the blocker or reassign — the worker cannot proceed",
+                    "WAITING ON YOU: clear the blocker or reassign — the worker cannot proceed",
                 ),
                 cas_types::TaskStatus::Open
                 | cas_types::TaskStatus::InProgress
-                | cas_types::TaskStatus::Closed => ("parked", "check the task"),
+                | cas_types::TaskStatus::Closed => ("parked", "WAITING ON YOU: check the task"),
                 cas_types::TaskStatus::Cancelled => (
                     "cancelled without delivery",
-                    "no delivery or merge action is pending",
+                    "WAITING ON YOU: no delivery or merge action is pending",
                 ),
             };
             format!(
-                "\n    task: {id} ({label}) — {} → WAITING ON YOU: {action}",
+                "\n    task: {id} ({label}) — {} → {waiting}",
                 truncate(title)
             )
         }
@@ -2602,20 +2607,31 @@ impl CasService {
                 let matches_agent = |assignee: Option<&str>| {
                     assignee == Some(agent.name.as_str()) || assignee == Some(agent.id.as_str())
                 };
+                let parked_task = parked_tasks
+                    .iter()
+                    .find(|t| matches_agent(t.assignee.as_deref()));
                 let task_info = format_assigned_task_info(
                     in_progress_tasks
                         .iter()
                         .find(|t| matches_agent(t.assignee.as_deref()))
                         .map(|t| (t.id.as_str(), t.title.as_str())),
-                    assigned_open_task.map(|t| (
-                        t.id.as_str(),
-                        t.title.as_str(),
-                        t.labels.iter().any(|label| label == VERIFICATION_REJECTED_REOPEN_LABEL),
-                    )),
-                    parked_tasks
-                        .iter()
-                        .find(|t| matches_agent(t.assignee.as_deref()))
-                        .map(|t| (t.id.as_str(), t.title.as_str(), t.status)),
+                    assigned_open_task.map(|t| {
+                        (
+                            t.id.as_str(),
+                            t.title.as_str(),
+                            t.labels
+                                .iter()
+                                .any(|label| label == VERIFICATION_REJECTED_REOPEN_LABEL),
+                        )
+                    }),
+                    parked_task.map(|t| (t.id.as_str(), t.title.as_str(), t.status)),
+                    parked_task.is_some_and(|task| {
+                        awaiting_merge_delivery_is_already_integrated(
+                            &self.inner.cas_root,
+                            task,
+                            clone_path.as_deref(),
+                        )
+                    }),
                 );
                 output.push_str(&format!(
                     "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
@@ -5097,6 +5113,61 @@ fn task_branch_affinity(
         return BranchAffinity::Branch(target.to_string());
     }
     BranchAffinity::Trunk
+}
+
+/// True when an `AwaitingMerge` task's parked factory branch is already
+/// reachable from the task's real integration target.
+///
+/// `AwaitingMerge` normally means the supervisor still has to land the branch,
+/// but a worker can go idle after that landing and before its required re-close.
+/// Reporting the normal merge instruction in that state sends the supervisor
+/// back to an action that is already complete. This is best-effort status
+/// evidence only: unknown Git state retains the conservative normal wording.
+fn awaiting_merge_delivery_is_already_integrated(
+    cas_root: &std::path::Path,
+    task: &cas_types::Task,
+    clone_path: Option<&str>,
+) -> bool {
+    if task.status != cas_types::TaskStatus::AwaitingMerge {
+        return false;
+    }
+    let Some(clone_path) = clone_path else {
+        return false;
+    };
+    let path = std::path::Path::new(clone_path);
+    let Ok(task_store) = crate::store::open_task_store_local(cas_root) else {
+        return false;
+    };
+    let target = match task_branch_affinity(task_store.as_ref(), task) {
+        BranchAffinity::Branch(branch) => branch,
+        // The normal trunk's exact name is repository-specific. Resolve the
+        // same local default signal Git uses for worker status, then retain the
+        // established `main` fallback for repositories without an origin HEAD.
+        BranchAffinity::Trunk => run_git(
+            path,
+            &["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+        )
+        .unwrap_or_else(|_| "main".to_string()),
+        BranchAffinity::Unknown => return false,
+    };
+    let source = task
+        .deliverables
+        .parked_branch
+        .as_deref()
+        .filter(|branch| !branch.trim().is_empty())
+        .unwrap_or("HEAD");
+
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let mut candidates = vec![target.to_string()];
+    if !target.starts_with("origin/") && !target.starts_with("refs/") {
+        candidates.push(format!("origin/{target}"));
+    }
+    candidates.into_iter().any(|candidate| {
+        run_git(path, &["merge-base", "--is-ancestor", source, &candidate]).is_ok()
+    })
 }
 
 /// Map worker display name -> the task binding sync must respect.
@@ -7818,6 +7889,7 @@ mod spawn_lifecycle_tests {
             Some(("cas-8b84", "Worker lifecycle observability")),
             None,
             None,
+            false,
         );
         assert!(out.contains("cas-8b84"), "{out}");
         assert!(out.contains("in progress"), "{out}");
@@ -7829,7 +7901,12 @@ mod spawn_lifecycle_tests {
     /// up, and the supervisor must be able to tell those from an idle row.
     #[test]
     fn assigned_but_unstarted_is_distinguished_from_in_progress() {
-        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing", false)), None);
+        let out = format_assigned_task_info(
+            None,
+            Some(("cas-4242", "Fix the thing", false)),
+            None,
+            false,
+        );
         assert!(out.contains("cas-4242"), "{out}");
         assert!(out.contains("assigned, not started"), "{out}");
         assert!(!out.contains("in progress"), "{out}");
@@ -7837,13 +7914,13 @@ mod spawn_lifecycle_tests {
 
     #[test]
     fn rejected_review_reopen_is_waiting_on_supervisor() {
-        let out = format_assigned_task_info(
-            None,
-            Some(("cas-56f8", "Needs rework", true)),
-            None,
-        );
+        let out =
+            format_assigned_task_info(None, Some(("cas-56f8", "Needs rework", true)), None, false);
         assert!(out.contains("WAITING ON YOU"), "{out}");
-        assert!(out.contains("resume the existing worker or replace it"), "{out}");
+        assert!(
+            out.contains("resume the existing worker or replace it"),
+            "{out}"
+        );
     }
 
     /// In-progress wins when a worker somehow holds both — the started task is
@@ -7854,6 +7931,7 @@ mod spawn_lifecycle_tests {
             Some(("cas-1111", "Started work")),
             Some(("cas-2222", "Also assigned", false)),
             None,
+            false,
         );
         assert!(out.contains("cas-1111"), "{out}");
         assert!(!out.contains("cas-2222"), "{out}");
@@ -7863,7 +7941,7 @@ mod spawn_lifecycle_tests {
     /// as missing data; "none assigned" is an answer.
     #[test]
     fn unassigned_worker_says_none_assigned() {
-        let out = format_assigned_task_info(None, None, None);
+        let out = format_assigned_task_info(None, None, None, false);
         assert!(out.contains("none assigned"), "{out}");
     }
 
@@ -7871,7 +7949,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn long_titles_are_truncated() {
         let long = "x".repeat(200);
-        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None);
+        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None, false);
         assert!(out.contains('…'), "{out}");
         assert!(
             out.len() < 140,
@@ -9089,6 +9167,7 @@ effort = "high"
             None,
             None,
             Some(("cas-block", "Stuck work", cas_types::TaskStatus::Blocked)),
+            false,
         );
         assert!(out.contains("cas-block"), "{out}");
         assert!(out.contains("blocked"), "{out}");
@@ -9486,6 +9565,7 @@ effort = "high"
                 "Done work",
                 cas_types::TaskStatus::AwaitingMerge,
             )),
+            false,
         );
         assert!(merge.contains("cas-1234"), "{merge}");
         assert!(merge.contains("awaiting merge"), "{merge}");
@@ -9500,6 +9580,7 @@ effort = "high"
                 "Reviewed work",
                 cas_types::TaskStatus::PendingSupervisorReview,
             )),
+            false,
         );
         assert!(review.contains("awaiting supervisor review"), "{review}");
     }
@@ -9515,6 +9596,7 @@ effort = "high"
                 "Old work",
                 cas_types::TaskStatus::AwaitingMerge,
             )),
+            false,
         );
         assert!(out.contains("cas-live"), "{out}");
         assert!(!out.contains("cas-parked"), "{out}");

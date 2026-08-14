@@ -201,7 +201,8 @@ pub use prompt_queue_store::{
     MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
     PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore, PromptRetryDisposition,
     QueuedPrompt, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
-    UndeliveredLifecycleRelay, WakeAttempt, reply_confirms_delivered_message,
+    UndeliveredLifecycleRelay, WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt,
+    WorkerPeerMessageEnqueue, reply_confirms_delivered_message,
 };
 
 // Reminder store for supervisor "Remind Me" feature

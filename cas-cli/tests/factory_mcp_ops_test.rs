@@ -5496,6 +5496,140 @@ async fn test_worker_unresolvable_message_target_fails_without_enqueue() {
     );
 }
 
+/// cas-5068 / GH #335: a worker may warn a same-session peer about a live
+/// collision, but CAS persists an inseparable supervisor-visible copy rather
+/// than opening an unobserved worker chat channel.
+#[tokio::test]
+async fn cas_5068_same_session_peer_warning_reaches_peer_and_supervisor_copy() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "worker-a"),
+        ("CAS_FACTORY_SESSION", "collision-session"),
+        ("CAS_SUPERVISOR_NAME", "supervisor-a"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker_with_id("test-agent-id", "worker-a", Some("collision-session"));
+    env.register_worker_in_session("worker-b", "collision-session");
+    let supervisor_id = env.register_supervisor_in_session("supervisor-a", "collision-session");
+
+    let result = env
+        .service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "worker-b",
+            "Stop: I own customer thread #42; do not send a second draft.",
+            None,
+        )))
+        .await
+        .expect("same-session peer warning must queue");
+    let text = get_text(&result);
+    assert!(text.contains("To: worker-b"), "{text}");
+    assert!(text.contains("supervisor_copy_notification_id:"), "{text}");
+
+    let rows = env.prompt_queue().peek_all(10).expect("queued rows");
+    assert_eq!(rows.len(), 2, "peer warning and supervisor copy: {rows:?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.target == "worker-b" && !row.urgent)
+    );
+    assert!(rows.iter().any(|row| {
+        row.target == "supervisor-a"
+            && !row.urgent
+            && row
+                .prompt
+                .contains("Peer worker message copy — from worker-a to worker-b")
+            && row.prompt.contains("customer thread #42")
+    }));
+
+    let supervisor_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing(supervisor_id);
+    let supervisor_service = CasService::new(supervisor_core, None);
+    let supervisor_poll = supervisor_service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("supervisor must retain peer-message visibility");
+    let supervisor_text = get_text(&supervisor_poll);
+    assert!(
+        supervisor_text.contains("Peer worker message copy — from worker-a to worker-b"),
+        "supervisor copy must be readable through the public inbox: {supervisor_text}"
+    );
+}
+
+#[tokio::test]
+async fn cas_5068_peer_warning_refuses_cross_session_target_without_enqueue() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "worker-a"),
+        ("CAS_FACTORY_SESSION", "session-a"),
+        ("CAS_SUPERVISOR_NAME", "supervisor-a"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker_with_id("test-agent-id", "worker-a", Some("session-a"));
+    env.register_supervisor_in_session("supervisor-a", "session-a");
+    env.register_worker_in_session("worker-b", "session-b");
+
+    let error = env
+        .service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "worker-b",
+            "do not queue across sessions",
+            None,
+        )))
+        .await
+        .expect_err("cross-session worker route must be refused");
+    assert!(
+        error
+            .message
+            .contains("registered worker in factory session 'session-a'")
+            && error.message.contains("target='supervisor'"),
+        "refusal must name the bounded scope and supported alternative: {error:?}"
+    );
+    assert!(env.prompt_queue().peek_all(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
+async fn cas_5068_peer_warning_is_rate_limited_per_recipient() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "worker-a"),
+        ("CAS_FACTORY_SESSION", "collision-session"),
+        ("CAS_SUPERVISOR_NAME", "supervisor-a"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker_with_id("test-agent-id", "worker-a", Some("collision-session"));
+    env.register_worker_in_session("worker-b", "collision-session");
+    env.register_supervisor_in_session("supervisor-a", "collision-session");
+
+    for warning in 0..cas_store::WORKER_PEER_MESSAGE_BURST_LIMIT {
+        env.service
+            .coordination(Parameters(coord_msg(
+                "message",
+                "worker-b",
+                &format!("collision warning #{warning}"),
+                None,
+            )))
+            .await
+            .expect("warning inside peer burst limit");
+    }
+    let error = env
+        .service
+        .coordination(Parameters(coord_msg(
+            "message",
+            "worker-b",
+            "one warning too many",
+            None,
+        )))
+        .await
+        .expect_err("sixth one-minute peer warning must be rate limited");
+    assert!(error.message.contains("rate limit"), "{error:?}");
+    assert_eq!(
+        env.prompt_queue().peek_all(20).expect("queued rows").len(),
+        (cas_store::WORKER_PEER_MESSAGE_BURST_LIMIT * 2) as usize,
+        "each allowed warning must retain its supervisor copy"
+    );
+}
+
 /// cas-c061: exact-content dedup is an observable send outcome. Reusing the
 /// existing row ID must not be reported as a newly queued message.
 #[tokio::test]
@@ -5551,10 +5685,17 @@ async fn test_worker_peer_message_does_not_confirm_supervisor_instruction() {
     let _guard = EnvGuard::set(&[
         ("CAS_AGENT_ROLE", "worker"),
         ("CAS_AGENT_NAME", "swift-fox"),
-        ("CAS_SUPERVISOR_NAME", "peer-worker"),
+        ("CAS_SUPERVISOR_NAME", "supervisor"),
+        ("CAS_FACTORY_SESSION", "peer-message-session"),
     ]);
     let env = FactoryTestEnv::new();
-    env.register_worker("peer-worker");
+    env.register_worker_with_id(
+        "test-agent-id",
+        "swift-fox",
+        Some("peer-message-session"),
+    );
+    env.register_worker_in_session("peer-worker", "peer-message-session");
+    env.register_supervisor_in_session("supervisor", "peer-message-session");
     let instruction = env
         .prompt_queue()
         .enqueue_urgent(

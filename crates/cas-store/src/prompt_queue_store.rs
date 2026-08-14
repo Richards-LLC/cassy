@@ -31,6 +31,12 @@ const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// transport-delivered copy is still awaiting confirmation.
 const PROMPT_DUPLICATE_WINDOW_SECS: i64 = 30;
 
+/// A peer warning is for an immediate shared-resource collision, not a
+/// general worker chat channel. Keep one sender from monopolizing a peer's
+/// queue while still allowing several independent collision warnings.
+pub const WORKER_PEER_MESSAGE_BURST_LIMIT: i64 = 5;
+const WORKER_PEER_MESSAGE_BURST_WINDOW_SECS: i64 = 60;
+
 /// Age after which an *undelivered* queue row is treated as stale and is
 /// quarantined instead of delivered (cas-d047, GH #69).
 ///
@@ -389,6 +395,17 @@ pub enum EnqueueOutcome {
     Created(i64),
     /// A recent, delivered, still-unconfirmed identical worker report exists.
     SuppressedDuplicate(i64),
+}
+
+/// The two durable rows created for an authorized worker-to-worker warning.
+///
+/// The supervisor row is deliberately part of the same store transaction as
+/// the recipient row: a peer route without supervisory visibility is not a
+/// valid route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerPeerMessageEnqueue {
+    pub recipient_id: i64,
+    pub supervisor_copy_id: i64,
 }
 
 impl EnqueueOutcome {
@@ -1165,6 +1182,22 @@ pub trait PromptQueueStore: Send + Sync {
         priority: Option<NotificationPriority>,
         urgent: bool,
     ) -> Result<EnqueueOutcome>;
+
+    /// Atomically enqueue a same-factory-session worker warning and a visible
+    /// copy for its supervisor. The store enforces the bounded peer burst so
+    /// every service surface shares the same durable policy.
+    fn enqueue_worker_peer_with_supervisor_copy(
+        &self,
+        source: &str,
+        recipient: &str,
+        supervisor: &str,
+        prompt: &str,
+        supervisor_copy: &str,
+        factory_session: &str,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+    ) -> Result<WorkerPeerMessageEnqueue>;
 
     /// Queue a prompt with structured sender attribution persisted on the same
     /// durable row. Existing MCP senders pass `None`; Commander messages pass
@@ -2319,6 +2352,60 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             urgent,
             None,
         )
+    }
+
+    fn enqueue_worker_peer_with_supervisor_copy(
+        &self,
+        source: &str,
+        recipient: &str,
+        supervisor: &str,
+        prompt: &str,
+        supervisor_copy: &str,
+        factory_session: &str,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+    ) -> Result<WorkerPeerMessageEnqueue> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now();
+            let cutoff = (now - chrono::Duration::seconds(WORKER_PEER_MESSAGE_BURST_WINDOW_SECS))
+                .to_rfc3339();
+            let recent: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM prompt_queue \
+                 WHERE source = ?1 AND target = ?2 AND factory_session = ?3 AND created_at >= ?4",
+                params![source, recipient, factory_session, cutoff],
+                |row| row.get(0),
+            )?;
+            if recent >= WORKER_PEER_MESSAGE_BURST_LIMIT {
+                return Err(StoreError::Other(format!(
+                    "worker peer message rate limit: at most {WORKER_PEER_MESSAGE_BURST_LIMIT} messages per minute to one peer"
+                )));
+            }
+
+            let now_text = now.to_rfc3339();
+            let priority: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
+            tx.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+                params![source, supervisor, supervisor_copy, now_text, factory_session, summary, priority],
+            )?;
+            let supervisor_copy_id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![source, recipient, prompt, now_text, factory_session, summary, priority, i64::from(urgent)],
+            )?;
+            let recipient_id = tx.last_insert_rowid();
+            let _ = capture_message_event(&tx, source, supervisor);
+            let _ = capture_message_event(&tx, source, recipient);
+            tx.commit()?;
+            Ok(WorkerPeerMessageEnqueue {
+                recipient_id,
+                supervisor_copy_id,
+            })
+        })
     }
 
     fn enqueue_attributed_urgent_with_outcome(

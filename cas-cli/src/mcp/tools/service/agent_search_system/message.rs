@@ -315,6 +315,9 @@ impl CasService {
             .ok()
             .or_else(|| agent_from_store.as_ref().map(|a| a.role.to_string()))
             .unwrap_or_else(|| "primary".to_string());
+        let factory_session = std::env::var("CAS_FACTORY_SESSION")
+            .ok()
+            .filter(|session| !session.trim().is_empty());
 
         let resolve_supervisor_name = || -> Option<String> {
             if let Ok(name) = std::env::var("CAS_SUPERVISOR_NAME") {
@@ -340,6 +343,7 @@ impl CasService {
         };
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
+        let mut peer_supervisor_copy = None;
         let resolved_target = if role == "worker" {
             if target == "supervisor" {
                 resolve_supervisor_name().ok_or_else(|| {
@@ -353,16 +357,79 @@ impl CasService {
                 ));
             } else {
                 let supervisor_name = resolve_supervisor_name();
-                if supervisor_name.as_deref() != Some(&target) {
-                    return Err(Self::error(
-                        ErrorCode::INVALID_REQUEST,
-                        format!(
-                            "Workers can only message their supervisor. Use target='supervisor' or '{}'",
-                            supervisor_name.unwrap_or_else(|| "<supervisor>".to_string())
-                        ),
-                    ));
+                let named_supervisor_is_registered = supervisor_name.as_deref() == Some(&target)
+                    && crate::store::open_agent_store(&self.inner.cas_root)
+                        .ok()
+                        .and_then(|store| store.list(None).ok())
+                        .is_some_and(|agents| {
+                            agents.iter().any(|agent| {
+                                agent.role == cas_types::AgentRole::Supervisor
+                                    && agent.name.eq_ignore_ascii_case(&target)
+                            })
+                        });
+                if named_supervisor_is_registered {
+                    target
+                } else {
+                    // cas-5068 / GH #335: peer contact is a narrow,
+                    // supervisor-visible collision-warning lane, not general
+                    // worker chat. Environment names alone must not grant
+                    // cross-session access; both sides are typed store rows.
+                    use crate::store::open_agent_store;
+                    use cas_types::AgentRole;
+
+                    let session = factory_session.as_deref().ok_or_else(|| {
+                        Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            "Workers can only message their supervisor or a same-session registered peer; this caller has no named factory session. Use target='supervisor' instead",
+                        )
+                    })?;
+                    let source_agent = agent_from_store.as_ref().filter(|agent| {
+                        agent.role == AgentRole::Worker
+                            && agent.factory_session.as_deref() == Some(session)
+                    }).ok_or_else(|| {
+                        Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            "Workers can only message their supervisor or a same-session registered peer; this caller is not a registered worker in the current factory session. Use target='supervisor' instead",
+                        )
+                    })?;
+                    let agent_store = open_agent_store(&self.inner.cas_root).map_err(|error| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to resolve peer message scope: {error}"),
+                        )
+                    })?;
+                    let agents = agent_store.list(None).map_err(|error| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to resolve peer message scope: {error}"),
+                        )
+                    })?;
+                    let peer = agents.iter().find(|agent| {
+                        agent.role == AgentRole::Worker
+                            && agent.id != source_agent.id
+                            && agent.name.eq_ignore_ascii_case(&target)
+                            && agent.factory_session.as_deref() == Some(session)
+                    }).ok_or_else(|| {
+                        Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            format!(
+                                "Workers can only message their supervisor or another registered worker in factory session '{session}'. Use target='supervisor' for '{}'",
+                                supervisor_name.unwrap_or_else(|| "<supervisor>".to_string())
+                            ),
+                        )
+                    })?;
+                    let supervisor = agents.iter().find(|agent| {
+                        agent.role == AgentRole::Supervisor
+                            && agent.factory_session.as_deref() == Some(session)
+                    }).ok_or_else(|| {
+                        Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            "Peer messages require a registered supervisor in the same factory session; use target='supervisor' instead",
+                        )
+                    })?;
+                    peer_supervisor_copy = Some(supervisor.name.clone());
+                    peer.name.clone()
                 }
-                target
             }
         } else {
             target
@@ -598,15 +665,13 @@ impl CasService {
             use crate::store::open_task_store_local;
             use cas_types::TaskStatus;
 
-            let merge_task = open_task_store_local(&self.inner.cas_root).ok().and_then(|store| {
-                let parked = store.list(Some(TaskStatus::AwaitingMerge)).ok()?;
-                select_unambiguous_merge_task(
-                    &parked,
-                    &display_name,
-                    req.task_id.as_deref(),
-                )
-                .cloned()
-            });
+            let merge_task = open_task_store_local(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| {
+                    let parked = store.list(Some(TaskStatus::AwaitingMerge)).ok()?;
+                    select_unambiguous_merge_task(&parked, &display_name, req.task_id.as_deref())
+                        .cloned()
+                });
 
             if let Some(task) = merge_task
                 && let Some(work_target) = task.deliverables.work_target.as_ref()
@@ -688,7 +753,6 @@ impl CasService {
             || resolved_target.eq_ignore_ascii_case("director")
             || resolved_target_agent.is_some();
 
-        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
         let urgent = req.urgent.unwrap_or(false);
         // Urgent messages break the target's in-flight turn, so they must jump
         // the queue ahead of any backlog: force Critical priority when urgent
@@ -873,41 +937,72 @@ impl CasService {
         // at debug so normal sessions stay quiet; enable via
         // `RUST_LOG=cas::coordination=debug`.
         let enqueue_started = std::time::Instant::now();
-        let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
-            &display_name,
-            &resolved_target,
-            &message,
-            factory_session.as_deref(),
-            Some(summary.as_str()),
-            priority,
-            urgent,
-        ) {
-            Ok(id) => id,
-            Err(error) => {
-                // Compensate halt fan-out so we never leave halt without the
-                // corresponding urgent message (all-or-none).
-                if !halt_compensation.is_empty() {
-                    use crate::store::open_agent_store;
-                    if let Ok(agent_store) = open_agent_store(&self.inner.cas_root) {
-                        for (id, prev) in halt_compensation.drain(..) {
-                            if let Ok(mut a) = agent_store.get(&id) {
-                                a.metadata = prev;
-                                let _ = agent_store.update(&a);
-                            }
-                        }
+        let peer_copy_message = peer_supervisor_copy.as_ref().map(|_| {
+            format!(
+                "Peer worker message copy — from {display_name} to {resolved_target}.\n\n{message}"
+            )
+        });
+        let (message_id, duplicate_suppressed, supervisor_copy_id) =
+            if let Some(supervisor) = peer_supervisor_copy.as_deref() {
+                let session = factory_session
+                    .as_deref()
+                    .expect("peer scope requires a factory session");
+                match queue.enqueue_worker_peer_with_supervisor_copy(
+                    &display_name,
+                    &resolved_target,
+                    supervisor,
+                    &message,
+                    peer_copy_message.as_deref().expect("peer copy text"),
+                    session,
+                    Some(summary.as_str()),
+                    priority,
+                    urgent,
+                ) {
+                    Ok(ids) => (ids.recipient_id, false, Some(ids.supervisor_copy_id)),
+                    Err(error) => {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            format!("Could not queue scoped peer message: {error}"),
+                        ));
                     }
                 }
-                return Err(Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to queue message: {error}"),
-                ));
-            }
-        };
-        let message_id = enqueue_outcome.id();
-        let duplicate_suppressed = matches!(
-            enqueue_outcome,
-            cas_store::EnqueueOutcome::SuppressedDuplicate(_)
-        );
+            } else {
+                let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
+                    &display_name,
+                    &resolved_target,
+                    &message,
+                    factory_session.as_deref(),
+                    Some(summary.as_str()),
+                    priority,
+                    urgent,
+                ) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        // Compensate halt fan-out so we never leave halt without the
+                        // corresponding urgent message (all-or-none).
+                        if !halt_compensation.is_empty() {
+                            use crate::store::open_agent_store;
+                            if let Ok(agent_store) = open_agent_store(&self.inner.cas_root) {
+                                for (id, prev) in halt_compensation.drain(..) {
+                                    if let Ok(mut a) = agent_store.get(&id) {
+                                        a.metadata = prev;
+                                        let _ = agent_store.update(&a);
+                                    }
+                                }
+                            }
+                        }
+                        return Err(Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to queue message: {error}"),
+                        ));
+                    }
+                };
+                let duplicate_suppressed = matches!(
+                    enqueue_outcome,
+                    cas_store::EnqueueOutcome::SuppressedDuplicate(_)
+                );
+                (enqueue_outcome.id(), duplicate_suppressed, None)
+            };
 
         if let Some(notification_id) = explicit_reply_to {
             queue.ack(notification_id).map_err(|error| {
@@ -1169,9 +1264,12 @@ impl CasService {
         }
 
         Ok(Self::success(format!(
-            "{} queued\n\nnotification_id: {}\nFrom: {} ({})\nTo: {}\n{}Message: {}",
+            "{} queued\n\nnotification_id: {}\n{}From: {} ({})\nTo: {}\n{}Message: {}",
             if urgent { "URGENT message" } else { "Message" },
             message_id,
+            supervisor_copy_id
+                .map(|id| format!("supervisor_copy_notification_id: {id}\n"))
+                .unwrap_or_default(),
             display_name,
             role,
             resolved_target,
@@ -1197,11 +1295,11 @@ impl CasService {
             std::env::var("CAS_AGENT_NAME").ok(),
         )
         .ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_REQUEST,
-                    "inbox_poll requires a registered agent identity",
-                )
-            })?;
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "inbox_poll requires a registered agent identity",
+            )
+        })?;
         let factory_session = std::env::var("CAS_FACTORY_SESSION")
             .ok()
             .filter(|session| !session.trim().is_empty())
@@ -1299,9 +1397,7 @@ impl CasService {
         crate::harness_policy::mirror_receipts_across_aliases(&*queue, &messages, &aliases);
 
         if messages.is_empty() {
-            return Ok(Self::success(format!(
-                "No unread messages for {recipient}"
-            )));
+            return Ok(Self::success(format!("No unread messages for {recipient}")));
         }
 
         // cas-99d2 (GH #127): a row the daemon already handed to this
@@ -1789,26 +1885,25 @@ fn enrich_report_from_harness_artifact(
     };
     let Some(agent) = agents.into_iter().find(|agent| {
         (agent.name == report.target || agent.id == report.target)
-            && report.factory_session.as_ref().is_none_or(|session| {
-                agent.factory_session.as_ref() == Some(session)
-            })
+            && report
+                .factory_session
+                .as_ref()
+                .is_none_or(|session| agent.factory_session.as_ref() == Some(session))
     }) else {
         return;
     };
     let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-    let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-        cas_root,
-        &agent,
-    ) else {
+    let Some(path) =
+        crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(cas_root, &agent)
+    else {
         return;
     };
-    let observations =
-        crate::mcp::tools::service::harness_observation::observations_after_delivery(
-            &path,
-            cli,
-            delivered_at,
-            &report.prompt,
-        );
+    let observations = crate::mcp::tools::service::harness_observation::observations_after_delivery(
+        &path,
+        cli,
+        delivered_at,
+        &report.prompt,
+    );
     if let Some(wake) = observations.wake {
         report.wake = ObservationStatus::Observed;
         report.wake_observed_at = Some(wake.at);
@@ -1869,7 +1964,11 @@ mod inbox_poll_identity_tests {
         let mut unique = lines.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(unique.len(), 3, "wake states collapse to the same text: {lines:?}");
+        assert_eq!(
+            unique.len(),
+            3,
+            "wake states collapse to the same text: {lines:?}"
+        );
     }
 
     /// A confirmed surfacing outranks whatever the nudge did: the message
@@ -1994,10 +2093,8 @@ mod inbox_poll_identity_tests {
         unsafe { std::env::set_var("CODEX_HOME", &codex_home) };
 
         let agent_store = crate::store::open_agent_store(&cas_root).unwrap();
-        let mut agent = cas_types::Agent::new(
-            "live-worker-session".to_string(),
-            "worker-a".to_string(),
-        );
+        let mut agent =
+            cas_types::Agent::new("live-worker-session".to_string(), "worker-a".to_string());
         agent.role = cas_types::AgentRole::Worker;
         agent.factory_session = Some("factory-1".to_string());
         agent
@@ -2012,7 +2109,12 @@ mod inbox_poll_identity_tests {
         queue.mark_transport_delivered(message_id).unwrap();
         let mut report = queue.message_delivery_report(message_id).unwrap().unwrap();
         assert_eq!(report.wake, ObservationStatus::Unobserved);
-        assert!(serde_json::to_value(&report).unwrap().get("prompt").is_none());
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("prompt")
+                .is_none()
+        );
 
         enrich_report_from_harness_artifact(&cas_root, &mut report);
 

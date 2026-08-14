@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.68.1] - 2026-08-14
+
+### Fixed
+- **The v2.68 delivery and recovery wave is now installable on Linux x86_64.** Release builds use the compiler-specific portable baseline, rebuild native dependencies from source before auditing, and fail immediately when a declared native target cannot be produced on the current host.
+- **Factory startup and recall keep using the information that is current and relevant.** Base selection consistently prefers the fresh remote-tracking ref, and mid-session recall prioritizes the current request over an overlong task title.
+- **Validation diagnostics remain accurate under edge cases.** Scoped-proof validation recognizes nested integration modules, and the unknown-tool MCP test no longer claims an unproven server-side mechanism when its historical timeout cannot be reproduced from retained evidence.
+
 ## [2.68.0] - 2026-08-14
 
 ### Added

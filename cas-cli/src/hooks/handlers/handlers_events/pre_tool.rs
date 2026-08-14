@@ -1146,64 +1146,14 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
         }
     }
 
-    // DENY: HEAD is on a protected branch (main/master/staging) or detached.
-    // Any other named branch — factory/*, feature/*, fix/*, epic/*, etc. — is allowed.
-    // Applies to BOTH isolated and non-isolated factory workers (cas-ba04): a worker
-    // without CAS_CLONE_PATH running in the shared checkout must not commit to main.
+    // Resolve HEAD once. Protected branches and detached HEAD retain the
+    // established WORKER COMMIT GUARD contract before identity-specific
+    // checks run. Besides keeping the message stable, this preserves the
+    // shared-checkout remedy (worktree first, restore trunk on fallback).
     let worker_name =
         std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
 
-    // DENY: HEAD is not the exact branch this worker owns (cas-30c6,
-    // cas-0efb). The earlier sibling-only comparison still allowed a worker
-    // to push `HEAD:refs/heads/factory/<mine>` while the shared checkout sat
-    // on a feature/epic branch. Requiring the canonical branch here makes the
-    // source of both commits and pushes explicit.
-    //
-    // The denylist above only protects the trunk, and `factory/*` is an
-    // allowed prefix (cas-7e7b), so a worker whose harness was bound to a
-    // sibling's worktree passed every check and could commit onto that
-    // sibling's branch — respawn 1034. Resolve the canonical binding from the
-    // worker's own registered identity instead; `my_context` reports the same
-    // classification from the same module, so the two never disagree.
-    //
-    // Only fires when the worker's identity is actually known: without
-    // CAS_AGENT_NAME there is no canonical branch to compare against, and
-    // guessing would deny every legitimate `factory/*` commit.
-    if let Some(registered_name) = std::env::var("CAS_AGENT_NAME")
-        .ok()
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-    {
-        let branch = get_branch_at_cwd(cwd);
-        match crate::factory_isolation::classify_worker_binding(&registered_name, branch.as_deref())
-        {
-            crate::factory_isolation::WorkerBinding::Own => {}
-            crate::factory_isolation::WorkerBinding::Sibling { owner } => {
-                return Some(crate::factory_isolation::sibling_misbinding_message(
-                    &registered_name,
-                    &owner,
-                    cwd,
-                ));
-            }
-            crate::factory_isolation::WorkerBinding::SharedTrunk
-            | crate::factory_isolation::WorkerBinding::Other => {
-                let actual = branch.as_deref().unwrap_or("<detached HEAD>");
-                let expected = crate::factory_isolation::expected_worker_branch(&registered_name);
-                return Some(format!(
-                    "🚫 WORKER BRANCH MISMATCH: you are '{registered_name}', but {cwd} is \
-                     checked out on '{actual}'.\n\nCommits, merges, and pushes are permitted only \
-                     from your own '{expected}' branch. A shared checkout can change HEAD between \
-                     tool calls; pushing from whatever branch happens to be current can graft \
-                     another worker's commits onto '{expected}'.\n\nMove to the worktree that owns \
-                     '{expected}', verify `git rev-parse --abbrev-ref HEAD` prints that exact \
-                     branch, then retry. If this is a non-isolated worker in the shared checkout, \
-                     stop and ask the supervisor to respawn it with isolate=true."
-                ));
-            }
-        }
-    }
-
-    match get_branch_at_cwd(cwd) {
+    let branch = match get_branch_at_cwd(cwd) {
         None => {
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: HEAD is detached — cannot determine branch.\n\n\
@@ -1256,7 +1206,60 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
                 not the Claude Code PreToolUse harness). Switching branches is the only option."
             ));
         }
-        Some(_) => {} // any non-protected named branch — allowed
+        Some(branch) => branch,
+    };
+
+    // DENY: a shared, non-isolated checkout is not on the exact branch this
+    // worker owns (cas-0efb). The earlier sibling-only comparison still
+    // allowed a worker to push `HEAD:refs/heads/factory/<mine>` while the
+    // shared checkout sat on a feature/epic branch. Isolated worktrees keep
+    // the established denylist semantics: feature/epic branches are valid
+    // because CAS_CLONE_PATH already proves checkout ownership, while a
+    // sibling factory branch remains an identity mismatch (cas-30c6).
+    //
+    // The denylist above only protects the trunk, and `factory/*` is an
+    // allowed prefix (cas-7e7b), so a worker whose harness was bound to a
+    // sibling's worktree passed every check and could commit onto that
+    // sibling's branch — respawn 1034. Resolve the canonical binding from the
+    // worker's own registered identity instead; `my_context` reports the same
+    // classification from the same module, so the two never disagree.
+    //
+    // Only fires when the worker's identity is actually known: without
+    // CAS_AGENT_NAME there is no canonical branch to compare against, and
+    // guessing would deny every legitimate `factory/*` commit.
+    if let Some(registered_name) = std::env::var("CAS_AGENT_NAME")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+    {
+        match crate::factory_isolation::classify_worker_binding(&registered_name, Some(&branch))
+        {
+            crate::factory_isolation::WorkerBinding::Own => {}
+            crate::factory_isolation::WorkerBinding::Sibling { owner } => {
+                return Some(crate::factory_isolation::sibling_misbinding_message(
+                    &registered_name,
+                    &owner,
+                    cwd,
+                ));
+            }
+            crate::factory_isolation::WorkerBinding::Other if !is_isolated => {
+                let expected = crate::factory_isolation::expected_worker_branch(&registered_name);
+                return Some(format!(
+                    "🚫 WORKER BRANCH MISMATCH: you are '{registered_name}', but {cwd} is \
+                     checked out on '{branch}'.\n\nCommits, merges, and pushes are permitted only \
+                     from your own '{expected}' branch. A shared checkout can change HEAD between \
+                     tool calls; pushing from whatever branch happens to be current can graft \
+                     another worker's commits onto '{expected}'.\n\nMove to the worktree that owns \
+                     '{expected}', verify `git rev-parse --abbrev-ref HEAD` prints that exact \
+                     branch, then retry. If this is a non-isolated worker in the shared checkout, \
+                     stop and ask the supervisor to respawn it with isolate=true."
+                ));
+            }
+            crate::factory_isolation::WorkerBinding::SharedTrunk => {
+                unreachable!("protected trunk branches return before identity classification")
+            }
+            crate::factory_isolation::WorkerBinding::Other => {}
+        }
     }
 
     None
@@ -2401,7 +2404,10 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("isolated-worker")),
+        ]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(
@@ -2423,7 +2429,10 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("isolated-worker")),
+        ]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(
@@ -2536,6 +2545,7 @@ mod worker_commit_guard_tests {
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("isolated-worker")),
         ]);
 
         let mut input = crate::hooks::handlers::HookInput::default();
@@ -2575,6 +2585,7 @@ mod worker_commit_guard_tests {
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("isolated-worker")),
         ]);
 
         let mut input = crate::hooks::handlers::HookInput::default();

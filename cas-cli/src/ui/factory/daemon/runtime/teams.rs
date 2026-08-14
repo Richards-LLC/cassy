@@ -3760,6 +3760,7 @@ mod tests {
 
         let result = std::process::Command::new("git")
             .args(["commit", "-m", "wip on worker branch"])
+            .env("CAS_AGENT_NAME", "test-worker")
             .current_dir(p)
             .output()
             .unwrap();

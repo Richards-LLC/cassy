@@ -111,7 +111,9 @@ impl WorktreeManager {
             }
 
             let merge_result = match venue {
-                MergeVenue::SharedCheckout => self.git.merge_branch(worker_branch, true),
+                MergeVenue::SharedCheckout => {
+                    self.git.merge_branch(epic_branch, worker_branch, true)
+                }
                 MergeVenue::TempWorktree => {
                     self.git
                         .merge_branch_via_temp_worktree(epic_branch, worker_branch, true)

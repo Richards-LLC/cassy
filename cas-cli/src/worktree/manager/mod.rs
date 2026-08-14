@@ -518,7 +518,10 @@ impl WorktreeManager {
             // the branch ref is advanced by compare-and-swap, so the
             // supervisor's next commit still lands where they were.
             let merge_result = match self.merge_venue(&worktree.parent_branch) {
-                MergeVenue::SharedCheckout => self.git.merge_branch(&worktree.branch, true),
+                MergeVenue::SharedCheckout => {
+                    self.git
+                        .merge_branch(&worktree.parent_branch, &worktree.branch, true)
+                }
                 MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
                     &worktree.parent_branch,
                     &worktree.branch,

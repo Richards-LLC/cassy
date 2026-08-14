@@ -34,7 +34,7 @@
 //! All scoring is pure token/set comparison. No embeddings, no I/O. A single
 //! call over 5 candidates is sub-millisecond for realistic memory sizes.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// Facets extracted from a new (not-yet-stored) memory. Callers populate
 /// this from the memory body + request parameters.
@@ -114,6 +114,10 @@ impl DimensionScores {
 pub struct OverlapMatch {
     pub slug: String,
     pub scores: DimensionScores,
+    /// A bounded, deterministic sample of the lexical content shared by the
+    /// two memories. This makes a high-overlap refusal auditable instead of
+    /// asking the caller to infer why a numeric score was assigned.
+    pub matched_terms: Vec<String>,
     /// True if appending a cross-reference to this candidate would exceed
     /// the 3-link cap. Caller should skip the mutation and surface a
     /// refresh recommendation instead.
@@ -211,7 +215,7 @@ fn push_token(out: &mut HashSet<String>, tok: &str) {
 /// are the most discriminating tokens for overlap detection.
 pub fn looks_like_symbol(tok: &str) -> bool {
     let has_path_sep = tok.contains('/') || tok.contains('.');
-    let has_under_or_dash = tok.contains('_') || tok.contains('-');
+    let has_underscore = tok.contains('_');
     let has_upper = tok.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = tok.chars().any(|c| c.is_ascii_lowercase());
     let looks_sha = tok.len() >= 7
@@ -219,7 +223,11 @@ pub fn looks_like_symbol(tok: &str) -> bool {
         && tok.chars().all(|c| c.is_ascii_hexdigit())
         && tok.chars().any(|c| c.is_ascii_digit())
         && tok.chars().any(|c| c.is_ascii_alphabetic());
-    has_path_sep || has_under_or_dash || (has_upper && has_lower) || looks_sha
+    // A hyphen alone is ordinary prose ("factory-session", "branch-ci"),
+    // not a discriminating file/API reference. Treating it as a symbol made
+    // common operational vocabulary triple-count as root cause, solution,
+    // and referenced-file evidence.
+    has_path_sep || has_underscore || (has_upper && has_lower) || looks_sha
 }
 
 /// Convenience extractor: given a memory body (with or without frontmatter),
@@ -265,6 +273,7 @@ pub fn check_overlap(
             OverlapMatch {
                 slug: cand.slug.clone(),
                 scores,
+                matched_terms: matched_terms(new, cand),
                 cap_reached: cand.related_count >= CROSS_REF_CAP,
             }
         })
@@ -330,20 +339,13 @@ fn score_candidate(new: &NewMemoryFacets, cand: &CandidateFacets) -> DimensionSc
     }
 
     // --- Dimension 2: root cause ---
-    // Exact match on the `root_cause` enum value, OR (when both sides lack
-    // the field) body-token overlap on cause-indicating terms.
+    // Exact match on the `root_cause` enum value. When both sides lack
+    // structured cause data, use a conservative whole-body similarity floor:
+    // two shared labels must not impersonate the same causal explanation.
     match (new.root_cause.as_deref(), cand.root_cause.as_deref()) {
         (Some(a), Some(b)) if a == b => s.root_cause = 1,
         (None, None) => {
-            // Fallback: if either side has no structured root_cause, look
-            // for at least 2 shared symbol-shaped tokens in the body — the
-            // salvaged spec's "same underlying mechanism" heuristic.
-            let shared_symbols = new
-                .body_tokens
-                .intersection(&cand.body_tokens)
-                .filter(|t| looks_like_symbol(t))
-                .count();
-            if shared_symbols >= 2 {
+            if body_similarity(new, cand) >= 0.70 {
                 s.root_cause = 1;
             }
         }
@@ -351,16 +353,16 @@ fn score_candidate(new: &NewMemoryFacets, cand: &CandidateFacets) -> DimensionSc
     }
 
     // --- Dimension 3: solution approach ---
-    // "Same fix shape" — approximated as ≥2 body tokens shared that look
-    // like symbols (file paths, APIs, flags). Already-counted file_refs are
-    // allowed to double-dip here; this dimension is about "same
-    // intervention", not novelty.
-    let shared_body_symbols: usize = new
+    // "Same fix shape" requires substantial body similarity, or two true
+    // symbols (paths, APIs, flags) in common. Hyphenated prose is excluded
+    // by `looks_like_symbol`, so shared factory labels cannot claim the same
+    // solution while real implementation references still cross-link.
+    let shared_body_symbols = new
         .body_tokens
         .intersection(&cand.body_tokens)
-        .filter(|t| looks_like_symbol(t))
+        .filter(|term| looks_like_symbol(term))
         .count();
-    if shared_body_symbols >= 2 {
+    if body_similarity(new, cand) >= 0.50 || shared_body_symbols >= 2 {
         s.solution_approach = 1;
     }
 
@@ -411,6 +413,31 @@ fn problem_tokens(title: &str, description: &str) -> HashSet<String> {
     combined.push(' ');
     combined.push_str(description);
     tokenize(&combined)
+}
+
+/// Jaccard similarity over the memory body after existing stop-word removal.
+/// This is deliberately content-based: metadata quality or a pair of shared
+/// labels cannot by themselves make unrelated learnings duplicates.
+fn body_similarity(new: &NewMemoryFacets, cand: &CandidateFacets) -> f32 {
+    let union = new.body_tokens.union(&cand.body_tokens).count();
+    if union == 0 {
+        return 0.0;
+    }
+    new.body_tokens.intersection(&cand.body_tokens).count() as f32 / union as f32
+}
+
+fn matched_terms(new: &NewMemoryFacets, cand: &CandidateFacets) -> Vec<String> {
+    let mut terms: BTreeSet<String> = new
+        .body_tokens
+        .intersection(&cand.body_tokens)
+        .cloned()
+        .collect();
+    terms.extend(
+        problem_tokens(&new.title, &new.description)
+            .intersection(&problem_tokens(&cand.title, &cand.description))
+            .cloned(),
+    );
+    terms.into_iter().take(8).collect()
 }
 
 #[cfg(test)]
@@ -687,6 +714,10 @@ mod tests {
         assert!(looks_like_symbol("2dfe2aa1234567"));
         assert!(!looks_like_symbol("hello"));
         assert!(!looks_like_symbol("world"));
+        assert!(
+            !looks_like_symbol("factory-session"),
+            "ordinary hyphenated prose is not a file/API symbol"
+        );
     }
 
     #[test]
@@ -770,5 +801,61 @@ mod tests {
         c.module = None;
         let s = score_candidate(&n, &c);
         assert_eq!(s.penalty, 0);
+    }
+
+    #[test]
+    fn cas_8c16_shared_factory_vocabulary_is_not_high_overlap() {
+        let mut new = NewMemoryFacets {
+            title: "worker context headroom scheduling".to_string(),
+            ..Default::default()
+        };
+        new.body_tokens = tokenize(
+            "Treat worker context headroom as a scheduling input. A factory-session handoff and shared-worker review do not decide capacity policy.",
+        );
+
+        let mut candidate = CandidateFacets {
+            slug: "merge-backlog".to_string(),
+            title: "worker context for merge-lane backlog coordination".to_string(),
+            ..Default::default()
+        };
+        candidate.body_tokens = tokenize(
+            "Two supervisors can collide on a merge-lane backlog before a factory-session handoff and shared-worker review.",
+        );
+
+        match check_overlap(&new, &[candidate], false) {
+            OverlapDecision::LowOverlap => {}
+            other => panic!("distinct session learning must store, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cas_8c16_near_identical_unstructured_memory_is_still_high_and_auditable() {
+        let title = "merge lane only on branch ci";
+        let body = "merge a lane only on its own branch ci after factory-session handoff";
+        let (body_tokens, file_refs) = extract_facets_from_body(body);
+        let new = NewMemoryFacets {
+            title: title.to_string(),
+            tags: tags(&["branch-ci", "lane-ownership"]),
+            body_tokens: body_tokens.clone(),
+            file_refs: file_refs.clone(),
+            ..Default::default()
+        };
+        let candidate = CandidateFacets {
+            slug: "branch-ci-policy".to_string(),
+            title: title.to_string(),
+            tags: tags(&["branch-ci", "lane-ownership"]),
+            body_tokens,
+            file_refs,
+            ..Default::default()
+        };
+
+        match check_overlap(&new, &[candidate], false) {
+            OverlapDecision::HighOverlap { best, .. } => {
+                assert!(best.scores.net() >= 4);
+                assert!(best.matched_terms.contains(&"branch".to_string()));
+                assert!(best.matched_terms.contains(&"lane".to_string()));
+            }
+            other => panic!("near-identical memory must be blocked, got {other:?}"),
+        }
     }
 }

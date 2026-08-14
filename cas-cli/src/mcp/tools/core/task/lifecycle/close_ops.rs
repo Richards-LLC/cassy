@@ -6671,7 +6671,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              {factory_branch} into {parent_branch}, including the current tip \
              and freshness qualifier (e.g. \
              `{coord} action=message \
-             target=supervisor task_id={} summary=\"ready to merge\" message=\"Fresh after \
+             target=supervisor task_id={} merge_request=true summary=\"ready to merge\" message=\"Fresh after \
              draining unread inbox messages until No unread messages: \
              {factory_branch} tip {branch_tip}; please re-check reachability, then \
              merge into {parent_branch} if still needed\"`). \

@@ -836,6 +836,19 @@ pub(crate) fn assign_task_to_new_worker(
         }
     };
 
+    if matches!(
+        task.status,
+        cas_types::TaskStatus::Closed | cas_types::TaskStatus::Cancelled
+    ) {
+        tracing::warn!(
+            task_id,
+            worker_name,
+            status = %task.status,
+            "cas-8aee: refusing spawn-time pre-assignment for terminal task"
+        );
+        return false;
+    }
+
     if let Some(ref existing) = task.assignee {
         if existing == worker_name {
             // Early-assign already pinned this worker (cas-7a94 isolate path).
@@ -3544,6 +3557,27 @@ mod tests {
             store.get("cas-abc1").unwrap().assignee.as_deref(),
             Some("recipes-fixer")
         );
+    }
+
+    /// cas-8aee (GH #336): a spawn that races a terminal close must not make
+    /// the close look like a new assignment or queue start instructions.
+    #[test]
+    fn assign_task_to_new_worker_refuses_terminal_tasks() {
+        let (_temp, cas_dir) = seeded_cas_dir();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        for (id, status) in [
+            ("cas-closed", TaskStatus::Closed),
+            ("cas-cancelled", TaskStatus::Cancelled),
+        ] {
+            store.add(&task_with(id, None, status)).unwrap();
+            assert!(
+                !assign_task_to_new_worker(&cas_dir, id, "swift-fox"),
+                "terminal task {id} must not be rebound during worker spawn"
+            );
+            let task = store.get(id).unwrap();
+            assert_eq!(task.status, status);
+            assert_eq!(task.assignee, None);
+        }
     }
 
     // --- cas-7a94: shutdown / cancel must release pre-assigns -----------

@@ -7,6 +7,66 @@ use std::str::FromStr;
 const MERGE_ENVELOPE_OPEN: &str = "<cas-merge-request>";
 const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
 
+/// The task id an assignment-like prompt asks its recipient to start.
+///
+/// This is deliberately shared by daemon delivery and `inbox_poll`: an
+/// assignment queued before a task reaches a terminal state must not become a
+/// fresh-looking `task start` instruction merely because it took a different
+/// transport. Spawn briefs use the same imperative shape and therefore belong
+/// to this contract too.
+pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
+    let lowered = prompt.to_lowercase();
+    const ASSIGNMENT_PHRASES: [&str; 5] = [
+        "you have been assigned",
+        "you are assigned",
+        "you're assigned",
+        "assigned task",
+        "you were spawned for task",
+    ];
+    if !ASSIGNMENT_PHRASES
+        .iter()
+        .any(|phrase| lowered.contains(phrase))
+    {
+        return None;
+    }
+    for marker in [
+        "action=start id=",
+        "task id:",
+        "assigned task ",
+        "spawned for task ",
+    ] {
+        if let Some(index) = lowered.find(marker)
+            && let Some(id) = first_task_id_token(&prompt[index + marker.len()..])
+        {
+            return Some(id);
+        }
+    }
+    first_task_id_token(prompt)
+}
+
+/// Terminal task states make an assignment's `task start` imperative stale.
+/// Missing/unreadable state deliberately returns false: delivery must fail
+/// open unless CAS has positive terminal evidence.
+pub(crate) fn assignment_targets_terminal_task(prompt: &str, status: TaskStatus) -> Option<String> {
+    matches!(status, TaskStatus::Closed | TaskStatus::Cancelled)
+        .then(|| assignment_solicited_task_id(prompt))
+        .flatten()
+}
+
+fn first_task_id_token(text: &str) -> Option<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find(|token| {
+            let Some(suffix) = token
+                .strip_prefix("cas-")
+                .or_else(|| token.strip_prefix("CAS-"))
+            else {
+                return false;
+            };
+            suffix.len() >= 4 && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .map(|token| format!("cas-{}", &token[4..]))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MergeRequestEnvelope {
     pub task_id: String,
@@ -570,6 +630,49 @@ pub(crate) fn revalidate_lifecycle_prompt(
         };
     }
     LifecyclePromptDecision::Deliver
+}
+
+#[cfg(test)]
+mod cas_8aee_assignment_delivery_tests {
+    use super::{assignment_solicited_task_id, assignment_targets_terminal_task};
+    use cas_types::TaskStatus;
+
+    #[test]
+    fn queued_assignment_closed_before_delivery_is_not_startable() {
+        let prompt = "You have been assigned a new task:\n\
+                      Task ID: cas-8aee\n\
+                      Start working: mcp__cas__task action=start id=cas-8aee\n\
+                      Then send an ACK to supervisor with your execution plan.";
+
+        assert_eq!(
+            assignment_targets_terminal_task(prompt, TaskStatus::Closed).as_deref(),
+            Some("cas-8aee"),
+            "the queued assignment must be withdrawn rather than render its stale start/ACK instructions"
+        );
+        assert!(
+            assignment_targets_terminal_task(prompt, TaskStatus::InProgress).is_none(),
+            "only positive terminal evidence may suppress a worker wake"
+        );
+    }
+
+    #[test]
+    fn queued_spawn_intro_closed_before_delivery_is_not_startable() {
+        let prompt = "You were spawned for task cas-bc5c — \"Customer communications\" — and it is assigned to you now.\n\
+                      Start with `mcp__cas__task action=show id=cas-bc5c`, then \
+                      `mcp__cas__task action=start id=cas-bc5c` before you change any code.";
+
+        assert_eq!(
+            assignment_solicited_task_id(prompt).as_deref(),
+            Some("cas-bc5c")
+        );
+        for status in [TaskStatus::Closed, TaskStatus::Cancelled] {
+            assert_eq!(
+                assignment_targets_terminal_task(prompt, status).as_deref(),
+                Some("cas-bc5c"),
+                "a terminal spawn intro must not reach any renderer with task-start guidance"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

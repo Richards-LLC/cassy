@@ -28,6 +28,7 @@ pub enum LifecycleTransition {
     Started,
     Blocked,
     ReadyReopened,
+    VerificationRejectedReopened,
     CloseRejected,
     AwaitingMerge,
     Closed,
@@ -39,6 +40,7 @@ impl LifecycleTransition {
             Self::Started => "task_started",
             Self::Blocked => "task_blocked",
             Self::ReadyReopened => "task_ready",
+            Self::VerificationRejectedReopened => "task_verification_rejected_reopened",
             Self::CloseRejected => "task_close_rejected",
             Self::AwaitingMerge => "task_awaiting_merge",
             Self::Closed => "task_closed",
@@ -47,7 +49,10 @@ impl LifecycleTransition {
 
     pub fn priority(self) -> NotificationPriority {
         match self {
-            Self::CloseRejected | Self::Blocked | Self::AwaitingMerge => NotificationPriority::High,
+            Self::CloseRejected
+            | Self::Blocked
+            | Self::AwaitingMerge
+            | Self::VerificationRejectedReopened => NotificationPriority::High,
             Self::Started | Self::ReadyReopened | Self::Closed => NotificationPriority::Normal,
         }
     }
@@ -70,7 +75,10 @@ impl LifecycleTransition {
     /// idle-nudge exclusion (cas-dab2) was added to stop.
     pub fn wakes_idle_supervisor(self) -> bool {
         match self {
-            Self::CloseRejected | Self::AwaitingMerge | Self::Blocked => true,
+            Self::CloseRejected
+            | Self::AwaitingMerge
+            | Self::Blocked
+            | Self::VerificationRejectedReopened => true,
             Self::Started | Self::ReadyReopened | Self::Closed => false,
         }
     }
@@ -906,6 +914,10 @@ mod tests {
             "task_ready"
         );
         assert_eq!(
+            LifecycleTransition::VerificationRejectedReopened.as_event_type(),
+            "task_verification_rejected_reopened"
+        );
+        assert_eq!(
             LifecycleTransition::CloseRejected.as_event_type(),
             "task_close_rejected"
         );
@@ -924,6 +936,7 @@ mod tests {
         assert!(LifecycleTransition::AwaitingMerge.wakes_idle_supervisor());
         assert!(LifecycleTransition::CloseRejected.wakes_idle_supervisor());
         assert!(LifecycleTransition::Blocked.wakes_idle_supervisor());
+        assert!(LifecycleTransition::VerificationRejectedReopened.wakes_idle_supervisor());
         assert!(!LifecycleTransition::Started.wakes_idle_supervisor());
         assert!(!LifecycleTransition::ReadyReopened.wakes_idle_supervisor());
         assert!(!LifecycleTransition::Closed.wakes_idle_supervisor());

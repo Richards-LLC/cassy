@@ -509,6 +509,7 @@ impl CasCore {
             }
         }
 
+        let mut rejection_reopened_at = None;
         // Atomically persist the verdict, resolve any active exact-task
         // dispatch, and clear that task's pending transition. If any step
         // fails, all authority and lifecycle writes roll back.
@@ -698,12 +699,13 @@ impl CasCore {
                 } else {
                     format!("{}\n\n{}", task.notes.trim_end(), decision)
                 };
+                let reopened_at = chrono::Utc::now();
                 let changed = tx
                     .execute(
                         "UPDATE tasks
                          SET status = 'open', pending_verification = 0, notes = ?2, updated_at = ?3
                          WHERE id = ?1 AND status = 'pending_supervisor_review'",
-                        rusqlite::params![req.task_id, notes, chrono::Utc::now().to_rfc3339(),],
+                        rusqlite::params![req.task_id, notes, reopened_at.to_rfc3339(),],
                     )
                     .map_err(|e| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
@@ -721,6 +723,7 @@ impl CasCore {
                         data: None,
                     });
                 }
+                rejection_reopened_at = Some(reopened_at);
             } else if delivery_transitioned {
                 tx.execute(
                     "UPDATE tasks
@@ -758,6 +761,46 @@ impl CasCore {
             tx.commit().map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to commit verification transaction: {e}")),
+                data: None,
+            })?;
+        }
+
+        // Reopening after a rejected supervisor review leaves the prior worker
+        // assigned but without an active lease. This is not ordinary ready work:
+        // a supervisor must explicitly resume that worker or replace it. Route
+        // the transition through the durable lifecycle outbox so an idle
+        // supervisor receives one wake-eligible, acknowledgeable recovery cue.
+        if let Some(reopened_at) = rejection_reopened_at {
+            use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+                emit_task_lifecycle_transition, occurrence_from_updated_at, LifecycleTransition,
+            };
+            let supervisor_queue = crate::store::open_supervisor_queue_store(&self.cas_root)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to open supervisor queue for rejection wake: {e}")),
+                    data: None,
+                })?;
+            let prompt_queue = crate::store::open_prompt_queue_store(&self.cas_root).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to open prompt queue for rejection wake: {e}")),
+                data: None,
+            })?;
+            emit_task_lifecycle_transition(
+                supervisor_queue.as_ref(),
+                Some(prompt_queue.as_ref()),
+                agent_store.as_ref(),
+                &req.task_id,
+                &task.title,
+                TaskStatus::PendingSupervisorReview,
+                TaskStatus::Open,
+                &caller_id,
+                Some("Verification rejected; worker remains assigned but inactive. Resume the existing worker or replace it."),
+                LifecycleTransition::VerificationRejectedReopened,
+                &occurrence_from_updated_at(reopened_at),
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Verification rejection reopened task but supervisor recovery wake failed: {e}")),
                 data: None,
             })?;
         }

@@ -2696,8 +2696,7 @@ impl FactoryDaemon {
                 use crate::prompt_revalidation::{
                     MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
                     merge_request_anchor_invalidated_guidance, merge_request_delivery_decision,
-                    merge_request_moot_guidance,
-                    revalidate_merge_request,
+                    merge_request_moot_guidance, revalidate_merge_request,
                 };
 
                 let task = crate::store::open_task_store_local(self.app.cas_dir())
@@ -2734,51 +2733,51 @@ impl FactoryDaemon {
                     &envelope.target_branch,
                 );
 
-                let (suppress_detail, guidance, summary) = match merge_request_delivery_decision(
-                    task.as_ref(),
-                    &envelope,
-                    &git,
-                ) {
-                    MergeRequestDelivery::Deliver => {
-                        if let MergeRequestDecision::Pending { target_tip } = &git
-                            && let Some(refreshed) =
-                                crate::prompt_revalidation::refresh_merge_request_target_tip(
-                                    &queued.prompt,
-                                    target_tip,
-                                )
-                        {
-                            prompt_with_instructions = refreshed;
+                let (suppress_detail, guidance, summary) =
+                    match merge_request_delivery_decision(task.as_ref(), &envelope, &git) {
+                        MergeRequestDelivery::Deliver => {
+                            if let MergeRequestDecision::Pending { target_tip } = &git
+                                && let Some(refreshed) =
+                                    crate::prompt_revalidation::refresh_merge_request_target_tip(
+                                        &queued.prompt,
+                                        target_tip,
+                                    )
+                            {
+                                prompt_with_instructions = refreshed;
+                            }
+                            merge_request_task = Some(envelope.task_id.clone());
+                            (None, None, "")
                         }
-                        merge_request_task = Some(envelope.task_id.clone());
-                        (None, None, "")
-                    }
-                    MergeRequestDelivery::SuppressLanded { target_tip } => (
-                        Some("merge request branch tip already integrated into target".to_string()),
-                        Some(merge_landed_guidance(
-                            &envelope.task_id,
-                            &envelope.branch_tip,
-                            &envelope.target_branch,
-                            &target_tip,
-                        )),
-                        "merge already landed — re-close task",
-                    ),
-                    MergeRequestDelivery::SuppressResolved { status } => (
-                        Some(format!(
-                            "merge request is moot: task is {status}, not awaiting merge"
-                        )),
-                        Some(merge_request_moot_guidance(&envelope.task_id, status)),
-                        "merge request no longer applies",
-                    ),
-                    MergeRequestDelivery::SuppressInvalidatedAnchor { current_anchor } => (
-                        Some("merge request delivery anchor was invalidated".to_string()),
-                        Some(merge_request_anchor_invalidated_guidance(
-                            &envelope.task_id,
-                            &envelope.branch_tip,
-                            current_anchor.as_deref(),
-                        )),
-                        "merge request delivery anchor no longer applies",
-                    ),
-                };
+                        MergeRequestDelivery::SuppressLanded { target_tip } => (
+                            Some(
+                                "merge request branch tip already integrated into target"
+                                    .to_string(),
+                            ),
+                            Some(merge_landed_guidance(
+                                &envelope.task_id,
+                                &envelope.branch_tip,
+                                &envelope.target_branch,
+                                &target_tip,
+                            )),
+                            "merge already landed — re-close task",
+                        ),
+                        MergeRequestDelivery::SuppressResolved { status } => (
+                            Some(format!(
+                                "merge request is moot: task is {status}, not awaiting merge"
+                            )),
+                            Some(merge_request_moot_guidance(&envelope.task_id, status)),
+                            "merge request no longer applies",
+                        ),
+                        MergeRequestDelivery::SuppressInvalidatedAnchor { current_anchor } => (
+                            Some("merge request delivery anchor was invalidated".to_string()),
+                            Some(merge_request_anchor_invalidated_guidance(
+                                &envelope.task_id,
+                                &envelope.branch_tip,
+                                current_anchor.as_deref(),
+                            )),
+                            "merge request delivery anchor no longer applies",
+                        ),
+                    };
 
                 if let (Some(detail), Some(guidance)) = (suppress_detail, guidance) {
                     match queue.enqueue_urgent_with_outcome(

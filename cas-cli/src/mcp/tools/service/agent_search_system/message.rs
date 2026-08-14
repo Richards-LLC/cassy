@@ -1275,16 +1275,16 @@ impl CasService {
             // a queued MERGE REQUIRED relay must not survive request_changes,
             // cancel, reset, or a completed merge merely because no daemon
             // tick ran before the supervisor polled.
-            let lifecycle_task = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
-                .and_then(|envelope| {
-                    task_store
-                        .as_ref()
-                        .and_then(|store| store.get(&envelope.task_id).ok())
-                });
-            let stale_lifecycle = lifecycle_relay_is_stale_at_inbox_pop(
+            let lifecycle_task = crate::prompt_revalidation::parse_lifecycle_envelope(
                 &message.prompt,
-                lifecycle_task.as_ref(),
-            );
+            )
+            .and_then(|envelope| {
+                task_store
+                    .as_ref()
+                    .and_then(|store| store.get(&envelope.task_id).ok())
+            });
+            let stale_lifecycle =
+                lifecycle_relay_is_stale_at_inbox_pop(&message.prompt, lifecycle_task.as_ref());
             if stale_lifecycle {
                 let task_id = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
                     .map(|envelope| envelope.task_id)
@@ -1718,7 +1718,8 @@ fn enrich_report_from_harness_artifact(
 mod inbox_poll_identity_tests {
     use super::{
         enrich_report_from_harness_artifact, interrupt_unconfirmed_message,
-        lifecycle_relay_is_stale_at_inbox_pop, recipient_transport_warning, resolve_inbox_recipient,
+        lifecycle_relay_is_stale_at_inbox_pop, recipient_transport_warning,
+        resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
 

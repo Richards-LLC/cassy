@@ -108,9 +108,7 @@ pub(crate) enum MergeRequestDelivery {
     /// this message asked the supervisor to merge was invalidated. This is
     /// deliberately distinct from `SuppressResolved`: a task can return to
     /// `AwaitingMerge` after request_changes, reset, or a reopen.
-    SuppressInvalidatedAnchor {
-        current_anchor: Option<String>,
-    },
+    SuppressInvalidatedAnchor { current_anchor: Option<String> },
 }
 
 /// Decide a merge request's fate from live state only (cas-6eab).
@@ -1356,7 +1354,11 @@ mod tests {
             "unverifiable git state must never suppress a merge request"
         );
         assert_eq!(
-            merge_request_delivery_decision(None, &merge_envelope(), &MergeRequestDecision::Unverifiable),
+            merge_request_delivery_decision(
+                None,
+                &merge_envelope(),
+                &MergeRequestDecision::Unverifiable,
+            ),
             MergeRequestDelivery::Deliver,
             "an unreadable task is uncertainty, not evidence of staleness"
         );

@@ -77,7 +77,7 @@ struct JsonRpcError {
 /// being masked by the harness:
 ///   * `server_handler::call_tool` self-times-out at 55s and replies with a
 ///     structured "timed out after 55s" error.
-///   * `runtime::EAGER_INIT_BUDGET` aborts startup at 45s.
+///   * `runtime::EAGER_INIT_BUDGET` checks the startup sequence at 45s.
 /// 90s clears both with slack for loaded CI, and is ~6.6x under the 600s
 /// nextest kill, so a wedge can never again consume the slow-timeout.
 const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
@@ -110,8 +110,9 @@ impl std::fmt::Display for TransportError {
             } => write!(
                 f,
                 "no JSON-RPC response to method '{method}' (id {id}) within {}s; \
-                 cas serve child status: {}. The server accepted the request and \
-                 never answered — this is a server-side non-response, not a slow test.",
+                 cas serve child status: {}. The request path produced no response; \
+                 this alone cannot distinguish a request that was never read, a \
+                 handler that never completed, or a response that was never flushed.",
                 waited.as_secs(),
                 match child_status {
                     Some(status) => format!("exited {status}"),
@@ -849,11 +850,11 @@ fn test_mcp_unknown_tool() {
 /// server that never answered produced an infinite wait instead of a test
 /// failure.
 ///
-/// This test pins the invariant that made the 600s possible: a server that
-/// accepts the request and never responds must surface as a bounded,
-/// legible `TransportError::Timeout` — never as an unbounded block. It
-/// drives a deliberately silent stub so the non-response is deterministic
-/// rather than relying on the rare natural trigger.
+/// This test pins the invariant that made the 600s possible: a request that
+/// produces no response must surface as a bounded, legible
+/// `TransportError::Timeout` — never as an unbounded block. It drives a
+/// deliberately silent stub so the non-response is deterministic rather than
+/// inferring which unobserved server phase caused the original CI occurrence.
 #[cfg(unix)]
 #[test]
 fn test_response_wait_is_bounded_when_server_never_answers() {
@@ -886,12 +887,16 @@ fn test_response_wait_is_bounded_when_server_never_answers() {
         "response wait must be bounded by the client timeout; waited {elapsed:?}"
     );
 
-    // The diagnostic must name the method and say the server went silent,
-    // so the next occurrence is triageable from CI logs alone.
+    // The diagnostic must name the method without claiming which unobserved
+    // phase failed. The original CI log did not establish that the server read
+    // the request, so "accepted the request" would turn a symptom into a false
+    // root-cause claim.
     let rendered = err.to_string();
     assert!(
-        rendered.contains("tools/list") && rendered.contains("never answered"),
-        "timeout diagnostic must identify the silent request: {rendered}"
+        rendered.contains("tools/list")
+            && rendered.contains("cannot distinguish")
+            && !rendered.contains("accepted the request"),
+        "timeout diagnostic must identify the silent request without overclaiming: {rendered}"
     );
 }
 

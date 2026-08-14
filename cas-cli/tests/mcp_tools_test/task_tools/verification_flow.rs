@@ -4181,9 +4181,11 @@ async fn test_additive_only_uses_worker_branch_not_main_worktree() {
     // cas-bc1b fix, we intentionally leave the worker worktree clean
     // and rely on the fact that pre-fix code would have looked at the
     // MAIN worktree (cas_root.parent()) where unrelated drift lives.
-    // Since cas_root.parent() here is a tempdir (not a git repo),
-    // we can't put a stray file there and prove anything — instead,
-    // prove the fix by committing a modification on the branch and
+    // The CAS root's parent is a clean Git repository, separate from
+    // the worker worktree below. That lets the factory close path pass
+    // its repository-identity check while still proving the constrained
+    // execution-note gate reads the worker branch rather than main.
+    // We prove the fix by committing a modification on the branch and
     // asserting the gate now catches it (which it wouldn't have
     // under the legacy `git diff HEAD` in main path — that one is
     // empty in tempdir because tempdir isn't a git repo).
@@ -4199,6 +4201,12 @@ enabled = false
 "#,
     )
     .expect("write config");
+
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join(".gitignore"), ".cas/\nworker-worktree/\n").unwrap();
+    std::fs::write(temp.path().join("main.txt"), "main checkout\n").unwrap();
+    proof_boundary_git(temp.path(), &["add", ".gitignore", "main.txt"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "main: initial"]);
 
     // Real git repo playing the role of a worker worktree.
     let worktree_path = temp.path().join("worker-worktree");
@@ -4349,8 +4357,9 @@ enabled = false
     );
 
     // --- Scenario C: value-only is the accurate posture for a copy/i18n
-    //     change to an existing file. It must close normally, without a
-    //     supervisor bypass or weakening additive-only.
+    //     change to an existing file. It must reach ordinary supervisor
+    //     review, without a worker-supplied envelope or weakening
+    //     additive-only.
     git(&["checkout", "-q", "main"]);
     git(&["checkout", "-q", "-b", "factory/value-only"]);
     std::fs::write(worktree_path.join("existing.txt"), "localized value\n").unwrap();
@@ -4373,6 +4382,11 @@ enabled = false
         t.worktree_id = Some(worktree_id.clone());
         task_store.update(&t).expect("update task");
     }
+    // Customer-visible value changes are reviewable under the default
+    // owner=supervisor policy. Make the fixture a factory worker explicitly:
+    // setup_cas clears ambient factory env so the test cannot accidentally
+    // exercise a solo caller's close behavior.
+    let _worker = FactoryWorkerEnv::enter();
     let resp_c = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
@@ -4387,12 +4401,13 @@ enabled = false
             .expect("close returns"),
     );
     assert!(
-        resp_c.contains("Closed task:"),
-        "value-only modification must close normally: {resp_c}"
+        resp_c.contains("supervisor review") || resp_c.contains("pending_supervisor_review"),
+        "value-only modification must queue ordinary supervisor review: {resp_c}"
     );
     assert_eq!(
         task_store.get(&id_c).expect("task").status,
-        cas::types::TaskStatus::Closed
+        cas::types::TaskStatus::PendingSupervisorReview,
+        "value-only must not bypass supervisor-owned review"
     );
 }
 

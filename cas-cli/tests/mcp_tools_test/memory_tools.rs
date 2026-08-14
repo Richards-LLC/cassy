@@ -491,6 +491,106 @@ fn frontmatter_memory(title: &str, module: &str, body: &str) -> String {
     )
 }
 
+fn learning_request(title: &str, content: &str, tags: &str) -> RememberRequest {
+    RememberRequest {
+        scope: "project".to_string(),
+        content: content.to_string(),
+        entry_type: "learning".to_string(),
+        tags: Some(tags.to_string()),
+        title: Some(title.to_string()),
+        importance: 0.7,
+        valid_from: None,
+        valid_until: None,
+        team_id: None,
+        bypass_overlap: None,
+        mode: None,
+        expected_updated_at: None,
+        personal: Some(true),
+    }
+}
+
+/// GH #329: generic factory vocabulary must not turn distinct session
+/// learnings into high-overlap duplicates.  The fixtures pin the three
+/// reported subjects (branch CI ownership, context headroom, and orphaned
+/// recovery) while keeping the test independent of any active team config.
+#[tokio::test]
+async fn cas_8c16_distinct_session_learnings_store_but_real_duplicate_is_explained() {
+    let (_temp, service) = setup_cas();
+
+    let backlog = "Two supervisors can collide on a merge-lane backlog. Record the owner before the factory-session handoff and shared-worker review.";
+    let branch_ci = "Merge a lane only on its own branch CI. This release policy prevents unverified work from landing after a factory-session handoff and shared-worker review.";
+    let orphan_recovery = "Recover an orphaned task only after its lease evidence is checked. The factory-session handoff and shared-worker review are separate operational concerns.";
+    let headroom = "Treat worker context headroom as a scheduling input when assigning deep work. A factory-session handoff and shared-worker review should not decide the capacity policy.";
+    let scoped_proof = "Prove the complete modified test module, not only newly added examples, before handing a fix to integration.";
+
+    for (title, content, tags) in [
+        (
+            "Worker context for merge-lane backlog coordination",
+            backlog,
+            "supervisor-planning,merge-backlog",
+        ),
+        (
+            "Worker context task recovery",
+            orphan_recovery,
+            "orphaned-task,lease-recovery",
+        ),
+        (
+            "Merge lane only on branch CI",
+            branch_ci,
+            "branch-ci,lane-ownership",
+        ),
+        (
+            "Worker context headroom scheduling",
+            headroom,
+            "context-budget,worker-scheduling",
+        ),
+        (
+            "Scoped proof covers modified contracts",
+            scoped_proof,
+            "test-scope,verification-proof",
+        ),
+    ] {
+        let result = service
+            .cas_remember(Parameters(learning_request(title, content, tags)))
+            .await
+            .expect("remember returns a structured result");
+        let text = extract_text(result.clone());
+        assert_eq!(
+            result.is_error,
+            Some(false),
+            "distinct learning '{title}' must store: {}",
+            text
+        );
+    }
+
+    let duplicate = service
+        .cas_remember(Parameters(learning_request(
+            "Merge lane only on branch CI",
+            branch_ci,
+            "branch-ci,lane-ownership",
+        )))
+        .await
+        .expect("duplicate returns a structured block");
+    assert_eq!(
+        duplicate.is_error,
+        Some(true),
+        "true duplicate must be blocked"
+    );
+    let text = extract_text(duplicate);
+    assert!(
+        text.contains("Overlap detected"),
+        "block remains legible: {text}"
+    );
+    assert!(
+        text.contains("Matched text:"),
+        "refusal must show the actual text overlap: {text}"
+    );
+    assert!(
+        text.contains("branch") && text.contains("lane"),
+        "refusal must make the matching content inspectable: {text}"
+    );
+}
+
 #[tokio::test]
 async fn test_overlap_blocks_duplicate_insert() {
     let (_temp, service) = setup_cas();

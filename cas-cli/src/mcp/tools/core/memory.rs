@@ -606,6 +606,7 @@ impl CasCore {
                         "Overlap detected: this memory duplicates an existing entry.\n\
                          Existing slug: {}\n\
                          Score: {}/5 (problem={}, root_cause={}, solution={}, files={}, tags={}, penalty={})\n\
+                         Matched text: {}\n\
                          Recommendation: {}\n",
                         best.slug,
                         best.scores.net(),
@@ -615,6 +616,11 @@ impl CasCore {
                         best.scores.referenced_files,
                         best.scores.tags,
                         best.scores.penalty,
+                        if best.matched_terms.is_empty() {
+                            "(no lexical terms; structured metadata matched)".to_string()
+                        } else {
+                            best.matched_terms.join(", ")
+                        },
                         match recommendation_action {
                             RecommendedAction::UpdateExisting =>
                                 "update the existing memory in place",

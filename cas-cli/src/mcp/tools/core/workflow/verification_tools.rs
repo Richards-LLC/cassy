@@ -4,6 +4,9 @@ use crate::mcp::tools::core::imports::*;
 // creates the same short-lived, durable boundary that a normal worker close
 // would have created before an external merge left the task review-pending.
 const SUPERVISOR_DIRECT_RECOVERY_DISPATCH_TIMEOUT_SECS: i64 = 600;
+/// Structured task label marking an Open task that was reopened by a rejected
+/// supervisor review and therefore needs a supervisor recovery decision.
+pub const VERIFICATION_REJECTED_REOPEN_LABEL: &str = "verification-rejected-reopen";
 
 impl CasCore {
     pub async fn cas_verification_add(
@@ -699,13 +702,22 @@ impl CasCore {
                 } else {
                     format!("{}\n\n{}", task.notes.trim_end(), decision)
                 };
+                let mut labels = task.labels.clone();
+                if !labels.iter().any(|label| label == VERIFICATION_REJECTED_REOPEN_LABEL) {
+                    labels.push(VERIFICATION_REJECTED_REOPEN_LABEL.to_string());
+                }
+                let labels = serde_json::to_string(&labels).map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to serialize rejection recovery label: {e}")),
+                    data: None,
+                })?;
                 let reopened_at = chrono::Utc::now();
                 let changed = tx
                     .execute(
                         "UPDATE tasks
-                         SET status = 'open', pending_verification = 0, notes = ?2, updated_at = ?3
+                         SET status = 'open', pending_verification = 0, notes = ?2, labels = ?3, updated_at = ?4
                          WHERE id = ?1 AND status = 'pending_supervisor_review'",
-                        rusqlite::params![req.task_id, notes, reopened_at.to_rfc3339(),],
+                        rusqlite::params![req.task_id, notes, labels, reopened_at.to_rfc3339(),],
                     )
                     .map_err(|e| McpError {
                         code: ErrorCode::INTERNAL_ERROR,

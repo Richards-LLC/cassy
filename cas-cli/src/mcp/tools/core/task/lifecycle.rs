@@ -1228,6 +1228,10 @@ impl CasCore {
 
         // Capture old status before mutation for lifecycle push (cas-062d).
         let old_status = task.status;
+        // A worker has acted on the supervisor's recovery choice; remove the
+        // structured rejection-reopen marker so a later unrelated Open state
+        // cannot be rendered as waiting on the supervisor.
+        task.labels.retain(|label| label != "verification-rejected-reopen");
         task.status = TaskStatus::InProgress;
         task.updated_at = chrono::Utc::now();
 

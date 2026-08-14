@@ -2609,7 +2609,7 @@ impl CasService {
                     assigned_open_task.map(|t| (
                         t.id.as_str(),
                         t.title.as_str(),
-                        t.notes.contains("Decision: supervisor review rejected"),
+                        t.labels.iter().any(|label| label == "verification-rejected-reopen"),
                     )),
                     parked_tasks
                         .iter()

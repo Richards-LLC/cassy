@@ -156,9 +156,8 @@ impl SessionContextAssembler {
         assembler
     }
 
-    /// Override the byte budget (tests; production uses
-    /// [`SESSION_START_BUDGET_BYTES`]).
-    #[cfg(test)]
+    /// Override the byte budget for another bounded delivery surface.
+    /// Production SessionStart uses [`SESSION_START_BUDGET_BYTES`].
     pub(crate) fn with_budget(mut self, budget: usize) -> Self {
         self.budget = Some(budget);
         self

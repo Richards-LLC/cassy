@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.69.0] - 2026-08-14
+
+### Added
+- **Every CAS harness now receives the MCP integration runbook.** `cas update --sync` distributes the same installation and diagnosis guidance to Claude, Codex, and Grok.
+
+### Fixed
+- **Commander page-initiated machine pairing now completes.** The pairing handoff sends the hub's canonical origin, so the relay accepts the invitation instead of rejecting it at delivery.
+- **A local pairing precondition failure no longer consumes the one-time code.** CAS checks the local hub before claiming and retains the same-machine nonce for a safe retry.
+
 ## [2.68.1] - 2026-08-14
 
 ### Fixed

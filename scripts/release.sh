@@ -2,8 +2,13 @@
 #
 # Local release build script for CAS
 #
-# Builds release binaries for all targets from the local machine,
-# packages them, and optionally creates a GitHub release.
+# Builds release binaries for all targets from the local machine, packages them,
+# and optionally creates a GitHub release. The Darwin artifact uses a native
+# build and therefore requires a macOS host; the early host preflight below
+# reports that requirement before any compiler work begins.
+# Linux release builds deliberately recompile C dependencies from source, so
+# they are slower than an incremental build but reproducibly enforce the
+# portability policy that the post-build audits validate.
 #
 # Prerequisites:
 #   - Rust toolchain (rustup)
@@ -21,6 +26,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+HOST_OS="$(uname -s)"
 TARGETS=(
     "aarch64-apple-darwin"
     "x86_64-unknown-linux-gnu"
@@ -47,6 +53,10 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Reject unsupported host/target combinations before bootstrapping toolchains
+# or compiling, rather than failing deep in a native compiler invocation.
+./scripts/check-release-host.sh "$HOST_OS" "${TARGETS[@]}"
 
 # ---------------------------------------------------------------------------
 # Load .env if present
@@ -114,7 +124,11 @@ if [ ! -x ".context/zig/zig" ]; then
     ./scripts/bootstrap-zig.sh
 fi
 export ZIG="$REPO_ROOT/.context/zig/zig"
-echo "Zig: $("$ZIG" version)"
+# cargo-zigbuild resolves its Zig executable through PATH rather than $ZIG.
+# Keep $ZIG for build scripts that consume it and expose the same pinned binary
+# through PATH so cargo zigbuild is reproducible when run independently.
+export PATH="$REPO_ROOT/.context/zig:$PATH"
+echo "Zig: $(zig version)"
 
 # A local release must reject lockfile/version/changelog/tag mistakes before
 # starting the expensive artifact builds. Build-only remains a packaging aid,
@@ -151,9 +165,20 @@ for target in "${TARGETS[@]}"; do
     echo "=== Building $target ==="
 
     if [[ "$target" == *"linux"* ]]; then
-        # Cross-compile for Linux using zigbuild
-        cargo clean -p blake3 --release --target "$target"
-        cargo zigbuild -p cas --release --target "$target" --locked
+        # Cross-compile for Linux using zigbuild. Its target wrapper passes
+        # Zig's portable x86_64 CPU baseline to C/C++ contributors; the audits
+        # below remain the authoritative release portability proof.
+        # C build-script output records compiler flags. A release portability
+        # audit is meaningful only when its artifact reflects current source
+        # and compiler policy, not C objects inherited from target/. Clear the
+        # complete target so every C dependency recompiles with this release's
+        # baseline policy (including BLAKE3's no-AVX-512 inputs). This costs an
+        # incremental build, but prevents a cache-masked flag regression from
+        # producing an apparently portable release.
+        cargo clean --release --target "$target"
+        CFLAGS_x86_64_unknown_linux_gnu="-march=x86_64" \
+        CXXFLAGS_x86_64_unknown_linux_gnu="-march=x86_64" \
+            cargo zigbuild -p cas --release --target "$target" --locked
         ghostty_archive="$(find "target/$target/release/build" -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print -quit)"
         if [[ -z "$ghostty_archive" ]]; then
             echo "error: built Ghostty archive not found for ISA audit" >&2

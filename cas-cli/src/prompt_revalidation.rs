@@ -93,7 +93,8 @@ pub(crate) enum MergeRequestDecision {
 ///
 /// - the branch tip is already an ancestor of the target branch (merged), or
 /// - the task is no longer parked awaiting a merge (re-closed, reopened,
-///   request_changes'd), so nothing is waiting on the supervisor at all.
+///   request_changes'd), so nothing is waiting on the supervisor at all, or
+/// - the task's delivery anchor no longer names this request's immutable tip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MergeRequestDelivery {
     /// Premise still holds — deliver, and tag the row so it can be retracted
@@ -103,13 +104,20 @@ pub(crate) enum MergeRequestDelivery {
     SuppressLanded { target_tip: String },
     /// The task left `AwaitingMerge` — the request is moot whatever git says.
     SuppressResolved { status: TaskStatus },
+    /// The task may have entered a later merge cycle, but the immutable tip
+    /// this message asked the supervisor to merge was invalidated. This is
+    /// deliberately distinct from `SuppressResolved`: a task can return to
+    /// `AwaitingMerge` after request_changes, reset, or a reopen.
+    SuppressInvalidatedAnchor {
+        current_anchor: Option<String>,
+    },
 }
 
 /// Decide a merge request's fate from live state only (cas-6eab).
 ///
-/// `task_status` is the task's status read fresh at transport time; `None`
-/// means the task could not be read at all. `git` is the live reachability
-/// check for the requested tip.
+/// `task` is read fresh at transport time; `None` means it could not be read
+/// at all. `envelope.branch_tip` is the delivery anchor captured when the
+/// message was queued. `git` is the live reachability check for that anchor.
 ///
 /// Fails open in exactly one direction: uncertainty (unreadable task,
 /// unverifiable git) delivers. A suppression requires positive evidence that
@@ -117,13 +125,21 @@ pub(crate) enum MergeRequestDelivery {
 /// a genuine merge request is a stalled task, while the cost of delivering a
 /// stale one is a supervisor round-trip.
 pub(crate) fn merge_request_delivery_decision(
-    task_status: Option<TaskStatus>,
+    task: Option<&Task>,
+    envelope: &MergeRequestEnvelope,
     git: &MergeRequestDecision,
 ) -> MergeRequestDelivery {
-    if let Some(status) = task_status
-        && status != TaskStatus::AwaitingMerge
-    {
-        return MergeRequestDelivery::SuppressResolved { status };
+    if let Some(task) = task {
+        if task.status != TaskStatus::AwaitingMerge {
+            return MergeRequestDelivery::SuppressResolved {
+                status: task.status,
+            };
+        }
+        if task.deliverables.factory_branch_anchor.as_deref() != Some(&envelope.branch_tip) {
+            return MergeRequestDelivery::SuppressInvalidatedAnchor {
+                current_anchor: task.deliverables.factory_branch_anchor.clone(),
+            };
+        }
     }
     match git {
         MergeRequestDecision::AlreadyIntegrated { target_tip } => {
@@ -135,6 +151,25 @@ pub(crate) fn merge_request_delivery_decision(
             MergeRequestDelivery::Deliver
         }
     }
+}
+
+/// Guidance sent to the worker when the exact delivery anchor named by its
+/// message has been invalidated. It may be tempting to describe an
+/// `AwaitingMerge` task as still actionable here, but that can be a *later*
+/// close cycle. Naming both anchors keeps the worker from asking the
+/// supervisor to merge a declined or superseded tip.
+pub(crate) fn merge_request_anchor_invalidated_guidance(
+    task_id: &str,
+    branch_tip: &str,
+    current_anchor: Option<&str>,
+) -> String {
+    let current = current_anchor.unwrap_or("none (the prior delivery was invalidated)");
+    format!(
+        "CAS suppressed your stale merge request for {task_id}: delivery anchor {branch_tip} \
+         is no longer current (current anchor: {current}). Do not ask the supervisor to merge \
+         the prior tip. Re-read the task with `task action=show id={task_id}` before sending \
+         anything further about it."
+    )
 }
 
 /// Guidance sent to the worker when its merge request is suppressed because
@@ -1232,14 +1267,32 @@ mod tests {
         assert_eq!(parse_lifecycle_envelope("ordinary free-form message"), None);
     }
 
+    fn merge_envelope() -> MergeRequestEnvelope {
+        MergeRequestEnvelope {
+            task_id: "cas-test".to_string(),
+            branch_tip: "worker-tip".to_string(),
+            target_branch: "main".to_string(),
+            target_branch_tip: "base-tip".to_string(),
+        }
+    }
+
+    fn merge_task(status: TaskStatus, anchor: Option<&str>) -> Task {
+        let mut task = Task::new("cas-test".to_string(), "merge test".to_string());
+        task.status = status;
+        task.deliverables.factory_branch_anchor = anchor.map(str::to_string);
+        task
+    }
+
     /// cas-6eab / GH #61: the reported sequence — supervisor merges and
     /// replies, THEN the worker's already-composed request reaches transport.
     /// It must be suppressed rather than delivered as an actionable ask.
     #[test]
     fn merge_request_delivered_after_the_merge_is_suppressed() {
+        let task = merge_task(TaskStatus::AwaitingMerge, Some("worker-tip"));
         assert_eq!(
             merge_request_delivery_decision(
-                Some(TaskStatus::AwaitingMerge),
+                Some(&task),
+                &merge_envelope(),
                 &MergeRequestDecision::AlreadyIntegrated {
                     target_tip: "abc123".to_string(),
                 },
@@ -1260,9 +1313,11 @@ mod tests {
             TaskStatus::Open,
             TaskStatus::PendingSupervisorReview,
         ] {
+            let task = merge_task(status, Some("worker-tip"));
             assert_eq!(
                 merge_request_delivery_decision(
-                    Some(status),
+                    Some(&task),
+                    &merge_envelope(),
                     &MergeRequestDecision::Pending {
                         target_tip: "abc123".to_string(),
                     },
@@ -1280,9 +1335,11 @@ mod tests {
     /// must anything CAS cannot verify. Suppression requires positive evidence.
     #[test]
     fn outstanding_and_unverifiable_merge_requests_are_delivered() {
+        let task = merge_task(TaskStatus::AwaitingMerge, Some("worker-tip"));
         assert_eq!(
             merge_request_delivery_decision(
-                Some(TaskStatus::AwaitingMerge),
+                Some(&task),
+                &merge_envelope(),
                 &MergeRequestDecision::Pending {
                     target_tip: "abc123".to_string(),
                 },
@@ -1291,20 +1348,22 @@ mod tests {
         );
         assert_eq!(
             merge_request_delivery_decision(
-                Some(TaskStatus::AwaitingMerge),
+                Some(&task),
+                &merge_envelope(),
                 &MergeRequestDecision::Unverifiable,
             ),
             MergeRequestDelivery::Deliver,
             "unverifiable git state must never suppress a merge request"
         );
         assert_eq!(
-            merge_request_delivery_decision(None, &MergeRequestDecision::Unverifiable),
+            merge_request_delivery_decision(None, &merge_envelope(), &MergeRequestDecision::Unverifiable),
             MergeRequestDelivery::Deliver,
             "an unreadable task is uncertainty, not evidence of staleness"
         );
         assert_eq!(
             merge_request_delivery_decision(
                 None,
+                &merge_envelope(),
                 &MergeRequestDecision::AlreadyIntegrated {
                     target_tip: "abc123".to_string(),
                 },
@@ -1313,6 +1372,47 @@ mod tests {
                 target_tip: "abc123".to_string(),
             },
             "git reachability is positive evidence even when the task is unreadable"
+        );
+    }
+
+    /// GH #340: request_changes clears the anchor before a queued worker
+    /// message reaches the supervisor. Even if the task later returns to
+    /// AwaitingMerge, the old request must never regain authority.
+    #[test]
+    fn invalidated_delivery_anchor_suppresses_a_queued_merge_request() {
+        let task = merge_task(TaskStatus::AwaitingMerge, None);
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&task),
+                &merge_envelope(),
+                &MergeRequestDecision::Pending {
+                    target_tip: "base-tip".to_string(),
+                },
+            ),
+            MergeRequestDelivery::SuppressInvalidatedAnchor {
+                current_anchor: None,
+            }
+        );
+        let guidance = merge_request_anchor_invalidated_guidance("cas-test", "worker-tip", None);
+        assert!(guidance.contains("worker-tip"));
+        assert!(guidance.contains("no longer current"));
+    }
+
+    #[test]
+    fn prior_cycle_request_stays_suppressed_after_a_new_anchor_is_parked() {
+        let task = merge_task(TaskStatus::AwaitingMerge, Some("replacement-tip"));
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&task),
+                &merge_envelope(),
+                &MergeRequestDecision::Pending {
+                    target_tip: "base-tip".to_string(),
+                },
+            ),
+            MergeRequestDelivery::SuppressInvalidatedAnchor {
+                current_anchor: Some("replacement-tip".to_string()),
+            },
+            "a later AwaitingMerge cycle must not revive the declined request"
         );
     }
 

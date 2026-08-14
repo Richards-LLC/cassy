@@ -106,11 +106,15 @@ impl RelayClient {
         body: &B,
     ) -> Result<T> {
         let url = format!("{}{}{}", self.endpoint, RELAY_PREFIX, suffix);
+        let diagnostic_body = relay_request_diagnostic(body);
         let response = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .send_json(body)
-            .map_err(relay_error)?;
+            .map_err(relay_error)
+            .with_context(|| {
+                format!("relay POST {suffix} failed; request body: {diagnostic_body}")
+            })?;
         let response: T = response.into_json().context("invalid relay response")?;
         Ok(response)
     }
@@ -390,11 +394,11 @@ fn resolve_hub_url(paths: &HubRuntimePaths, explicit: Option<&str>) -> Result<St
     let url = explicit.or(record.public_url.as_deref()).context(
         "Hub has no public URL. Start it with `cas hub --tailscale-serve start` or pass --hub-url.",
     )?;
-    validate_hub_url(url)?;
-    Ok(url.to_owned())
+    let parsed = validate_hub_url(url)?;
+    Ok(parsed.origin().ascii_serialization())
 }
 
-fn validate_hub_url(url: &str) -> Result<()> {
+fn validate_hub_url(url: &str) -> Result<Url> {
     let parsed = Url::parse(url).context("invalid hub URL")?;
     anyhow::ensure!(
         parsed.username().is_empty()
@@ -409,7 +413,7 @@ fn validate_hub_url(url: &str) -> Result<()> {
         parsed.scheme() == "https" || is_loopback_origin(url),
         "hub URL must be an HTTPS origin or an HTTP IP-loopback origin"
     );
-    Ok(())
+    Ok(parsed)
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
@@ -490,6 +494,39 @@ fn relay_error(error: ureq::Error) -> anyhow::Error {
     relay_error_from_parts(status, code, description)
 }
 
+fn relay_request_diagnostic(body: &impl Serialize) -> String {
+    let mut value = match serde_json::to_value(body) {
+        Ok(value) => value,
+        Err(error) => return format!("<could not serialize request: {error}>"),
+    };
+    redact_relay_secrets(&mut value);
+    serde_json::to_string(&value)
+        .unwrap_or_else(|error| format!("<could not format request: {error}>"))
+}
+
+fn redact_relay_secrets(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (name, value) in fields {
+                if matches!(
+                    name.as_str(),
+                    "authorize_nonce" | "invitation_url" | "user_code"
+                ) {
+                    *value = serde_json::Value::String("<redacted>".to_owned());
+                } else {
+                    redact_relay_secrets(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_relay_secrets(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn relay_error_from_parts(status: Option<u16>, code: &str, description: &str) -> anyhow::Error {
     match (status, code) {
         (Some(404), "invalid_code") => {
@@ -533,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn section_four_completion_fixture_uses_kebab_case_scopes() {
+    fn section_four_completion_fixture_pins_relay_accepted_canonical_origin() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../hub-web/src/fixtures/hub-reverse-pairing/complete-request.json"
@@ -543,7 +580,7 @@ mod tests {
         let request = serde_json::to_value(CompleteRequest {
             wire_version: 1,
             authorize_nonce: "base64url-32-random-bytes",
-            hub_url: "https://workstation.tail.example:443/",
+            hub_url: "https://workstation.tail.example",
             machine_label: "Studio workstation",
             invitation_url: "https://commander.example/#pair=base64url-32-random-bytes&hub=machine-uuid",
             invitation_expires_at: "2026-08-11T20:11:30Z".parse().unwrap(),
@@ -555,6 +592,29 @@ mod tests {
             format!("{RELAY_PREFIX}/authorizations/id/complete"),
             "/api/hub/pairing/authorizations/id/complete"
         );
+    }
+
+    #[test]
+    fn completion_failure_diagnostic_shows_canonical_origin_without_secrets() {
+        let scopes = Scope::default_read_only();
+        let diagnostic = relay_request_diagnostic(&CompleteRequest {
+            wire_version: 1,
+            authorize_nonce: "secret-authorize-nonce",
+            hub_url: "https://workstation.tail.example",
+            machine_label: "Studio workstation",
+            invitation_url: "https://commander.example/#pair=secret-invitation-token",
+            invitation_expires_at: "2026-08-11T20:11:30Z".parse().unwrap(),
+            granted_scopes: &scopes,
+        });
+
+        assert!(
+            diagnostic.contains(r#""hub_url":"https://workstation.tail.example""#),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains(r#""authorize_nonce":"<redacted>""#));
+        assert!(diagnostic.contains(r#""invitation_url":"<redacted>""#));
+        assert!(!diagnostic.contains("secret-authorize-nonce"));
+        assert!(!diagnostic.contains("secret-invitation-token"));
     }
 
     #[test]
@@ -606,17 +666,18 @@ mod tests {
     #[derive(Default)]
     struct RecordingRelay {
         claims: std::sync::Mutex<Vec<(String, String)>>,
+        completed_hub_urls: std::sync::Mutex<Vec<String>>,
         active_claim: std::sync::Mutex<Option<(String, String)>>,
         fail_first_completion: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingRelay {
         fn failing_first_completion() -> Self {
-            Self {
-                claims: std::sync::Mutex::new(Vec::new()),
-                active_claim: std::sync::Mutex::new(None),
-                fail_first_completion: std::sync::atomic::AtomicBool::new(true),
-            }
+            let relay = Self::default();
+            relay
+                .fail_first_completion
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            relay
         }
     }
 
@@ -647,12 +708,16 @@ mod tests {
             &self,
             _authorization_id: &str,
             _nonce: &str,
-            _hub_url: &str,
+            hub_url: &str,
             _machine_label: &str,
             _invitation_url: &str,
             _invitation_expires_at: DateTime<Utc>,
             _granted_scopes: &BTreeSet<Scope>,
         ) -> Result<CompleteResponse> {
+            self.completed_hub_urls
+                .lock()
+                .unwrap()
+                .push(hub_url.to_owned());
             if self
                 .fail_first_completion
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -755,6 +820,10 @@ mod tests {
         let claims = relay.claims.lock().unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].0, "K7MW-4H2Q");
+        assert_eq!(
+            *relay.completed_hub_urls.lock().unwrap(),
+            ["https://workstation.tail.example"]
+        );
     }
 
     #[test]
@@ -775,6 +844,13 @@ mod tests {
         assert_eq!(claims.len(), 2);
         assert_eq!(claims[0].1, claims[1].1);
         assert_eq!(URL_SAFE_NO_PAD.decode(&claims[0].1).unwrap().len(), 32);
+        assert_eq!(
+            *relay.completed_hub_urls.lock().unwrap(),
+            [
+                "https://workstation.tail.example",
+                "https://workstation.tail.example"
+            ]
+        );
     }
 
     #[test]

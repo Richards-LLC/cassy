@@ -45,6 +45,7 @@ Tasks may set `execution_note` to:
 - **`test-first`** — Commit a failing test before implementation; the verifier expects a new test file.
 - **`characterization-first`** — Pin current behavior in tests before edits; the verifier inspects notes and evidence.
 - **`additive-only`** — New files only; close rejects `M`/`D`/`R`. Ask the supervisor before changing scope.
+- **`value-only`** — Existing copy/i18n values only; close allows `M` but rejects `A`/`C`/`D`/`R`. Normal review and merge gates still apply.
 - **`no-code`** — Zero-code ops/artifact work. Set portable `external_ref` proof; close rejects missing proof or task-attributed code.
 
 Null means use judgment; other values are invalid.

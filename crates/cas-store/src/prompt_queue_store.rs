@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::recording_store::capture_message_event;
+use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::NotificationPriority;
 use crate::{Result, StoreError};
 
@@ -1613,6 +1614,17 @@ pub trait PromptQueueStore: Send + Sync {
         &self,
         limit: usize,
     ) -> Result<Vec<UndeliveredLifecycleRelay>>;
+
+    /// Durably reconcile terminal lifecycle relays for tasks that can no
+    /// longer need supervisor action.  The forensic prompt row and its final
+    /// delivery stage are retained; only its replay eligibility is cleared.
+    /// Returns the number of previously-unacknowledged rows reconciled.
+    fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize>;
+
+    /// Count all unresolved terminal lifecycle relay rows without applying a
+    /// display cap.  Status banners use this with a bounded sample so they
+    /// cannot hide backlog depth.
+    fn undelivered_lifecycle_relay_count(&self) -> Result<usize>;
 
     /// Get count of pending prompts
     fn pending_count(&self) -> Result<usize>;
@@ -3881,6 +3893,46 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(out)
     }
 
+    fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            let now = Utc::now().to_rfc3339();
+            let reconciled = tx.execute(
+                "UPDATE prompt_queue
+                 SET acked_at = ?, acked_via = 'terminal_task_reconciled'
+                 WHERE transport_delivered_at IS NULL
+                   AND acked_at IS NULL
+                   AND source LIKE 'lifecycle-wake:%'
+                   AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
+                   AND EXISTS (
+                       SELECT 1 FROM tasks
+                       WHERE status IN ('closed', 'cancelled')
+                         AND (prompt_queue.summary = tasks.id
+                              OR prompt_queue.summary LIKE '%: ' || tasks.id
+                              OR prompt_queue.summary LIKE '%: ' || tasks.id || ' (%')
+                   )",
+                params![now],
+            )?;
+            tx.commit()?;
+            Ok(reconciled)
+        })
+    }
+
+    fn undelivered_lifecycle_relay_count(&self) -> Result<usize> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM prompt_queue
+             WHERE transport_delivered_at IS NULL
+               AND acked_at IS NULL
+               AND source LIKE 'lifecycle-wake:%'
+               AND highest_stage IN ('suppressed', 'dropped', 'abandoned')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.try_into().unwrap_or(usize::MAX))
+    }
+
     fn ack_lifecycle_wake(&self, lifecycle_wake_id: i64) -> Result<Option<i64>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let prompt_id = conn
@@ -4305,6 +4357,9 @@ impl SqlitePromptQueueStore {
 #[cfg(test)]
 mod tests {
     use crate::prompt_queue_store::*;
+    use crate::task_store::SqliteTaskStore;
+    use crate::TaskStore;
+    use cas_types::{Task, TaskStatus};
     use rusqlite::params;
     use tempfile::TempDir;
 
@@ -4544,6 +4599,53 @@ mod tests {
                 .unwrap()
                 .confirmed_at
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn terminal_task_reconciliation_drains_a_backlog_larger_than_the_display_cap() {
+        let (temp, store) = create_test_store();
+        let task_id = "cas-terminal-backlog";
+        let task_store = SqliteTaskStore::open(temp.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new(task_id.to_string(), "terminal backlog".to_string());
+        task_store.add(&task).unwrap();
+        task.status = TaskStatus::Closed;
+        task.closed_at = Some(Utc::now());
+        task_store.update(&task).unwrap();
+        for index in 0..12 {
+            let prompt_id = store
+                .enqueue_full(
+                    &format!("lifecycle-wake:{}", 5100 + index),
+                    "supervisor",
+                    "<task-lifecycle transition=\"task_awaiting_merge\">",
+                    Some("session"),
+                    Some(&format!("task_awaiting_merge: {task_id} ({index})")),
+                    Some(NotificationPriority::High),
+                )
+                .unwrap();
+            store
+                .mark_suppressed(prompt_id, Some("task lifecycle occurrence expired"))
+                .unwrap();
+        }
+
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 12);
+        assert_eq!(store.list_undelivered_lifecycle_relays(10).unwrap().len(), 10);
+        assert_eq!(
+            store
+                .reconcile_terminal_lifecycle_relays()
+                .unwrap(),
+            12,
+            "terminal reconciliation must drain the full queue, not only the displayed sample"
+        );
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 0);
+        assert!(store.list_undelivered_lifecycle_relays(10).unwrap().is_empty());
+        assert_eq!(
+            store
+                .reconcile_terminal_lifecycle_relays()
+                .unwrap(),
+            0,
+            "a reconciled relay must never reappear on a later status read"
         );
     }
 

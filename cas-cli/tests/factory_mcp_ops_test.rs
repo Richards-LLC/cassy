@@ -2042,6 +2042,50 @@ async fn test_worker_status_empty() {
 }
 
 #[tokio::test]
+async fn cas_a736_worker_status_reconciles_the_full_terminal_relay_backlog() {
+    let env = FactoryTestEnv::new();
+    let task_id = "cas-terminal-relay-backlog";
+    let mut task = Task::new(task_id.to_string(), "terminal relay backlog".to_string());
+    env.task_store().add(&task).expect("add terminal task");
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    env.task_store().update(&task).expect("close task");
+
+    let queue = env.prompt_queue();
+    for index in 0..12 {
+        let prompt_id = queue
+            .enqueue_full(
+                &format!("lifecycle-wake:{}", 6000 + index),
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\">",
+                Some("historical-session"),
+                Some(&format!("task_awaiting_merge: {task_id} ({index})")),
+                None,
+            )
+            .expect("enqueue historical relay");
+        queue
+            .mark_suppressed(prompt_id, Some("historical lifecycle occurrence expired"))
+            .expect("suppress historical relay");
+    }
+    assert_eq!(queue.list_undelivered_lifecycle_relays(10).unwrap().len(), 10);
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+    assert!(
+        !text.contains("UNDELIVERED SUPERVISOR RELAY"),
+        "the terminal backlog must fully self-reconcile rather than leave a banner: {text}"
+    );
+    assert!(
+        queue.list_undelivered_lifecycle_relays(10).unwrap().is_empty(),
+        "a second status read must not reintroduce an acknowledged terminal relay"
+    );
+}
+
+#[tokio::test]
 async fn test_worker_status_shows_agents() {
     // Acquire env mutex to prevent concurrent tests from setting CAS_AGENT_ROLE=supervisor
     // which would activate supervisor scoping and filter out our test workers.

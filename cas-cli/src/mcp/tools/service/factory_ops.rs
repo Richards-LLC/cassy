@@ -664,30 +664,14 @@ fn format_assigned_task_info(
 /// without a daemon, a queue, or a clock.
 fn format_undelivered_relay_section(
     rows: &[cas_store::UndeliveredLifecycleRelay],
-    terminal_rows: &[cas_store::UndeliveredLifecycleRelay],
+    total: usize,
 ) -> String {
-    if rows.is_empty() && terminal_rows.is_empty() {
+    if rows.is_empty() {
         return String::new();
     }
     let mut out = String::new();
-    if !terminal_rows.is_empty() {
-        let terminal_ids = terminal_rows
-            .iter()
-            .filter_map(lifecycle_relay_notification_id)
-            .map(|id| format!("`lifecycle-wake:{id}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push_str(&format!(
-            "⚠ {} UNDELIVERED SUPERVISOR RELAY{} for terminal tasks suppressed: {terminal_ids}. Acknowledge each with `coordination action=message_ack notification_id=<id>` to dismiss it durably.\n",
-            terminal_rows.len(),
-            if terminal_rows.len() == 1 { "" } else { "s" }
-        ));
-    }
-    if rows.is_empty() {
-        return format!("{out}\n");
-    }
     out.push_str(&format!(
-        "⚠ UNDELIVERED SUPERVISOR RELAY ({}) — these never reached you:\n",
+        "⚠ UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {}) — these never reached you:\n",
         rows.len()
     ));
     for row in rows {
@@ -717,46 +701,6 @@ fn format_undelivered_relay_section(
          (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
     );
     out
-}
-
-/// Return the durable notification ID a lifecycle relay exposes to operators.
-/// Sources have evolved (`lifecycle-wake:<id>` and
-/// `lifecycle-wake:worker-attention:<id>`); the final numeric component is
-/// the public ACK identity for both forms.
-fn lifecycle_relay_notification_id(row: &cas_store::UndeliveredLifecycleRelay) -> Option<i64> {
-    row.source
-        .rsplit(':')
-        .next()
-        .and_then(|id| id.parse::<i64>().ok())
-}
-
-/// A lifecycle relay is only actionable while its named task remains open.
-/// Keep the terminal prompt row for doctor/forensics, but do not inject an
-/// already-closed lane into every supervisor `worker_status` response.
-fn unresolved_lifecycle_relays(
-    rows: Vec<cas_store::UndeliveredLifecycleRelay>,
-    closed_task_ids: &[String],
-) -> Vec<cas_store::UndeliveredLifecycleRelay> {
-    rows.into_iter()
-        .filter(|row| {
-            let Some(summary) = row.summary.as_deref() else {
-                return true;
-            };
-            !closed_task_ids.iter().any(|id| summary.contains(id))
-        })
-        .collect()
-}
-
-/// Task lifecycle summaries always carry one `cas-…` task ID. Keep extraction
-/// deliberately conservative: a row we cannot parse stays visible rather than
-/// letting a formatting drift hide a real undelivered relay.
-fn lifecycle_relay_task_id(row: &cas_store::UndeliveredLifecycleRelay) -> Option<&str> {
-    row.summary.as_deref().and_then(|summary| {
-        summary
-            .split_whitespace()
-            .find(|word| word.starts_with("cas-"))
-            .map(|word| word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-    })
 }
 
 fn format_spawn_lifecycle_section(
@@ -1979,37 +1923,22 @@ impl CasService {
         // rendered even when no agents are registered — the whole failure mode
         // being fixed is that a lost relay left no trace anywhere, so the
         // fleet read silence as "nothing is waiting on me".
-        let undelivered_relays = crate::store::open_prompt_queue_store(&self.inner.cas_root)
+        let (undelivered_relays, undelivered_total) = crate::store::open_prompt_queue_store(&self.inner.cas_root)
             .ok()
-            .and_then(|queue| queue.list_undelivered_lifecycle_relays(10).ok())
-            .unwrap_or_default();
-        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
-            .ok()
-            .map(|tasks| {
-                undelivered_relays
-                    .iter()
-                    .filter_map(lifecycle_relay_task_id)
-                    .filter(|task_id| {
-                        tasks
-                            .get(task_id)
-                            .ok()
-                            .is_some_and(|task| task.status == cas_types::TaskStatus::Closed)
-                    })
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
+            .map(|queue| {
+                // A terminal task is positive evidence that the lifecycle
+                // relay's requested supervisor action is moot. Reconcile it
+                // durably (while retaining the forensic prompt row) before
+                // sampling the remaining actionable backlog.
+                let _ = queue.reconcile_terminal_lifecycle_relays();
+                let total = queue.undelivered_lifecycle_relay_count().unwrap_or(0);
+                let rows = queue.list_undelivered_lifecycle_relays(10).unwrap_or_default();
+                (rows, total)
             })
             .unwrap_or_default();
-        let terminal_rows: Vec<_> = undelivered_relays
-            .iter()
-            .filter(|row| {
-                lifecycle_relay_task_id(row)
-                    .is_some_and(|task_id| closed_task_ids.iter().any(|id| id == task_id))
-            })
-            .cloned()
-            .collect();
         let undelivered_section = format_undelivered_relay_section(
-            &unresolved_lifecycle_relays(undelivered_relays, &closed_task_ids),
-            &terminal_rows,
+            &undelivered_relays,
+            undelivered_total,
         );
 
         if agents.is_empty() {
@@ -7669,7 +7598,7 @@ mod spawn_lifecycle_tests {
             &[lost_relay(
                 "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
             )],
-            &[],
+            1,
         );
         assert!(
             out.contains("UNDELIVERED SUPERVISOR RELAY"),
@@ -7695,34 +7624,18 @@ mod spawn_lifecycle_tests {
     /// has to be believed the single time it fires.
     #[test]
     fn no_undelivered_relays_renders_nothing() {
-        assert!(format_undelivered_relay_section(&[], &[]).is_empty());
+        assert!(format_undelivered_relay_section(&[], 0).is_empty());
     }
 
     #[test]
-    fn reconciled_closed_task_relays_do_not_replay_in_worker_status() {
-        let closed = lost_relay("task_awaiting_merge: cas-reconciled (2026-08-09T15:56:36Z)");
-        let still_actionable = lost_relay("task_blocked: cas-open (2026-08-09T15:57:00Z)");
-        let remaining = unresolved_lifecycle_relays(
-            vec![closed.clone(), still_actionable],
-            &["cas-reconciled".to_string()],
-        );
-
-        let rendered = format_undelivered_relay_section(&remaining, &[closed]);
-        assert!(
-            !rendered.contains("cas-reconciled"),
-            "closed lane must not replay: {rendered}"
+    fn relay_banner_states_the_true_total_beyond_its_display_cap() {
+        let rendered = format_undelivered_relay_section(
+            &[lost_relay("task_blocked: cas-open (2026-08-09T15:57:00Z)")],
+            12,
         );
         assert!(
-            rendered.contains("cas-open"),
-            "open lane remains a real signal: {rendered}"
-        );
-        assert!(
-            rendered.contains("1 UNDELIVERED SUPERVISOR RELAY for terminal tasks suppressed"),
-            "terminal relays collapse to one count while live relays remain detailed: {rendered}"
-        );
-        assert!(
-            rendered.contains("`lifecycle-wake:3386`"),
-            "the terminal count must name the exact lifecycle-wake ID it demands: {rendered}"
+            rendered.contains("12 total; displaying 1"),
+            "the display cap must never conceal backlog depth: {rendered}"
         );
     }
 

@@ -188,8 +188,8 @@ test-real-store-untouched:
 # reported and that the passed count is nonzero. Use it for the final-proof
 # run you intend to quote in a close note:
 #
-#   make -C cas-cli test-scoped SCOPED_ARGS='-p cas --lib my_module'
-#   make -C cas-cli test-scoped SCOPED_ARGS='-p cas --test cli_test'
+#   make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --lib my_module'
+#   make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --test cli_test'
 #
 # NOTE: like test-clean-env, this MUST stay an explicit rule — the `test-%`
 # pattern rule above would otherwise match it and run `cargo test -p cas scoped`.

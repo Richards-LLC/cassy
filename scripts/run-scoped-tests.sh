@@ -38,10 +38,11 @@
 # Both harness formats are understood: `cargo test`'s "test result: ok. N
 # passed" and `cargo nextest run`'s "Summary [...] N tests run: M passed".
 #
-# Usage — every argument is passed through to the cargo subcommand verbatim:
+# Usage — every argument other than `--proof` is passed through to cargo:
 #
 #   scripts/run-scoped-tests.sh -p cas --lib my_module
-#   scripts/run-scoped-tests.sh -p cas --test cli_test
+#   scripts/run-scoped-tests.sh --proof -p cas --lib my_module
+#   scripts/run-scoped-tests.sh --proof -p cas --test cli_test
 #   scripts/run-scoped-tests.sh --lib -- --nocapture
 #   make -C cas-cli test-scoped SCOPED_ARGS='-p cas --lib my_module'
 #
@@ -54,13 +55,29 @@
 #                 path to keep the captured run log (default: a temp file)
 #
 # Exit codes: 0 = genuinely green with a nonzero passed count,
-#             1 = the run failed or executed nothing.
+#             1 = the run failed, executed nothing, or `--proof` missed a
+#                 committed source/test surface.
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 CARGO_CMD="${CARGO_CMD:-nextest run}"
+
+# `--proof` is deliberately opt-in. Workers need fast, narrow filters while
+# developing; the committed-diff check belongs to the final receipt they quote
+# at handoff, where an incomplete surface must fail loudly instead of reading
+# as a green proof.
+proof_mode=0
+proof_args=()
+for arg in "$@"; do
+    if [[ "$arg" == "--proof" ]]; then
+        proof_mode=1
+    else
+        proof_args+=("$arg")
+    fi
+done
+set -- "${proof_args[@]}"
 
 if [[ $# -eq 0 ]]; then
     echo "error: refusing to run unscoped." >&2
@@ -229,3 +246,9 @@ if [[ "${filtered}" -gt 0 ]]; then
     echo "      (${filtered} filtered out by the scope — expected for a scoped run.)"
 fi
 echo "Quote that passed count in your close note (rule-173)."
+
+if [[ "${proof_mode}" -eq 1 ]]; then
+    "${REPO_ROOT}/scripts/check-scoped-test-surface.sh" -- "$@"
+else
+    echo "      Iteration receipt only. Add --proof for committed-diff surface validation at handoff."
+fi

@@ -297,6 +297,73 @@ expect fail "refusing to run unscoped" \
     "refuses to run with no scope arguments" \
     env CARGO="${stub}" "${GUARD}"
 
+# ---------------------------------------------------------------------------
+# Proof surface — GH #329 / cas-8fd4. The runner needs a final-receipt mode
+# that notices a test name is narrower than the test MODULE changed by the
+# committed diff, while leaving ordinary development filters unblocked.
+# ---------------------------------------------------------------------------
+SURFACE_GUARD="${SCRIPT_DIR}/check-scoped-test-surface.sh"
+surface_repo="${tmpdir}/surface-repo"
+mkdir -p "${surface_repo}/cas-cli/src/hooks" "${surface_repo}/cas-cli/tests"
+git -C "${surface_repo}" init -q -b main
+{
+    printf 'mod worker_commit_guard_tests {\n'
+    for test_number in $(seq 1 40); do
+        printf '    #[test] fn established_contract_%s() {}\n' "${test_number}"
+    done
+    printf '    #[test] fn cas_8fd4_added_one() {}\n'
+    printf '    #[test] fn cas_8fd4_added_two() {}\n'
+    printf '}\n'
+} >"${surface_repo}/cas-cli/src/hooks/pre_tool.rs"
+printf '// factory integration target\n' \
+    >"${surface_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${surface_repo}" checkout -qb proof
+printf '\nfn fix_the_guard() {}\n' >>"${surface_repo}/cas-cli/src/hooks/pre_tool.rs"
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm source-change
+
+expect fail "missing library module 'worker_commit_guard_tests'" \
+    "proof: narrow two-test filter is refused for a changed 42-test module" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib cas_8fd4"
+
+expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+    "proof: complete changed-module filter is accepted" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
+
+printf '// contract changed with the implementation\n' >>"${surface_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm integration-change
+
+expect fail "missing integration target 'factory_mcp_ops_test'" \
+    "proof: changed integration binary cannot be omitted" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
+
+expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+    "proof: changed module plus integration target is accepted" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test"
+
+docs_repo="${tmpdir}/docs-repo"
+mkdir -p "${docs_repo}/docs"
+git -C "${docs_repo}" init -q -b main
+printf 'base\n' >"${docs_repo}/docs/readme.md"
+git -C "${docs_repo}" add .
+git -C "${docs_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${docs_repo}" checkout -qb proof
+printf 'non-test documentation only\n' >>"${docs_repo}/docs/readme.md"
+git -C "${docs_repo}" add .
+git -C "${docs_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm docs-only
+
+expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+    "proof: non-test-only diff does not invent a required target" \
+    bash -c "cd '${docs_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib"
+
 echo
 echo "test result: ${pass_count} passed; ${fail_count} failed"
 if [[ "${fail_count}" -ne 0 ]]; then

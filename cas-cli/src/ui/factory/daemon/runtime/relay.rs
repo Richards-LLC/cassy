@@ -769,7 +769,7 @@ mod tests {
 
         let replay = snapshot_to_ansi(&snapshot, false);
         assert!(replay.starts_with(b"\x1bc\x1b[0m\x1b[2J\x1b[H"));
-        assert!(replay.windows(4).any(|window| window == b"\x1b[H"));
+        assert!(replay.windows(3).any(|window| window == b"\x1b[H"));
         assert!(!replay.starts_with(b"["), "a keyframe cannot begin mid-CSI");
     }
 }

@@ -1,4 +1,5 @@
 import "./styles.css";
+import { attentionContent, groupAttention, machineEventAttention, type AttentionContent } from "./attention";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -12,6 +13,7 @@ import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest }
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
@@ -33,6 +35,9 @@ const paneBuffers = new Map<string, number[]>();
 const selectedPanes = new Map<string, string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
+// A live Claude/Ink proof after cas-9a29 decides whether one-row PTYs are safe.
+// Until then collapsed phone rows preserve their last real terminal geometry.
+const mobileCollapsedPaneGeometry = "freeze";
 let attention: AttentionItem[] = [];
 let selectedMachineId: string | undefined;
 let selectedSession: string | undefined;
@@ -46,6 +51,18 @@ let pairingDraft = createPairingDraft(location.origin);
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
+
+function paneLayoutStorage(): PaneLayoutStorage | undefined {
+  try { return window.localStorage; } catch { return undefined; }
+}
+
+function layoutForPanes(key: string, panes: readonly PaneInfo[], fallbackPrimaryPaneId: string | undefined): PaneLayout | undefined {
+  const activePaneIds = panes.filter((pane) => pane.kind !== "Director").map((pane) => pane.id);
+  const storage = paneLayoutStorage();
+  return storage
+    ? loadPaneLayout(storage, key, activePaneIds, fallbackPrimaryPaneId)
+    : normalizePaneLayout(activePaneIds, undefined, fallbackPrimaryPaneId);
+}
 
 async function boot(): Promise<void> {
   const stored = await catalog.recoverPending();
@@ -74,19 +91,24 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
       if (["daemon_disconnected", "pane_exited", "session_removed"].includes(kind)) {
-        void addAttention(machine, event.session as string | undefined, kind, event.diagnostic ? `Daemon ended: ${JSON.stringify(event.diagnostic)}` : kind.replaceAll("_", " "));
+        void addAttention(machine, event.session as string | undefined, kind, machineEventAttention(kind, event.diagnostic));
       }
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
     },
-    onSessionState: (session, state, scrollback) => void renderSessionState(machine.id, session, state, scrollback),
+    onSessionState: (session, state, scrollback) => {
+      void renderSessionState(machine.id, session, state, scrollback);
+    },
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
     },
-    onSocketError: (session, detail) => void addAttention(machine, session, "session_transport", detail),
+    onSocketError: (session, detail) => {
+      renderTerminalFailure(machine.id, session, detail);
+      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "incident" });
+    },
   });
 }
 
@@ -94,10 +116,11 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
 }
 
-async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, message: string): Promise<void> {
-  const id = `${machine.id}:${session ?? "machine"}:${kind}:${message}`;
+async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, content: string | AttentionContent): Promise<void> {
+  const normalized = typeof content === "string" ? { headline: content, severity: "notice" as const } : content;
+  const id = `${machine.id}:${session ?? "machine"}:${kind}:${normalized.headline}:${normalized.detail ?? ""}`;
   if (attention.some((item) => item.id === id && !item.acknowledgedAt)) return;
-  const item: AttentionItem = { id, machineId: machine.id, machineLabel: machine.label, session, kind, message, createdAt: new Date().toISOString() };
+  const item: AttentionItem = { id, machineId: machine.id, machineLabel: machine.label, session, kind, message: normalized.headline, ...normalized, createdAt: new Date().toISOString() };
   attention = [item, ...attention];
   await attentionStore.put(item);
   render();
@@ -108,6 +131,14 @@ async function acknowledgeAttention(id: string): Promise<void> {
   if (!item) return;
   item.acknowledgedAt = new Date().toISOString();
   await attentionStore.put(item);
+  render();
+}
+
+async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
+  const acknowledgedAt = new Date().toISOString();
+  const pending = items.filter((item) => !item.acknowledgedAt);
+  for (const item of pending) item.acknowledgedAt = acknowledgedAt;
+  await Promise.all(pending.map((item) => attentionStore.put(item)));
   render();
 }
 
@@ -331,8 +362,39 @@ async function openSession(machineId: string, session: string): Promise<void> {
   selectedMachineId = machineId;
   selectedSession = session;
   render();
+  renderTerminalConnecting(machineId, session);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
   await connections.get(machineId)?.attach(session);
+}
+
+function renderTerminalConnecting(machineId: string, session: string): void {
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  if (placeholder) {
+    placeholder.classList.remove("terminal-state");
+    placeholder.textContent = "Opening the terminal connection. This can take up to 10 seconds.";
+  }
+}
+
+function renderTerminalFailure(machineId: string, session: string, detail: string): void {
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  if (!placeholder) return;
+  const message = document.createElement("p");
+  message.textContent = `Terminal unavailable: ${detail}`;
+  const retry = document.createElement("button");
+  retry.className = "primary retry-terminal";
+  retry.textContent = "Try again";
+  retry.onclick = () => {
+    renderTerminalConnecting(machineId, session);
+    void connections.get(machineId)?.attach(session);
+  };
+  placeholder.classList.add("terminal-state");
+  placeholder.replaceChildren(message, retry);
 }
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
@@ -345,7 +407,7 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
     for (const task of tasks) {
       if (["blocked", "awaiting_merge", "awaitingmerge"].includes(String(task.status))) {
-        await addAttention(machine, session, String(task.status), `${task.id}: ${task.title}`);
+        await addAttention(machine, session, String(task.status), { headline: String(task.title), severity: "notice", ticketId: String(task.id) });
       }
     }
     render();
@@ -391,36 +453,85 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
-  const active = new Set(state.panes.filter((pane) => pane.kind !== "Director").map((pane) => pane.id));
+  grid.querySelector(".empty")?.remove();
+  const visiblePanes = state.panes.filter((pane) => pane.kind !== "Director");
+  const active = new Set(visiblePanes.map((pane) => pane.id));
   const selectedKey = sessionKey(machineId, session);
   const selectedPane = selectedPanes.get(selectedKey);
   if (!selectedPane || !active.has(selectedPane)) {
-    const fallback = state.panes.find((pane) => pane.kind !== "Director" && pane.focused)
-      ?? state.panes.find((pane) => pane.kind !== "Director");
+    const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
     if (fallback) selectedPanes.set(selectedKey, fallback.id);
+  }
+  const layout = layoutForPanes(selectedKey, visiblePanes, selectedPanes.get(selectedKey));
+  if (!layout) return;
+  grid.classList.add("pane-layout");
+  grid.classList.toggle("single-pane", visiblePanes.length === 1);
+  grid.dataset.secondaryPaneGeometry = mobileCollapsedPaneGeometry;
+  let primarySlot = grid.querySelector<HTMLElement>(".primary-pane-slot");
+  let secondaryStrip = grid.querySelector<HTMLElement>(".secondary-pane-strip");
+  if (!primarySlot || !secondaryStrip) {
+    primarySlot = document.createElement("div"); primarySlot.className = "primary-pane-slot";
+    secondaryStrip = document.createElement("div"); secondaryStrip.className = "secondary-pane-strip";
+    grid.replaceChildren(primarySlot, secondaryStrip);
   }
   for (const [key, surface] of surfaces) {
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) { surface.dispose(); surfaces.delete(key); }
   }
-  for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
+  const panesById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
+  for (const paneId of orderedPaneIds(layout)) {
+    const pane = panesById.get(paneId);
+    if (!pane) continue;
     const key = paneKey(machineId, session, pane.id);
-    let mount = grid.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
-    if (!mount) {
-      const card = document.createElement("section");
+    let card = grid.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"]`);
+    let mount = card?.querySelector<HTMLElement>(".terminal-mount");
+    if (!card || !mount) {
+      card = document.createElement("section");
       card.className = "pane";
       card.dataset.paneId = pane.id;
       if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
       card.onclick = () => {
         selectedPanes.set(selectedKey, pane.id);
         for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
-        card.classList.add("selected");
+        card?.classList.add("selected");
         surfaces.get(key)?.focus();
       };
-      const title = document.createElement("header");
-      title.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
+      const title = document.createElement("header"); title.className = "pane-header";
+      const label = document.createElement("span"); label.className = "pane-title";
+      label.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
+      const controls = document.createElement("div"); controls.className = "pane-layout-controls";
+      const button = (label: string, className: string, action: () => void) => {
+        const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
+        control.setAttribute("aria-label", label);
+        control.onclick = (event) => { event.stopPropagation(); action(); };
+        return control;
+      };
+      const updateLayout = (change: (current: PaneLayout) => PaneLayout) => {
+        const current = layoutForPanes(selectedKey, visiblePanes, selectedPanes.get(selectedKey));
+        if (!current) return;
+        const next = change(current);
+        const storage = paneLayoutStorage();
+        if (storage) savePaneLayout(storage, selectedKey, next);
+        void renderSessionState(machineId, session, state);
+      };
+      controls.append(
+        button("Make primary", "make-primary", () => updateLayout((current) => promotePane(current, pane.id))),
+        button("Move earlier", "move-earlier", () => updateLayout((current) => movePane(current, pane.id, -1))),
+        button("Move later", "move-later", () => updateLayout((current) => movePane(current, pane.id, 1))),
+      );
+      title.append(label, controls);
       mount = document.createElement("div"); mount.className = "terminal-mount";
-      card.append(title, mount); grid.append(card);
+      card.append(title, mount);
     }
+    if (!card || !mount) continue;
+    const position = orderedPaneIds(layout).indexOf(pane.id);
+    card.classList.toggle("primary", pane.id === layout.primaryPaneId);
+    const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
+    const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
+    const moveLater = card.querySelector<HTMLButtonElement>(".move-later");
+    if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
+    if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
+    if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
+    (pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card);
     const existingSurface = surfaces.get(key);
     if (existingSurface && (existingSurface.element !== mount || !existingSurface.element.isConnected)) {
       existingSurface.dispose();
@@ -449,6 +560,19 @@ function hubSupports(machineId: string, capability: string): boolean {
 
 function canControl(machineId: string, session: string, scope: Scope): boolean {
   return hubSupports(machineId, "daemon_attach") && machines.get(machineId)?.scopes.includes(scope) === true && leases.get(sessionKey(machineId, session))?.held_by_me === true;
+}
+
+function controlDisabledReason(machine: StoredMachine | undefined, session: string | undefined, lease: LeaseState | undefined): string | undefined {
+  if (!machine) return "Choose a paired machine, then a live session, to use its controls.";
+  if (!session) return "Choose a live session to use its controls.";
+  if (!hubSupports(machine.id, "daemon_attach")) return "This hub does not support Commander control. Upgrade the hub, then reconnect this machine.";
+  const missingScopes = ["pane-input", "message-send", "pane-interrupt"] as const;
+  if (missingScopes.some((scope) => !machine.scopes.includes(scope))) {
+    return `This credential can only observe from ${location.origin}. Pair ${machine.label} again from this Commander origin and approve control access on the machine. Pairings are specific to each Commander origin.`;
+  }
+  if (lease?.held_by_me) return undefined;
+  if (lease?.controller_label) return `${lease.controller_label} currently controls this session. Wait for it to be released or use an administrator credential to take over.`;
+  return "Take control to enable terminal input, messages, and interrupts.";
 }
 
 function sendControl(machineId: string, session: string, message: unknown): void {
@@ -503,7 +627,7 @@ function pairDialogMarkup(): string {
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
     : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Commander build has no reviewed relay origin.</p>';
-  return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Create a ten-minute code, then approve the exact origin and read-only scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair this machine</h2><p>Create a ten-minute code, then verify the exact Commander origin and approve the requested read and control scopes on the target machine.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairingStatus ? `<p class="pair-status" role="status">${escapeHtml(pairingStatus)}</p>` : ""}<div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${pendingPairing ? "" : '<p class="pairing-disabled-reason">Pair is disabled until you open a pairing URL generated by <code>cas hub pair</code> on the machine.</p>'}<button type="button" ${pendingPairing ? "" : "disabled"}>Pair</button>${relayAction}</div></section></dialog>`;
 }
 
 function capturePairingDraft(): void {
@@ -520,6 +644,7 @@ function render(captureDraft = true): void {
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
+  const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
@@ -534,8 +659,8 @@ function render(captureDraft = true): void {
     <div class="shell">
       <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair this machine</button><nav id="machine-list"></nav></aside>
       <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
-      <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div></header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
-      <aside class="context"><section><h2>Attention <span class="badge">${attention.filter((item) => !item.acknowledgedAt).length}</span></h2><div id="attention-list"></div></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea><button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
+      <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}</header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
+      <aside class="context"><section><h2>Attention <span class="badge">${attention.filter((item) => !item.acknowledgedAt).length}</span></h2><div id="attention-list"></div></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
     </div>${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
   const machineList = document.querySelector("#machine-list")!;
@@ -578,12 +703,33 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
 
 function renderAttention(): void {
   const container = document.querySelector("#attention-list")!;
-  for (const item of attention.filter((candidate) => !candidate.acknowledgedAt).slice(0, 8)) {
-    const card = document.createElement("article"); card.className = "attention-item";
-    const text = document.createElement("button"); text.className = "attention-open"; text.textContent = `${item.machineLabel}${item.session ? ` / ${item.session}` : ""}: ${item.message}`;
-    text.onclick = () => { selectedMachineId = item.machineId; if (item.session) void openSession(item.machineId, item.session); };
-    const ack = document.createElement("button"); ack.className = "ack"; ack.textContent = "Acknowledge"; ack.onclick = () => void acknowledgeAttention(item.id);
-    card.append(text, ack); container.append(card);
+  for (const group of groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))) {
+    const section = document.createElement("section"); section.className = "attention-group";
+    const header = document.createElement("header"); header.className = "attention-group-header";
+    const label = document.createElement("span"); label.className = "attention-group-label"; label.textContent = `${group.machineLabel}${group.session ? ` / ${group.session}` : ""}`;
+    header.append(label);
+    const routineItems = group.items.filter((item) => attentionContent(item).severity === "notice");
+    if (routineItems.length > 0) {
+      const acknowledgeAll = document.createElement("button"); acknowledgeAll.className = "attention-group-ack"; acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`; acknowledgeAll.onclick = () => void acknowledgeAttentionGroup(routineItems);
+      header.append(acknowledgeAll);
+    }
+    section.append(header);
+    for (const item of group.items) {
+      const content = attentionContent(item);
+      const card = document.createElement("article"); card.className = `attention-item attention-item--${content.severity}`;
+      const text = document.createElement("button"); text.className = "attention-open";
+      const title = document.createElement("span"); title.className = "attention-title"; title.textContent = content.headline;
+      text.append(title);
+      if (content.severity === "incident") { const severity = document.createElement("span"); severity.className = "attention-severity"; severity.textContent = "Action required · open session"; text.append(severity); }
+      if (content.ticketId) { const ticket = document.createElement("small"); ticket.className = "attention-ticket"; ticket.title = `Task ${content.ticketId}`; ticket.textContent = content.ticketId; text.append(ticket); }
+      if (content.cause) { const cause = document.createElement("span"); cause.className = "attention-cause"; cause.textContent = `Cause: ${content.cause}`; text.append(cause); }
+      if (content.detail) { const detail = document.createElement("span"); detail.className = "attention-detail"; detail.textContent = content.detail; text.append(detail); }
+      text.onclick = () => { selectedMachineId = item.machineId; if (item.session) void openSession(item.machineId, item.session); };
+      card.append(text);
+      if (content.severity === "notice") { const ack = document.createElement("button"); ack.className = "ack"; ack.textContent = "Acknowledge"; ack.onclick = () => void acknowledgeAttention(item.id); card.append(ack); }
+      section.append(card);
+    }
+    container.append(section);
   }
 }
 

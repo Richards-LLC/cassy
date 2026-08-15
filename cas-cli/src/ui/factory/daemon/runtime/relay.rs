@@ -210,12 +210,20 @@ pub(in crate::ui::factory::daemon) fn write_pane_snapshots(
 /// dimensions. This function captures that reflowed viewport as ANSI bytes
 /// suitable for replaying into a web terminal emulator (ghostty-web / xterm.js),
 /// preserving colors, bold/italic, and cursor position.
-fn snapshot_to_ansi(snap: &TerminalSnapshot) -> Vec<u8> {
+fn snapshot_to_ansi(snap: &TerminalSnapshot, in_alt_screen: bool) -> Vec<u8> {
     let cap = (snap.rows as usize) * (snap.cols as usize) * 4;
     let mut buf = Vec::with_capacity(cap);
     let mut tmp = String::new();
 
-    // Reset attributes, clear screen, cursor home
+    // The snapshot is taken from the currently visible buffer.  When that is
+    // an alternate screen, enter it before replaying the rows: a live Ink UI
+    // subsequently sends cursor-addressed incremental redraws and assumes
+    // that its alternate buffer is still selected.
+    if in_alt_screen {
+        buf.extend_from_slice(b"\x1b[?1049h");
+    }
+
+    // Reset attributes, clear screen, cursor home.
     buf.extend_from_slice(b"\x1b[0m\x1b[2J\x1b[H");
 
     let mut prev_fg: (u8, u8, u8) = (0, 0, 0);
@@ -453,7 +461,7 @@ impl FactoryDaemon {
         for pane_id in pane_ids {
             if let Some(pane) = self.app.mux.get(&pane_id) {
                 if let Ok(snapshot) = pane.get_full_snapshot() {
-                    let ansi = snapshot_to_ansi(&snapshot);
+                    let ansi = snapshot_to_ansi(&snapshot, pane.is_in_alt_screen());
                     if let Some(buffer) = self.pane_buffers.get_mut(&pane_id) {
                         buffer.replace_with(ansi);
                     }
@@ -508,7 +516,7 @@ impl FactoryDaemon {
                             // resize so the snapshot has correct content).
                             if let Some(p) = self.app.mux.get(&actual_pane) {
                                 if let Ok(snapshot) = p.get_full_snapshot() {
-                                    let ansi = snapshot_to_ansi(&snapshot);
+                                    let ansi = snapshot_to_ansi(&snapshot, p.is_in_alt_screen());
                                     self.pane_buffers
                                         .entry(actual_pane.clone())
                                         .or_default()
@@ -556,7 +564,7 @@ impl FactoryDaemon {
         // Rebuild the buffer from the reflowed vt snapshot
         if let Some(p) = self.app.mux.get(&actual_pane) {
             if let Ok(snapshot) = p.get_full_snapshot() {
-                let ansi = snapshot_to_ansi(&snapshot);
+                let ansi = snapshot_to_ansi(&snapshot, p.is_in_alt_screen());
                 self.pane_buffers
                     .entry(actual_pane)
                     .or_default()
@@ -702,5 +710,25 @@ mod tests {
         let mut buf = PaneBuffer::default();
         buf.append(b"\x1b[1;31mhello\x1b[0m world");
         assert_eq!(buf.as_plain_text(), "hello world");
+    }
+
+    #[test]
+    fn snapshot_replay_reenters_alternate_screen_before_ink_redraws() {
+        let snapshot = TerminalSnapshot {
+            cells: vec![cas_factory_protocol::TerminalCell {
+                codepoint: 'x' as u32,
+                fg: (0, 0, 0),
+                bg: (0, 0, 0),
+                flags: 0,
+                width: 1,
+            }],
+            cursor: cas_factory_protocol::CursorPosition { x: 0, y: 0 },
+            cols: 1,
+            rows: 1,
+        };
+
+        let replay = snapshot_to_ansi(&snapshot, true);
+        assert!(replay.starts_with(b"\x1b[?1049h\x1b[0m\x1b[2J\x1b[H"));
+        assert!(replay.ends_with(b"\x1b[0m\x1b[1;1H"));
     }
 }

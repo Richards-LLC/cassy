@@ -35,6 +35,13 @@ describe("binding Commander browser invariants", () => {
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
   });
 
+  it("names the remedy when an observer-only credential disables control", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("This credential can only observe from ${location.origin}");
+    expect(source).toContain("Pairings are specific to each Commander origin.");
+    expect(source).toContain('class="control-disabled-reason"');
+  });
+
   it("binds the browser fetch receiver at every pairing handoff", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/fetcher:\s*(?:window\.|globalThis\.)?fetch\s*[,}]/);
@@ -70,13 +77,19 @@ describe("binding Commander browser invariants", () => {
   });
 
   it("keeps long-lived credentials out of ambient browser storage and URL channels", async () => {
-    const source = await Promise.all(["storage.ts", "main.ts", "dpop.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const source = await Promise.all(["storage.ts", "dpop.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     const joined = source.join("\n");
     for (const forbidden of ["local" + "Storage", "document.cookie", "serviceWorker.register", "caches.open"]) {
       expect(joined).not.toContain(forbidden);
     }
     expect(await readFile(new URL("storage.ts", import.meta.url), "utf8")).not.toContain("session" + "Storage");
     expect(joined).toContain("indexedDB.open");
+
+    // Layout is an intentionally non-secret, per-device preference. It must
+    // remain isolated from the IndexedDB credential catalog.
+    const layout = await readFile(new URL("pane-layout.ts", import.meta.url), "utf8");
+    expect(layout).toContain("cas-commander:pane-layout:");
+    for (const secretField of ["credential", "privateKey", "deviceKey"]) expect(layout).not.toContain(secretField);
   });
 
   it("feature-detects hub versions and keeps controls disabled on skew", async () => {
@@ -109,6 +122,18 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("data-session-key");
   });
 
+  it("keeps the phone ATTENTION hierarchy human-readable and group-actionable", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('machineEventAttention(kind, event.diagnostic)');
+    expect(main).toContain('title.textContent = content.headline');
+    expect(main).toContain('acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`');
+    expect(main).toContain('if (content.severity === "notice")');
+    expect(main).toContain('groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))');
+    expect(css).toContain(".attention-item--incident");
+    expect(css).toContain("@media (max-width: 850px)");
+    expect(css).toContain(".attention-group-label { max-width: 155px; }");
+  });
+
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source.indexOf("if (captureDraft) capturePairingDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
@@ -134,6 +159,67 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("this.desired = false");
     expect(source).toContain("this.eventAbort?.abort()");
     expect(source).toContain('this.callbacks.onState("auth-blocked", detail)');
+  });
+
+  it("bounds a terminal that opens but never sends its initial session state", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ status: 200, ok: true, json: async () => ({ ticket: "unused" }) })));
+    class FakeWebSocket {
+      static readonly OPEN = 1;
+      static readonly CONNECTING = 0;
+      static instances: FakeWebSocket[] = [];
+      readyState = FakeWebSocket.CONNECTING;
+      binaryType = "";
+      onopen: (() => void) | null = null;
+      onmessage: ((message: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor() { FakeWebSocket.instances.push(this); }
+      open(): void { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
+      close(): void { this.readyState = 3; this.onclose?.({ code: 1006 } as CloseEvent); }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["pane-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    (supervisor as unknown as { desired: boolean }).desired = true;
+
+    await supervisor.attach("factory-a");
+    FakeWebSocket.instances[0].open();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(callbacks.onSocketError).toHaveBeenCalledWith(
+      "factory-a",
+      "Terminal connection opened but sent no session state within 10 seconds. Retrying…",
+    );
+    supervisor.stop();
+  });
+
+  it("turns terminal failures into an explanation and direct retry action", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    expect(source).toContain("Opening the terminal connection. This can take up to 10 seconds.");
+    expect(source).toContain("Terminal unavailable: ${detail}");
+    expect(source).toContain('retry.textContent = "Try again"');
+    expect(source).toContain("void connections.get(machineId)?.attach(session)");
+    expect(styles).toContain(".terminal-state");
+    expect(styles).toContain("#a36c2c");
+  });
+
+  it("removes the connecting instruction when the terminal state arrives", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('grid.querySelector(".empty")?.remove();');
   });
 
   it.each(["stop", "auth-block"] as const)("cancels a scheduled attach retry on %s", async (terminalAction) => {

@@ -971,11 +971,38 @@ impl CasCore {
     /// List all entries
     pub async fn cas_list(
         &self,
-        Parameters(req): Parameters<LimitRequest>,
+        Parameters(req): Parameters<MemoryListRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use cas_types::EntrySortOptions;
+        use cas_types::{EntrySortOptions, MemoryTier, ScopeFilter};
 
         let store = self.open_store()?;
+
+        let scope_filter: ScopeFilter = req.scope.parse().map_err(|_| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from("scope must be 'global', 'project', or 'all'"),
+            data: None,
+        })?;
+        let tier_filter = req
+            .tier
+            .as_deref()
+            .map(str::parse::<MemoryTier>)
+            .transpose()
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("tier must be 'working', 'cold', or 'archive'"),
+                data: None,
+            })?;
+        let tag_filters: Vec<String> = req
+            .tags
+            .as_deref()
+            .map(|tags| {
+                tags.split(',')
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())
+                    .map(str::to_ascii_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let all_entries = store.list().map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -997,6 +1024,28 @@ impl CasCore {
                 }
             })
             .collect();
+
+        // Every filter narrows the same collection used below for both the
+        // displayed rows and the header total. This prevents a capped list
+        // from ever reporting an unfiltered count.
+        if let Some(scope) = scope_filter.as_scope() {
+            entries.retain(|entry| entry.scope == scope);
+        }
+
+        if !tag_filters.is_empty() {
+            entries.retain(|entry| {
+                tag_filters.iter().all(|requested| {
+                    entry
+                        .tags
+                        .iter()
+                        .any(|entry_tag| entry_tag.eq_ignore_ascii_case(requested))
+                })
+            });
+        }
+
+        if let Some(tier) = tier_filter {
+            entries.retain(|entry| entry.memory_tier == tier);
+        }
 
         // Filter by team_id if specified
         if let Some(ref team_id) = req.team_id {

@@ -38,10 +38,12 @@ impl CasService {
     }
 
     pub(super) async fn memory_list(&self, req: MemoryRequest) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::LimitRequest;
-        let inner_req = LimitRequest {
+        use crate::mcp::tools::MemoryListRequest;
+        let inner_req = MemoryListRequest {
             limit: req.limit,
             scope: req.scope.unwrap_or_else(|| "all".to_string()),
+            tags: req.tags,
+            tier: req.tier,
             sort: req.sort,
             sort_order: req.sort_order,
             team_id: req.team_id,

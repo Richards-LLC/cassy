@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.69.1] - 2026-08-14
+
+### Fixed
+- **Commander page-initiated pairing now finishes in browsers that require `fetch` to retain its `Window` receiver.** Every pairing handoff binds the browser fetch function before relay creation, polling, acknowledgement, or credential exchange.
+
 ## [2.69.0] - 2026-08-14
 
 ### Added

@@ -524,6 +524,7 @@ impl DaemonInitPhase {
                 None
             }
         };
+        let ai_enrichment = self.factory_config.ai_enrichment.clone();
 
         // Return a FactoryDaemon for the main event loop
         Ok(FactoryDaemon {
@@ -551,6 +552,9 @@ impl DaemonInitPhase {
             relay_clients: HashMap::new(),
             pane_watchers: HashMap::new(),
             pane_buffers: HashMap::new(),
+            session_summarizer: super::runtime::session_summarizer::SessionSummarizer::new(
+                ai_enrichment,
+            ),
             gui_listener,
             gui_clients: HashMap::new(),
             next_gui_client_id: 0,

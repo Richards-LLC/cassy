@@ -35,8 +35,8 @@ pub mod session;
 pub mod spec_resolver;
 pub use changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
 pub use config::{
-    AutoPromptConfig, DEFAULT_STALL_THRESHOLD_SECS, EpicState, FactoryConfig, NotifyBackend,
-    NotifyConfig,
+    AiEnrichmentConfig, AutoPromptConfig, DEFAULT_STALL_THRESHOLD_SECS, EpicState, FactoryConfig,
+    NotifyBackend, NotifyConfig,
 };
 pub use core::{FactoryCore, FactoryError, FactoryEvent, PaneId, PaneInfo, Result};
 pub use director::{
@@ -55,7 +55,6 @@ pub use session::state::{
 };
 pub use spec_resolver::{
     ConfigSources, SpecResolverError, apply_codex_fallback, apply_codex_fallback_for_supervisor,
-    configured_factory_default_model,
-    resolve_specs, resolve_supervisor_spec, worker_slot_cli_configured,
-    worker_slot_effort_configured,
+    configured_factory_default_model, resolve_specs, resolve_supervisor_spec,
+    worker_slot_cli_configured, worker_slot_effort_configured,
 };

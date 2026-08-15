@@ -29,7 +29,10 @@ describe("Commander live connection lifecycle", () => {
       stop: vi.fn(() => { events.push("old:stop"); }),
     };
     const connections = new Map([[prior.id, oldSupervisor]]);
-    const connectionStates = new Map<string, ConnectionState>([[prior.id, "auth-blocked"]]);
+    const connectionStates = new Map<string, ConnectionState>([[prior.id, {
+      phase: "failed", stage: "auth", since: 0, attempt: 0,
+      missedHeartbeats: 0, degraded: false, authFailure: "revoked",
+    }]]);
     const createConnection = vi.fn((machine: StoredMachine) => ({
       machine,
       start: vi.fn(() => { events.push(`new:start:${machine.credentialId}`); }),

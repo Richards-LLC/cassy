@@ -4,6 +4,55 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Optional server-side enrichment for Commander session cards.
+///
+/// Disabled by default because enabling it sends a redacted excerpt of
+/// terminal output to the configured model provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiEnrichmentConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_summary_provider")]
+    pub provider: String,
+    #[serde(default = "default_summary_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_summary_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_summary_model")]
+    pub model: String,
+    #[serde(default = "default_summary_effort")]
+    pub effort: String,
+}
+
+fn default_summary_provider() -> String {
+    "openai".to_string()
+}
+fn default_summary_endpoint() -> String {
+    "https://api.openai.com/v1/responses".to_string()
+}
+fn default_summary_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+fn default_summary_model() -> String {
+    "gpt-5.6-luna".to_string()
+}
+fn default_summary_effort() -> String {
+    "low".to_string()
+}
+
+impl Default for AiEnrichmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_summary_provider(),
+            endpoint: default_summary_endpoint(),
+            api_key_env: default_summary_api_key_env(),
+            model: default_summary_model(),
+            effort: default_summary_effort(),
+        }
+    }
+}
+
 /// State of the current epic workflow
 #[derive(Debug, Clone, Default)]
 pub enum EpicState {
@@ -226,6 +275,9 @@ pub struct FactoryConfig {
     /// (cas-9829). Sourced from `.cas/config.toml` `[factory]
     /// stall_threshold_secs`; defaults to [`DEFAULT_STALL_THRESHOLD_SECS`].
     pub stall_threshold_secs: u64,
+    /// Shared AI enrichment for Commander summaries and event enrichment.
+    /// Default off because terminal excerpts may be sent to a third-party API.
+    pub ai_enrichment: AiEnrichmentConfig,
 }
 
 impl Default for FactoryConfig {
@@ -254,6 +306,7 @@ impl Default for FactoryConfig {
             resolved_worker_specs: vec![],
             resolved_supervisor_spec: None,
             stall_threshold_secs: DEFAULT_STALL_THRESHOLD_SECS,
+            ai_enrichment: AiEnrichmentConfig::default(),
         }
     }
 }

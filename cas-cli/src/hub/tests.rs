@@ -12,8 +12,8 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::ui::factory::{
-    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneInfo, PaneKind, SessionState,
-    daemon_capabilities,
+    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneBootstrap, PaneInfo, PaneKind,
+    SessionState, daemon_capabilities,
 };
 
 /// Hub state initialization intentionally refuses to traverse symlinked path
@@ -31,8 +31,7 @@ fn private_tempdir() -> tempfile::TempDir {
 // normal isolated run takes about 3 seconds, so the former 5-second deadline
 // flakes under full-suite build contention. Fifteen seconds keeps a bounded
 // failure while leaving enough scheduling headroom for a busy developer host.
-const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(15);
+const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
@@ -121,6 +120,21 @@ async fn h1_bp_04_slow_viewer_lags_without_new_upstream_or_harming_fast_viewer()
         slow.recv().await,
         Err(ViewerRecvError::Lagged { .. })
     ));
+    let keyframe = proxy_frame(DaemonMessage::PaneKeyframe {
+        pane_id: "worker-1".into(),
+        epoch: 7,
+        seq: 99,
+        cols: 80,
+        rows: 24,
+        ansi: b"fresh screen".to_vec(),
+    });
+    mux.publish("factory-a", keyframe.clone()).await.unwrap();
+    assert_eq!(
+        slow.recv().await.unwrap().bytes,
+        keyframe.bytes,
+        "lag recovery skips stale deltas and accepts an authoritative keyframe"
+    );
+    assert_eq!(fast.recv().await.unwrap().bytes, keyframe.bytes);
     assert_eq!(mux.upstream_start_count("factory-a").await, 1);
     assert!(fast.try_recv().is_err());
 }
@@ -177,9 +191,7 @@ fn h1_death_05_fixture_process_entry() {
     };
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         std::fs::write(port_file, listener.local_addr().unwrap().port().to_string()).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -196,6 +208,7 @@ fn h1_death_05_fixture_process_entry() {
             scrollback: None,
             protocol_version: PROTOCOL_VERSION,
             capabilities: daemon_capabilities(),
+            pane_bootstrap: Vec::new(),
         };
         socket
             .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
@@ -242,10 +255,15 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
     assert_eq!(catalog.list().await.unwrap().len(), 1);
     let events = MachineEventBus::new(8);
     let mut event_rx = events.subscribe();
-    let connector = DaemonConnector::new(SessionMultiplexer::new(8), events)
-        .with_exit_evidence_store(store);
+    let connector =
+        DaemonConnector::new(SessionMultiplexer::new(8), events).with_exit_evidence_store(store);
     let mut viewer = connector
-        .attach("death-fixture", port, std::iter::empty::<String>(), Some(identity.clone()))
+        .attach(
+            "death-fixture",
+            port,
+            std::iter::empty::<String>(),
+            Some(identity.clone()),
+        )
         .await
         .unwrap();
     let welcome = viewer.recv().await.unwrap();
@@ -253,7 +271,10 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
         serde_json::from_slice::<DaemonMessage>(&welcome.bytes).unwrap(),
         DaemonMessage::Welcome { .. }
     ));
-    assert_eq!(connector.upstream_connection_count("death-fixture").await, 1);
+    assert_eq!(
+        connector.upstream_connection_count("death-fixture").await,
+        1
+    );
 
     // SAFETY: exact child pid is fingerprinted above and owned by this test.
     assert_eq!(unsafe { libc::kill(identity.pid as i32, libc::SIGILL) }, 0);
@@ -282,7 +303,10 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
     assert_eq!(source.model_call_count(), 0);
     assert_eq!(source.logical_session_create_count(), 0);
     assert_eq!(catalog.list().await.unwrap().len(), 1);
-    assert_eq!(connector.upstream_connection_count("death-fixture").await, 1);
+    assert_eq!(
+        connector.upstream_connection_count("death-fixture").await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -755,7 +779,11 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
         .await
         .unwrap();
     assert_eq!(hostile.status(), StatusCode::UNAUTHORIZED);
-    assert!(!hostile.headers().contains_key("access-control-allow-origin"));
+    assert!(
+        !hostile
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
     assert!(auth.list_devices().unwrap().is_empty());
 
     let accepted_invitation = auth
@@ -771,9 +799,7 @@ async fn h2_pair_02_pairing_exchange_cors_covers_bound_browser_responses() {
         Request::post("/v1/auth/pairing/exchange")
             .header("origin", origin)
             .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&accepted_exchange).unwrap(),
-            ))
+            .body(Body::from(serde_json::to_vec(&accepted_exchange).unwrap()))
             .unwrap()
     };
     let accepted = app.clone().oneshot(accepted_request()).await.unwrap();
@@ -838,6 +864,13 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
             .unwrap()
             .iter()
             .any(|capability| capability == "cloud_device_suggestions")
+    );
+    assert!(
+        body["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "machine_multiplex_v2")
     );
 }
 
@@ -972,7 +1005,7 @@ async fn h0_tls_hsts_policy_is_bound_to_server_transport_not_client_headers() {
 }
 
 #[tokio::test]
-async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
+async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_upstream() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -984,7 +1017,7 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
             focused_pane: Some("worker-1".into()),
             panes: vec![PaneInfo {
                 id: "worker-1".into(),
-                kind: PaneKind::Worker,
+                kind: PaneKind::Supervisor,
                 focused: true,
                 title: "Worker 1".into(),
                 exited: false,
@@ -1000,12 +1033,34 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         )])),
         protocol_version: PROTOCOL_VERSION,
         capabilities: daemon_capabilities(),
+        pane_bootstrap: vec![PaneBootstrap {
+            pane_id: "worker-1".into(),
+            epoch: 1_723_456_789_012,
+            cols: 120,
+            rows: 40,
+            scrollback_start_row: 17,
+            scrollback_end_row: 817,
+        }],
     };
     let output = DaemonMessage::Output {
         pane_id: "worker-1".into(),
         data: b"\x1b[32mlive bytes\x1b[0m".to_vec(),
     };
     let welcome_bytes = serde_json::to_vec(&welcome).unwrap();
+    let mut expected_welcome = welcome.clone();
+    let DaemonMessage::Welcome {
+        scrollback: expected_scrollback,
+        ..
+    } = &mut expected_welcome
+    else {
+        unreachable!()
+    };
+    *expected_scrollback = None;
+    let expected_welcome_bytes = serde_json::to_vec(&expected_welcome).unwrap();
+    assert!(
+        expected_welcome_bytes.len() <= super::connector::COMMANDER_WELCOME_METADATA_HARD_BYTES,
+        "canonical Welcome must remain within the metadata hard ceiling"
+    );
     let output_bytes = serde_json::to_vec(&output).unwrap();
 
     let daemon_connections = connections.clone();
@@ -1035,7 +1090,11 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         .attach("factory-a", port, ["worker-1"], None)
         .await
         .unwrap();
-    assert_eq!(first.recv().await.unwrap().bytes, welcome_bytes);
+    assert_eq!(
+        first.recv().await.unwrap().bytes,
+        expected_welcome_bytes,
+        "v3 Welcome must be transformed exactly to metadata-only form"
+    );
 
     let mut second = connector
         .attach("factory-a", port, ["worker-1"], None)
@@ -1043,13 +1102,19 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         .unwrap();
     assert_eq!(
         second.recv().await.unwrap().bytes,
-        welcome_bytes,
-        "late viewers rehydrate from the byte-identical canonical Welcome"
+        expected_welcome_bytes,
+        "late viewers rehydrate from the same deterministic canonical Welcome"
     );
 
     release_output.notify_waiters();
     assert_eq!(first.recv().await.unwrap().bytes, output_bytes);
     assert_eq!(second.recv().await.unwrap().bytes, output_bytes);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), first.recv())
+            .await
+            .is_err(),
+        "PTY output must be delivered exactly once"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     assert_eq!(connections.load(Ordering::SeqCst), 1);
     assert_eq!(connector.upstream_connection_count("factory-a").await, 1);
@@ -1086,6 +1151,82 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     let removed = receiver.recv().await.unwrap();
     assert_eq!(removed.kind, MachineEventKind::SessionRemoved);
     assert_eq!(removed.session.as_deref(), Some("factory-a"));
+}
+
+#[tokio::test]
+async fn commander_attention_event_is_immediate_then_durably_patched_in_place() {
+    let temp = private_tempdir();
+    let path = temp.path().join("events.json");
+    let events = MachineEventBus::open(16, &path).unwrap();
+    let mut broadcast = events.subscribe();
+    let mut enrichment = events.enable_enrichment();
+    events.set_session_context(
+        "factory-a",
+        SessionAttentionContext {
+            title: "Refactor authentication".into(),
+            phase: "testing".into(),
+        },
+    );
+
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::Error {
+            message: "serde panic in auth.rs:44".into(),
+        },
+    );
+    let immediate = broadcast.recv().await.unwrap();
+    assert_eq!(immediate.kind, MachineEventKind::DaemonError);
+    assert!(immediate.enrichment_pending);
+    assert!(immediate.enrichment.is_none());
+    assert_eq!(immediate.session_context.as_ref().unwrap().phase, "testing");
+    assert_eq!(
+        enrichment.recv().await.unwrap().sequence,
+        immediate.sequence
+    );
+
+    events.finish_enrichment(
+        immediate.sequence,
+        Some(AttentionEnrichment {
+            severity: AttentionSeverity::Critical,
+            summary: "Authentication worker crashed".into(),
+            detail: Some("auth.rs:44 serde panic".into()),
+            action: AttentionAction::Retry,
+            fingerprint: "auth.rs-serde-panic".into(),
+        }),
+    );
+    let patch = broadcast.recv().await.unwrap();
+    assert_eq!(patch.sequence, immediate.sequence);
+    assert_eq!(patch.revision, 1);
+    assert!(!patch.enrichment_pending);
+    assert_eq!(
+        patch.enrichment.as_ref().unwrap().fingerprint,
+        "auth.rs-serde-panic"
+    );
+
+    drop(events);
+    let reopened = MachineEventBus::open(16, &path).unwrap();
+    assert_eq!(reopened.history(), vec![patch]);
+}
+
+#[tokio::test]
+async fn commander_attention_api_off_is_complete_without_pending_state() {
+    let events = MachineEventBus::new(4);
+    let mut broadcast = events.subscribe();
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::Error {
+            message: "raw error remains actionable".into(),
+        },
+    );
+
+    let event = broadcast.recv().await.unwrap();
+    assert_eq!(event.kind, MachineEventKind::DaemonError);
+    assert!(!event.enrichment_pending);
+    assert!(event.enrichment.is_none());
+    assert_eq!(
+        event.payload.unwrap()["message"],
+        "raw error remains actionable"
+    );
 }
 
 #[test]
@@ -1335,6 +1476,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
             scrollback: None,
             protocol_version: PROTOCOL_VERSION,
             capabilities: daemon_capabilities(),
+            pane_bootstrap: Vec::new(),
         };
         socket
             .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
@@ -1508,8 +1650,25 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
             request_id: None,
         },
     };
+    let resize = ClientMessage::ResizePane {
+        pane_id: "worker-1".into(),
+        cols: 80,
+        rows: 24,
+    };
+    let keyframe = ClientMessage::RequestPaneKeyframe {
+        pane_id: "worker-1".into(),
+    };
+    let scrollback = ClientMessage::ScrollbackRequest {
+        pane_id: "worker-1".into(),
+        generation: 42,
+        start_row: 0,
+        count: 200,
+    };
 
     assert_eq!(required_scope(&input), Some(Scope::PaneInput));
+    assert_eq!(required_scope(&resize), Some(Scope::PaneRead));
+    assert_eq!(required_scope(&keyframe), Some(Scope::PaneRead));
+    assert_eq!(required_scope(&scrollback), Some(Scope::PaneRead));
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);
@@ -1556,7 +1715,11 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
     let phone = pair("phone");
     let laptop = pair("laptop");
 
+    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
+    assert!(auth.may_resize_panes(&laptop, "factory-a", now).unwrap());
     auth.acquire_lease(&phone, "factory-a", now).unwrap();
+    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
+    assert!(!auth.may_resize_panes(&laptop, "factory-a", now).unwrap());
     assert!(
         auth.lease_status(&phone, "factory-a", now)
             .unwrap()
@@ -1577,6 +1740,7 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
         Some("laptop")
     );
     auth.release_lease(&laptop, "factory-a", now).unwrap();
+    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
     assert!(
         auth.lease_status(&phone, "factory-a", now)
             .unwrap()
@@ -1719,6 +1883,99 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     let audit = std::fs::read_to_string(temp.path().join("hub/audit.jsonl")).unwrap();
     assert!(audit.contains("dpop_replay") && audit.contains("device_revoke"));
     assert!(!audit.contains(&credential.credential));
+}
+
+#[test]
+fn expired_device_credential_refreshes_once_but_revoked_never_does() {
+    use chrono::{Duration, Utc};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let issued = Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            issued,
+        )
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, issued).unwrap();
+
+    // Keep the credential active through its ordinary 30-day idle windows.
+    for day in [29, 58, 87] {
+        let active_at = issued + Duration::days(day);
+        let active_proof = sign_dpop(
+            &signing,
+            &credential.credential,
+            "GET",
+            "/v1/machine",
+            active_at,
+            &format!("active-before-expiry-{day}"),
+        );
+        auth.authenticate_dpop(
+            &format!("DPoP {}", credential.credential),
+            &active_proof,
+            "https://controller.example",
+            "GET",
+            "/v1/machine",
+            active_at,
+        )
+        .unwrap();
+    }
+
+    let expired_at = issued + Duration::days(91);
+    let refresh_proof = sign_dpop(
+        &signing,
+        &credential.credential,
+        "POST",
+        "/v1/auth/refresh",
+        expired_at,
+        "refresh-expired",
+    );
+    let refreshed = auth
+        .refresh_device_credential(
+            &format!("DPoP {}", credential.credential),
+            &refresh_proof,
+            "https://controller.example",
+            "POST",
+            "/v1/auth/refresh",
+            expired_at,
+        )
+        .unwrap();
+    assert_ne!(refreshed.credential, credential.credential);
+    assert_eq!(refreshed.expires_at, expired_at + Duration::days(90));
+
+    auth.revoke_device(&refreshed.device_id, expired_at)
+        .unwrap();
+    let revoked_proof = sign_dpop(
+        &signing,
+        &refreshed.credential,
+        "POST",
+        "/v1/auth/refresh",
+        expired_at,
+        "refresh-revoked",
+    );
+    assert!(
+        auth.refresh_device_credential(
+            &format!("DPoP {}", refreshed.credential),
+            &revoked_proof,
+            "https://controller.example",
+            "POST",
+            "/v1/auth/refresh",
+            expired_at,
+        )
+        .is_err()
+    );
 }
 
 fn public_jwk(signing: &p256::ecdsa::SigningKey) -> PublicJwk {

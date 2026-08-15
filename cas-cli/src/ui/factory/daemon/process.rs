@@ -291,6 +291,10 @@ pub async fn run_daemon_after_fork(
             None
         }
     };
+    let ai_enrichment = crate::config::Config::load(app.cas_dir())
+        .unwrap_or_default()
+        .factory()
+        .ai_enrichment;
 
     let mut daemon = FactoryDaemon {
         session_name,
@@ -317,6 +321,9 @@ pub async fn run_daemon_after_fork(
         relay_clients: HashMap::new(),
         pane_watchers: HashMap::new(),
         pane_buffers: HashMap::new(),
+        session_summarizer: super::runtime::session_summarizer::SessionSummarizer::new(
+            ai_enrichment,
+        ),
         gui_listener,
         gui_clients: HashMap::new(),
         next_gui_client_id: 0,

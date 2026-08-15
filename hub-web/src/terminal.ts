@@ -3,7 +3,9 @@ export interface TerminalSurface {
   readonly cols: number;
   readonly rows: number;
   write(data: Uint8Array): void;
+  setControlMode(enabled: boolean): void;
   focus(): void;
+  search(query: string): boolean;
   dispose(): void;
 }
 

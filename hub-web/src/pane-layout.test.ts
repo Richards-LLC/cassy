@@ -8,6 +8,14 @@ class MemoryStorage implements PaneLayoutStorage {
 }
 
 describe("terminal pane layouts", () => {
+  it("uses the supervisor as the first-run primary without persisting operator configuration", () => {
+    const storage = new MemoryStorage();
+
+    expect(loadPaneLayout(storage, "hub:session", ["worker-a", "supervisor", "worker-b"], "supervisor"))
+      .toEqual({ primaryPaneId: "supervisor", paneIds: ["worker-a", "supervisor", "worker-b"] });
+    expect(storage.entries.size).toBe(0);
+  });
+
   it("keeps the promoted supervisor first while preserving the operator's secondary order", () => {
     const storage = new MemoryStorage();
     const initial = loadPaneLayout(storage, "hub:session", ["worker-a", "supervisor", "worker-b"], "worker-a")!;

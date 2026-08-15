@@ -89,9 +89,8 @@ pub(super) fn execute_daemon(
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        resolve_specs(effective_workers, sources).map_err(|e| {
-            anyhow::anyhow!("Failed to resolve worker specs: {e}")
-        })?
+        resolve_specs(effective_workers, sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?
     };
 
     // Resolve supervisor spec from the cascade (cas-1948).
@@ -113,17 +112,15 @@ pub(super) fn execute_daemon(
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        resolve_supervisor_spec(sources).map_err(|e| {
-            anyhow::anyhow!("Failed to resolve supervisor spec: {e}")
-        })?
+        resolve_supervisor_spec(sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?
     };
 
     // Resolve supervisor name up front so teams_configs and FactoryConfig agree.
     // When the caller doesn't provide a name, generate one so the teams config
     // key matches the Mux pane name (app/init.rs uses generate_unique for this).
-    let resolved_supervisor_name = supervisor_name.unwrap_or_else(|| {
-        crate::orchestration::names::generate_unique(1).remove(0)
-    });
+    let resolved_supervisor_name = supervisor_name
+        .unwrap_or_else(|| crate::orchestration::names::generate_unique(1).remove(0));
 
     // Build native Agent Teams spawn configs so agents start with Teams CLI flags.
     let (teams_configs, lead_session_id) = {
@@ -140,7 +137,9 @@ pub(super) fn execute_daemon(
         worker_cli,
         supervisor_model: llm.model_for_role("supervisor").map(String::from),
         worker_model: llm.model_for_role("worker").map(String::from),
-        supervisor_effort: llm.reasoning_effort_for_role("supervisor").map(String::from),
+        supervisor_effort: llm
+            .reasoning_effort_for_role("supervisor")
+            .map(String::from),
         worker_effort: llm.reasoning_effort_for_role("worker").map(String::from),
         resolved_worker_specs,
         resolved_supervisor_spec: Some(resolved_supervisor_spec),
@@ -168,6 +167,7 @@ pub(super) fn execute_daemon(
             .unwrap_or(false),
         // cas-9829: activity-based stall detection threshold.
         stall_threshold_secs: cas_config.factory().stall_threshold_secs,
+        ai_enrichment: cas_config.factory().ai_enrichment,
     };
 
     let daemon_config = DaemonConfig {

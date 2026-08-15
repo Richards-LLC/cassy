@@ -27,6 +27,7 @@ const PAIRING_TTL_MINUTES: i64 = 10;
 const WS_TICKET_TTL_MINUTES: i64 = 5;
 const CREDENTIAL_ABSOLUTE_DAYS: i64 = 90;
 const CREDENTIAL_IDLE_DAYS: i64 = 30;
+const CREDENTIAL_REFRESH_GRACE_DAYS: i64 = 7;
 const DPOP_SKEW_SECONDS: i64 = 60;
 const DPOP_REPLAY_MINUTES: i64 = 5;
 
@@ -85,8 +86,13 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         | ClientMessage::Focus { .. }
         | ClientMessage::FocusNext
         | ClientMessage::FocusPrev
-        | ClientMessage::Resize { .. }
-        | ClientMessage::ResizePane { .. } => Some(Scope::PaneInput),
+        | ClientMessage::Resize { .. } => Some(Scope::PaneInput),
+        // Reporting the viewport is part of observing a pane, not terminal
+        // input. The lease policy is enforced separately: an unleased pane
+        // may follow an observer, while a leased pane follows its controller.
+        ClientMessage::ResizePane { .. }
+        | ClientMessage::RequestPaneKeyframe { .. }
+        | ClientMessage::ScrollbackRequest { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),
         ClientMessage::SpawnWorkers { .. }
@@ -630,6 +636,74 @@ impl AuthStore {
         Ok(context)
     }
 
+    /// Rotate an otherwise-valid device credential without requiring a new
+    /// machine-side pairing. Expiry has a short, bounded recovery grace; a
+    /// revoked credential, changed origin, bad proof, or idle credential can
+    /// never use this path.
+    pub fn refresh_device_credential(
+        &self,
+        authorization: &str,
+        proof: &str,
+        origin: &str,
+        method: &str,
+        target_uri: &str,
+        now: DateTime<Utc>,
+    ) -> Result<DeviceCredential> {
+        validate_origin(origin)?;
+        let credential = authorization
+            .strip_prefix("DPoP ")
+            .context("authentication refused")?;
+        let credential_hash = hash_b64(credential.as_bytes());
+        let mut state = self.lock()?;
+        let device_index = state
+            .devices
+            .iter()
+            .position(|device| constant_time_eq(&device.credential_hash, &credential_hash))
+            .context("authentication refused")?;
+        let device = state.devices[device_index].clone();
+        anyhow::ensure!(
+            device.revoked_at.is_none()
+                && device.controller_origin == origin
+                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
+                && device.expires_at + Duration::days(CREDENTIAL_REFRESH_GRACE_DAYS) >= now,
+            "authentication refused"
+        );
+        let verified = verify_dpop(
+            proof,
+            credential,
+            &device.public_key,
+            &device.public_key_thumbprint,
+            method,
+            target_uri,
+            now,
+        )?;
+        state.dpop_jtis.retain(|entry| entry.expires_at >= now);
+        anyhow::ensure!(
+            !state.dpop_jtis.iter().any(|entry| {
+                entry.credential_id == device.credential_id && entry.jti == verified.jti
+            }),
+            "authentication refused"
+        );
+        state.dpop_jtis.push(ReplayRecord {
+            credential_id: device.credential_id.clone(),
+            jti: verified.jti,
+            expires_at: now + Duration::minutes(DPOP_REPLAY_MINUTES),
+        });
+        let rotated = random_secret();
+        let expires_at = now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS);
+        state.devices[device_index].credential_hash = hash_b64(rotated.as_bytes());
+        state.devices[device_index].last_used_at = now;
+        state.devices[device_index].expires_at = expires_at;
+        self.persist(&state)?;
+        Ok(DeviceCredential {
+            device_id: device.device_id,
+            credential_id: device.credential_id,
+            credential: rotated,
+            expires_at,
+            scopes: device.scopes,
+        })
+    }
+
     pub fn issue_ws_ticket(
         &self,
         context: &AuthContext,
@@ -840,6 +914,24 @@ impl AuthStore {
             .leases
             .get(session)
             .is_some_and(|lease| lease.device_id == context.device_id && lease.expires_at >= now))
+    }
+
+    /// Whether this viewer owns the shared PTY geometry for a session.
+    ///
+    /// With no controller, any pane reader may establish a usable viewport.
+    /// Once a controller lease exists, only that device may resize; otherwise
+    /// a phone observer could unexpectedly reflow a desktop controller's TUI.
+    pub fn may_resize_panes(
+        &self,
+        context: &AuthContext,
+        session: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        if !context.has(Scope::PaneRead) {
+            return Ok(false);
+        }
+        let lease = self.lease_status(context, session, now)?;
+        Ok(lease.controller_device_id.is_none() || lease.held_by_me)
     }
 
     pub fn audit(

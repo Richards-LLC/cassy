@@ -120,6 +120,21 @@ mod worker_attention_tests {
     use super::*;
     use cas_types::{Agent, AgentRole, AgentStatus};
 
+    #[test]
+    fn websocket_keyframe_requests_stay_before_pty_delta_drain() {
+        let source = include_str!("lifecycle.rs");
+        let request = source
+            .find("let ws_activity = self.process_ws_client_input().await;")
+            .expect("daemon loop must process WS keyframe requests");
+        let drain = source
+            .find("let (bytes_processed, events) = self.app.mux.poll_batch();")
+            .expect("daemon loop must drain PTY deltas");
+        assert!(
+            request < drain,
+            "WS keyframe capture must remain before PTY drain so queued bytes become ordered post-keyframe deltas"
+        );
+    }
+
     fn register_supervisor(cas_dir: &std::path::Path, session: &str) {
         let agents = crate::store::open_agent_store(cas_dir).unwrap();
         let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
@@ -164,7 +179,10 @@ mod worker_attention_tests {
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
                 && crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt)
         }));
-        assert!(rows.iter().any(|row| row.prompt.contains("kind=\"worker_idle\"")));
+        assert!(
+            rows.iter()
+                .any(|row| row.prompt.contains("kind=\"worker_idle\""))
+        );
         assert!(rows.iter().any(|row| {
             row.prompt.contains("kind=\"worker_stalled\"") && row.prompt.contains("cas-d4ae")
         }));
@@ -179,6 +197,9 @@ impl FactoryDaemon {
         // Extract fields before factory_config is moved
         let project_dir = config.factory_config.cwd.to_string_lossy().to_string();
         let lead_session_id = config.factory_config.lead_session_id.clone();
+        let session_summarizer = super::session_summarizer::SessionSummarizer::new(
+            config.factory_config.ai_enrichment.clone(),
+        );
 
         // Set factory session env var so PTY children (and their MCP servers) inherit it.
         // SAFETY: called before spawning any threads or async tasks in this process.
@@ -344,6 +365,7 @@ impl FactoryDaemon {
             relay_clients: HashMap::new(),
             pane_watchers: HashMap::new(),
             pane_buffers: HashMap::new(),
+            session_summarizer,
             gui_listener,
             gui_clients: HashMap::new(),
             next_gui_client_id: 0,
@@ -483,7 +505,12 @@ impl FactoryDaemon {
             // Read and process input from GUI clients
             let gui_activity = self.process_gui_client_input().await;
 
-            // Read and process input from WebSocket clients
+            // ORDERING INVARIANT: WS input MUST be processed before poll_batch.
+            // RequestPaneKeyframe captures Ghostty state and queues the frame
+            // under this loop's exclusive `&mut FactoryDaemon`; PTY bytes still
+            // queued in the backend are then drained and queued as later Output.
+            // Reordering or parallelizing these calls creates a snapshot/tap gap
+            // that can silently lose terminal output during attach.
             let ws_activity = self.process_ws_client_input().await;
 
             // Poll PTYs for output using coalesced batch drain (efficient for 6 Claudes generating)
@@ -491,6 +518,21 @@ impl FactoryDaemon {
             let had_output = bytes_processed > 0;
             for event in events {
                 self.handle_mux_event(event).await;
+            }
+
+            let summary_metadata = format!(
+                "session={} role=supervisor task={}",
+                self.session_name,
+                self.app.epic_state().epic_title().unwrap_or("unassigned")
+            );
+            if let Some(summary) = self
+                .session_summarizer
+                .poll(&self.pane_buffers, &summary_metadata)
+                .await
+            {
+                self.broadcast_daemon_message(
+                    &crate::ui::factory::protocol::DaemonMessage::SessionSummary { summary },
+                );
             }
 
             // Process relay events from cloud (remote terminal attach/input/detach)
@@ -670,6 +712,9 @@ impl FactoryDaemon {
 
                     // Record events for export
                     self.app.record_events(&delivery_events);
+                    if !delivery_events.is_empty() {
+                        self.session_summarizer.note_semantic_event();
+                    }
 
                     // Send notifications for detected events
                     self.app.notify_events(&delivery_events);

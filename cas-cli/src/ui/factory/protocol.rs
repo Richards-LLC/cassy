@@ -9,7 +9,9 @@ use std::collections::HashMap;
 /// Original daemon protocol version used before explicit negotiation existed.
 pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
 /// Current additive daemon protocol version.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+/// Maximum recent PTY output replayed per active pane on client attach.
+pub(crate) const COMMANDER_REPLAY_BYTES_PER_PANE: usize = 64 * 1024;
 
 /// Independently negotiable daemon protocol features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,12 +19,18 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub enum ProtocolCapability {
     TargetedInterrupt,
     AttributedSendMessage,
+    /// A pane can be initialized from terminal state instead of a raw-byte tail.
+    AuthoritativePaneKeyframes,
+    /// Historical rows can be requested independently from the live viewport.
+    PagedScrollback,
 }
 
 pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
     vec![
         ProtocolCapability::TargetedInterrupt,
         ProtocolCapability::AttributedSendMessage,
+        ProtocolCapability::AuthoritativePaneKeyframes,
+        ProtocolCapability::PagedScrollback,
     ]
 }
 
@@ -80,6 +88,17 @@ pub enum ClientMessage {
     Attach {
         /// Request full scrollback buffer
         request_scrollback: bool,
+    },
+
+    /// Request a fresh, authoritative terminal-state keyframe for one pane.
+    RequestPaneKeyframe { pane_id: String },
+
+    /// Request a bounded page from the pane's historical screen rows.
+    ScrollbackRequest {
+        pane_id: String,
+        generation: u64,
+        start_row: u32,
+        count: u16,
     },
 
     /// Detach from the session (graceful disconnect)
@@ -222,6 +241,28 @@ pub enum DaemonMessage {
         /// Independently negotiable features. Missing means no new controls.
         #[serde(default)]
         capabilities: Vec<ProtocolCapability>,
+        /// Content-free attach metadata used by protocol v3 clients.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pane_bootstrap: Vec<PaneBootstrap>,
+    },
+
+    /// An authoritative ANSI serialization of the pane's current terminal state.
+    PaneKeyframe {
+        pane_id: String,
+        epoch: u64,
+        seq: u64,
+        cols: u16,
+        rows: u16,
+        ansi: Vec<u8>,
+    },
+
+    /// A bounded, styled page of historical screen rows.
+    ScrollbackPage {
+        pane_id: String,
+        generation: u64,
+        start_row: u32,
+        next_row: Option<u32>,
+        rows: Vec<cas_factory_protocol::CacheRow>,
     },
 
     /// Terminal output from a pane
@@ -231,6 +272,10 @@ pub enum DaemonMessage {
         /// Output data (terminal escape sequences included)
         data: Vec<u8>,
     },
+
+    /// Best-effort, server-computed description of the current session.
+    /// All observers receive the same value; terminal content is never sent.
+    SessionSummary { summary: SessionCardSummary },
 
     /// A pane exited
     PaneExited {
@@ -306,6 +351,16 @@ pub enum DaemonMessage {
     InitComplete,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCardSummary {
+    pub title: String,
+    pub description: String,
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_on: Option<String>,
+    pub generated_at: String,
+}
+
 /// Snapshot of session state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
@@ -335,6 +390,17 @@ pub struct PaneInfo {
     pub title: String,
     /// Whether the pane process has exited
     pub exited: bool,
+}
+
+/// Per-pane attach metadata. This deliberately contains no terminal content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneBootstrap {
+    pub pane_id: String,
+    pub epoch: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub scrollback_start_row: u32,
+    pub scrollback_end_row: u32,
 }
 
 /// Kind of pane (matches cas_mux::PaneKind)
@@ -537,12 +603,20 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::SpawnWorkers { count, names, specs } => {
+            ClientMessage::SpawnWorkers {
+                count,
+                names,
+                specs,
+            } => {
                 assert_eq!(count, 1);
                 assert_eq!(names, vec!["alice"]);
                 assert_eq!(specs.len(), 1);
                 let s = specs[0].as_ref().unwrap();
-                assert_eq!(s.name.as_deref(), Some("alice"), "WorkerSpec.name must survive wire round-trip");
+                assert_eq!(
+                    s.name.as_deref(),
+                    Some("alice"),
+                    "WorkerSpec.name must survive wire round-trip"
+                );
                 assert_eq!(s.cli, SupervisorCli::Codex);
                 assert_eq!(s.model.as_deref(), Some("gpt-5.5"));
                 assert_eq!(s.effort, Some(cas_mux::Effort::Medium));
@@ -558,10 +632,17 @@ mod tests {
         let json = r#"{"SpawnWorkers":{"count":2,"names":["bob","carol"]}}"#;
         let decoded: ClientMessage = serde_json::from_str(json).unwrap();
         match decoded {
-            ClientMessage::SpawnWorkers { count, names, specs } => {
+            ClientMessage::SpawnWorkers {
+                count,
+                names,
+                specs,
+            } => {
                 assert_eq!(count, 2);
                 assert_eq!(names, vec!["bob", "carol"]);
-                assert!(specs.is_empty(), "missing specs field should default to empty vec");
+                assert!(
+                    specs.is_empty(),
+                    "missing specs field should default to empty vec"
+                );
             }
             _ => panic!("Wrong message type decoded"),
         }
@@ -681,6 +762,7 @@ mod tests {
             scrollback: None,
             protocol_version: PROTOCOL_VERSION,
             capabilities: daemon_capabilities(),
+            pane_bootstrap: Vec::new(),
         };
         let json = serde_json::to_value(&current).unwrap();
         assert_eq!(
@@ -689,6 +771,30 @@ mod tests {
         );
         assert!(daemon_capabilities().contains(&ProtocolCapability::TargetedInterrupt));
         assert!(daemon_capabilities().contains(&ProtocolCapability::AttributedSendMessage));
+        assert!(daemon_capabilities().contains(&ProtocolCapability::AuthoritativePaneKeyframes));
+        assert!(daemon_capabilities().contains(&ProtocolCapability::PagedScrollback));
+    }
+
+    #[test]
+    fn keyframe_and_scrollback_requests_are_additive_wire_messages() {
+        let keyframe = ClientMessage::RequestPaneKeyframe {
+            pane_id: "supervisor".into(),
+        };
+        let request = ClientMessage::ScrollbackRequest {
+            pane_id: "worker-1".into(),
+            generation: 42,
+            start_row: 100,
+            count: 200,
+        };
+
+        assert_eq!(
+            serde_json::to_value(keyframe).unwrap(),
+            serde_json::json!({"RequestPaneKeyframe":{"pane_id":"supervisor"}})
+        );
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({"ScrollbackRequest":{"pane_id":"worker-1","generation":42,"start_row":100,"count":200}})
+        );
     }
 
     /// New-daemon / old-client direction: serde's default unknown-field
@@ -718,6 +824,7 @@ mod tests {
             scrollback: None,
             protocol_version: PROTOCOL_VERSION,
             capabilities: daemon_capabilities(),
+            pane_bootstrap: Vec::new(),
         };
         let json = serde_json::to_string(&current).unwrap();
         let legacy: LegacyDaemonMessage = serde_json::from_str(&json).unwrap();

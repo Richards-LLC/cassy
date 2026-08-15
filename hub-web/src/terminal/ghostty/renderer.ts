@@ -56,7 +56,7 @@ export function ghosttyTextRunEnd(
 
 function fontForCell(cell: GhosttyCell, fontSize: number, fontFamily: string): string {
   const style = cell.italic ? "italic" : "normal";
-  const weight = cell.bold ? "700" : "400";
+  const weight = cell.bold ? "600" : "400";
   return `${style} ${weight} ${fontSize}px ${fontFamily}`;
 }
 

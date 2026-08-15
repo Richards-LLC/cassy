@@ -51,6 +51,10 @@ impl HubRuntimePaths {
         self.root.join("hub.log")
     }
 
+    pub fn events_path(&self) -> PathBuf {
+        self.root.join("events.json")
+    }
+
     pub fn acquire_instance_lock(&self) -> Result<HubInstanceLock> {
         self.try_acquire_instance_lock()?.ok_or_else(|| {
             anyhow::anyhow!("another cas hub instance already holds the machine lock")

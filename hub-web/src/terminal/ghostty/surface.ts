@@ -16,9 +16,9 @@ import {
 import symbolsFontUrl from "./fonts/SymbolsNerdFontMono-Regular.woff2?url";
 import { isMonospaceFamily } from "../../appearanceFonts";
 
-export const DEFAULT_TERMINAL_FONT_SIZE = 12;
-const MIN_TERMINAL_FONT_SIZE = 6;
-const MAX_TERMINAL_FONT_SIZE = 32;
+export const DEFAULT_TERMINAL_FONT_SIZE = 13;
+const MIN_TERMINAL_FONT_SIZE = 12;
+const MAX_TERMINAL_FONT_SIZE = 16;
 // The glyph fallbacks only supply symbols the text faces are missing (powerline
 // separators, devicons, and other private-use prompt symbols), so shells
 // configured for a locally installed Nerd Font keep their prompt glyphs no
@@ -39,9 +39,9 @@ const CURSOR_BLINK_INTERVAL_MS = 500;
 const TERMINAL_FONT_LOAD_TEXT = "iMW0@# .";
 const TERMINAL_FONT_LOAD_VARIANTS = [
   "normal 400",
-  "normal 700",
+  "normal 600",
   "italic 400",
-  "italic 700",
+  "italic 600",
 ] as const;
 
 /** Requested terminal font; omitted fields fall back to the defaults. */
@@ -137,15 +137,17 @@ export function terminalFontSize(size?: number): number {
 /**
  * Whether the cursor should keep toggling. An unfocused surface draws a steady
  * hollow cursor instead of blinking, and a reduced-motion reader gets a steady
- * cursor too rather than a permanently animating element.
+ * cursor too rather than a permanently animating element. Observer sessions
+ * also stay steady: only the active lease holder gets a blinking cursor.
  */
 export function shouldBlinkTerminalCursor(state: {
+  readonly controlMode: boolean;
   readonly focused: boolean;
   readonly cursorBlinking: boolean;
   readonly cursorVisible: boolean;
   readonly reducedMotion: boolean;
 }): boolean {
-  return state.focused && state.cursorBlinking && state.cursorVisible && !state.reducedMotion;
+  return state.controlMode && state.focused && state.cursorBlinking && state.cursorVisible && !state.reducedMotion;
 }
 
 /**
@@ -262,6 +264,30 @@ function terminalColumnAtOffset(row: GhosttySnapshot["rowData"][number], offset:
     if (offset < nextOffset) return column;
   }
   return Math.max(0, row.cells.length - 1);
+}
+
+export interface TerminalSearchMatch {
+  readonly start: { readonly x: number; readonly y: number };
+  readonly end: { readonly x: number; readonly y: number };
+}
+
+export function terminalSearchMatch(
+  rows: GhosttySnapshot["rowData"],
+  query: string,
+): TerminalSearchMatch | null {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return null;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    const offset = terminalRowText(row, false).toLocaleLowerCase().indexOf(needle);
+    if (offset < 0) continue;
+    return {
+      start: { x: terminalColumnAtOffset(row, offset), y: rowIndex },
+      end: { x: terminalColumnAtOffset(row, offset + needle.length - 1), y: rowIndex },
+    };
+  }
+  return null;
 }
 
 export function terminalLinkAtPositionWithRange(
@@ -526,6 +552,7 @@ export class GhosttyTerminalSurface {
   private selectionMoved = false;
   private composing = false;
   private focused = false;
+  private controlMode = false;
   private resizeNotified = false;
   private canvasConfigured = false;
   private theme: GhosttyTheme;
@@ -671,6 +698,15 @@ export class GhosttyTerminalSurface {
     this.requestRender();
   }
 
+  setControlMode(enabled: boolean): void {
+    if (this.disposed || this.controlMode === enabled) return;
+    this.controlMode = enabled;
+    // Lease changes are semantic mode changes. Restart from a visible phase so
+    // observer mode cannot inherit the hidden half of a controller's blink.
+    this.cursorOn = true;
+    this.requestRender();
+  }
+
   async setFont(font: GhosttyTerminalFont): Promise<void> {
     if (this.disposed) return;
     const fontSize = terminalFontSize(font.size);
@@ -794,6 +830,16 @@ export class GhosttyTerminalSurface {
 
   focus(): void {
     this.input.focus({ preventScroll: true });
+  }
+
+  search(query: string): boolean {
+    const match = terminalSearchMatch(this.core.snapshot().rowData, query);
+    if (!match) return false;
+    this.core.setSelection({ ...match.start, tag: 1 }, { ...match.end, tag: 1 });
+    this.selectionAnchorScreen = this.core.viewportPointToScreen(match.start.x, match.start.y);
+    this.selectionEndScreen = this.core.viewportPointToScreen(match.end.x, match.end.y);
+    this.requestRender();
+    return true;
   }
 
   hasSelection(): boolean {
@@ -1556,6 +1602,7 @@ export class GhosttyTerminalSurface {
     const snapshot = this.snapshot;
     if (!snapshot) return false;
     return shouldBlinkTerminalCursor({
+      controlMode: this.controlMode,
       focused: this.focused,
       cursorBlinking: snapshot.cursorBlinking,
       cursorVisible: snapshot.cursorVisible,

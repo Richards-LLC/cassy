@@ -1,11 +1,68 @@
 use crate::ui::factory::daemon::imports::*;
-use crate::ui::factory::protocol::{ClientMessage, DaemonMessage};
+use crate::ui::factory::protocol::{ClientMessage, DaemonMessage, PaneBootstrap};
 use futures_util::{FutureExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+const COMMANDER_WELCOME_WARN_BYTES: usize = 2 * 1024 * 1024;
+const COMMANDER_KEYFRAME_WARN_BYTES: usize = 128 * 1024;
+const COMMANDER_KEYFRAME_BUDGET_BYTES: usize = 256 * 1024;
+const COMMANDER_KEYFRAME_HARD_BYTES: usize = 1024 * 1024;
+const COMMANDER_SCROLLBACK_PAGE_HARD_BYTES: usize = 256 * 1024;
+const COMMANDER_SCROLLBACK_MAX_ROWS: u16 = 200;
+
+fn commander_epoch() -> u64 {
+    static EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            // Keep the wire value within JavaScript's exact integer range.
+            // Milliseconds still make daemon generations distinct in practice;
+            // epoch/sequence resume semantics remain Phase C.
+            .as_millis() as u64
+    })
+}
+
 /// Encode a DaemonMessage as a WebSocket Binary frame (raw JSON, no length prefix).
 fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
-    serde_json::to_vec(msg).ok().map(WsMessage::Binary)
+    let bytes = serde_json::to_vec(msg).ok()?;
+    if matches!(msg, DaemonMessage::Welcome { .. }) && bytes.len() > COMMANDER_WELCOME_WARN_BYTES {
+        tracing::warn!(
+            bytes = bytes.len(),
+            expected_max_bytes = COMMANDER_WELCOME_WARN_BYTES,
+            "Commander Welcome exceeded the expected bounded replay envelope"
+        );
+    }
+    if matches!(msg, DaemonMessage::PaneKeyframe { .. }) {
+        if bytes.len() > COMMANDER_KEYFRAME_HARD_BYTES {
+            tracing::error!(
+                bytes = bytes.len(),
+                hard_max_bytes = COMMANDER_KEYFRAME_HARD_BYTES,
+                "refusing oversized Commander pane keyframe"
+            );
+            return None;
+        }
+        if bytes.len() > COMMANDER_KEYFRAME_WARN_BYTES {
+            tracing::warn!(
+                bytes = bytes.len(),
+                warning_bytes = COMMANDER_KEYFRAME_WARN_BYTES,
+                budget_bytes = COMMANDER_KEYFRAME_BUDGET_BYTES,
+                hard_max_bytes = COMMANDER_KEYFRAME_HARD_BYTES,
+                "Commander pane keyframe exceeded its warning budget"
+            );
+        }
+    }
+    if matches!(msg, DaemonMessage::ScrollbackPage { .. })
+        && bytes.len() > COMMANDER_SCROLLBACK_PAGE_HARD_BYTES
+    {
+        tracing::error!(
+            bytes = bytes.len(),
+            hard_max_bytes = COMMANDER_SCROLLBACK_PAGE_HARD_BYTES,
+            "refusing oversized Commander scrollback page"
+        );
+        return None;
+    }
+    Some(WsMessage::Binary(bytes))
 }
 
 /// WebSocket transport adapter for the shared Commander control dispatcher.
@@ -16,6 +73,29 @@ pub(super) fn commander_control_from_ws_message(
 }
 
 impl FactoryDaemon {
+    fn commander_pane_bootstrap(
+        &self,
+        state: &crate::ui::factory::SessionState,
+    ) -> Vec<PaneBootstrap> {
+        let epoch = commander_epoch();
+        state
+            .panes
+            .iter()
+            .filter_map(|metadata| {
+                let pane = self.app.mux.get(&metadata.id)?;
+                let (rows, cols) = pane.size();
+                Some(PaneBootstrap {
+                    pane_id: metadata.id.clone(),
+                    epoch,
+                    cols,
+                    rows,
+                    scrollback_start_row: 0,
+                    scrollback_end_row: pane.scrollback_lines(),
+                })
+            })
+            .collect()
+    }
+
     /// Accept new WebSocket client connections (non-blocking).
     pub(super) async fn accept_ws_clients(&mut self) -> bool {
         let listener = match self.ws_listener {
@@ -44,13 +124,15 @@ impl FactoryDaemon {
 
             // Build and send Welcome message
             let state = self.build_session_state();
-            let scrollback = self.build_scrollback();
+            let pane_bootstrap = self.commander_pane_bootstrap(&state);
+            let scrollback = self.build_scrollback(&state);
             let welcome = DaemonMessage::Welcome {
                 session_name: self.session_name.clone(),
                 state,
                 scrollback: Some(scrollback),
                 protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                 capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                pane_bootstrap,
             };
 
             if let Some(frame) = ws_encode(&welcome) {
@@ -221,20 +303,98 @@ impl FactoryDaemon {
         }
 
         match msg {
-            ClientMessage::Attach { .. } => {
+            ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
-                let scrollback = self.build_scrollback();
+                let pane_bootstrap = self.commander_pane_bootstrap(&state);
+                let scrollback = request_scrollback.then(|| self.build_scrollback(&state));
                 let welcome = DaemonMessage::Welcome {
                     session_name: self.session_name.clone(),
                     state,
-                    scrollback: Some(scrollback),
+                    scrollback,
                     protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                     capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                    pane_bootstrap,
                 };
                 if let Some(frame) = ws_encode(&welcome) {
                     if let Some(client) = self.ws_clients.get_mut(&client_id) {
                         let _ = client.sink.feed(frame).now_or_never();
                     }
+                }
+            }
+            ClientMessage::RequestPaneKeyframe { pane_id } => {
+                let actual = self.resolve_pane_name(&pane_id);
+                // The daemon event loop owns the pane and all WS sinks. Snapshot
+                // capture and frame enqueue therefore occur in one serialized
+                // turn; raw PTY Output can only be enqueued after this returns.
+                let keyframe = self.app.mux.get(&actual).and_then(|pane| {
+                    let snapshot = pane.get_full_snapshot().ok()?;
+                    Some(DaemonMessage::PaneKeyframe {
+                        pane_id: actual.clone(),
+                        epoch: commander_epoch(),
+                        seq: 0,
+                        cols: snapshot.cols,
+                        rows: snapshot.rows,
+                        ansi: super::relay::snapshot_to_ansi(&snapshot, pane.is_in_alt_screen()),
+                    })
+                });
+                if let Some(frame) = keyframe.as_ref().and_then(ws_encode)
+                    && let Some(client) = self.ws_clients.get_mut(&client_id)
+                {
+                    let _ = client.sink.feed(frame).now_or_never();
+                }
+            }
+            ClientMessage::ScrollbackRequest {
+                pane_id,
+                generation,
+                start_row,
+                count,
+            } => {
+                let actual = self.resolve_pane_name(&pane_id);
+                if generation != commander_epoch() {
+                    if let Some(frame) = ws_encode(&DaemonMessage::Error {
+                        message: format!("scrollback generation expired for pane '{actual}'"),
+                    }) && let Some(client) = self.ws_clients.get_mut(&client_id)
+                    {
+                        let _ = client.sink.feed(frame).now_or_never();
+                    }
+                    return;
+                }
+                let requested = count.min(COMMANDER_SCROLLBACK_MAX_ROWS);
+                let mut rows = self
+                    .app
+                    .mux
+                    .get(&actual)
+                    .map(|pane| pane.scrollback_page(start_row, requested))
+                    .unwrap_or_default();
+                let mut page = DaemonMessage::ScrollbackPage {
+                    pane_id: actual,
+                    generation,
+                    start_row,
+                    next_row: rows.last().map(|row| row.screen_row.saturating_add(1)),
+                    rows: Vec::new(),
+                };
+                loop {
+                    if let DaemonMessage::ScrollbackPage {
+                        rows: page_rows,
+                        next_row,
+                        ..
+                    } = &mut page
+                    {
+                        *page_rows = rows.clone();
+                        *next_row = rows.last().map(|row| row.screen_row.saturating_add(1));
+                    }
+                    if serde_json::to_vec(&page)
+                        .is_ok_and(|bytes| bytes.len() <= COMMANDER_SCROLLBACK_PAGE_HARD_BYTES)
+                        || rows.is_empty()
+                    {
+                        break;
+                    }
+                    rows.pop();
+                }
+                if let Some(frame) = ws_encode(&page)
+                    && let Some(client) = self.ws_clients.get_mut(&client_id)
+                {
+                    let _ = client.sink.feed(frame).now_or_never();
                 }
             }
             ClientMessage::Detach => {

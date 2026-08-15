@@ -37,9 +37,43 @@ describe("binding Commander browser invariants", () => {
 
   it("names the remedy when an observer-only credential disables control", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
-    expect(source).toContain("This credential can only observe from ${location.origin}");
+    expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
+    expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Commander origin.");
+    expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
+    expect(source).toContain('disabled aria-describedby="control-disabled-reason"');
     expect(source).toContain('class="control-disabled-reason"');
+  });
+
+  it("derives the header mode and terminal cursor from the real session lease", async () => {
+    const [main, terminal] = await Promise.all([
+      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readFile(new URL("terminal/ghostty/surface.ts", import.meta.url), "utf8"),
+    ]);
+    expect(main).toContain('const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER"');
+    expect(main).toContain('class="mode-badge ${mode.toLowerCase()}"');
+    expect(main).toContain("setControlMode(leases.get(selectedKey)?.held_by_me === true)");
+    expect(terminal).toContain("state.controlMode && state.focused");
+  });
+
+  it("keeps palette codenames primary while indexing optional session summaries", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
+    expect(source).toContain("summary ? `${summary.title} ${summary.description} ${summary.phase}` : \"\"");
+    expect(source).toContain('data-search-text="${escapeAttr(searchMetadata)}"');
+    expect(source).toContain('const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label');
+    expect(source).toContain('command.dataset.searchText ?? ""');
+  });
+
+  it("renders instructional empty pane and all-clear feed states", async () => {
+    const [main, attentionView] = await Promise.all([
+      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readFile(new URL("attention-view.ts", import.meta.url), "utf8"),
+    ]);
+    expect(main).toContain("No session — pick one from the drawer or drag it here.");
+    expect(main).toContain('empty.className = "empty empty-pane-slot"');
+    expect(attentionView).toContain('message.textContent = "All clear"');
+    expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
   it("binds the browser fetch receiver at every pairing handoff", async () => {
@@ -123,15 +157,102 @@ describe("binding Commander browser invariants", () => {
   });
 
   it("keeps the phone ATTENTION hierarchy human-readable and group-actionable", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
-    expect(main).toContain('machineEventAttention(kind, event.diagnostic)');
-    expect(main).toContain('title.textContent = content.headline');
-    expect(main).toContain('acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`');
-    expect(main).toContain('if (content.severity === "notice")');
-    expect(main).toContain('groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))');
-    expect(css).toContain(".attention-item--incident");
-    expect(css).toContain("@media (max-width: 850px)");
-    expect(css).toContain(".attention-group-label { max-width: 155px; }");
+    const [main, attentionView, css] = await Promise.all(["main.ts", "attention-view.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('machineEventAttention(kind, payload, pending)');
+    expect(main).toContain('applyAttentionEnrichment(provisional, enriched');
+    expect(main).toContain('renderAttentionPanel(container, attention');
+    expect(attentionView).toContain('headline.textContent = card.content.headline');
+    expect(attentionView).toContain('button("Dismiss all info"');
+    expect(attentionView).toContain('button("Dismiss group"');
+    expect(attentionView).toContain('severity !== "critical"');
+    expect(css).toContain(".attention-item--critical");
+    expect(css).toContain(".attention-item--enriching .attention-title::after");
+    expect(css).toContain("prefers-reduced-motion: reduce");
+    expect(css).toContain("@media (max-width: 53rem)");
+    expect(css).toContain("max-width: var(--mobile-attention-label-width)");
+  });
+
+  it("keeps the section 2 visual system tokenized and machine copy mono", async () => {
+    const [main, css, html, renderer, surface] = await Promise.all([
+      "main.ts",
+      "styles.css",
+      "../index.html",
+      "terminal/ghostty/renderer.ts",
+      "terminal/ghostty/surface.ts",
+    ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    for (const token of [
+      "--bg-root: #101318",
+      "--bg-panel: #151922",
+      "--bg-raised: #1B202B",
+      "--bg-terminal: #0C0E13",
+      "--bg-hover: #222836",
+      "--bg-active: #2A3142",
+      "--line-subtle: #232936",
+      "--line-strong: #38415A",
+      "--text-hi: #E8EBF2",
+      "--text-mid: #9AA3B5",
+      "--text-lo: #5C6577",
+      "--state-ok: #4CC38A",
+      "--state-warn: #E5B454",
+      "--state-crit: #E5645E",
+      "--state-info: #6CA7F2",
+      "--state-idle: #5C6577",
+      "--fs-xs: .6875rem",
+      "--fs-sm: .78125rem",
+      "--fs-base: .84375rem",
+      "--fs-md: .9375rem",
+      "--fs-lg: 1.125rem",
+      "--radius-card: 6px",
+      "--radius-pane: 8px",
+      "--radius-pill: 999px",
+    ]) expect(css).toContain(token);
+
+    const rootEnd = css.indexOf("\n}\n");
+    expect(rootEnd).toBeGreaterThan(0);
+    const componentCss = css.slice(rootEnd + 3);
+    expect(componentCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(componentCss).not.toMatch(/rgba?\(/i);
+    expect(main).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+
+    expect(main).toContain('class="session-name"');
+    expect(main).toContain('class="session-meta"');
+    expect(main).toContain('"toolbar-session-title"');
+    expect(main).toContain('span.className = "status-identifier"');
+    expect(css).toContain("font-family: var(--font-mono)");
+    expect(css).not.toContain("border-right:");
+    expect(css).not.toContain(".context { border-left:");
+    expect(css.match(/box-shadow:/g)).toHaveLength(2);
+    expect(renderer).not.toContain('"700"');
+    expect(surface).not.toContain('"normal 700"');
+    expect(surface).not.toContain('"italic 700"');
+  });
+
+  it("encodes the supervisor-first Commander shell at desktop and phone widths", async () => {
+    const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
+    expect(main).toContain('id="pair-toggle" class="rail-control pair-machine"');
+    expect(main).toContain('class="session-header"');
+    expect(main).toContain('data-context-tab="status"');
+    expect(main).toContain('Workers &amp; Tasks');
+    expect(main).toContain('visiblePanes.find((pane) => pane.kind === "Supervisor")?.id');
+    expect(main).toContain('data-machine-latency');
+    expect(main).toContain('state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`');
+    expect(main).not.toContain("state.latencyMs ?? 0");
+    expect(connection).toContain('onLatency?(latencyMs: number)');
+    expect(css).toContain('--machine-rail-width: 48px');
+    expect(css).toContain('--context-panel-width: 320px');
+    expect(css).toContain('--session-header-height: 44px');
+    expect(css).toContain('--pane-header-height: 32px');
+    expect(css).toContain('grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--context-panel-width)');
+    expect(css).toContain('flex: 0 0 var(--session-header-height)');
+    expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr)');
+    expect(css).toContain('.secondary-pane-strip .pane.collapsed');
+    expect(css).toContain('grid-template-rows: minmax(0, 1fr) var(--machine-rail-width)');
+    expect(css).toContain('.session-header .actions [data-compact-label] { font-size: 0; }');
+    expect(main).not.toContain('class="toolbar"');
+    expect(main).not.toContain('class="machines"');
+    expect(main).not.toContain('class="sessions"');
   });
 
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
@@ -143,10 +264,12 @@ describe("binding Commander browser invariants", () => {
     }
   });
 
-  it("resends the live grid size when observer mode becomes controller mode", async () => {
+  it("lets unleased observers size panes but preserves controller-owned geometry", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
-    expect(source).toContain("const becameController = state.held_by_me && !leases.get(key)?.held_by_me");
-    expect(source).toContain("if (becameController) resizeControlledPanes(machineId, session)");
+    expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
+    expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
+    expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
+    expect(source).toContain("if (canResizePanes(machineId, session)) sendControl");
     expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
   });
 
@@ -158,7 +281,8 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("if (reachable)");
     expect(source).toContain("this.desired = false");
     expect(source).toContain("this.eventAbort?.abort()");
-    expect(source).toContain('this.callbacks.onState("auth-blocked", detail)');
+    expect(source).toContain('this.transition("failed", "auth", { reason: detail, authFailure: kind })');
+    expect(source).toContain("this.callbacks.onAuthFailure?.(kind, detail)");
   });
 
   it("bounds a terminal that opens but never sends its initial session state", async () => {
@@ -189,37 +313,160 @@ describe("binding Commander browser invariants", () => {
       scopes: ["pane-read"], publicKey, privateKey,
     } satisfies StoredMachine;
     const callbacks = {
-      onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+      onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     (supervisor as unknown as { desired: boolean }).desired = true;
 
     await supervisor.attach("factory-a");
     FakeWebSocket.instances[0].open();
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(3_000);
 
     expect(callbacks.onSocketError).toHaveBeenCalledWith(
       "factory-a",
-      "Terminal connection opened but sent no session state within 10 seconds. Retrying…",
+      "Terminal attach opened but sent no session state within 3s. Retrying…",
     );
+    expect(callbacks.onAttachState.mock.calls.map(([, state]) => [state.phase, state.stage])).toEqual([
+      ["auth", "auth"],
+      ["dialing", "dialing"],
+      ["attaching", "attaching"],
+      ["failed", "attaching"],
+      ["backoff", "attaching"],
+    ]);
+    expect(new Set(callbacks.onAttachState.mock.calls.slice(0, -1).map(([, state]) => state.attachSince)).size).toBe(1);
+    expect(supervisor.attachSnapshot("factory-a")?.phase).toBe("backoff");
     supervisor.stop();
   });
 
-  it("turns terminal failures into an explanation and direct retry action", async () => {
+  it("turns connection failures into timed actions while retaining prior terminal frames", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
-    expect(source).toContain("Opening the terminal connection. This can take up to 10 seconds.");
-    expect(source).toContain("Terminal unavailable: ${detail}");
-    expect(source).toContain('retry.textContent = "Try again"');
-    expect(source).toContain("void connections.get(machineId)?.attach(session)");
+    expect(source).toContain("const view = connectingView(snapshot, now)");
+    expect(source).toContain('retry.textContent = "Retry"');
+    expect(source).toContain('diagnose.textContent = "Diagnose"');
+    expect(source).toContain("openConnectionLog(machineId)");
+    expect(source).toContain("const view = disconnectedView(snapshot, now)");
+    expect(source).toContain("Disconnected ${view.elapsedSeconds}s ago");
     expect(styles).toContain(".terminal-state");
-    expect(styles).toContain("#a36c2c");
+    expect(styles).toContain(".terminal-connecting-step");
+    expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
+  });
+
+  it("drives pane recovery from the selected session attach lifecycle", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("onAttachState: (session, state) =>");
+    expect(source).toContain("attachStates.set(sessionKey(machine.id, session), state)");
+    expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
+    expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
+    expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");
+    expect(source).toContain("connections.get(machineId)?.attach(session)");
   });
 
   it("removes the connecting instruction when the terminal state arrives", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain('grid.querySelector(".empty")?.remove();');
+  });
+
+  it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {
+    const [connection, main] = await Promise.all(["connection.ts", "main.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(connection.indexOf("this.requestPaneKeyframe(session, supervisor.id)")).toBeLessThan(
+      connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
+    );
+    expect(connection).not.toContain("welcome.scrollback, true");
+    expect(main).toContain('const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches');
+    expect(main.indexOf("if (collapsedOnPhone) continue;")).toBeLessThan(
+      main.indexOf("requestPaneKeyframe(session, pane.id)"),
+    );
+  });
+
+  it("multiplexes sessions on one proto-2 socket and routes raw PTY binary frames", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({ ticket: "machine-ticket" }),
+    })));
+    class FakeWebSocket {
+      static readonly OPEN = 1;
+      static readonly CONNECTING = 0;
+      static instances: FakeWebSocket[] = [];
+      readyState = FakeWebSocket.CONNECTING;
+      binaryType = "";
+      sent: string[] = [];
+      onopen: (() => void) | null = null;
+      onmessage: ((message: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(readonly url: URL) { FakeWebSocket.instances.push(this); }
+      open(): void { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
+      receive(data: string | ArrayBuffer): void { this.onmessage?.({ data } as MessageEvent); }
+      close(code = 1000): void { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
+      send(value: string): void { this.sent.push(value); }
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["pane-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(),
+      onFlowControlReset: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    const internals = supervisor as unknown as { desired: boolean; machineMultiplex: boolean };
+    internals.desired = true;
+    internals.machineMultiplex = true;
+
+    const firstAttach = supervisor.attach("factory-a");
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive(JSON.stringify({ proto: 2, capabilities: ["pty_binary", "machine_multiplex"] }));
+    await firstAttach;
+    await supervisor.attach("factory-b");
+    await supervisor.attach("factory-a");
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.sent.map((value) => JSON.parse(value))).toEqual(expect.arrayContaining([
+      { proto: 2 },
+      { channel: "events", subscribe: true },
+      { channel: "pty:factory-a", subscribe: true },
+      { channel: "pty:factory-b", subscribe: true },
+    ]));
+    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true }))).toHaveLength(1);
+
+    socket.receive(JSON.stringify({
+      channel: "pty:factory-a",
+      message: { Welcome: {
+        session_name: "factory-a",
+        state: { focused_pane: "supervisor", panes: [{ id: "supervisor", kind: "Supervisor" }] },
+        protocol_version: 3,
+        capabilities: ["authoritative_pane_keyframes"],
+      } },
+    }));
+    const session = new TextEncoder().encode("factory-a");
+    const pane = new TextEncoder().encode("supervisor");
+    const payload = new Uint8Array([0x1b, 0x5b, 0x48, 0x4f, 0x4b]);
+    const frame = new Uint8Array(9 + session.length + pane.length + payload.length);
+    frame.set(new TextEncoder().encode("CAS2"));
+    frame[4] = 1;
+    new DataView(frame.buffer).setUint16(5, session.length);
+    new DataView(frame.buffer).setUint16(7, pane.length);
+    frame.set(session, 9);
+    frame.set(pane, 9 + session.length);
+    frame.set(payload, 9 + session.length + pane.length);
+    socket.receive(frame.buffer);
+    expect(callbacks.onOutput).toHaveBeenCalledWith("factory-a", "supervisor", payload);
+
+    socket.receive(JSON.stringify({ channel: "pty:factory-a", keyframe_required: { skipped: 200 } }));
+    expect(callbacks.onFlowControlReset).toHaveBeenCalledWith("factory-a");
+    expect(socket.sent.some((value) => value.includes("RequestPaneKeyframe"))).toBe(true);
+    supervisor.stop();
   });
 
   it.each(["stop", "auth-block"] as const)("cancels a scheduled attach retry on %s", async (terminalAction) => {
@@ -251,7 +498,7 @@ describe("binding Commander browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const internals = supervisor as unknown as {

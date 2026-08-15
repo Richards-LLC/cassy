@@ -1,5 +1,7 @@
 use std::convert::Infallible;
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Json;
@@ -17,10 +19,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AuthContext, AuthStore, DaemonConnector, HealthResponse, HubAction, HubAuthorizer, HubRequest,
-    HubSession, MachineEventBus, MachineIdentity, MachineMetadata, PairingExchange, Scope,
-    SessionCatalog, SessionReadModel, TransportSecurity, ViewerRecvError, required_scope,
+    HubSession, MachineEventBus, MachineIdentity, MachineMetadata, PairingExchange, ProxyFrame,
+    ProxyFrameKind, Scope, SessionCatalog, SessionReadModel, TransportSecurity, ViewerRecvError,
+    required_scope,
 };
-use crate::ui::factory::{ClientMessage, MessageAttribution};
+use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
+
+const MACHINE_PROTOCOL_VERSION: u32 = 2;
+const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
 
 #[derive(Clone)]
 pub struct HubState<R: SessionReadModel> {
@@ -101,9 +107,18 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/websocket-ticket",
             post(websocket_ticket::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/auth/refresh",
+            post(refresh_credential::<R>).options(preflight::<R>),
+        )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
+        .route(
+            "/v1/diagnostics",
+            get(diagnostics::<R>).options(preflight::<R>),
+        )
         .route("/v1/sessions", get(sessions::<R>).options(preflight::<R>))
         .route("/v1/events", get(events::<R>).options(preflight::<R>))
+        .route("/v1/attach", get(machine_attach::<R>))
         .route(
             "/v1/sessions/{session}/status",
             get(status::<R>).options(preflight::<R>),
@@ -344,12 +359,68 @@ async fn machine<R: SessionReadModel>(
                 "session_index",
                 "daemon_attach",
                 "machine_events",
+                "machine_multiplex_v2",
                 "tailscale_serve",
                 "cloud_device_suggestions",
             ],
             transport: state.metadata.transport,
             cloud_devices: state.metadata.cloud_devices,
         })
+        .into_response(),
+        &headers,
+    )
+}
+
+async fn diagnostics<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    if authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/diagnostics",
+    )
+    .is_err()
+    {
+        return unauthorized();
+    }
+    let tailscale = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::task::spawn_blocking(|| {
+            Command::new("tailscale")
+                .args(["status", "--json"])
+                .output()
+        }),
+    )
+    .await;
+    let tailscale = match tailscale {
+        Ok(Ok(Ok(output))) if output.status.success() => {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .unwrap_or_else(|_| serde_json::json!({"error":"tailscale returned invalid JSON"}))
+        }
+        Ok(Ok(Ok(output))) => {
+            serde_json::json!({"error": format!("tailscale status exited {}", output.status)})
+        }
+        Ok(Ok(Err(_))) => serde_json::json!({"error":"tailscale CLI unavailable"}),
+        Ok(Err(_)) => serde_json::json!({"error":"tailscale status worker failed"}),
+        Err(_) => serde_json::json!({"error":"tailscale status timed out after 3s"}),
+    };
+    let session_count = state
+        .catalog
+        .list()
+        .await
+        .map(|items| items.len())
+        .unwrap_or_default();
+    with_cors(
+        Json(serde_json::json!({
+            "target_node": state.machine.id,
+            "tailscale_status": tailscale,
+            "daemon_health": {"status":"ready", "sessions":session_count},
+            "checked_at": chrono::Utc::now(),
+        }))
         .into_response(),
         &headers,
     )
@@ -406,29 +477,43 @@ async fn events<R: SessionReadModel>(
     {
         return unauthorized();
     }
+    // Subscribe before snapshotting. A concurrent event can consequently be
+    // replayed once and then observed live once; sequence+revision make that a
+    // harmless idempotent upsert, while the ordering avoids a lost-event gap.
     let receiver = state.events.subscribe();
-    let output = stream::unfold(receiver, |mut receiver| async move {
+    let replay = stream::iter(
+        state
+            .events
+            .history()
+            .into_iter()
+            .map(|event| Ok::<Event, Infallible>(machine_event_sse(event))),
+    );
+    let live = stream::unfold(receiver, |mut receiver| async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
-                    let item = Event::default()
-                        .id(event.sequence.to_string())
-                        .event(format!("{:?}", event.kind).to_lowercase())
-                        .json_data(event)
-                        .expect("MachineEvent serialization is infallible");
-                    return Some((Ok::<Event, Infallible>(item), receiver));
+                    return Some((Ok::<Event, Infallible>(machine_event_sse(event)), receiver));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
         }
     });
+    let output = replay.chain(live);
     with_cors(
         Sse::new(output)
             .keep_alive(KeepAlive::default())
             .into_response(),
         &headers,
     )
+}
+
+fn machine_event_sse(event: super::MachineEvent) -> Event {
+    Event::default()
+        .id(format!("{}.{}", event.sequence, event.revision))
+        .event(format!("{:?}", event.kind).to_lowercase())
+        .json_data(event)
+        .expect("MachineEvent serialization is infallible")
 }
 
 async fn status<R: SessionReadModel>(
@@ -523,7 +608,15 @@ async fn attach<R: SessionReadModel>(
     let connector = state.connector.clone();
     upgrade
         .on_upgrade(move |socket| {
-            proxy_socket(socket, connector, session, port, panes, daemon_identity, socket_auth)
+            proxy_socket(
+                socket,
+                connector,
+                session,
+                port,
+                panes,
+                daemon_identity,
+                socket_auth,
+            )
         })
         .into_response()
 }
@@ -627,7 +720,12 @@ async fn handle_client_message(
     let mut message: ClientMessage = serde_json::from_slice(bytes)?;
     let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
-    if !context.has(scope) || !store.has_active_lease(context, session, now)? {
+    let allowed = if matches!(message, ClientMessage::ResizePane { .. }) {
+        store.may_resize_panes(context, session, now)?
+    } else {
+        context.has(scope) && store.has_active_lease(context, session, now)?
+    };
+    if !allowed {
         store.audit(
             Some(context),
             "denied",
@@ -685,9 +783,42 @@ async fn pairing_exchange<R: SessionReadModel>(
     }
 }
 
+async fn refresh_credential<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return unauthorized();
+    };
+    let Some(request_origin) = origin(&headers) else {
+        return unauthorized();
+    };
+    let Some(authorization) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return unauthorized();
+    };
+    let Some(proof) = headers.get("dpop").and_then(|value| value.to_str().ok()) else {
+        return unauthorized();
+    };
+    match auth.refresh_device_credential(
+        authorization,
+        proof,
+        &request_origin,
+        "POST",
+        "/v1/auth/refresh",
+        chrono::Utc::now(),
+    ) {
+        Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(_) => with_cors(unauthorized(), &headers),
+    }
+}
+
 #[derive(Deserialize)]
 struct TicketRequest {
-    session: String,
+    #[serde(default)]
+    session: Option<String>,
 }
 
 async fn websocket_ticket<R: SessionReadModel>(
@@ -707,10 +838,16 @@ async fn websocket_ticket<R: SessionReadModel>(
         Ok(Some(context)) => context,
         _ => return unauthorized(),
     };
-    let endpoint = format!("/v1/sessions/{}/attach", request.session);
+    let (session, endpoint) = match request.session {
+        Some(session) => {
+            let endpoint = format!("/v1/sessions/{session}/attach");
+            (session, endpoint)
+        }
+        None => ("*".to_owned(), "/v1/attach".to_owned()),
+    };
     match state.auth.as_ref().unwrap().issue_ws_ticket(
         &context,
-        &request.session,
+        &session,
         &endpoint,
         chrono::Utc::now(),
     ) {
@@ -720,6 +857,304 @@ async fn websocket_ticket<R: SessionReadModel>(
             &headers,
         ),
         Err(_) => unauthorized(),
+    }
+}
+
+async fn machine_attach<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Query(query): Query<AttachQuery>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let origin = origin(&headers);
+    let endpoint = "/v1/attach";
+    let socket_auth = if let Some(auth) = &state.auth {
+        let Some(origin) = origin.as_deref() else {
+            return unauthorized();
+        };
+        match auth.consume_ws_ticket(&query.ticket, origin, "*", endpoint, chrono::Utc::now()) {
+            Ok(context) if context.has(Scope::PaneRead) => Some((auth.clone(), context)),
+            _ => return unauthorized(),
+        }
+    } else {
+        if !authorized(&state, HubAction::PaneRead, &headers) {
+            return unauthorized();
+        }
+        None
+    };
+    upgrade
+        .on_upgrade(move |socket| proxy_machine_socket(socket, state, socket_auth))
+        .into_response()
+}
+
+#[derive(Debug)]
+enum MachineOutbound {
+    Frame { session: String, frame: ProxyFrame },
+    Lagged { session: String, skipped: u64 },
+    Closed { session: String },
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineClientEnvelope {
+    channel: String,
+    #[serde(default)]
+    subscribe: bool,
+    #[serde(default)]
+    panes: Vec<String>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    message: Option<serde_json::Value>,
+    #[serde(default)]
+    ping: Option<u64>,
+}
+
+fn machine_binary_frame(session: &str, frame: &ProxyFrame) -> anyhow::Result<Option<Vec<u8>>> {
+    let (kind, pane_id, payload) = match frame.kind {
+        ProxyFrameKind::Output => {
+            let DaemonMessage::Output { pane_id, data } =
+                serde_json::from_slice::<DaemonMessage>(&frame.bytes)?
+            else {
+                anyhow::bail!("output frame kind did not contain Output")
+            };
+            (1_u8, pane_id, data)
+        }
+        ProxyFrameKind::PaneKeyframe => {
+            let DaemonMessage::PaneKeyframe { pane_id, ansi, .. } =
+                serde_json::from_slice::<DaemonMessage>(&frame.bytes)?
+            else {
+                anyhow::bail!("keyframe frame kind did not contain PaneKeyframe")
+            };
+            (2_u8, pane_id, ansi)
+        }
+        ProxyFrameKind::Other => return Ok(None),
+    };
+    let session_len =
+        u16::try_from(session.len()).context("session name exceeds protocol limit")?;
+    let pane_len = u16::try_from(pane_id.len()).context("pane id exceeds protocol limit")?;
+    let mut encoded = Vec::with_capacity(9 + session.len() + pane_id.len() + payload.len());
+    encoded.extend_from_slice(MACHINE_PROTOCOL_MAGIC);
+    encoded.push(kind);
+    encoded.extend_from_slice(&session_len.to_be_bytes());
+    encoded.extend_from_slice(&pane_len.to_be_bytes());
+    encoded.extend_from_slice(session.as_bytes());
+    encoded.extend_from_slice(pane_id.as_bytes());
+    encoded.extend_from_slice(&payload);
+    Ok(Some(encoded))
+}
+
+async fn proxy_machine_socket<R: SessionReadModel>(
+    mut socket: WebSocket,
+    state: HubState<R>,
+    auth: Option<(AuthStore, AuthContext)>,
+) {
+    let handshake = tokio::time::timeout(Duration::from_secs(3), socket.recv()).await;
+    let received_proto = match handshake {
+        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|value| value.get("proto").and_then(serde_json::Value::as_u64)),
+        _ => None,
+    };
+    if received_proto != Some(u64::from(MACHINE_PROTOCOL_VERSION)) {
+        let error = serde_json::json!({
+            "error": {
+                "code": "protocol_mismatch",
+                "supported": MACHINE_PROTOCOL_VERSION,
+                "received": received_proto,
+            }
+        });
+        let _ = socket.send(Message::Text(error.to_string().into())).await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+    let hello = serde_json::json!({
+        "proto": MACHINE_PROTOCOL_VERSION,
+        "capabilities": ["pty_binary", "machine_multiplex", "keyframe_flow_control"]
+    });
+    if socket
+        .send(Message::Text(hello.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let (mut sink, mut source) = socket.split();
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<MachineOutbound>(64);
+    let mut subscriptions = std::collections::HashMap::<String, tokio::task::JoinHandle<()>>::new();
+    let mut machine_events = state.events.subscribe();
+    let mut events_subscribed = false;
+    let mut revocations = auth
+        .as_ref()
+        .map(|(store, _)| store.subscribe_revocations());
+    let revalidation_period = Duration::from_millis(250);
+    let mut revalidation = tokio::time::interval_at(
+        tokio::time::Instant::now() + revalidation_period,
+        revalidation_period,
+    );
+    revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            outgoing = outbound_rx.recv() => match outgoing {
+                Some(MachineOutbound::Frame { session, frame }) => {
+                    let result = match machine_binary_frame(&session, &frame) {
+                        Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
+                        Ok(None) => {
+                            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&frame.bytes) else { break };
+                            let envelope = serde_json::json!({"channel":format!("pty:{session}"),"message":message});
+                            sink.send(Message::Text(envelope.to_string().into())).await
+                        }
+                        Err(_) => break,
+                    };
+                    if result.is_err() { break; }
+                }
+                Some(MachineOutbound::Lagged { session, skipped }) => {
+                    let envelope = serde_json::json!({
+                        "channel": format!("pty:{session}"),
+                        "keyframe_required": {"skipped": skipped},
+                    });
+                    if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                }
+                Some(MachineOutbound::Closed { session }) => {
+                    subscriptions.remove(&session);
+                    let envelope = serde_json::json!({"channel":format!("pty:{session}"),"closed":true});
+                    if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                }
+                None => break,
+            },
+            incoming = source.next() => match incoming {
+                Some(Ok(Message::Ping(payload))) => {
+                    if sink.send(Message::Pong(payload)).await.is_err() { break; }
+                }
+                Some(Ok(Message::Pong(_))) => {}
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Binary(_))) => {
+                    let error = serde_json::json!({"error":{"code":"binary_client_frame","message":"Commander controls must be JSON"}});
+                    if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                }
+                Some(Ok(Message::Text(text))) => {
+                    let Ok(envelope) = serde_json::from_str::<MachineClientEnvelope>(&text) else {
+                        let error = serde_json::json!({"error":{"code":"invalid_frame","message":"invalid machine protocol frame"}});
+                        if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                        continue;
+                    };
+                    if envelope.channel == "health" {
+                        if let Some(ping) = envelope.ping {
+                            let pong = serde_json::json!({"channel":"health","pong":ping});
+                            if sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
+                        }
+                        continue;
+                    }
+                    if envelope.channel == "events" && envelope.subscribe {
+                        events_subscribed = true;
+                        continue;
+                    }
+                    let channel_session = envelope.channel.strip_prefix("pty:").map(str::to_owned)
+                        .or_else(|| (envelope.channel == "resize").then(|| envelope.session.clone()).flatten());
+                    let Some(session) = channel_session else {
+                        let error = serde_json::json!({"error":{"code":"unknown_channel","channel":envelope.channel}});
+                        if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                        continue;
+                    };
+                    if envelope.subscribe {
+                        if subscriptions.contains_key(&session) { continue; }
+                        let candidate = state.catalog.list().await.ok().and_then(|sessions| {
+                            sessions.into_iter().find(|candidate| candidate.name == session)
+                        });
+                        let Some(candidate) = candidate else {
+                            let error = serde_json::json!({"channel":format!("pty:{session}"),"error":{"code":"session_not_found"}});
+                            if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                            continue;
+                        };
+                        let Some(port) = candidate.ws_port else {
+                            let error = serde_json::json!({"channel":format!("pty:{session}"),"error":{"code":"daemon_offline"}});
+                            if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                            continue;
+                        };
+                        let Ok(mut viewer) = state.connector.attach(
+                            &session,
+                            port,
+                            envelope.panes,
+                            candidate.daemon_identity,
+                        ).await else {
+                            continue;
+                        };
+                        let tx = outbound_tx.clone();
+                        let task_session = session.clone();
+                        let handle = tokio::spawn(async move {
+                            loop {
+                                match viewer.recv().await {
+                                    Ok(frame) => {
+                                        if tx.send(MachineOutbound::Frame { session: task_session.clone(), frame }).await.is_err() { break; }
+                                    }
+                                    Err(ViewerRecvError::Lagged { skipped }) => {
+                                        if tx.send(MachineOutbound::Lagged { session: task_session.clone(), skipped }).await.is_err() { break; }
+                                    }
+                                    Err(ViewerRecvError::Closed) => {
+                                        let _ = tx.send(MachineOutbound::Closed { session: task_session.clone() }).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                        subscriptions.insert(session, handle);
+                        continue;
+                    }
+                    let Some(message) = envelope.message else { continue; };
+                    let bytes = match serde_json::to_vec(&message) {
+                        Ok(bytes) => bytes,
+                        Err(_) => continue,
+                    };
+                    if handle_client_message(&state.connector, &session, &auth, &bytes).await.is_err() {
+                        let error = serde_json::json!({"channel":format!("pty:{session}"),"error":{"code":"forbidden"}});
+                        if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                    }
+                }
+            },
+            event = async {
+                if events_subscribed {
+                    machine_events.recv().await.ok()
+                } else {
+                    futures_util::future::pending().await
+                }
+            } => {
+                if let Some(event) = event {
+                    let envelope = serde_json::json!({"channel":"events","event":event});
+                    if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
+                }
+            },
+            revoked = async {
+                match revocations.as_mut() {
+                    Some(receiver) => receiver.recv().await.ok(),
+                    None => futures_util::future::pending().await,
+                }
+            } => {
+                if revoked.as_deref() == auth.as_ref().map(|(_, context)| context.device_id.as_str()) {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+            },
+            revoked_on_disk = async {
+                let Some((store, context)) = auth.as_ref() else {
+                    return futures_util::future::pending::<bool>().await;
+                };
+                revalidation.tick().await;
+                let store = store.clone();
+                let context = context.clone();
+                tokio::task::spawn_blocking(move || {
+                    store.ensure_active_context(&context, chrono::Utc::now()).is_err()
+                }).await.unwrap_or(true)
+            } => {
+                if revoked_on_disk {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+        }
+    }
+    for (_, handle) in subscriptions {
+        handle.abort();
     }
 }
 
@@ -974,4 +1409,39 @@ fn internal_error(error: anyhow::Error) -> Response {
         Json(serde_json::json!({"error":"internal_error"})),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod machine_protocol_tests {
+    use super::*;
+    use crate::hub::proxy_frame;
+
+    #[test]
+    fn proto_2_binary_output_keeps_terminal_bytes_raw_after_the_route_header() {
+        let payload = vec![0, 255, 0x1b, b'[', b'H', b'o', b'k'];
+        let encoded = machine_binary_frame(
+            "factory-a",
+            &proxy_frame(DaemonMessage::Output {
+                pane_id: "supervisor".into(),
+                data: payload.clone(),
+            }),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(&encoded[..4], MACHINE_PROTOCOL_MAGIC);
+        assert_eq!(encoded[4], 1);
+        assert_eq!(u16::from_be_bytes([encoded[5], encoded[6]]), 9);
+        assert_eq!(u16::from_be_bytes([encoded[7], encoded[8]]), 10);
+        assert_eq!(&encoded[9..18], b"factory-a");
+        assert_eq!(&encoded[18..28], b"supervisor");
+        assert_eq!(&encoded[28..], payload);
+        assert!(!encoded.windows(6).any(|window| window == b"Output"));
+    }
+
+    #[test]
+    fn non_pty_machine_messages_remain_on_the_json_channel() {
+        let frame = proxy_frame(DaemonMessage::Pong);
+        assert!(machine_binary_frame("factory-a", &frame).unwrap().is_none());
+    }
 }

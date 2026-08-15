@@ -8,9 +8,15 @@ use cas_factory_protocol::{
 
 use crate::ui::factory::daemon::FactoryDaemon;
 use crate::ui::factory::daemon::cloud_client::RelayEvent;
+use crate::ui::factory::protocol::COMMANDER_REPLAY_BYTES_PER_PANE;
 
-/// Max bytes to keep per pane for replay on attach (256 KB).
-const PANE_BUFFER_CAPACITY: usize = 256 * 1024;
+/// Max bytes to keep per active pane for replay on attach (64 KiB).
+///
+/// This is enough for the visible viewport plus a bounded recent tail while
+/// keeping a reconnect small enough for Commander on a phone. Older output is
+/// still available through the task/pane logs instead of being paid on every
+/// attach.
+const PANE_BUFFER_CAPACITY: usize = COMMANDER_REPLAY_BYTES_PER_PANE;
 
 /// Tracks a remote relay client connected via cloud WebSocket
 #[derive(Debug)]
@@ -210,10 +216,15 @@ pub(in crate::ui::factory::daemon) fn write_pane_snapshots(
 /// dimensions. This function captures that reflowed viewport as ANSI bytes
 /// suitable for replaying into a web terminal emulator (ghostty-web / xterm.js),
 /// preserving colors, bold/italic, and cursor position.
-fn snapshot_to_ansi(snap: &TerminalSnapshot, in_alt_screen: bool) -> Vec<u8> {
+pub(super) fn snapshot_to_ansi(snap: &TerminalSnapshot, in_alt_screen: bool) -> Vec<u8> {
     let cap = (snap.rows as usize) * (snap.cols as usize) * 4;
     let mut buf = Vec::with_capacity(cap);
     let mut tmp = String::new();
+
+    // RIS resets modes, attributes, cursor state, and both screen buffers. An
+    // arbitrary PTY tail can never make this guarantee because it may begin
+    // inside an escape sequence or depend on modes set before the slice.
+    buf.extend_from_slice(b"\x1bc");
 
     // The snapshot is taken from the currently visible buffer.  When that is
     // an alternate screen, enter it before replaying the rows: a live Ink UI
@@ -713,6 +724,58 @@ mod tests {
     }
 
     #[test]
+    fn pane_buffer_keeps_only_the_bounded_recent_tail() {
+        let mut buf = PaneBuffer::default();
+        let bytes = vec![b'x'; PANE_BUFFER_CAPACITY + 97];
+        buf.append(&bytes);
+
+        assert_eq!(buf.as_bytes().len(), PANE_BUFFER_CAPACITY);
+    }
+
+    #[test]
+    fn pathological_raw_tail_starts_mid_sgr_but_keyframe_is_authoritative() {
+        let styled_cell = b"\x1b[38;2;215;119;87mX";
+        let mut raw = Vec::with_capacity(styled_cell.len() * 30_000);
+        for _ in 0..30_000 {
+            raw.extend_from_slice(styled_cell);
+        }
+        let mut ring = PaneBuffer::default();
+        ring.append(&raw);
+        let tail = ring.as_bytes();
+        let tail_start = raw.len() - tail.len();
+        let preceding_escape = raw[..tail_start]
+            .iter()
+            .rposition(|byte| *byte == b'\x1b')
+            .expect("fixture must have an SGR before the sliced boundary");
+
+        assert_eq!(tail.len(), PANE_BUFFER_CAPACITY);
+        assert_ne!(tail[0], b'\x1b');
+        assert!(
+            !raw[preceding_escape..tail_start].contains(&b'm'),
+            "the bounded raw tail fixture must begin inside an SGR sequence"
+        );
+        assert!(!tail.windows(4).any(|window| window == b"\x1b[2J"));
+        assert!(!tail.windows(3).any(|window| window == b"\x1b[H"));
+
+        let snapshot = TerminalSnapshot {
+            cells: vec![cas_factory_protocol::TerminalCell {
+                codepoint: 'X' as u32,
+                fg: (215, 119, 87),
+                bg: (0, 0, 0),
+                flags: 0,
+                width: 1,
+            }],
+            cursor: cas_factory_protocol::CursorPosition { x: 0, y: 0 },
+            cols: 1,
+            rows: 1,
+        };
+        let keyframe = snapshot_to_ansi(&snapshot, false);
+
+        assert!(keyframe.starts_with(b"\x1bc\x1b[0m\x1b[2J\x1b[H"));
+        assert!(keyframe.len() < 128 * 1024);
+    }
+
+    #[test]
     fn snapshot_replay_reenters_alternate_screen_before_ink_redraws() {
         let snapshot = TerminalSnapshot {
             cells: vec![cas_factory_protocol::TerminalCell {
@@ -728,7 +791,28 @@ mod tests {
         };
 
         let replay = snapshot_to_ansi(&snapshot, true);
-        assert!(replay.starts_with(b"\x1b[?1049h\x1b[0m\x1b[2J\x1b[H"));
+        assert!(replay.starts_with(b"\x1bc\x1b[?1049h\x1b[0m\x1b[2J\x1b[H"));
         assert!(replay.ends_with(b"\x1b[0m\x1b[1;1H"));
+    }
+
+    #[test]
+    fn snapshot_keyframe_always_starts_at_an_escape_boundary_and_resets_modes() {
+        let snapshot = TerminalSnapshot {
+            cells: vec![cas_factory_protocol::TerminalCell {
+                codepoint: 'x' as u32,
+                fg: (0, 0, 0),
+                bg: (0, 0, 0),
+                flags: 0,
+                width: 1,
+            }],
+            cursor: cas_factory_protocol::CursorPosition { x: 0, y: 0 },
+            cols: 1,
+            rows: 1,
+        };
+
+        let replay = snapshot_to_ansi(&snapshot, false);
+        assert!(replay.starts_with(b"\x1bc\x1b[0m\x1b[2J\x1b[H"));
+        assert!(replay.windows(3).any(|window| window == b"\x1b[H"));
+        assert!(!replay.starts_with(b"["), "a keyframe cannot begin mid-CSI");
     }
 }

@@ -206,6 +206,9 @@ pub struct FactoryDaemon {
     pane_watchers: HashMap<String, std::collections::HashSet<String>>,
     /// Per-pane ring buffer of raw PTY bytes for replay on attach
     pane_buffers: HashMap<String, runtime::relay::PaneBuffer>,
+    /// One opt-in summarizer per factory session; requests run once here and
+    /// the resulting card is broadcast to every observer.
+    session_summarizer: runtime::session_summarizer::SessionSummarizer,
     /// GUI socket listener (for desktop GUI clients using JSON protocol)
     gui_listener: UnixListener,
     /// Connected GUI clients
@@ -286,8 +289,7 @@ pub struct FactoryDaemon {
     /// cas-6e76 (GH #224): normal PTY writes are transport receipts, not proof
     /// that an idle harness surfaced a turn.  Keep a bounded probe until pane
     /// output corroborates it, then retry once and make residual silence loud.
-    normal_delivery_probes:
-        HashMap<i64, crate::ui::factory::daemon::runtime::NormalDeliveryProbe>,
+    normal_delivery_probes: HashMap<i64, crate::ui::factory::daemon::runtime::NormalDeliveryProbe>,
     /// cas-f02b (GH #101): last observed PTY output byte count per pane, sampled
     /// when a supervisor wake is evaluated. Equality across two evaluations is
     /// the evidence that the pane is not mid-render and is safe to type into.
@@ -319,14 +321,23 @@ enum ControlEvent {
     SetMode(ClientViewMode),
     MouseScrollUp,
     MouseScrollDown,
-    MouseClick { col: u16, row: u16 },
-    DropImage { col: u16, row: u16, path: String },
+    MouseClick {
+        col: u16,
+        row: u16,
+    },
+    DropImage {
+        col: u16,
+        row: u16,
+        path: String,
+    },
     /// Bracketed paste from the client. The client coalesces a paste into one
     /// event (stripping the terminal's \x1b[200~/\x1b[201~ markers), so we carry
     /// the literal payload here and re-wrap it as bracketed paste when injecting
     /// into the focused pane — otherwise embedded newlines reach the inner CLI as
     /// bare Enter keys and submit the prompt mid-paste (cas-5702).
-    Paste { payload: String },
+    Paste {
+        payload: String,
+    },
     SetSelectMode(bool),
 }
 
@@ -403,8 +414,14 @@ mod tests {
             requester_config_dir: None,
         });
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let config = mux
-            .build_add_worker_config("alice", tmpdir.path().to_path_buf(), None, "supervisor", None, extracted_spec);
+        let config = mux.build_add_worker_config(
+            "alice",
+            tmpdir.path().to_path_buf(),
+            None,
+            "supervisor",
+            None,
+            extracted_spec,
+        );
 
         // When `nice` wraps the binary, the actual command is at args[2].
         // See cas-mux/src/mux_tests/tests.rs::effective_command for the same pattern.

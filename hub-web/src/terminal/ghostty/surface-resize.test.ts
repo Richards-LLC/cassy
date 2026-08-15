@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GhosttyTerminalSurface } from "./surface";
+import { GhosttyTerminalSurface, shouldBlinkTerminalCursor } from "./surface";
 
 const originalWindow = globalThis.window;
 
@@ -60,5 +60,24 @@ describe("Ghostty terminal resize after a collapsed pane", () => {
     expect(onResize).toHaveBeenCalledWith(surface.cols, surface.rows);
     expect(surface.cols).toBeGreaterThan(1);
     expect(surface.rows).toBeGreaterThan(1);
+  });
+});
+
+describe("Ghostty terminal cursor mode", () => {
+  const activeCursor = {
+    focused: true,
+    cursorBlinking: true,
+    cursorVisible: true,
+    reducedMotion: false,
+  };
+
+  it("blinks only while the real session lease is in control mode", () => {
+    expect(shouldBlinkTerminalCursor({ ...activeCursor, controlMode: true })).toBe(true);
+    expect(shouldBlinkTerminalCursor({ ...activeCursor, controlMode: false })).toBe(false);
+  });
+
+  it("still respects focus and reduced motion while controlling", () => {
+    expect(shouldBlinkTerminalCursor({ ...activeCursor, controlMode: true, focused: false })).toBe(false);
+    expect(shouldBlinkTerminalCursor({ ...activeCursor, controlMode: true, reducedMotion: true })).toBe(false);
   });
 });

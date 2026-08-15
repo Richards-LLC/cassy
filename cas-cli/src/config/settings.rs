@@ -207,6 +207,13 @@ pub struct FactoryConfig {
     /// build caches even while the filesystem is above the high watermark.
     #[serde(default = "default_target_cache_retention_count")]
     pub target_cache_retention_count: usize,
+
+    /// AI enrichment for Commander summaries and events. DEFAULT OFF: enabling this sends
+    /// redacted terminal transcript excerpts to a third-party API from a
+    /// machine that may hold secrets. Configure an OpenAI-compatible local
+    /// endpoint when transcripts must not leave the machine or tailnet.
+    #[serde(default)]
+    pub ai_enrichment: cas_factory::AiEnrichmentConfig,
 }
 
 /// Durable staging configuration for large generated artifacts.
@@ -293,11 +300,11 @@ impl Default for FactoryConfig {
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
             strict_cli: false,
-            target_cache_high_watermark_percent:
-                default_target_cache_high_watermark_percent(),
+            target_cache_high_watermark_percent: default_target_cache_high_watermark_percent(),
             target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),
             target_cache_min_idle_secs: default_target_cache_min_idle_secs(),
             target_cache_retention_count: default_target_cache_retention_count(),
+            ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
         }
     }
 }
@@ -1030,13 +1037,19 @@ mod tests {
         let parsed: std::collections::HashMap<String, FactoryConfig> =
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
-        assert_eq!(fc.cargo_build_jobs, FactoryConfig::default().cargo_build_jobs);
+        assert_eq!(
+            fc.cargo_build_jobs,
+            FactoryConfig::default().cargo_build_jobs
+        );
         assert_eq!(fc.nice_cargo, FactoryConfig::default().nice_cargo);
         assert_eq!(
             fc.stall_threshold_secs,
             FactoryConfig::default().stall_threshold_secs
         );
-        assert_eq!(fc.epic_base_branch, FactoryConfig::default().epic_base_branch);
+        assert_eq!(
+            fc.epic_base_branch,
+            FactoryConfig::default().epic_base_branch
+        );
         assert_eq!(fc.epic_base_branch, None);
         assert_eq!(fc.target_cache_high_watermark_percent, 85);
         assert_eq!(fc.target_cache_low_watermark_percent, 75);
@@ -1666,7 +1679,12 @@ harness = "codex"
 
         let with_other_keys: std::collections::HashMap<String, CodeConfig> =
             toml::from_str("[code]\ndebounce_ms = 750\n").expect("valid toml");
-        assert!(with_other_keys.get("code").expect("section present").enabled);
+        assert!(
+            with_other_keys
+                .get("code")
+                .expect("section present")
+                .enabled
+        );
 
         // And an explicit opt-out is still honoured.
         let opted_out: std::collections::HashMap<String, CodeConfig> =

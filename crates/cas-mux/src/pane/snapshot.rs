@@ -265,6 +265,33 @@ impl Pane {
         Ok((rows, cache_rows, Some(cache_start)))
     }
 
+    /// Return an absolute, bounded page of styled historical screen rows.
+    ///
+    /// The caller owns the request-size ceiling; this method never returns
+    /// more than `count` rows and never changes the pane's live viewport.
+    pub fn scrollback_page(&self, start_row: u32, count: u16) -> Vec<CacheRow> {
+        let end_row = start_row
+            .saturating_add(u32::from(count))
+            .min(self.scrollback_lines());
+        let mut rows = Vec::with_capacity(end_row.saturating_sub(start_row) as usize);
+        for screen_row in start_row..end_row {
+            let text = self
+                .terminal
+                .dump_screen_row(screen_row)
+                .unwrap_or_default();
+            let style_runs = self
+                .terminal
+                .screen_row_style_runs(screen_row)
+                .unwrap_or_default();
+            rows.push(CacheRow {
+                screen_row,
+                style_runs: convert_style_runs_to_proto(&text, &style_runs, self.cols as usize),
+                text,
+            });
+        }
+        rows
+    }
+
     pub fn get_viewport_rows_data(&self) -> Result<Vec<RowData>> {
         let mut rows = Vec::with_capacity(self.rows as usize);
         for row_idx in 0..self.rows {

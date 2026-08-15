@@ -54,6 +54,16 @@ export interface SessionState {
   rows: number;
 }
 
+export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";
+
+export interface SessionCardSummary {
+  title: string;
+  description: string;
+  phase: SessionPhase;
+  blocked_on?: string;
+  generated_at: string;
+}
+
 export interface LeaseState {
   controller_device_id?: string;
   controller_label?: string;
@@ -72,8 +82,13 @@ export interface AttentionItem {
   headline?: string;
   detail?: string;
   cause?: string;
-  severity?: "incident" | "notice";
+  severity?: "critical" | "warning" | "info" | "incident" | "notice";
+  action?: "repair" | "view_pane" | "retry" | "open_pr" | "none";
   ticketId?: string;
+  payload?: unknown;
+  fingerprint?: string;
+  enrichmentPending?: boolean;
+  enrichedAt?: string;
   createdAt: string;
   seenAt?: string;
   acknowledgedAt?: string;

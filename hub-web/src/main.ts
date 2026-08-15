@@ -1,6 +1,9 @@
 import "./styles.css";
-import { attentionContent, groupAttention, machineEventAttention, type AttentionContent } from "./attention";
+import { applyAttentionEnrichment, attentionCounts, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
+import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
+import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -13,8 +16,9 @@ import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest }
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
-import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionState, StoredMachine } from "./types";
+import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
@@ -22,35 +26,120 @@ let pendingPairing: PendingPairing | null = consumePairingFragment(window.locati
 pendingPairing ??= pendingPairingStore.load();
 const pairingOperations = new PairingOperationCoordinator();
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const rootStyles = getComputedStyle(document.documentElement);
+document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
+  "content",
+  rootStyles.getPropertyValue("--bg-root").trim(),
+);
 const machines = new Map<string, StoredMachine>();
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
+const attachStates = new Map<string, AttachSnapshot>();
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const sessionStates = new Map<string, SessionState>();
+// Shared data source for session drawers, status rows, pane tooltips, and the
+// Cmd+K integration lane. Values are produced once by the daemon.
+export const sessionSummaries = new Map<string, SessionCardSummary>();
 const paneBuffers = new Map<string, number[]>();
+const paneLastActivity = new Map<string, number>();
+const authoritativeSessions = new Set<string>();
+const paneKeyframesReady = new Set<string>();
 const selectedPanes = new Map<string, string>();
+const collapsedWorkerPanes = new Set<string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
 // A live Claude/Ink proof after cas-9a29 decides whether one-row PTYs are safe.
 // Until then collapsed phone rows preserve their last real terminal geometry.
 const mobileCollapsedPaneGeometry = "freeze";
 let attention: AttentionItem[] = [];
+const newCriticalAttentionIds = new Set<string>();
+const reclassifiedAttentionIds = new Set<string>();
 let selectedMachineId: string | undefined;
 let selectedSession: string | undefined;
 let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
 let pairingPollTimer: number | undefined;
 let pairingCountdownTimer: number | undefined;
+let connectionViewTicker: number | undefined;
 let pairingCreateInFlight = false;
 let pairingExchangeInFlight = false;
 let pairingDraft = createPairingDraft(location.origin);
+let machineDrawerOpen = false;
+let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
+let activeContextTab: "attention" | "status" = "attention";
+let commandPaletteOpen = false;
 
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
+
+function lastActivityLabel(timestamp: number | undefined): string {
+  return relativeTimestamp(timestamp);
+}
+
+function updatePaneActivity(element: HTMLElement, timestamp: number | undefined): void {
+  element.textContent = lastActivityLabel(timestamp);
+  element.title = timestamp === undefined ? "No activity received" : absoluteTimestamp(timestamp);
+}
+
+function focusPane(machineId: string, session: string, paneId: string): void {
+  const selectedKey = sessionKey(machineId, session);
+  const key = paneKey(machineId, session, paneId);
+  selectedPanes.set(selectedKey, paneId);
+  collapsedWorkerPanes.delete(key);
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  for (const pane of grid?.querySelectorAll<HTMLElement>(".pane") ?? []) {
+    const selected = pane.dataset.paneId === paneId;
+    pane.classList.toggle("selected", selected);
+    if (selected) pane.classList.remove("collapsed");
+  }
+  surfaces.get(key)?.focus();
+}
+
+function activePaneContext(): { machineId: string; session: string; paneId: string; surface: TerminalSurface } | undefined {
+  if (!selectedMachineId || !selectedSession) return undefined;
+  const paneId = selectedPanes.get(sessionKey(selectedMachineId, selectedSession));
+  const surface = paneId ? surfaces.get(paneKey(selectedMachineId, selectedSession, paneId)) : undefined;
+  return paneId && surface ? { machineId: selectedMachineId, session: selectedSession, paneId, surface } : undefined;
+}
+
+function openTerminalSearch(): void {
+  const active = activePaneContext();
+  if (!active) return;
+  const pane = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(active.paneId)}"]`);
+  if (!pane) return;
+  pane.querySelector<HTMLElement>(".terminal-search")?.remove();
+  const form = document.createElement("form");
+  form.className = "terminal-search";
+  form.setAttribute("role", "search");
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "Find in terminal";
+  input.setAttribute("aria-label", "Find in focused terminal");
+  const result = document.createElement("span");
+  result.setAttribute("role", "status");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "Close terminal search");
+  const closeSearch = () => { form.remove(); active.surface.focus(); };
+  close.onclick = closeSearch;
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    result.textContent = active.surface.search(input.value) ? "Match selected" : "No match";
+  };
+  form.onkeydown = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeSearch();
+  };
+  form.append(input, result, close);
+  pane.append(form);
+  input.focus();
+}
 
 function paneLayoutStorage(): PaneLayoutStorage | undefined {
   try { return window.localStorage; } catch { return undefined; }
@@ -79,37 +168,115 @@ async function boot(): Promise<void> {
 
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
   return new HubConnectionSupervisor(machine, {
-    onState: (state, detail) => {
+    onState: (state) => {
       connectionStates.set(machine.id, state);
-      if (state === "reconnecting" || state === "auth-blocked" || state === "offline") invalidateMachineLeases(machine.id);
-      if (state === "auth-blocked") void addAttention(machine, undefined, "auth_loss", detail ?? "Authentication blocked");
-      if (state === "reconnecting") void addAttention(machine, undefined, "hub_disconnected", detail ?? "Hub disconnected");
+      if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
+      if (state.authFailure) void addAttention(machine, undefined, "auth_loss", state.reason ?? "Authentication blocked");
+      if (state.phase === "backoff") void addAttention(machine, undefined, "hub_disconnected", state.reason ?? "Hub disconnected");
       render();
     },
+    onAttachState: (session, state) => {
+      attachStates.set(sessionKey(machine.id, session), state);
+      if (selectedMachineId === machine.id && selectedSession === session) render();
+    },
+    onAuthFailure: (kind, detail) => {
+      if (kind === "expired") return;
+      pairingStatus = `${detail}. Re-pair in Commander; no browser reset is required.`;
+      render();
+    },
+    onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items) => { sessions.set(machine.id, items); render(); },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
-      if (["daemon_disconnected", "pane_exited", "session_removed"].includes(kind)) {
-        void addAttention(machine, event.session as string | undefined, kind, machineEventAttention(kind, event.diagnostic));
+      if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
+        void upsertMachineEventAttention(machine, event);
       }
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
     },
-    onSessionState: (session, state, scrollback) => {
-      void renderSessionState(machine.id, session, state, scrollback);
+    onSessionState: (session, state, scrollback, authoritativeKeyframes) => {
+      void renderSessionState(machine.id, session, state, scrollback, authoritativeKeyframes);
+    },
+    onPaneKeyframe: (session, pane, data) => {
+      const key = paneKey(machine.id, session, pane);
+      paneKeyframesReady.add(key);
+      paneBuffers.set(key, [...data]);
+      surfaces.get(key)?.write(data);
+    },
+    onFlowControlReset: (session) => {
+      const prefix = `${sessionKey(machine.id, session)}:`;
+      for (const key of paneKeyframesReady) {
+        if (key.startsWith(prefix)) paneKeyframesReady.delete(key);
+      }
     },
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
+      paneLastActivity.set(key, Date.now());
+      if (authoritativeSessions.has(sessionKey(machine.id, session)) && !paneKeyframesReady.has(key)) return;
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
+      const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
+      if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, paneLastActivity.get(key));
+    },
+    onSessionSummary: (session, summary) => {
+      sessionSummaries.set(sessionKey(machine.id, session), summary);
+      if (selectedMachineId === machine.id && selectedSession === session) {
+        const state = sessionStates.get(sessionKey(machine.id, session));
+        if (state) void renderSessionState(machine.id, session, state);
+      }
+      render();
     },
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
-      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "incident" });
+      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "critical", action: "view_pane", payload: detail });
     },
   });
+}
+
+function attentionEnrichment(value: unknown): AttentionEnrichment | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (!["critical", "warning", "info"].includes(String(candidate.severity))) return undefined;
+  if (!["repair", "view_pane", "retry", "open_pr", "none"].includes(String(candidate.action))) return undefined;
+  if (typeof candidate.summary !== "string" || typeof candidate.fingerprint !== "string") return undefined;
+  if (candidate.detail !== undefined && candidate.detail !== null && typeof candidate.detail !== "string") return undefined;
+  return candidate as unknown as AttentionEnrichment;
+}
+
+async function upsertMachineEventAttention(machine: StoredMachine, event: Record<string, unknown>): Promise<void> {
+  const kind = String(event.kind ?? "hub_event");
+  const session = typeof event.session === "string" ? event.session : undefined;
+  const sequence = typeof event.sequence === "number" || typeof event.sequence === "string"
+    ? String(event.sequence)
+    : crypto.randomUUID();
+  const id = `${machine.id}:event:${sequence}`;
+  const existing = attention.find((item) => item.id === id);
+  const payload = event.payload ?? event.diagnostic ?? event;
+  const pending = event.enrichment_pending === true;
+  const provisional = existing ?? createAttentionItem({
+    id,
+    machineId: machine.id,
+    machineLabel: machine.label,
+    session,
+    kind,
+    createdAt: typeof event.at === "string" ? event.at : new Date().toISOString(),
+  }, machineEventAttention(kind, payload, pending));
+  const enriched = attentionEnrichment(event.enrichment);
+  const next = enriched
+    ? applyAttentionEnrichment(provisional, enriched, typeof event.enriched_at === "string" ? event.enriched_at : undefined)
+    : { ...provisional, enrichmentPending: pending };
+  const wasCritical = existing?.severity === "critical";
+  if (existing && existing.severity !== next.severity) reclassifiedAttentionIds.add(id);
+  if (!wasCritical && next.severity === "critical") newCriticalAttentionIds.add(id);
+  attention = existing
+    ? attention.map((item) => item.id === id ? next : item)
+    : [next, ...attention];
+  await attentionStore.put(next);
+  render();
+  newCriticalAttentionIds.delete(id);
+  reclassifiedAttentionIds.delete(id);
 }
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
@@ -117,21 +284,20 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
 }
 
 async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, content: string | AttentionContent): Promise<void> {
-  const normalized = typeof content === "string" ? { headline: content, severity: "notice" as const } : content;
-  const id = `${machine.id}:${session ?? "machine"}:${kind}:${normalized.headline}:${normalized.detail ?? ""}`;
-  if (attention.some((item) => item.id === id && !item.acknowledgedAt)) return;
-  const item: AttentionItem = { id, machineId: machine.id, machineLabel: machine.label, session, kind, message: normalized.headline, ...normalized, createdAt: new Date().toISOString() };
+  const createdAt = new Date().toISOString();
+  const item = createAttentionItem({
+    id: `${machine.id}:${session ?? "machine"}:${kind}:${createdAt}:${crypto.randomUUID()}`,
+    machineId: machine.id,
+    machineLabel: machine.label,
+    session,
+    kind,
+    createdAt,
+  }, content);
+  if (item.severity === "critical") newCriticalAttentionIds.add(item.id);
   attention = [item, ...attention];
   await attentionStore.put(item);
   render();
-}
-
-async function acknowledgeAttention(id: string): Promise<void> {
-  const item = attention.find((candidate) => candidate.id === id);
-  if (!item) return;
-  item.acknowledgedAt = new Date().toISOString();
-  await attentionStore.put(item);
-  render();
+  newCriticalAttentionIds.delete(item.id);
 }
 
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
@@ -374,8 +540,110 @@ function renderTerminalConnecting(machineId: string, session: string): void {
   const placeholder = grid.querySelector<HTMLElement>(".empty");
   if (placeholder) {
     placeholder.classList.remove("terminal-state");
-    placeholder.textContent = "Opening the terminal connection. This can take up to 10 seconds.";
+    placeholder.textContent = `Connecting to ${session}…`;
   }
+}
+
+function clearDisconnectedState(grid: HTMLElement): void {
+  grid.classList.remove("terminal-disconnected");
+  grid.querySelector(".terminal-disconnected-banner")?.remove();
+}
+
+function openConnectionLog(machineId: string): void {
+  let dialog = document.querySelector<HTMLDialogElement>("#connection-log");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.id = "connection-log";
+    dialog.className = "connection-log";
+    dialog.innerHTML = '<header><h2>Connection log</h2><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre>';
+    document.body.append(dialog);
+  }
+  const output = dialog.querySelector("pre")!;
+  output.textContent = "Running diagnostics…";
+  dialog.showModal();
+  void connections.get(machineId)?.diagnose().then((result) => {
+    output.textContent = JSON.stringify(result, null, 2);
+  }).catch((error) => {
+    output.textContent = error instanceof Error ? error.message : "Diagnosis failed";
+  });
+}
+
+function renderConnectionSurface(machineId: string, session: string, snapshot: ConnectionState, now = Date.now()): void {
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  const hasLastFrame = grid.querySelector(".pane") !== null;
+  if (hasLastFrame && shouldRetainDisconnectedFrame(snapshot)) {
+    const view = disconnectedView(snapshot, now);
+    let banner = grid.querySelector<HTMLElement>(".terminal-disconnected-banner");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.className = "terminal-disconnected-banner";
+      banner.setAttribute("role", "status");
+      grid.prepend(banner);
+    }
+    banner.textContent = `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
+    grid.classList.add("terminal-disconnected");
+    return;
+  }
+  clearDisconnectedState(grid);
+  if (snapshot.phase === "live") return;
+  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  if (!placeholder) return;
+  const view = connectingView(snapshot, now);
+  placeholder.className = "empty terminal-state terminal-connecting";
+  const spinner = document.createElement("span");
+  spinner.className = "connection-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+  const title = document.createElement("p");
+  title.className = "terminal-connecting-title";
+  title.textContent = `Connecting to ${session}…`;
+  const elapsed = document.createElement("time");
+  elapsed.className = "terminal-connecting-elapsed";
+  elapsed.textContent = view.elapsedLabel;
+  placeholder.replaceChildren(spinner, title, elapsed);
+  if (view.step) {
+    const step = document.createElement("p");
+    step.className = "terminal-connecting-step";
+    step.textContent = view.step;
+    placeholder.append(step);
+  }
+  if (view.actionsAvailable) {
+    const actions = document.createElement("div");
+    actions.className = "terminal-connecting-actions";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.onclick = () => { void connections.get(machineId)?.attach(session); };
+    const diagnose = document.createElement("button");
+    diagnose.type = "button";
+    diagnose.textContent = "Diagnose";
+    diagnose.onclick = () => openConnectionLog(machineId);
+    actions.append(retry, diagnose);
+    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch") {
+      const repair = document.createElement("button");
+      repair.type = "button";
+      repair.textContent = "Re-pair";
+      repair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+      actions.append(repair);
+    }
+    placeholder.append(actions);
+  }
+}
+
+function syncConnectionViewTicker(): void {
+  if (connectionViewTicker !== undefined) window.clearInterval(connectionViewTicker);
+  connectionViewTicker = undefined;
+  const connection = activeConnection();
+  if (!selectedMachineId || !selectedSession || !connection) return;
+  const snapshot = connection.attachSnapshot(selectedSession) ?? connection.snapshot();
+  if (snapshot.phase === "live" && !snapshot.degraded) return;
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  connectionViewTicker = window.setInterval(() => {
+    const current = connection.attachSnapshot(session) ?? connection.snapshot();
+    renderConnectionSurface(machineId, session, current);
+  }, 1_000);
 }
 
 function renderTerminalFailure(machineId: string, session: string, detail: string): void {
@@ -407,7 +675,16 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
     for (const task of tasks) {
       if (["blocked", "awaiting_merge", "awaitingmerge"].includes(String(task.status))) {
-        await addAttention(machine, session, String(task.status), { headline: String(task.title), severity: "notice", ticketId: String(task.id) });
+        const awaitingMerge = ["awaiting_merge", "awaitingmerge"].includes(String(task.status).toLowerCase());
+        const alreadyQueued = attention.some((item) => !item.acknowledgedAt && item.ticketId === String(task.id) && item.kind === String(task.status));
+        if (alreadyQueued) continue;
+        await addAttention(machine, session, String(task.status), {
+          headline: String(task.title),
+          severity: awaitingMerge ? "warning" : "info",
+          action: awaitingMerge ? "open_pr" : "none",
+          ticketId: String(task.id),
+          payload: task,
+        });
       }
     }
     render();
@@ -419,9 +696,12 @@ async function loadLease(machineId: string, session: string): Promise<void> {
     const state = await connections.get(machineId)?.lease(session);
     if (state) {
       const key = sessionKey(machineId, session);
-      const becameController = state.held_by_me && !leases.get(key)?.held_by_me;
+      const previousLease = leases.get(key);
+      const becameGeometryOwner =
+        (state.held_by_me && !previousLease?.held_by_me) ||
+        (!state.controller_label && Boolean(previousLease?.controller_label));
       leases.set(key, state);
-      if (becameController) resizeControlledPanes(machineId, session);
+      if (becameGeometryOwner) resizeViewablePanes(machineId, session);
       const expiryTimer = leaseExpiryTimers.get(key);
       if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
       if (state.expires_at) {
@@ -434,7 +714,8 @@ async function loadLease(machineId: string, session: string): Promise<void> {
   } catch { /* legacy hub may not expose lease status */ }
 }
 
-function resizeControlledPanes(machineId: string, session: string): void {
+function resizeViewablePanes(machineId: string, session: string): void {
+  if (!canResizePanes(machineId, session)) return;
   const state = sessionStates.get(sessionKey(machineId, session));
   if (!state) return;
   for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
@@ -443,8 +724,19 @@ function resizeControlledPanes(machineId: string, session: string): void {
   }
 }
 
-async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>): Promise<void> {
-  sessionStates.set(sessionKey(machineId, session), state);
+async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): Promise<void> {
+  const selectedKey = sessionKey(machineId, session);
+  sessionStates.set(selectedKey, state);
+  if (authoritativeKeyframes === true) {
+    authoritativeSessions.add(selectedKey);
+    for (const pane of state.panes) {
+      const key = paneKey(machineId, session, pane.id);
+      paneBuffers.delete(key);
+      paneKeyframesReady.delete(key);
+    }
+  } else if (authoritativeKeyframes === false) {
+    authoritativeSessions.delete(selectedKey);
+  }
   if (scrollback) {
     for (const [pane, chunks] of Object.entries(scrollback)) {
       paneBuffers.set(paneKey(machineId, session, pane), chunks.flat().slice(-2_000_000));
@@ -453,16 +745,31 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
-  grid.querySelector(".empty")?.remove();
   const visiblePanes = state.panes.filter((pane) => pane.kind !== "Director");
   const active = new Set(visiblePanes.map((pane) => pane.id));
-  const selectedKey = sessionKey(machineId, session);
+  if (visiblePanes.length === 0) {
+    for (const [key, surface] of surfaces) {
+      if (!key.startsWith(`${machineId}:${session}:`)) continue;
+      surface.dispose();
+      surfaces.delete(key);
+    }
+    const empty = document.createElement("div");
+    empty.className = "empty empty-pane-slot";
+    empty.textContent = "No session — pick one from the drawer or drag it here.";
+    grid.classList.remove("pane-layout", "single-pane");
+    grid.replaceChildren(empty);
+    return;
+  }
+  grid.querySelector(".empty")?.remove();
   const selectedPane = selectedPanes.get(selectedKey);
   if (!selectedPane || !active.has(selectedPane)) {
     const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
     if (fallback) selectedPanes.set(selectedKey, fallback.id);
   }
-  const layout = layoutForPanes(selectedKey, visiblePanes, selectedPanes.get(selectedKey));
+  const defaultPrimaryPaneId = visiblePanes.find((pane) => pane.kind === "Supervisor")?.id
+    ?? selectedPanes.get(selectedKey)
+    ?? visiblePanes[0]?.id;
+  const layout = layoutForPanes(selectedKey, visiblePanes, defaultPrimaryPaneId);
   if (!layout) return;
   grid.classList.add("pane-layout");
   grid.classList.toggle("single-pane", visiblePanes.length === 1);
@@ -488,16 +795,16 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       card = document.createElement("section");
       card.className = "pane";
       card.dataset.paneId = pane.id;
+      card.dataset.paneRole = pane.kind.toLowerCase();
       if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
       card.onclick = () => {
-        selectedPanes.set(selectedKey, pane.id);
-        for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
-        card?.classList.add("selected");
-        surfaces.get(key)?.focus();
+        focusPane(machineId, session, pane.id);
       };
       const title = document.createElement("header"); title.className = "pane-header";
-      const label = document.createElement("span"); label.className = "pane-title";
-      label.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
+      const statusDot = document.createElement("span"); statusDot.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
+      const label = document.createElement("span"); label.className = "pane-title"; label.textContent = pane.title || pane.id;
+      const role = document.createElement("span"); role.className = "pane-role"; role.textContent = pane.kind.toLowerCase();
+      const activity = document.createElement("span"); activity.className = "pane-last-activity"; updatePaneActivity(activity, paneLastActivity.get(key));
       const controls = document.createElement("div"); controls.className = "pane-layout-controls";
       const button = (label: string, className: string, action: () => void) => {
         const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
@@ -514,17 +821,44 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         void renderSessionState(machineId, session, state);
       };
       controls.append(
+        button("Find", "pane-search", () => { focusPane(machineId, session, pane.id); openTerminalSearch(); }),
         button("Make primary", "make-primary", () => updateLayout((current) => promotePane(current, pane.id))),
         button("Move earlier", "move-earlier", () => updateLayout((current) => movePane(current, pane.id, -1))),
         button("Move later", "move-later", () => updateLayout((current) => movePane(current, pane.id, 1))),
       );
-      title.append(label, controls);
+      title.append(statusDot, label, role, activity, controls);
+      title.title = sessionSummaries.get(selectedKey)?.title ?? "";
+      if (pane.kind !== "Supervisor") {
+        title.title = [sessionSummaries.get(selectedKey)?.title, "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
+        title.tabIndex = 0;
+        title.setAttribute("role", "button");
+        title.onclick = (event) => {
+          event.stopPropagation();
+          const wasCollapsed = collapsedWorkerPanes.has(key);
+          focusPane(machineId, session, pane.id);
+          if (!wasCollapsed) collapsedWorkerPanes.add(key);
+          card?.classList.toggle("collapsed", collapsedWorkerPanes.has(key));
+          if (!collapsedWorkerPanes.has(key)) queueMicrotask(() => surfaces.get(key)?.focus());
+        };
+        title.onkeydown = (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          title.click();
+        };
+      }
       mount = document.createElement("div"); mount.className = "terminal-mount";
       card.append(title, mount);
     }
     if (!card || !mount) continue;
     const position = orderedPaneIds(layout).indexOf(pane.id);
     card.classList.toggle("primary", pane.id === layout.primaryPaneId);
+    card.classList.toggle("selected", selectedPanes.get(selectedKey) === pane.id);
+    card.classList.toggle("collapsed", pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key));
+    card.querySelector<HTMLElement>(".pane-status-dot")!.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
+    card.querySelector<HTMLElement>(".pane-title")!.textContent = pane.title || pane.id;
+    const paneHeader = card.querySelector<HTMLElement>(".pane-header");
+    if (paneHeader) paneHeader.title = [sessionSummaries.get(selectedKey)?.title, pane.kind === "Supervisor" ? undefined : "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
+    updatePaneActivity(card.querySelector<HTMLElement>(".pane-last-activity")!, paneLastActivity.get(key));
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
     const moveLater = card.querySelector<HTMLButtonElement>(".move-later");
@@ -532,15 +866,19 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
     (pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card);
+    const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches
+      && pane.id !== layout.primaryPaneId;
     const existingSurface = surfaces.get(key);
-    if (existingSurface && (existingSurface.element !== mount || !existingSurface.element.isConnected)) {
+    existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);
+    if (existingSurface && (collapsedOnPhone || existingSurface.element !== mount || !existingSurface.element.isConnected)) {
       existingSurface.dispose();
       surfaces.delete(key);
     }
+    if (collapsedOnPhone) continue;
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },
-        onResize: (cols, rows) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
+        onResize: (cols, rows) => { if (canResizePanes(machineId, session)) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
       });
       const currentMount = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
       if (selectedMachineId !== machineId || selectedSession !== session || !mount.isConnected || currentMount !== mount) {
@@ -548,8 +886,12 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         continue;
       }
       surfaces.set(key, surface);
+      surface.setControlMode(leases.get(selectedKey)?.held_by_me === true);
       const buffered = paneBuffers.get(key);
       if (buffered) surface.write(new Uint8Array(buffered));
+    }
+    if (authoritativeSessions.has(selectedKey) && !paneKeyframesReady.has(key)) {
+      connections.get(machineId)?.requestPaneKeyframe(session, pane.id);
     }
   }
 }
@@ -562,17 +904,31 @@ function canControl(machineId: string, session: string, scope: Scope): boolean {
   return hubSupports(machineId, "daemon_attach") && machines.get(machineId)?.scopes.includes(scope) === true && leases.get(sessionKey(machineId, session))?.held_by_me === true;
 }
 
+function canResizePanes(machineId: string, session: string): boolean {
+  if (!hubSupports(machineId, "daemon_attach") || machines.get(machineId)?.scopes.includes("pane-read") !== true) return false;
+  const lease = leases.get(sessionKey(machineId, session));
+  return !lease?.controller_label || lease.held_by_me;
+}
+
 function controlDisabledReason(machine: StoredMachine | undefined, session: string | undefined, lease: LeaseState | undefined): string | undefined {
   if (!machine) return "Choose a paired machine, then a live session, to use its controls.";
   if (!session) return "Choose a live session to use its controls.";
   if (!hubSupports(machine.id, "daemon_attach")) return "This hub does not support Commander control. Upgrade the hub, then reconnect this machine.";
   const missingScopes = ["pane-input", "message-send", "pane-interrupt"] as const;
   if (missingScopes.some((scope) => !machine.scopes.includes(scope))) {
-    return `This credential can only observe from ${location.origin}. Pair ${machine.label} again from this Commander origin and approve control access on the machine. Pairings are specific to each Commander origin.`;
+    return `Relay pairing granted read-only scopes for ${location.origin}. Run cas hub pair --origin ${location.origin}, open the new pairing URL here, and approve control access on ${machine.label}. Pairings are specific to each Commander origin.`;
   }
   if (lease?.held_by_me) return undefined;
   if (lease?.controller_label) return `${lease.controller_label} currently controls this session. Wait for it to be released or use an administrator credential to take over.`;
   return "Take control to enable terminal input, messages, and interrupts.";
+}
+
+function takeControlDisabledReason(machine: StoredMachine | undefined, session: string | undefined, lease: LeaseState | undefined): string | undefined {
+  const reason = controlDisabledReason(machine, session, lease);
+  if (!machine || !session || !hubSupports(machine.id, "daemon_attach")) return reason;
+  if (!["pane-input", "message-send", "pane-interrupt"].every((scope) => machine.scopes.includes(scope as Scope))) return reason;
+  if (!lease?.held_by_me && lease?.controller_label && !machine.scopes.includes("hub-admin")) return reason;
+  return undefined;
 }
 
 function sendControl(machineId: string, session: string, message: unknown): void {
@@ -609,6 +965,20 @@ function toast(message: string): void {
   window.setTimeout(() => output.classList.remove("visible"), 3200);
 }
 
+function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): string {
+  if (!state) return "idle";
+  if (state.phase === "live") {
+    if (state.degraded) return `degraded · ${state.missedHeartbeats} missed`;
+    return state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`;
+  }
+  if (state.phase === "backoff") return `retrying ${state.stage} in ${Math.ceil((state.retryInMs ?? 0) / 1000)}s`;
+  if (state.phase === "failed") return state.reason ?? `failed during ${state.stage}`;
+  const elapsed = "session" in state ? attachElapsedSeconds(state) : elapsedSeconds(state);
+  return `${state.phase} · ${elapsed}s`;
+}
+
+function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
+
 function pairingDetails(origin: string, scopes: readonly Scope[]): string {
   return `<dl class="pair-details"><div><dt>Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
@@ -640,12 +1010,31 @@ function capturePairingDraft(): void {
 function render(captureDraft = true): void {
   if (captureDraft) capturePairingDraft();
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const machineSessions = selected ? sessions.get(selected.id) ?? [] : [];
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
+  const machineConnectionSnapshot = selected ? connectionStates.get(selected.id) : undefined;
+  const terminalAttachSnapshot = selected && selectedSession ? attachStates.get(sessionKey(selected.id, selectedSession)) : undefined;
+  const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
+  const takeControlReason = takeControlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
+  const connectionState = connectionClass(connectionSnapshot);
+  const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
+  const latency = machineConnectionSnapshot?.latencyMs;
+  const counts = attentionCounts(attention);
+  const infoItems = dismissableInfoItems(attention);
+  const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
+  const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
+  const machineLabel = selected?.label ?? "No machine";
+  const compactMachineLabel = machineLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "—";
+  const controlActionDisabled = takeControlReason !== undefined;
+  const sessionCommands = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).map((session) => {
+    const summary = sessionSummaries.get(sessionKey(machine.id, session.name));
+    const searchMetadata = summary ? `${summary.title} ${summary.description} ${summary.phase}` : "";
+    const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label;
+    return `<button type="button" class="palette-command" data-palette-machine="${escapeAttr(machine.id)}" data-palette-session="${escapeAttr(session.name)}" data-search-text="${escapeAttr(searchMetadata)}"><span>Jump to ${escapeHtml(session.name)}</span><small${summary ? ` title="${escapeAttr(summary.description)}"` : ""}>${escapeHtml(secondary)}</small></button>`;
+  })).join("");
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -656,19 +1045,73 @@ function render(captureDraft = true): void {
     surfaces.clear();
   }
   app.innerHTML = `
-    <div class="shell">
-      <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair this machine</button><nav id="machine-list"></nav></aside>
-      <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
-      <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}</header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
-      <aside class="context"><section><h2>Attention <span class="badge">${attention.filter((item) => !item.acknowledgedAt).length}</span></h2><div id="attention-list"></div></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
-    </div>${pairDialogMarkup()}<div id="toast" role="status"></div>`;
+    <div class="shell${attentionPanelCollapsed ? " attention-collapsed" : ""}">
+      <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
+        <div class="machine-rail">
+          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" aria-expanded="${machineDrawerOpen}">C</button>
+          <nav id="machine-rail-list" aria-label="Machines"></nav>
+          <button id="pair-toggle" class="rail-control pair-machine" type="button" aria-label="Pair a machine" title="Pair a machine">+</button>
+        </div>
+        <div class="machine-drawer">
+          <header class="drawer-header"><strong>Machines</strong><button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
+          ${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}
+          <nav id="machine-tree" aria-label="Machine sessions"></nav>
+          ${selected ? '<button id="remove-machine" class="remove-machine">Remove selected machine</button>' : ""}
+        </div>
+      </aside>
+      <main>
+        <header class="session-header">
+          <h1 class="${selectedSession ? "toolbar-session-title" : ""}">${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
+          <span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span>
+          <span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span>
+          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? "—" : `${latency}ms`}</span></span>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
+        </header>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
+      </main>
+      <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
+        <div class="attention-rail">
+          <button id="attention-panel-toggle" class="rail-control" type="button" aria-label="${attentionPanelCollapsed ? "Expand" : "Collapse"} attention panel" aria-expanded="${!attentionPanelCollapsed}">${attentionPanelCollapsed ? "‹" : "›"}</button>
+          <button id="attention-rail-counts" class="attention-rail-counts" type="button" data-open-context="attention" aria-label="Open attention"></button>
+        </div>
+        <div class="context-body">
+          <div class="context-tabs" role="tablist" aria-label="Operations panel">
+            <button type="button" role="tab" data-context-tab="attention" aria-selected="${activeContextTab === "attention"}">Attention</button>
+            <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
+          </div>
+          <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><div id="status-view"></div><div class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></div></section>
+        </div>
+      </aside>
+    </div>
+    <dialog id="command-palette" class="command-palette">
+      <section>
+        <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
+        <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
+        <div class="palette-commands">
+          <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
+          <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
+          ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
+        </div>
+      </section>
+    </dialog>
+    ${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
-  const machineList = document.querySelector("#machine-list")!;
-  for (const machine of machines.values()) machineList.append(machineButton(machine));
-  const sessionList = document.querySelector("#session-list")!;
-  for (const session of machineSessions) sessionList.append(sessionButton(selected!.id, session));
+  const machineRail = document.querySelector("#machine-rail-list")!;
+  const machineTree = document.querySelector("#machine-tree")!;
+  for (const machine of machines.values()) {
+    machineRail.append(machineRailButton(machine));
+    machineTree.append(machineTreeGroup(machine));
+  }
+  document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
   renderAttention(); renderStatus(status);
+  if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
+  syncConnectionViewTicker();
   bindEvents(selected, lease);
+  if (commandPaletteOpen) {
+    document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
+    queueMicrotask(() => document.querySelector<HTMLInputElement>("#command-palette-query")?.focus());
+  }
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
   if (selected && selectedSession) {
     const state = sessionStates.get(sessionKey(selected.id, selectedSession));
@@ -687,63 +1130,239 @@ function compatibilityWarning(machineId: string): string | undefined {
   return undefined;
 }
 
-function machineButton(machine: StoredMachine): HTMLButtonElement {
-  const button = document.createElement("button"); button.className = `nav-item ${machine.id === selectedMachineId ? "active" : ""}`;
-  button.textContent = `${machine.label} · ${connectionStates.get(machine.id) ?? "idle"}`;
-  button.onclick = () => { selectedMachineId = machine.id; selectedSession = undefined; render(); };
+function machineInitials(label: string): string {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0][0]}${words[1][0]}` : words[0]?.slice(0, 2) ?? "?").toUpperCase();
+}
+
+function selectMachine(machine: StoredMachine): void {
+  selectedMachineId = machine.id;
+  selectedSession = undefined;
+  machineDrawerOpen = true;
+  render();
+}
+
+function machineRailButton(machine: StoredMachine): HTMLButtonElement {
+  const snapshot = connectionStates.get(machine.id);
+  const state = connectionClass(snapshot);
+  const button = document.createElement("button");
+  button.className = `machine-icon ${machine.id === selectedMachineId ? "active" : ""}`;
+  button.type = "button";
+  button.innerHTML = `<span>${escapeHtml(machineInitials(machine.label))}</span><i class="machine-state ${state}"></i>`;
+  button.title = `${machine.label} · ${connectionLabel(snapshot)}`;
+  button.setAttribute("aria-label", `${machine.label}, ${connectionLabel(snapshot)}`);
+  button.onclick = () => selectMachine(machine);
   return button;
+}
+
+function machineTreeGroup(machine: StoredMachine): HTMLElement {
+  const group = document.createElement("section");
+  group.className = `machine-group ${machine.id === selectedMachineId ? "active" : ""}`;
+  const machineRow = document.createElement("button");
+  machineRow.className = "machine-row";
+  machineRow.type = "button";
+  const snapshot = connectionStates.get(machine.id);
+  const state = connectionClass(snapshot);
+  machineRow.innerHTML = `<span class="machine-state ${state}"></span><strong>${escapeHtml(machine.label)}</strong><small>${escapeHtml(connectionLabel(snapshot))}</small>`;
+  machineRow.onclick = () => selectMachine(machine);
+  group.append(machineRow);
+  if (machine.id === selectedMachineId) {
+    const sessionList = document.createElement("div");
+    sessionList.className = "session-tree";
+    for (const session of sessions.get(machine.id) ?? []) sessionList.append(sessionButton(machine.id, session));
+    if (!sessionList.childElementCount) {
+      const empty = document.createElement("p"); empty.className = "drawer-empty"; empty.textContent = "No live sessions."; sessionList.append(empty);
+    }
+    group.append(sessionList);
+  }
+  return group;
 }
 
 function sessionButton(machineId: string, session: HubSession): HTMLButtonElement {
   const button = document.createElement("button"); button.className = `nav-item ${session.name === selectedSession ? "active" : ""}`;
-  button.innerHTML = `<span>${escapeHtml(session.name)}</span><small>${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
-  button.onclick = () => void openSession(machineId, session.name);
+  const summary = sessionSummaries.get(sessionKey(machineId, session.name));
+  const stale = summary && summary.phase !== "idle" && Date.now() - Date.parse(summary.generated_at) > 10 * 60 * 1000;
+  button.innerHTML = summary
+    ? `<small class="session-name session-eyebrow">${escapeHtml(session.name)}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
+    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
+  button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
 
 function renderAttention(): void {
-  const container = document.querySelector("#attention-list")!;
-  for (const group of groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))) {
-    const section = document.createElement("section"); section.className = "attention-group";
-    const header = document.createElement("header"); header.className = "attention-group-header";
-    const label = document.createElement("span"); label.className = "attention-group-label"; label.textContent = `${group.machineLabel}${group.session ? ` / ${group.session}` : ""}`;
-    header.append(label);
-    const routineItems = group.items.filter((item) => attentionContent(item).severity === "notice");
-    if (routineItems.length > 0) {
-      const acknowledgeAll = document.createElement("button"); acknowledgeAll.className = "attention-group-ack"; acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`; acknowledgeAll.onclick = () => void acknowledgeAttentionGroup(routineItems);
-      header.append(acknowledgeAll);
-    }
-    section.append(header);
-    for (const item of group.items) {
-      const content = attentionContent(item);
-      const card = document.createElement("article"); card.className = `attention-item attention-item--${content.severity}`;
-      const text = document.createElement("button"); text.className = "attention-open";
-      const title = document.createElement("span"); title.className = "attention-title"; title.textContent = content.headline;
-      text.append(title);
-      if (content.severity === "incident") { const severity = document.createElement("span"); severity.className = "attention-severity"; severity.textContent = "Action required · open session"; text.append(severity); }
-      if (content.ticketId) { const ticket = document.createElement("small"); ticket.className = "attention-ticket"; ticket.title = `Task ${content.ticketId}`; ticket.textContent = content.ticketId; text.append(ticket); }
-      if (content.cause) { const cause = document.createElement("span"); cause.className = "attention-cause"; cause.textContent = `Cause: ${content.cause}`; text.append(cause); }
-      if (content.detail) { const detail = document.createElement("span"); detail.className = "attention-detail"; detail.textContent = content.detail; text.append(detail); }
-      text.onclick = () => { selectedMachineId = item.machineId; if (item.session) void openSession(item.machineId, item.session); };
-      card.append(text);
-      if (content.severity === "notice") { const ack = document.createElement("button"); ack.className = "ack"; ack.textContent = "Acknowledge"; ack.onclick = () => void acknowledgeAttention(item.id); card.append(ack); }
-      section.append(card);
-    }
-    container.append(section);
+  const container = document.querySelector<HTMLElement>("#attention-panel");
+  if (!container) return;
+  renderAttentionPanel(container, attention, {
+    dismiss: acknowledgeAttentionGroup,
+    act: performAttentionAction,
+    copy: async (payload) => {
+      await navigator.clipboard.writeText(payload);
+      toast("Event payload copied");
+    },
+  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds });
+}
+
+async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
+  if (action === "repair") {
+    document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+    return;
   }
+  if (action === "open_pr") {
+    const url = attentionUrl(item);
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+  }
+  selectedMachineId = item.machineId;
+  if (item.session) await openSession(item.machineId, item.session);
+  else render();
 }
 
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector("#status-view")!;
   if (!status) { container.textContent = "Open a session for push-refreshed status."; return; }
+  const summary = selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
+  if (summary) {
+    const row = document.createElement("article");
+    row.className = "status-row session-summary-status";
+    row.title = summary.description;
+    row.innerHTML = `<span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description">${escapeHtml(summary.description)}</small>`;
+    container.append(row);
+  }
   const agents = (status.agents as any[]) ?? [];
   const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
-  for (const agent of agents) { const row = document.createElement("article"); row.className = "status-row"; row.textContent = `${agent.name} · ${agent.status}${agent.current_task ? ` · ${agent.current_task}` : ""}${agent.latest_activity?.summary ? ` — ${agent.latest_activity.summary}` : ""}`; container.append(row); }
-  for (const task of tasks) { const row = document.createElement("article"); row.className = "status-row"; row.textContent = `${task.id} · ${task.status} · ${task.title}`; container.append(row); }
+  const identifier = (value: unknown): HTMLSpanElement => {
+    const span = document.createElement("span");
+    span.className = "status-identifier";
+    span.textContent = String(value);
+    return span;
+  };
+  for (const agent of agents) {
+    const row = document.createElement("article"); row.className = "status-row";
+    row.append(identifier(agent.name), " · ", identifier(agent.status));
+    if (agent.current_task) row.append(" · ", identifier(agent.current_task));
+    if (agent.latest_activity?.summary) row.append(` — ${agent.latest_activity.summary}`);
+    container.append(row);
+  }
+  for (const task of tasks) {
+    const row = document.createElement("article"); row.className = "status-row";
+    row.append(identifier(task.id), " · ", identifier(task.status), ` · ${task.title}`);
+    container.append(row);
+  }
+}
+
+async function toggleControl(selected: StoredMachine | undefined, lease: LeaseState | undefined): Promise<void> {
+  if (!selected || !selectedSession) return;
+  if (lease?.held_by_me) {
+    await connections.get(selected.id)?.releaseLease(selectedSession);
+    invalidateMachineLeases(selected.id);
+  } else {
+    await connections.get(selected.id)?.requestControl(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
+  }
+  await loadLease(selected.id, selectedSession);
+}
+
+function openCommandPalette(): void {
+  commandPaletteOpen = true;
+  render();
+}
+
+function focusPaneByNumber(index: number): void {
+  if (!selectedMachineId || !selectedSession) return;
+  const state = sessionStates.get(sessionKey(selectedMachineId, selectedSession));
+  if (!state) return;
+  const panes = state.panes.filter((pane) => pane.kind !== "Director");
+  const layout = layoutForPanes(sessionKey(selectedMachineId, selectedSession), panes, panes.find((pane) => pane.kind === "Supervisor")?.id);
+  const paneId = layout ? orderedPaneIds(layout)[index] : undefined;
+  if (paneId) focusPane(selectedMachineId, selectedSession, paneId);
+}
+
+function cycleRenderedAttention(direction: number): void {
+  if (attentionPanelCollapsed || activeContextTab !== "attention") {
+    attentionPanelCollapsed = false;
+    activeContextTab = "attention";
+    render();
+  }
+  queueMicrotask(() => {
+    const container = document.querySelector<HTMLElement>("#attention-panel");
+    if (container) cycleAttentionGroup(container, direction);
+  });
+}
+
+function globalShortcut(event: KeyboardEvent): void {
+  const command = event.metaKey || event.ctrlKey;
+  if (command && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    event.stopPropagation();
+    openCommandPalette();
+    return;
+  }
+  if (command && event.key.toLowerCase() === "f" && activePaneContext()) {
+    event.preventDefault();
+    event.stopPropagation();
+    openTerminalSearch();
+    return;
+  }
+  if (command && /^[1-9]$/.test(event.key)) {
+    event.preventDefault();
+    event.stopPropagation();
+    focusPaneByNumber(Number(event.key) - 1);
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  const editing = target?.matches("input, textarea, [contenteditable='true']") === true;
+  if (!command && !event.altKey && !editing && (event.key === "[" || event.key === "]")) {
+    event.preventDefault();
+    cycleRenderedAttention(event.key === "[" ? -1 : 1);
+  }
 }
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
+  document.querySelector<HTMLButtonElement>("#command-palette-toggle")!.onclick = openCommandPalette;
+  const palette = document.querySelector<HTMLDialogElement>("#command-palette")!;
+  const closePalette = () => { commandPaletteOpen = false; palette.close(); };
+  document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
+  palette.oncancel = () => { commandPaletteOpen = false; };
+  const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
+  paletteQuery.oninput = () => {
+    const query = paletteQuery.value.trim().toLocaleLowerCase();
+    for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
+      const searchable = `${command.textContent ?? ""} ${command.dataset.searchText ?? ""}`.toLocaleLowerCase();
+      command.hidden = query.length > 0 && !searchable.includes(query);
+    }
+  };
+  paletteQuery.onkeydown = (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "Enter") return;
+    const first = [...palette.querySelectorAll<HTMLButtonElement>(".palette-command")]
+      .find((command) => !command.hidden && !command.disabled);
+    if (!first) return;
+    event.preventDefault();
+    if (event.key === "Enter") first.click();
+    else first.focus();
+  };
+  for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-machine]")) {
+    command.onclick = () => {
+      commandPaletteOpen = false;
+      selectedMachineId = command.dataset.paletteMachine;
+      const session = command.dataset.paletteSession;
+      if (selectedMachineId && session) void openSession(selectedMachineId, session);
+    };
+  }
+  const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");
+  if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
+  const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
+  if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
+  document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
+  document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
+  document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
+    button.onclick = () => { activeContextTab = "attention"; attentionPanelCollapsed = false; render(); };
+  }
+  for (const tab of document.querySelectorAll<HTMLButtonElement>("[data-context-tab]")) {
+    tab.onclick = () => { activeContextTab = tab.dataset.contextTab === "status" ? "status" : "attention"; render(); };
+  }
   const pairForm = document.querySelector<HTMLFormElement>("#pair-form");
   const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");
@@ -783,16 +1402,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     selectedMachineId = machines.keys().next().value; selectedSession = undefined;
     render();
   };
-  document.querySelector<HTMLButtonElement>("#lease")!.onclick = async () => {
-    if (!selected || !selectedSession) return;
-    if (lease?.held_by_me) {
-      await connections.get(selected.id)?.releaseLease(selectedSession);
-      invalidateMachineLeases(selected.id);
-    } else {
-      await connections.get(selected.id)?.acquireLease(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
-    }
-    await loadLease(selected.id, selectedSession);
-  };
+  document.querySelector<HTMLButtonElement>("#lease")!.onclick = () => void toggleControl(selected, lease);
   document.querySelector<HTMLButtonElement>("#interrupt")!.onclick = () => {
     if (!selected || !selectedSession) return;
     const pane = selectedPanes.get(sessionKey(selected.id, selectedSession));
@@ -815,4 +1425,5 @@ function scopeChecks(selectedScopes: readonly Scope[]): string {
 function escapeHtml(value: string): string { const span = document.createElement("span"); span.textContent = value; return span.innerHTML; }
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
 
+window.addEventListener("keydown", globalShortcut, true);
 void boot();

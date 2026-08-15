@@ -37,13 +37,14 @@ impl FactoryDaemon {
 
                     // Build and send Welcome message with current state
                     let state = self.build_session_state();
-                    let scrollback = self.build_scrollback();
+                    let scrollback = self.build_scrollback(&state);
                     let welcome = DaemonMessage::Welcome {
                         session_name: self.session_name.clone(),
                         state,
                         scrollback: Some(scrollback),
                         protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                         capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                        pane_bootstrap: Vec::new(),
                     };
 
                     let frame = match encode_frame(&welcome) {
@@ -292,15 +293,16 @@ impl FactoryDaemon {
         }
 
         match msg {
-            ClientMessage::Attach { .. } => {
+            ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
-                let scrollback = self.build_scrollback();
+                let scrollback = request_scrollback.then(|| self.build_scrollback(&state));
                 let welcome = DaemonMessage::Welcome {
                     session_name: self.session_name.clone(),
                     state,
-                    scrollback: Some(scrollback),
+                    scrollback,
                     protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                     capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                    pane_bootstrap: Vec::new(),
                 };
                 if let Some(frame) = encode_frame(&welcome) {
                     if let Some(client) = self.gui_clients.get_mut(&client_id) {
@@ -458,6 +460,15 @@ impl FactoryDaemon {
             ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
                 unreachable!("Commander controls return through the shared dispatcher")
             }
+            ClientMessage::RequestPaneKeyframe { .. } | ClientMessage::ScrollbackRequest { .. } => {
+                if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                    message: "pane keyframes and paged scrollback require the WebSocket transport"
+                        .to_string(),
+                }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                {
+                    queue_frame(client, &frame);
+                }
+            }
             ClientMessage::GetState => {
                 let state = self.build_session_state();
                 let msg = DaemonMessage::StateUpdate { state };
@@ -526,13 +537,21 @@ impl FactoryDaemon {
         }
     }
 
-    /// Build scrollback buffers for all panes from the ring buffers.
-    pub(super) fn build_scrollback(&self) -> std::collections::HashMap<String, Vec<Vec<u8>>> {
+    /// Build bounded replay buffers for panes that still belong to this session.
+    ///
+    /// `pane_buffers` can retain output for departed panes until cleanup catches
+    /// up. Never serialize those stale buffers into every new client attach.
+    pub(super) fn build_scrollback(
+        &self,
+        state: &SessionState,
+    ) -> std::collections::HashMap<String, Vec<Vec<u8>>> {
         let mut scrollback = std::collections::HashMap::new();
-        for (pane_id, buffer) in &self.pane_buffers {
-            let bytes = buffer.as_bytes();
-            if !bytes.is_empty() {
-                scrollback.insert(pane_id.clone(), vec![bytes]);
+        for pane in &state.panes {
+            if let Some(buffer) = self.pane_buffers.get(&pane.id) {
+                let bytes = buffer.as_bytes();
+                if !bytes.is_empty() {
+                    scrollback.insert(pane.id.clone(), vec![bytes]);
+                }
             }
         }
         scrollback

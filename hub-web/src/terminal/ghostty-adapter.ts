@@ -17,6 +17,19 @@ const theme = {
   ],
 };
 
+function applicationTerminalFont(): { family: string; size: number } {
+  const styles = getComputedStyle(document.documentElement);
+  const family = styles.getPropertyValue("--font-mono").trim();
+  const sizeToken = styles.getPropertyValue("--fs-terminal").trim();
+  const rootSize = Number.parseFloat(styles.fontSize);
+  const tokenSize = Number.parseFloat(sizeToken);
+  const size = sizeToken.endsWith("rem") ? tokenSize * rootSize : tokenSize;
+  return {
+    family: family || '"JetBrains Mono", "IBM Plex Mono", monospace',
+    size: Number.isFinite(size) ? size : 13,
+  };
+}
+
 export async function createGhosttyTerminalSurface(
   mount: HTMLElement,
   callbacks: TerminalSurfaceCallbacks,
@@ -25,6 +38,7 @@ export async function createGhosttyTerminalSurface(
   const encoder = new TextEncoder();
   const surface = await GhosttyTerminalSurface.create(mount, {
     theme,
+    font: applicationTerminalFont(),
     onData: (data) => callbacks.onData(encoder.encode(data)),
     onResize: callbacks.onResize,
     onSelectionChange: () => undefined,

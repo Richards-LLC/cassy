@@ -16,9 +16,9 @@ import {
 import symbolsFontUrl from "./fonts/SymbolsNerdFontMono-Regular.woff2?url";
 import { isMonospaceFamily } from "../../appearanceFonts";
 
-export const DEFAULT_TERMINAL_FONT_SIZE = 12;
-const MIN_TERMINAL_FONT_SIZE = 6;
-const MAX_TERMINAL_FONT_SIZE = 32;
+export const DEFAULT_TERMINAL_FONT_SIZE = 13;
+const MIN_TERMINAL_FONT_SIZE = 12;
+const MAX_TERMINAL_FONT_SIZE = 16;
 // The glyph fallbacks only supply symbols the text faces are missing (powerline
 // separators, devicons, and other private-use prompt symbols), so shells
 // configured for a locally installed Nerd Font keep their prompt glyphs no
@@ -39,9 +39,9 @@ const CURSOR_BLINK_INTERVAL_MS = 500;
 const TERMINAL_FONT_LOAD_TEXT = "iMW0@# .";
 const TERMINAL_FONT_LOAD_VARIANTS = [
   "normal 400",
-  "normal 700",
+  "normal 600",
   "italic 400",
-  "italic 700",
+  "italic 600",
 ] as const;
 
 /** Requested terminal font; omitted fields fall back to the defaults. */

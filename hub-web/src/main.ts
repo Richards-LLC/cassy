@@ -24,6 +24,11 @@ let pendingPairing: PendingPairing | null = consumePairingFragment(window.locati
 pendingPairing ??= pendingPairingStore.load();
 const pairingOperations = new PairingOperationCoordinator();
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const rootStyles = getComputedStyle(document.documentElement);
+document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
+  "content",
+  rootStyles.getPropertyValue("--bg-root").trim(),
+);
 const machines = new Map<string, StoredMachine>();
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
@@ -794,7 +799,7 @@ function render(captureDraft = true): void {
       </aside>
       <main>
         <header class="session-header">
-          <h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
+          <h1 class="${selectedSession ? "toolbar-session-title" : ""}">${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
           <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
           <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
@@ -897,7 +902,7 @@ function machineTreeGroup(machine: StoredMachine): HTMLElement {
 
 function sessionButton(machineId: string, session: HubSession): HTMLButtonElement {
   const button = document.createElement("button"); button.className = `nav-item ${session.name === selectedSession ? "active" : ""}`;
-  button.innerHTML = `<span>${escapeHtml(session.name)}</span><small>${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
+  button.innerHTML = `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
   button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
@@ -937,8 +942,24 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!status) { container.textContent = "Open a session for push-refreshed status."; return; }
   const agents = (status.agents as any[]) ?? [];
   const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
-  for (const agent of agents) { const row = document.createElement("article"); row.className = "status-row"; row.textContent = `${agent.name} · ${agent.status}${agent.current_task ? ` · ${agent.current_task}` : ""}${agent.latest_activity?.summary ? ` — ${agent.latest_activity.summary}` : ""}`; container.append(row); }
-  for (const task of tasks) { const row = document.createElement("article"); row.className = "status-row"; row.textContent = `${task.id} · ${task.status} · ${task.title}`; container.append(row); }
+  const identifier = (value: unknown): HTMLSpanElement => {
+    const span = document.createElement("span");
+    span.className = "status-identifier";
+    span.textContent = String(value);
+    return span;
+  };
+  for (const agent of agents) {
+    const row = document.createElement("article"); row.className = "status-row";
+    row.append(identifier(agent.name), " · ", identifier(agent.status));
+    if (agent.current_task) row.append(" · ", identifier(agent.current_task));
+    if (agent.latest_activity?.summary) row.append(` — ${agent.latest_activity.summary}`);
+    container.append(row);
+  }
+  for (const task of tasks) {
+    const row = document.createElement("article"); row.className = "status-row";
+    row.append(identifier(task.id), " · ", identifier(task.status), ` · ${task.title}`);
+    container.append(row);
+  }
 }
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {

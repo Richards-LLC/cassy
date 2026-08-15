@@ -132,8 +132,64 @@ describe("binding Commander browser invariants", () => {
     expect(attentionView).toContain('severity !== "critical"');
     expect(css).toContain(".attention-item--critical");
     expect(css).toContain("prefers-reduced-motion: reduce");
-    expect(css).toContain("@media (max-width: 850px)");
-    expect(css).toContain(".attention-group-label { max-width: 155px; }");
+    expect(css).toContain("@media (max-width: 53rem)");
+    expect(css).toContain("max-width: var(--mobile-attention-label-width)");
+  });
+
+  it("keeps the section 2 visual system tokenized and machine copy mono", async () => {
+    const [main, css, html, renderer, surface] = await Promise.all([
+      "main.ts",
+      "styles.css",
+      "../index.html",
+      "terminal/ghostty/renderer.ts",
+      "terminal/ghostty/surface.ts",
+    ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    for (const token of [
+      "--bg-root: #101318",
+      "--bg-panel: #151922",
+      "--bg-raised: #1B202B",
+      "--bg-terminal: #0C0E13",
+      "--bg-hover: #222836",
+      "--bg-active: #2A3142",
+      "--line-subtle: #232936",
+      "--line-strong: #38415A",
+      "--text-hi: #E8EBF2",
+      "--text-mid: #9AA3B5",
+      "--text-lo: #5C6577",
+      "--state-ok: #4CC38A",
+      "--state-warn: #E5B454",
+      "--state-crit: #E5645E",
+      "--state-info: #6CA7F2",
+      "--state-idle: #5C6577",
+      "--fs-xs: .6875rem",
+      "--fs-sm: .78125rem",
+      "--fs-base: .84375rem",
+      "--fs-md: .9375rem",
+      "--fs-lg: 1.125rem",
+      "--radius-card: 6px",
+      "--radius-pane: 8px",
+      "--radius-pill: 999px",
+    ]) expect(css).toContain(token);
+
+    const rootEnd = css.indexOf("\n}\n");
+    expect(rootEnd).toBeGreaterThan(0);
+    const componentCss = css.slice(rootEnd + 3);
+    expect(componentCss).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(componentCss).not.toMatch(/rgba?\(/i);
+    expect(main).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(html).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+
+    expect(main).toContain('class="session-name"');
+    expect(main).toContain('class="session-meta"');
+    expect(main).toContain('"toolbar-session-title"');
+    expect(main).toContain('span.className = "status-identifier"');
+    expect(css).toContain("font-family: var(--font-mono)");
+    expect(css).not.toContain("border-right:");
+    expect(css).not.toContain(".context { border-left:");
+    expect(css.match(/box-shadow:/g)).toHaveLength(2);
+    expect(renderer).not.toContain('"700"');
+    expect(surface).not.toContain('"normal 700"');
+    expect(surface).not.toContain('"italic 700"');
   });
 
   it("encodes the supervisor-first Commander shell at desktop and phone widths", async () => {
@@ -146,11 +202,15 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain('visiblePanes.find((pane) => pane.kind === "Supervisor")?.id');
     expect(main).toContain('data-machine-latency');
     expect(connection).toContain('onLatency?(latencyMs: number)');
-    expect(css).toContain('grid-template-columns: 48px minmax(0, 1fr) 320px');
-    expect(css).toContain('flex: 0 0 44px; height: 44px');
-    expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(32px, 35fr)');
+    expect(css).toContain('--machine-rail-width: 48px');
+    expect(css).toContain('--context-panel-width: 320px');
+    expect(css).toContain('--session-header-height: 44px');
+    expect(css).toContain('--pane-header-height: 32px');
+    expect(css).toContain('grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--context-panel-width)');
+    expect(css).toContain('flex: 0 0 var(--session-header-height)');
+    expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr)');
     expect(css).toContain('.secondary-pane-strip .pane.collapsed');
-    expect(css).toContain('.shell, .shell.attention-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 48px;');
+    expect(css).toContain('grid-template-rows: minmax(0, 1fr) var(--machine-rail-width)');
     expect(main).not.toContain('class="toolbar"');
     expect(main).not.toContain('class="machines"');
     expect(main).not.toContain('class="sessions"');
@@ -239,7 +299,8 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain('retry.textContent = "Try again"');
     expect(source).toContain("void connections.get(machineId)?.attach(session)");
     expect(styles).toContain(".terminal-state");
-    expect(styles).toContain("#a36c2c");
+    expect(styles).toContain("background: var(--tint-warn)");
+    expect(styles).toContain("color: var(--state-warn)");
   });
 
   it("removes the connecting instruction when the terminal state arrives", async () => {

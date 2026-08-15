@@ -11,7 +11,7 @@
 //! worked, and there was simply no code path from the queue back to a turn.
 
 use cas_core::hooks::types::{HookInput, HookSpecificOutput};
-use cas_store::{PromptQueueStore, PromptStore, SqlitePromptQueueStore, Store};
+use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
 use tempfile::TempDir;
 
 use crate::hooks::handlers::handle_user_prompt_submit;

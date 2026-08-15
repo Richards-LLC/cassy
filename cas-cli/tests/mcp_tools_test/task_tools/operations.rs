@@ -2159,6 +2159,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
             id: blocker_id,
             reason: Some("done".to_string()),
             bypass_code_review: None,

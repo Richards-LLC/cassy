@@ -532,6 +532,7 @@ mod delivery_audit_text_tests {
     #[test]
     fn negative_result_receipts_name_every_missing_field() {
         let req = crate::mcp::tools::TaskCloseRequest {
+            stranded_branch_override: None,
             id: "cas-negative".to_string(),
             reason: None,
             bypass_code_review: None,
@@ -1693,6 +1694,7 @@ impl CasCore {
             Err(_) => "main".to_string(),
         };
         let req = TaskCloseRequest {
+            stranded_branch_override: None,
             id: task.id.clone(),
             reason: None,
             bypass_code_review: None,
@@ -2114,7 +2116,63 @@ impl CasCore {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
                 EpicCloseGateOutcome::Reject(msg) => {
-                    return Ok(Self::tool_error(msg));
+                    // cas-b192: the gate is legitimately unsatisfiable for an
+                    // epic whose lanes all landed by squash and were then
+                    // refactored. Without a designed door supervisors improvise
+                    // one — a real session reached for execution_note=no-code to
+                    // escape this block and created a second defect that needed
+                    // proof_scope_fix to unwind. The door is explicit,
+                    // supervisor-only, and audited, and it only exists once the
+                    // gate has actually blocked.
+                    let Some(reason) = req.stranded_branch_override.as_deref() else {
+                        return Ok(Self::tool_error(msg));
+                    };
+                    let narrative = match validate_stranded_branch_override_reason(reason) {
+                        Ok(narrative) => narrative,
+                        Err(error) => {
+                            return Ok(Self::tool_error(format!(
+                                "EPIC CLOSE OVERRIDE REJECTED: {error}"
+                            )));
+                        }
+                    };
+                    let caller = match self.resolve_live_supervisor_authority() {
+                        Ok(caller) => caller,
+                        Err(error) => {
+                            return Ok(Self::tool_error(match error {
+                                SupervisorAuthorityError::Identity(error) => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: stranded_branch_override requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
+                                ),
+                                SupervisorAuthorityError::Store(error) => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: supervisor authority could not be checked ({error})."
+                                ),
+                                SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+                                ),
+                                SupervisorAuthorityError::NotLive(caller) => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: only a live registered supervisor may use stranded_branch_override. Caller `{}` has role {}.",
+                                    caller.name, caller.role
+                                ),
+                            }));
+                        }
+                    };
+                    // The waived gate output is stored verbatim: it already
+                    // names every branch and the measured verdict behind it, so
+                    // the note records what was actually true at override time
+                    // rather than only what the supervisor asserted.
+                    append_close_decision_note(
+                        task_store.as_ref(),
+                        &mut task,
+                        &format!(
+                            "decision: supervisor `{caller_name}` (role {caller_role}) overrode \
+                             the epic stranded-branch gate for `{epic_id}`.\n\
+                             Inspection narrative: {narrative}\n\
+                             Waived gate output follows verbatim, including every measured \
+                             branch verdict:\n{msg}",
+                            caller_name = caller.name,
+                            caller_role = caller.role,
+                            epic_id = req.id,
+                        ),
+                    );
                 }
             }
         }
@@ -10296,6 +10354,36 @@ pub(crate) enum EpicCloseGateOutcome {
     Reject(String),
 }
 
+/// Validate the narrative supplied with a stranded-branch override (cas-b192).
+///
+/// The point of the override is the audit trail, so a contentless value is
+/// rejected: the note must say what was inspected, not merely that someone
+/// waved it through. Anything substantive is accepted verbatim — judging the
+/// QUALITY of a supervisor's reasoning is not this function's job, recording it
+/// faithfully is.
+pub(crate) fn validate_stranded_branch_override_reason(reason: &str) -> Result<String, String> {
+    const CONTENTLESS: &[&str] = &[
+        "ok", "okay", "fine", "yes", "y", "done", "n/a", "na", "-", "override", "force",
+        "looks fine", "lgtm", "trust me",
+    ];
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "stranded_branch_override requires a non-empty narrative describing what you \
+             inspected before waiving the gate."
+                .to_string(),
+        );
+    }
+    if CONTENTLESS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "stranded_branch_override narrative `{trimmed}` records nothing that can be \
+             audited later. State what you checked — for example which branches and paths \
+             you diffed against the target, and what you found."
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Which way does a factory branch's content point relative to the integration
 /// target, restricted to the paths that branch actually delivers? (cas-b192)
 ///
@@ -10685,8 +10773,16 @@ pub(crate) fn run_epic_close_merge_gate(
          Epic {epic_id} cannot close — {n} child task(s) have factory branches \
          whose delivery is not accounted for on {parent}:\n{detail}\n\
          {closing_instruction}\n\
-         This guard cannot be bypassed (use of bypass_code_review=true does not \
-         skip merge-state checks — it is a data-state guard, not a review gate).\n\n\
+         bypass_code_review=true does not skip this check — it is a data-state \
+         guard, not a review gate.\n\n\
+         If you have inspected these lanes and they are genuinely stale — content \
+         shipped by another route and since refactored — a live registered \
+         supervisor may close with \
+         `stranded_branch_override=\"<what you inspected and found>\"`. The \
+         narrative and every measurement above are recorded as a decision note. \
+         Use that rather than improvising a workaround; do NOT reach for \
+         execution_note=no-code, which blocks the honest path and needs \
+         proof_scope_fix to unwind.\n\n\
          Remediation when the worker worktree still exists:\n\
          - `mcp__cas__coordination action=worktree_merge id=<factory-branch> \
            task_id=<child-task-id>`\n\n\
@@ -14867,6 +14963,7 @@ mod code_review_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -16075,6 +16172,7 @@ mod search_manifest_gate_tests {
 
     fn req_with_manifest(id: &str, manifest_json: Option<&str>) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -16413,6 +16511,7 @@ mod merge_state_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -19647,6 +19746,7 @@ mod epic_status_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -20504,6 +20604,62 @@ mod epic_status_gate_tests {
             "an empty branch must never be minted into merge evidence: {:?}",
             statuses[0].merge_evidence_note
         );
+    }
+
+    #[test]
+    fn override_narrative_must_record_what_was_inspected() {
+        assert!(validate_stranded_branch_override_reason("   ").is_err());
+        assert!(validate_stranded_branch_override_reason("ok").is_err());
+        assert!(validate_stranded_branch_override_reason("LGTM").is_err());
+        assert!(validate_stranded_branch_override_reason("trust me").is_err());
+        let good = validate_stranded_branch_override_reason(
+            "  diffed all 11 delivered paths against main; content present and later \
+             refactored by PR #406  ",
+        )
+        .expect("a substantive narrative is accepted");
+        assert!(
+            good.starts_with("diffed all 11") && good.ends_with("PR #406"),
+            "narrative is stored trimmed but verbatim: {good}"
+        );
+    }
+
+    #[test]
+    fn refusal_offers_the_designed_door_instead_of_an_improvised_one() {
+        // cas-b192: the old text said the guard "cannot be bypassed", which left
+        // a supervisor at 05:45 with two options — follow the destructive
+        // instruction, or invent a workaround. One real session invented
+        // execution_note=no-code and created a second defect.
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker"));
+        let task = epic("cas-epic-door");
+        let req = base_req(&task.id);
+        match run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            dir.path(),
+            std::slice::from_ref(&unmerged),
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("stranded_branch_override"),
+                    "the refusal must name the designed override: {message}"
+                );
+                assert!(
+                    message.contains("bypass_code_review=true does not skip this check"),
+                    "the review-gate bypass must stay powerless here: {message}"
+                );
+                assert!(
+                    !message.contains("cannot be bypassed"),
+                    "must not claim there is no door at all: {message}"
+                );
+                assert!(
+                    message.contains("execution_note=no-code"),
+                    "must warn off the improvised workaround that caused a second defect: {message}"
+                );
+            }
+            other => panic!("expected a rejection to inspect, got {other:?}"),
+        }
     }
 
     #[test]

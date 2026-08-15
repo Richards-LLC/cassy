@@ -1747,6 +1747,7 @@ mod tests {
             task.status = TaskStatus::InProgress;
             task.deliverables.work_target = Some(target);
             let request = TaskCloseRequest {
+                stranded_branch_override: None,
                 id: task.id.clone(),
                 reason: None,
                 bypass_code_review: Some(true),

@@ -2654,6 +2654,7 @@ impl CasCore {
             if let Some(task_id) = task_id {
                 let close_result = self
                     .cas_task_close(Parameters(TaskCloseRequest {
+                        stranded_branch_override: None,
                         id: task_id.to_string(),
                         reason: Some(receipt.scope_summary.clone()),
                         bypass_code_review: None,

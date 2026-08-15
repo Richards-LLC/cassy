@@ -268,6 +268,7 @@ async fn test_start_allowed_with_other_task_pending_verification() {
 
     // Try to close first task - should get VERIFICATION REQUIRED
     let close_req = TaskCloseRequest {
+        stranded_branch_override: None,
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
@@ -372,6 +373,7 @@ async fn test_claim_allowed_with_other_task_pending_verification() {
 
     // Try to close first task - should get VERIFICATION REQUIRED
     let close_req = TaskCloseRequest {
+        stranded_branch_override: None,
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
@@ -580,6 +582,7 @@ async fn test_start_same_task_allowed_when_pending() {
 
     // Try to close - should get VERIFICATION REQUIRED
     let close_req = TaskCloseRequest {
+        stranded_branch_override: None,
         id: task_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,

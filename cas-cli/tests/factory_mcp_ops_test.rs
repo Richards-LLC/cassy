@@ -5392,6 +5392,7 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
     let close = worker_service
         .inner
         .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            stranded_branch_override: None,
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
             bypass_code_review: None,
@@ -6525,6 +6526,7 @@ async fn test_062d_lifecycle_close_pushes_closed() {
         .service
         .inner
         .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            stranded_branch_override: None,
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
             code_review_findings: None,

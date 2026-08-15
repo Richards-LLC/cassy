@@ -181,6 +181,34 @@ pub struct TaskCloseRequest {
     #[serde(default)]
     pub bypass_code_review: Option<bool>,
 
+    /// Supervisor override for the epic close stranded-branch gate (cas-b192).
+    ///
+    /// Deliberately a NARRATIVE STRING rather than a boolean: the value is the
+    /// audit record of what was actually inspected before waiving the gate, and
+    /// it is stored verbatim alongside the gate's own measurements.
+    ///
+    /// This exists because the gate is otherwise unsatisfiable for a legitimate
+    /// case — an epic whose children's content shipped through a squash and was
+    /// then refactored, leaving every lane behind the target. The gate cannot
+    /// prove those lanes are safe (an older line and a new line are
+    /// indistinguishable by text), and it must not guess. Without a designed
+    /// door, supervisors improvise one: a real session reached for
+    /// `execution_note=no-code` to escape this block and created a second
+    /// defect that needed `proof_scope_fix` to unwind.
+    ///
+    /// Only honored for a live registered supervisor; every other caller is
+    /// rejected. Never skips anything for a branch that measures as carrying
+    /// genuinely absent content — that is real unmerged work, not a stale lane.
+    #[schemars(description = "Supervisor override for the epic close \
+                       stranded-branch gate. Pass a narrative describing what \
+                       you inspected (e.g. 'diffed all 11 delivered paths \
+                       against main; content present and later refactored by \
+                       PR #406'). Only honored for a live registered \
+                       supervisor. The narrative and the gate's own \
+                       measurements are logged as a decision note.")]
+    #[serde(default)]
+    pub stranded_branch_override: Option<String>,
+
     /// Structured cas-code-review results passed in by the worker
     /// before it retries close (cas-b39f, option (a)). The worker
     /// invokes the cas-code-review skill, collects the merged

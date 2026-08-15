@@ -500,7 +500,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     const retry = document.createElement("button");
     retry.type = "button";
     retry.textContent = "Retry";
-    retry.onclick = () => connections.get(machineId)?.retry();
+    retry.onclick = () => { void connections.get(machineId)?.attach(session); };
     const diagnose = document.createElement("button");
     diagnose.type = "button";
     diagnose.textContent = "Diagnose";
@@ -522,11 +522,14 @@ function syncConnectionViewTicker(): void {
   connectionViewTicker = undefined;
   const connection = activeConnection();
   if (!selectedMachineId || !selectedSession || !connection) return;
-  const snapshot = connection.snapshot();
+  const snapshot = connection.attachSnapshot(selectedSession) ?? connection.snapshot();
   if (snapshot.phase === "live" && !snapshot.degraded) return;
   const machineId = selectedMachineId;
   const session = selectedSession;
-  connectionViewTicker = window.setInterval(() => renderConnectionSurface(machineId, session, connection.snapshot()), 1_000);
+  connectionViewTicker = window.setInterval(() => {
+    const current = connection.attachSnapshot(session) ?? connection.snapshot();
+    renderConnectionSurface(machineId, session, current);
+  }, 1_000);
 }
 
 function renderTerminalFailure(machineId: string, session: string, detail: string): void {
@@ -896,7 +899,6 @@ function render(captureDraft = true): void {
   const machineConnectionSnapshot = selected ? connectionStates.get(selected.id) : undefined;
   const terminalAttachSnapshot = selected && selectedSession ? attachStates.get(sessionKey(selected.id, selectedSession)) : undefined;
   const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot;
-  const needsRepair = connectionSnapshot?.stage === "auth" && connectionSnapshot.phase === "failed";
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = takeControlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;

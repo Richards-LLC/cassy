@@ -339,6 +339,16 @@ describe("binding Commander browser invariants", () => {
     expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
   });
 
+  it("drives pane recovery from the selected session attach lifecycle", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("onAttachState: (session, state) =>");
+    expect(source).toContain("attachStates.set(sessionKey(machine.id, session), state)");
+    expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
+    expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
+    expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");
+    expect(source).toContain("connections.get(machineId)?.attach(session)");
+  });
+
   it("removes the connecting instruction when the terminal state arrives", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain('grid.querySelector(".empty")?.remove();');

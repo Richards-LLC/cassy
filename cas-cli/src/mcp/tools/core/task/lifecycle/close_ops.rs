@@ -9994,10 +9994,33 @@ pub(crate) fn collect_epic_branch_statuses(
                     .iter()
                     .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
                     .collect();
+                // "Accounted for" has two shapes, and this codebase already
+                // recognises both: content still byte-identical on the target
+                // (ContentPresent), and content the target has since evolved
+                // (DeliveryContentPresence::Superseded, which the ancestry-clean
+                // path already treats as merged rather than stranded). The only
+                // thing that must still block is a delivered path the target has
+                // NEVER touched and which still differs — that is possible
+                // unlanded work, and BehindTarget reports it as candidate_paths.
+                //
+                // Measured on the five real cas-69e7 / Commander lanes: every
+                // differing delivery path had been moved by main afterwards and
+                // candidate_paths was empty for all of them, which is why the
+                // epic was hard-blocked with nothing actually stranded.
+                let accounted_for = |d: &BranchContentDirection| match d {
+                    BranchContentDirection::ContentPresent { .. } => true,
+                    BranchContentDirection::BehindTarget {
+                        candidate_paths, ..
+                    } => candidate_paths.is_empty(),
+                    _ => false,
+                };
                 let delivered: Vec<String> = directions
                     .iter()
                     .flat_map(|d| match d {
                         BranchContentDirection::ContentPresent { paths } => paths.clone(),
+                        BranchContentDirection::BehindTarget { stale_paths, .. } => {
+                            stale_paths.clone()
+                        }
                         _ => Vec::new(),
                     })
                     .collect();
@@ -10009,18 +10032,16 @@ pub(crate) fn collect_epic_branch_statuses(
                 // such a branch is still correct — that is the guidance layer's
                 // job — but clearing the gate needs positive evidence, so this
                 // path requires at least one compared delivery path.
-                if !delivered.is_empty()
-                    && directions
-                        .iter()
-                        .all(|d| matches!(d, BranchContentDirection::ContentPresent { .. }))
-                {
+                if !delivered.is_empty() && directions.iter().all(accounted_for) {
                     unmerged_count = 0;
                     merge_evidence_note = Some(format!(
                         "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
-                         lost): every path they deliver is already byte-identical on \
-                         `{parent_branch}`, so there is nothing left to integrate. Delivered \
-                         path(s) checked: {}. Requiring a merge here would only pollute history \
-                         — and where the branch is additionally behind, revert shipped work.",
+                         lost): every path they deliver is either byte-identical on \
+                         `{parent_branch}` or has been superseded there by later work, and no \
+                         delivered path is both untouched by `{parent_branch}` and still \
+                         different. Delivered path(s) checked: {}. Requiring a merge here would \
+                         only pollute history — and where the branch is behind, revert shipped \
+                         work.",
                         t.id,
                         fallback_branches.join(", "),
                         delivered.join(", "),
@@ -20507,9 +20528,44 @@ mod epic_status_gate_tests {
     }
 
     #[test]
+    fn epic_close_proceeds_when_every_delivered_path_was_superseded() {
+        // cas-69e7's exact shape, reduced: the lane is behind, but every path it
+        // delivered has since been moved on main and none is untouched-and-
+        // different. Nothing is stranded, so the epic must close WITHOUT anyone
+        // merging a stale branch.
+        let dir = init_squash_landed_repo(None);
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        let superseded = child("cas-superseded", TaskStatus::Closed, Some("lane"));
+        let task = epic("cas-epic-superseded");
+        let req = base_req(&task.id);
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&superseded), "main", p);
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "a fully superseded lane strands nothing: {:?}",
+            statuses[0].merge_evidence_note
+        );
+        assert!(matches!(
+            run_epic_close_merge_gate(
+                &task,
+                &req,
+                "main",
+                p,
+                std::slice::from_ref(&superseded),
+            ),
+            EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+    }
+
+    #[test]
     fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
-        // Fail-closed: being behind is not proof that nothing was lost. The fix
-        // must stop the destructive ADVICE without weakening the GATE.
+        // Fail-closed where it counts: a behind lane that ALSO carries a path
+        // main has never touched may hold real work, so it keeps blocking. This
+        // is the line between cas-69e7 (nothing stranded) and actual data loss.
         let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
         let p = dir.path();
         std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();

@@ -151,16 +151,44 @@ pub(crate) fn describe_reaped(reaped: &[ReapedProcess]) -> String {
         .join(", ")
 }
 
-/// The cgroup directory this process belongs to, if the host provides a
-/// writable cgroup v2 tree we may create children in.
-///
-/// Writability is proven by actually creating and removing a probe directory —
-/// a delegated tree is not implied by the mount existing, and guessing wrong
-/// means every worker spawn logs a failure.
+/// The cgroup directory this process belongs to.
 #[cfg(target_os = "linux")]
-fn writable_parent() -> Option<PathBuf> {
+fn own_cgroup_dir() -> Option<PathBuf> {
     let own = parse_own_cgroup_path(&std::fs::read_to_string("/proc/self/cgroup").ok()?)?;
-    let parent = PathBuf::from(CGROUP_ROOT).join(own.trim_start_matches('/'));
+    Some(PathBuf::from(CGROUP_ROOT).join(own.trim_start_matches('/')))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn own_cgroup_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
+pub(super) fn own_scope_for_test() -> Option<PathBuf> {
+    own_cgroup_dir()
+}
+
+/// The containment root in which worker and shared-server scopes are siblings.
+///
+/// An MCP server invoked by a worker already runs *inside* that worker's
+/// `cas-worker-*` scope. Treating its current cgroup as the root nests a
+/// supposedly shared server below the worker, so the next worker teardown
+/// kills it. Ascend exactly one level for a recognized CAS worker scope; never
+/// ascend arbitrary host cgroups.
+fn containment_root(own: &Path) -> PathBuf {
+    let is_worker_scope = own
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("cas-worker-"));
+    if is_worker_scope {
+        own.parent().unwrap_or(own).to_path_buf()
+    } else {
+        own.to_path_buf()
+    }
+}
+
+/// Prove that `parent` is a writable delegated cgroup v2 tree.
+fn writable_scope_parent(parent: PathBuf) -> Option<PathBuf> {
     if !parent.join("cgroup.controllers").exists() {
         return None;
     }
@@ -176,6 +204,18 @@ fn writable_parent() -> Option<PathBuf> {
         }
         Err(_) => None,
     }
+}
+
+/// The containment root, if the host provides a writable cgroup v2 tree.
+///
+/// Worker scopes and shared-server scopes are created here as siblings.
+///
+/// Writability is proven by actually creating and removing a probe directory —
+/// a delegated tree is not implied by the mount existing, and guessing wrong
+/// means every worker spawn logs a failure.
+#[cfg(target_os = "linux")]
+fn writable_parent() -> Option<PathBuf> {
+    writable_scope_parent(containment_root(&own_cgroup_dir()?))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -204,8 +244,29 @@ pub(crate) fn create_server_scope(factory_session: &str, server_name: &str) -> O
     )
 }
 
+/// Create a leaf cgroup for a **private registered server**.
+///
+/// Unlike a shared server, this scope is deliberately nested below the
+/// worker's current scope. Explicit `server_stop` can kill just this subtree,
+/// while worker teardown still kills it as part of the worker subtree.
+pub(crate) fn create_private_server_scope(
+    factory_session: &str,
+    server_name: &str,
+) -> Option<PathBuf> {
+    let parent = writable_scope_parent(own_cgroup_dir()?)?;
+    create_named_scope_in(
+        &parent,
+        prefixed_scope_name("cas-private-server", factory_session, server_name),
+        server_name,
+    )
+}
+
 fn create_named_scope(scope: String, label: &str) -> Option<PathBuf> {
     let parent = writable_parent()?;
+    create_named_scope_in(&parent, scope, label)
+}
+
+fn create_named_scope_in(parent: &Path, scope: String, label: &str) -> Option<PathBuf> {
     let dir = parent.join(scope);
     match std::fs::create_dir(&dir) {
         Ok(()) => Some(dir),
@@ -232,23 +293,36 @@ pub(crate) fn add_pid(dir: &Path, pid: u32) -> io::Result<()> {
 
 /// Describe every process currently in the cgroup, best effort.
 fn snapshot(dir: &Path) -> Vec<ReapedProcess> {
-    let Ok(contents) = std::fs::read_to_string(dir.join("cgroup.procs")) else {
-        return Vec::new();
-    };
-    let pids = parse_procs(&contents);
-    if pids.is_empty() {
-        return Vec::new();
-    }
     let listening = listening_ports_by_inode();
-    pids.into_iter()
-        .map(|pid| ReapedProcess {
-            pid,
-            comm: std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                .map(|comm| comm.trim().to_string())
-                .unwrap_or_else(|_| "unknown".to_string()),
-            ports: listening_ports_for_pid(pid, &listening),
-        })
-        .collect()
+    let mut processes = Vec::new();
+    snapshot_into(dir, &listening, &mut processes);
+    processes
+}
+
+fn snapshot_into(dir: &Path, listening: &HashMap<u64, u16>, processes: &mut Vec<ReapedProcess>) {
+    if let Ok(contents) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+        processes.extend(parse_procs(&contents).into_iter().map(|pid| {
+            ReapedProcess {
+                pid,
+                comm: std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .map(|comm| comm.trim().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string()),
+                ports: listening_ports_for_pid(pid, &listening),
+            }
+        }));
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for child in entries.flatten().filter_map(|entry| {
+        entry
+            .file_type()
+            .ok()
+            .filter(|kind| kind.is_dir())
+            .map(|_| entry.path())
+    }) {
+        snapshot_into(&child, listening, processes);
+    }
 }
 
 fn listening_ports_by_inode() -> HashMap<u64, u16> {
@@ -311,12 +385,29 @@ pub(crate) fn kill_scope(dir: &Path) -> io::Result<Vec<ReapedProcess>> {
             }
         }
     }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let survivors = snapshot(dir);
+        if survivors.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "cgroup {} still contains surviving processes: {}",
+                dir.display(),
+                describe_reaped(&survivors)
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
     Ok(reaped)
 }
 
 /// Remove the (expected-empty) scope directory once its processes are gone.
 pub(crate) fn remove_scope(dir: &Path) {
     for _ in 0..20 {
+        remove_empty_descendant_scopes(dir);
         match std::fs::remove_dir(dir) {
             Ok(()) => return,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
@@ -328,6 +419,25 @@ pub(crate) fn remove_scope(dir: &Path) {
         dir = %dir.display(),
         "cas-99f5: worker cgroup scope could not be removed; it may still hold processes"
     );
+}
+
+/// Remove empty child cgroups before their CAS-owned parent. Private server
+/// scopes are nested under worker scopes, so worker teardown legitimately
+/// leaves an empty hierarchy rather than a leaf.
+fn remove_empty_descendant_scopes(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for child in entries.flatten().filter_map(|entry| {
+        entry
+            .file_type()
+            .ok()
+            .filter(|kind| kind.is_dir())
+            .map(|_| entry.path())
+    }) {
+        remove_empty_descendant_scopes(&child);
+        let _ = std::fs::remove_dir(child);
+    }
 }
 
 #[cfg(test)]
@@ -397,17 +507,45 @@ mod tests {
         let name = scope_name("../../evil", "worker/../..");
         assert!(!name.contains('/'), "{name}");
         assert!(!name.contains(".."), "{name}");
-        assert_eq!(scope_name("cas-src-mighty-crane-74", "cosmic-crow-41"),
-            "cas-worker-cas-src-mighty-crane-74-cosmic-crow-41");
+        assert_eq!(
+            scope_name("cas-src-mighty-crane-74", "cosmic-crow-41"),
+            "cas-worker-cas-src-mighty-crane-74-cosmic-crow-41"
+        );
+    }
+
+    #[test]
+    fn shared_scope_root_ascends_out_of_a_worker_scope_only() {
+        let worker = Path::new("/delegated/session/cas-worker-factory-worker-a");
+        assert_eq!(
+            containment_root(worker),
+            PathBuf::from("/delegated/session")
+        );
+
+        let ordinary = Path::new("/delegated/session");
+        assert_eq!(containment_root(ordinary), ordinary);
+
+        let lookalike = Path::new("/delegated/session/not-cas-worker-a");
+        assert_eq!(containment_root(lookalike), lookalike);
     }
 
     #[test]
     fn reap_summary_names_pids_comms_and_ports() {
         let summary = describe_reaped(&[
-            ReapedProcess { pid: 4242, comm: "node".into(), ports: vec![5173, 24678] },
-            ReapedProcess { pid: 4243, comm: "esbuild".into(), ports: vec![] },
+            ReapedProcess {
+                pid: 4242,
+                comm: "node".into(),
+                ports: vec![5173, 24678],
+            },
+            ReapedProcess {
+                pid: 4243,
+                comm: "esbuild".into(),
+                ports: vec![],
+            },
         ]);
-        assert!(summary.contains("4242 (node, listening on 5173,24678)"), "{summary}");
+        assert!(
+            summary.contains("4242 (node, listening on 5173,24678)"),
+            "{summary}"
+        );
         assert!(summary.contains("4243 (esbuild)"), "{summary}");
         assert_eq!(describe_reaped(&[]), "no surviving processes");
     }

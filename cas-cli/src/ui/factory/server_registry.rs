@@ -43,6 +43,7 @@ const LOG_DIR: &str = "logs";
 const PID_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Grace between SIGTERM and SIGKILL on [`stop`].
+#[cfg(not(target_os = "linux"))]
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Lifecycle state of a registry entry.
@@ -126,8 +127,9 @@ pub(crate) struct RegisteredServer {
     pub factory_session: Option<String>,
     /// Whether this server was placed outside worker containment.
     pub shared: bool,
-    /// Its own cgroup scope, when the host delegates a writable v2 tree and
-    /// this server is shared.
+    /// Its own cgroup scope, when the host delegates a writable v2 tree.
+    /// Private scopes are children of the worker scope; shared scopes are
+    /// siblings of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cgroup: Option<PathBuf>,
     /// Combined stdout/stderr capture — never inherited, because the MCP
@@ -381,16 +383,27 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
     let pid_dir = registry_dir(cas_root).join(".pid");
     fs::create_dir_all(&pid_dir)?;
     let pid_file = pid_dir.join(format!("{stamp}-{}.pid", std::process::id()));
+    let launcher_pid_file = pid_dir.join(format!("{stamp}-{}.launcher", std::process::id()));
+    let launch_file = pid_dir.join(format!("{stamp}-{}.go", std::process::id()));
     let _pid_file_guard = ScopedFile(pid_file.clone());
+    let _launcher_pid_file_guard = ScopedFile(launcher_pid_file.clone());
+    let _launch_file_guard = ScopedFile(launch_file.clone());
 
-    // The launcher: redirect, background the real command, publish its pid,
-    // exit. `$!` is the server itself, so the registry never records the
-    // launcher's pid.
+    // The launcher first publishes its own pid and waits. That barrier is
+    // load-bearing: CAS moves the launcher into the server's dedicated cgroup
+    // before it may fork the real command, so PTY wrappers that immediately
+    // call setsid cannot escape containment in the gap between spawn and
+    // add_pid. Once released, `$!` is the server itself; the launcher publishes
+    // it and exits.
     let script = format!(
-        "exec >>'{log}' 2>&1; {command} & printf '%s' \"$!\" > '{pid_file}'",
+        "exec >>'{log}' 2>&1; printf '%s' \"$$\" > '{launcher_pid_file}'; \
+         while [ ! -f '{launch_file}' ]; do sleep 0.01; done; \
+         {command} & printf '%s' \"$!\" > '{pid_file}'",
         log = log_path.display(),
         command = spec.command,
         pid_file = pid_file.display(),
+        launcher_pid_file = launcher_pid_file.display(),
+        launch_file = launch_file.display(),
     );
 
     let mut launcher = Command::new("sh");
@@ -421,46 +434,89 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
     }
 
     let mut child = launcher.spawn()?;
+    let launcher_pid = match read_published_pid(&launcher_pid_file) {
+        Ok(pid) => pid,
+        Err(error) => {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+
+    // Every registered server gets a dedicated scope when cgroup v2 is
+    // delegated. Private scopes stay below the worker so teardown still owns
+    // them; shared scopes are true siblings so teardown cannot reach them.
+    let scope = if spec.shared {
+        super::cgroup::create_server_scope(
+            spec.factory_session.as_deref().unwrap_or("no-session"),
+            &spec.name,
+        )
+    } else {
+        super::cgroup::create_private_server_scope(
+            spec.factory_session.as_deref().unwrap_or("no-session"),
+            &spec.name,
+        )
+    };
+    let cgroup = match scope {
+        Some(dir) => match super::cgroup::add_pid(&dir, launcher_pid) {
+            Ok(()) => Some(dir),
+            Err(error) => {
+                tracing::warn!(
+                    server = %spec.name,
+                    launcher_pid,
+                    shared = spec.shared,
+                    error = %error,
+                    "cas-44d2: server launcher could not join its dedicated cgroup; \
+                     falling back to process-tree containment"
+                );
+                super::cgroup::remove_scope(&dir);
+                None
+            }
+        },
+        None => None,
+    };
+
+    if let Err(error) = fs::write(&launch_file, b"go\n") {
+        // The launcher has not forked the workload yet. Kill this exact child
+        // before returning so a failed registration cannot become an orphan.
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(launcher_pid as libc::pid_t, libc::SIGKILL);
+        }
+        if let Some(ref dir) = cgroup {
+            let _ = super::cgroup::kill_scope(dir);
+            super::cgroup::remove_scope(dir);
+        }
+        let _ = child.wait();
+        return Err(error);
+    }
+
     // The launcher exits as soon as it has published the pid; waiting here is
     // what keeps it from becoming a zombie.
     let status = child.wait()?;
     if !status.success() {
+        if let Some(ref dir) = cgroup {
+            let _ = super::cgroup::kill_scope(dir);
+            super::cgroup::remove_scope(dir);
+        }
         return Err(io::Error::other(format!(
             "server launcher exited with {status}; see {}",
             log_path.display()
         )));
     }
 
-    let pid = read_published_pid(&pid_file)?;
-
-    // Move a shared server out of the worker's inherited cgroup scope. Without
-    // this, `cgroup.kill` at teardown takes it down no matter what session it
-    // is in — cgroup membership has no escape hatch, which is exactly why
-    // cas-99f5 chose it.
-    let cgroup = if spec.shared {
-        let scope = super::cgroup::create_server_scope(
-            spec.factory_session.as_deref().unwrap_or("no-session"),
-            &spec.name,
-        );
-        match scope {
-            Some(dir) => match super::cgroup::add_pid(&dir, pid) {
-                Ok(()) => Some(dir),
-                Err(error) => {
-                    tracing::warn!(
-                        server = %spec.name,
-                        pid,
-                        error = %error,
-                        "cas-7c93: shared server could not join its own cgroup scope; \
-                         session containment (setsid) remains the floor"
-                    );
-                    super::cgroup::remove_scope(&dir);
-                    None
-                }
-            },
-            None => None,
+    let pid = match read_published_pid(&pid_file) {
+        Ok(pid) => pid,
+        Err(error) => {
+            if let Some(ref dir) = cgroup {
+                let _ = super::cgroup::kill_scope(dir);
+                super::cgroup::remove_scope(dir);
+            }
+            return Err(error);
         }
-    } else {
-        None
     };
 
     let record = RegisteredServer {
@@ -529,13 +585,27 @@ pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<Sto
     let outcome = match liveness(&record) {
         ServerLiveness::Live => {
             let ports = listening_ports(&record);
-            signal_server(&record);
+            terminate_server(&record)?;
             StopOutcome::Stopped {
                 pid: record.pid,
                 ports,
             }
         }
-        ServerLiveness::Gone => StopOutcome::AlreadyGone,
+        ServerLiveness::Gone if record.cgroup.is_some() => {
+            // The registered wrapper may exit before a detached descendant.
+            // Its dedicated scope remains authoritative even after reparenting,
+            // so drain it before claiming the workload was already gone.
+            terminate_server(&record)?;
+            StopOutcome::AlreadyGone
+        }
+        ServerLiveness::Gone => {
+            return Err(io::Error::other(format!(
+                "registered pid {} for server '{}' is gone, but this legacy record has no \
+                 containment scope; server_stop cannot prove that no detached descendants \
+                 survived",
+                record.pid, record.name
+            )));
+        }
         other => {
             // Do not touch the record's state on a refusal beyond marking it
             // dead: the server we started is provably no longer there, but
@@ -555,20 +625,6 @@ pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<Sto
         }
     };
 
-    if let Some(dir) = record.cgroup.clone() {
-        // Only ever the server's *own* scope: created by `start`, containing
-        // nothing this registry did not put there.
-        match super::cgroup::kill_scope(&dir) {
-            Ok(_) => super::cgroup::remove_scope(&dir),
-            Err(error) => tracing::warn!(
-                server = %record.name,
-                dir = %dir.display(),
-                error = %error,
-                "cas-7c93: could not kill server cgroup scope"
-            ),
-        }
-    }
-
     record.state = ServerState::Stopped;
     record.ended_at = Some(Utc::now());
     record.ended_detail = Some(match &outcome {
@@ -577,6 +633,203 @@ pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<Sto
     });
     write_record(cas_root, &record)?;
     Ok(outcome)
+}
+
+/// Terminate the registered workload and prove that the target is gone.
+///
+/// A dedicated cgroup is authoritative when available: it includes every
+/// descendant even after `setsid`, and `kill_scope` now refuses success while
+/// members remain. Older records and hosts without delegated cgroup v2 use a
+/// platform fallback below.
+fn terminate_server(record: &RegisteredServer) -> io::Result<()> {
+    if let Some(ref dir) = record.cgroup {
+        super::cgroup::kill_scope(dir)?;
+        super::cgroup::remove_scope(dir);
+        return verify_record_gone(record);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return terminate_linux_process_tree(record);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        signal_server(record);
+        return verify_record_gone(record);
+    }
+
+    #[cfg(not(unix))]
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "cannot prove termination of server '{}' descendants on this platform",
+                record.name
+            ),
+        ));
+    }
+}
+
+fn verify_record_gone(record: &RegisteredServer) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if !matches!(liveness(record), ServerLiveness::Live) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "server_stop could not prove termination; surviving registered pid {} ({})",
+                record.pid, record.name
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    starttime: u64,
+}
+
+/// Discover and freeze the full Linux descendant tree before killing it.
+///
+/// Freezing is what closes the fork/reparent race: once the root and every
+/// discovered descendant has received SIGSTOP, another scan must be stable
+/// before any parent is killed. Every signal is start-time fingerprinted so a
+/// recycled pid is never touched.
+#[cfg(target_os = "linux")]
+fn terminate_linux_process_tree(record: &RegisteredServer) -> io::Result<()> {
+    let mut tree = Vec::<ProcessIdentity>::new();
+    let root_starttime = record.pid_starttime.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to stop server '{}' without a start-time fingerprint",
+                record.name
+            ),
+        )
+    })?;
+    tree.push(ProcessIdentity {
+        pid: record.pid,
+        starttime: root_starttime,
+    });
+    signal_fingerprinted(tree[0], libc::SIGSTOP)?;
+
+    for _ in 0..8 {
+        let before = tree.len();
+        let roots: Vec<u32> = tree.iter().map(|proc| proc.pid).collect();
+        for pid in roots {
+            collect_linux_descendants(pid, &mut tree)?;
+        }
+        for proc in &tree {
+            signal_fingerprinted(*proc, libc::SIGSTOP)?;
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+
+    // One final scan after all known members are frozen. Any child found here
+    // was forked during the preceding pass; freeze it and include it too.
+    let roots: Vec<u32> = tree.iter().map(|proc| proc.pid).collect();
+    for pid in roots {
+        collect_linux_descendants(pid, &mut tree)?;
+    }
+    for proc in &tree {
+        signal_fingerprinted(*proc, libc::SIGSTOP)?;
+    }
+
+    // Children first makes the survivor report easier to interpret and avoids
+    // relying on reparenting behavior. SIGKILL cannot be ignored.
+    for proc in tree.iter().rev() {
+        signal_fingerprinted(*proc, libc::SIGKILL)?;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let survivors: Vec<_> = tree
+            .iter()
+            .copied()
+            .filter(|proc| process_identity_live(*proc))
+            .collect();
+        if survivors.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let detail = survivors
+                .iter()
+                .map(|proc| proc.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(io::Error::other(format!(
+                "server_stop could not terminate surviving descendant pid(s): {detail}"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_descendants(pid: u32, tree: &mut Vec<ProcessIdentity>) -> io::Result<()> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    let children = match fs::read_to_string(&path) {
+        Ok(children) => children,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot inspect descendants through {path}: {error}"),
+            ));
+        }
+    };
+    for child in children
+        .split_whitespace()
+        .filter_map(|value| value.parse::<u32>().ok())
+    {
+        if tree.iter().any(|known| known.pid == child) {
+            continue;
+        }
+        if let Some(starttime) = crate::mcp::daemon::read_pid_starttime(child) {
+            let identity = ProcessIdentity {
+                pid: child,
+                starttime,
+            };
+            // Freeze on discovery, before recursing. If the child forked in
+            // the small scan-to-stop gap, the next scan of this now-frozen
+            // parent finds that last child deterministically.
+            signal_fingerprinted(identity, libc::SIGSTOP)?;
+            tree.push(identity);
+            collect_linux_descendants(child, tree)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity_live(proc: ProcessIdentity) -> bool {
+    crate::mcp::daemon::read_pid_starttime(proc.pid) == Some(proc.starttime) && !is_zombie(proc.pid)
+}
+
+#[cfg(target_os = "linux")]
+fn signal_fingerprinted(proc: ProcessIdentity, signal: libc::c_int) -> io::Result<()> {
+    if !process_identity_live(proc) {
+        return Ok(());
+    }
+    // SAFETY: the pid's start-time fingerprint was revalidated immediately
+    // above; ESRCH is an ordinary exit race.
+    let rc = unsafe { libc::kill(proc.pid as libc::pid_t, signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 /// The process group `pid` belongs to, when the platform can tell us.
@@ -603,11 +856,13 @@ fn process_group_of(_pid: u32) -> Option<u32> {
 /// Pure, so the "never killpg a private server's group" rule is testable
 /// without spawning anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, not(target_os = "linux")))]
 pub(crate) enum SignalTarget {
     Pid(u32),
     ProcessGroup(u32),
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 pub(crate) fn signal_target(record: &RegisteredServer) -> SignalTarget {
     match (record.shared, record.pgid) {
         // Only signal the group when it is genuinely the server's own, not the
@@ -621,7 +876,7 @@ pub(crate) fn signal_target(record: &RegisteredServer) -> SignalTarget {
 }
 
 /// SIGTERM, brief grace, then SIGKILL to whatever is still there.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn signal_server(record: &RegisteredServer) {
     let send = |signal: libc::c_int| {
         // SAFETY: identity was fingerprint-validated by the caller immediately
@@ -645,9 +900,6 @@ fn signal_server(record: &RegisteredServer) {
     }
     send(libc::SIGKILL);
 }
-
-#[cfg(not(unix))]
-fn signal_server(_record: &RegisteredServer) {}
 
 /// How long a stopped/dead entry stays visible as history before it is pruned.
 ///

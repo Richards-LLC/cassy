@@ -30,6 +30,129 @@ fn wait_until_gone(pid: u32) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
+struct ProcessTreeGuard {
+    pid: u32,
+    armed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // `script` makes the workload a session/group leader. Validate that
+        // relationship before group cleanup so a failed assertion can never
+        // signal the test runner's group.
+        let pgid = unsafe { libc::getpgid(self.pid as libc::pid_t) };
+        if pgid == self.pid as libc::pid_t {
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        } else {
+            unsafe {
+                libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// cas-44d2: reproduce the incident command shape, including a CAS-like child
+/// that survives TERM/HUP. `script` creates a new session for the workload;
+/// stopping only its registered wrapper pid used to return success while this
+/// child (and its own children) stayed alive.
+#[cfg(target_os = "linux")]
+#[test]
+fn server_stop_reaps_script_wrapped_cas_factory_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipping: util-linux script is not installed");
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join("registry");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake_cas = bin.join("cas");
+    std::fs::write(
+        &fake_cas,
+        "#!/bin/sh\n\
+         test \"$1 $2 $3 $4\" = \"factory --new -n cas-44d2-proof\" || exit 64\n\
+         trap '' HUP TERM\n\
+         printf '%s' \"$$\" > \"$CAS_44D2_CHILD_PID\"\n\
+         while :; do sleep 300; done\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_cas).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_cas, permissions).unwrap();
+
+    let child_pid_file = temp.path().join("cas-factory.pid");
+    let transcript = temp.path().join("typescript");
+    let command = format!(
+        "PATH='{}':\"$PATH\" CAS_44D2_CHILD_PID='{}' \
+         script -q -c 'cas factory --new -n cas-44d2-proof' '{}'",
+        bin.display(),
+        child_pid_file.display(),
+        transcript.display(),
+    );
+    let record = start(
+        &cas_root,
+        &spec("script-cas-factory", &command, temp.path(), false),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let workload_pid = loop {
+        if let Ok(contents) = std::fs::read_to_string(&child_pid_file)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake `cas factory` never published its pid; log: {:?}",
+            record
+                .log_path
+                .as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let mut workload_guard = ProcessTreeGuard {
+        pid: workload_pid,
+        armed: true,
+    };
+
+    assert_ne!(
+        record.pid, workload_pid,
+        "the fixture must include a wrapper"
+    );
+    assert_eq!(
+        unsafe { libc::getpgid(workload_pid as libc::pid_t) },
+        workload_pid as libc::pid_t,
+        "precondition: util-linux script must put the workload in a new session/group"
+    );
+    assert!(crate::mcp::daemon::pid_alive(record.pid));
+    assert!(crate::mcp::daemon::pid_alive(workload_pid));
+
+    let outcome = stop(&cas_root, &record).unwrap();
+    assert!(matches!(outcome, StopOutcome::Stopped { .. }));
+    assert!(
+        wait_until_gone(record.pid),
+        "registered wrapper survived stop"
+    );
+    assert!(
+        wait_until_gone(workload_pid),
+        "server_stop returned success while script's `cas factory` descendant survived"
+    );
+    workload_guard.armed = false;
+}
+
 /// AC1: register, query, stop — the end-to-end shape a supervisor sees.
 #[test]
 fn start_records_ownership_then_list_and_stop_resolve_it() {
@@ -103,6 +226,30 @@ fn started_server_is_reparented_and_never_a_zombie_child() {
     let refreshed = refresh(&cas_root).unwrap();
     assert_eq!(refreshed.len(), 1);
     assert_eq!(refreshed[0].state, ServerState::Dead);
+}
+
+#[test]
+fn stop_does_not_claim_a_legacy_wrapper_is_the_whole_workload() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().to_path_buf();
+    let mut record = start(
+        &cas_root,
+        &spec("legacy-gone", "sleep 0.02", temp.path(), false),
+    )
+    .unwrap();
+    assert!(wait_until_gone(record.pid));
+
+    // Records created before cas-44d2 have no dedicated scope. Once their
+    // wrapper pid is gone, a detached child is no longer discoverable by
+    // ancestry. Honest failure is the only provable outcome.
+    if let Some(scope) = record.cgroup.take() {
+        super::super::cgroup::remove_scope(&scope);
+    }
+    let error = stop(&cas_root, &record).unwrap_err();
+    assert!(
+        error.to_string().contains("cannot prove"),
+        "server_stop must report unverifiable descendants, not success: {error}"
+    );
 }
 
 /// AC: "dead pids are marked dead, not resurrected."
@@ -381,6 +528,27 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
         Some(caller_pgid),
         "a private server must stay in the caller's group so it dies with it"
     );
+    if let Some(own_scope) = super::super::cgroup::own_scope_for_test()
+        && own_scope
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cas-worker-"))
+    {
+        if let (Some(shared_scope), Some(private_scope)) =
+            (shared.cgroup.as_ref(), private.cgroup.as_ref())
+        {
+            assert_eq!(
+                shared_scope.parent(),
+                own_scope.parent(),
+                "shared server scope must be a worker sibling, not a child that teardown kills"
+            );
+            assert_eq!(
+                private_scope.parent(),
+                Some(own_scope.as_path()),
+                "private server scope must stay under its worker so teardown still owns it"
+            );
+        }
+    }
 
     // And the signal targets follow from that: the shared server's own group
     // may be signalled; the private one may only ever be signalled by pid,

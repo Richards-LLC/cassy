@@ -35,6 +35,15 @@ describe("binding Commander browser invariants", () => {
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
   });
 
+  it("declares the Commander favicon from the static web source", async () => {
+    const [html, favicon] = await Promise.all([
+      readFile(new URL("../index.html", import.meta.url), "utf8"),
+      readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
+    ]);
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
+    expect(favicon).toContain('>C</text>');
+  });
+
   it("names the remedy when an observer-only credential disables control", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
@@ -74,6 +83,15 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
     expect(attentionView).toContain('message.textContent = "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
+  });
+
+  it("distinguishes a loading catalog from an unpaired Commander drawer", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("let machineCatalogLoaded = false;");
+    expect(source).toContain("machineCatalogLoaded = true;");
+    expect(source).toContain('"Loading paired machines…"');
+    expect(source).toContain('"No machines paired yet — press + to pair this machine."');
+    expect(source).toContain("render(false);");
   });
 
   it("binds the browser fetch receiver at every pairing handoff", async () => {

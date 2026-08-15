@@ -32,6 +32,7 @@ document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribut
   rootStyles.getPropertyValue("--bg-root").trim(),
 );
 const machines = new Map<string, StoredMachine>();
+let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
@@ -156,6 +157,7 @@ function layoutForPanes(key: string, panes: readonly PaneInfo[], fallbackPrimary
 async function boot(): Promise<void> {
   const stored = await catalog.recoverPending();
   for (const machine of stored.machines) machines.set(machine.id, machine);
+  machineCatalogLoaded = true;
   if (stored.pendingCleanup > 0) {
     pairingStatus = "A canceled credential remains blocked while durable local cleanup is pending.";
   }
@@ -1103,6 +1105,15 @@ function render(captureDraft = true): void {
     machineRail.append(machineRailButton(machine));
     machineTree.append(machineTreeGroup(machine));
   }
+  if (!machineCatalogLoaded || machines.size === 0) {
+    const message = document.createElement("p");
+    message.className = "drawer-empty";
+    message.setAttribute("role", "status");
+    message.textContent = machineCatalogLoaded
+      ? "No machines paired yet — press + to pair this machine."
+      : "Loading paired machines…";
+    machineTree.append(message);
+  }
   document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
   renderAttention(); renderStatus(status);
   if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
@@ -1426,4 +1437,5 @@ function escapeHtml(value: string): string { const span = document.createElement
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
 
 window.addEventListener("keydown", globalShortcut, true);
+render(false);
 void boot();

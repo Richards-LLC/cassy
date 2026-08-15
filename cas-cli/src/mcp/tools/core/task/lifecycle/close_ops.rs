@@ -9969,6 +9969,85 @@ pub(crate) fn collect_epic_branch_statuses(
                     ));
                 }
             }
+            // cas-b192: the reconciliation above proves content only through
+            // BYTE-IDENTICAL patch equivalence against a recorded anchor. That
+            // fails the moment later lanes refactor the same files, which is
+            // the normal shape of an epic that squash-landed and then evolved —
+            // and it never runs at all for a child with no resolvable anchor.
+            // Both cases then read as "stranded" purely because ancestry was
+            // lost, which is what produced a hard block plus a destructive
+            // merge instruction on five live lanes.
+            //
+            // So fall back to the same question one level down: does the branch
+            // still deliver anything the target does not already have? Only a
+            // positive CONTENT-PRESENT answer clears the child. BehindTarget
+            // and Unknown deliberately keep blocking — being behind is not
+            // proof that nothing was lost, and this guard must stay fail-closed
+            // even while it stops issuing destructive advice.
+            if unmerged_count > 0
+                && dropped_paths.is_empty()
+                && content_check_error.is_none()
+                && merge_evidence_note.is_none()
+                && !fallback_branches.is_empty()
+            {
+                let directions: Vec<BranchContentDirection> = fallback_branches
+                    .iter()
+                    .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
+                    .collect();
+                // "Accounted for" has two shapes, and this codebase already
+                // recognises both: content still byte-identical on the target
+                // (ContentPresent), and content the target has since evolved
+                // (DeliveryContentPresence::Superseded, which the ancestry-clean
+                // path already treats as merged rather than stranded). The only
+                // thing that must still block is a delivered path the target has
+                // NEVER touched and which still differs — that is possible
+                // unlanded work, and BehindTarget reports it as candidate_paths.
+                //
+                // Measured on the five real cas-69e7 / Commander lanes: every
+                // differing delivery path had been moved by main afterwards and
+                // candidate_paths was empty for all of them, which is why the
+                // epic was hard-blocked with nothing actually stranded.
+                let accounted_for = |d: &BranchContentDirection| match d {
+                    BranchContentDirection::ContentPresent { .. } => true,
+                    BranchContentDirection::BehindTarget {
+                        candidate_paths, ..
+                    } => candidate_paths.is_empty(),
+                    _ => false,
+                };
+                let delivered: Vec<String> = directions
+                    .iter()
+                    .flat_map(|d| match d {
+                        BranchContentDirection::ContentPresent { paths } => paths.clone(),
+                        BranchContentDirection::BehindTarget { stale_paths, .. } => {
+                            stale_paths.clone()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                // A branch that delivers NO paths at all proves nothing about
+                // this child. That is the recycled/reset-to-parent shape: the
+                // branch was reused for other work and no longer represents the
+                // task, so "nothing to merge from it" must not be read as "the
+                // task's delivery landed". Withholding a merge instruction for
+                // such a branch is still correct — that is the guidance layer's
+                // job — but clearing the gate needs positive evidence, so this
+                // path requires at least one compared delivery path.
+                if !delivered.is_empty() && directions.iter().all(accounted_for) {
+                    unmerged_count = 0;
+                    merge_evidence_note = Some(format!(
+                        "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
+                         lost): every path they deliver is either byte-identical on \
+                         `{parent_branch}` or has been superseded there by later work, and no \
+                         delivered path is both untouched by `{parent_branch}` and still \
+                         different. Delivered path(s) checked: {}. Requiring a merge here would \
+                         only pollute history — and where the branch is behind, revert shipped \
+                         work.",
+                        t.id,
+                        fallback_branches.join(", "),
+                        delivered.join(", "),
+                    ));
+                }
+            }
             EpicChildBranchStatus {
                 task_id: t.id.clone(),
                 task_status: t.status,
@@ -10238,6 +10317,195 @@ pub(crate) enum EpicCloseGateOutcome {
     Reject(String),
 }
 
+/// Which way does a factory branch's content point relative to the integration
+/// target, restricted to the paths that branch actually delivers? (cas-b192)
+///
+/// The epic close guard reasoned purely about REACHABILITY: commits in
+/// `target..branch` meant "unmerged", and the printed remediation said
+/// `git merge --no-ff <branch>`. That collapses two opposite situations into
+/// one confident verdict. A lane whose work landed via an epic squash and was
+/// then refactored by later lanes is *behind* the target, and merging it
+/// re-opens the pre-refactor files. Measured against the real
+/// `factory/young-jaguar-27` and `origin/main`: the plain merge stops with 11
+/// conflicts, and resolving them the way an operator who was just told "this
+/// must be merged" naturally would (accept incoming) exits 0 — a clean,
+/// committable, successful-looking merge that deletes 2,700 shipped lines.
+///
+/// So this asks a containment question rather than a reachability one, and it
+/// is deliberately THREE-valued. "Cannot tell" is a real answer here: an older
+/// version of a line and a newly written line are indistinguishable by text
+/// alone, and a guard that silently picks a side when it cannot tell is how
+/// this defect class gets rebuilt in a new shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchContentDirection {
+    /// Every path this branch delivers is byte-identical on the target. Its
+    /// content has landed — by whatever route — so merging gains nothing and
+    /// only pollutes history. This is the `noble-octopus-51` shape: one commit
+    /// unreachable from main, yet `git diff main..branch` over that commit's
+    /// own three files is empty.
+    ContentPresent { paths: Vec<String> },
+    /// The branch differs from the target on paths the TARGET has moved since
+    /// their merge base. The branch is behind on exactly the files it would
+    /// bring, so merging is at best a conflict storm and at worst a revert.
+    /// `candidate_paths` are the delivery paths the target has NOT touched and
+    /// which still differ: possible genuinely unlanded work that a human must
+    /// look at. Naming them is what keeps a refusal from silently discarding
+    /// real work stranded in a stale lane.
+    BehindTarget {
+        stale_paths: Vec<String>,
+        candidate_paths: Vec<String>,
+    },
+    /// The branch differs and the target has not touched those paths at all.
+    /// This is genuine unmerged work and a merge instruction is legitimate.
+    ContentAbsent { paths: Vec<String> },
+    /// Measurement failed. Say so rather than guess in either direction.
+    Unknown { reason: String },
+}
+
+impl BranchContentDirection {
+    /// Is it safe to print a `git merge` instruction for this branch?
+    ///
+    /// Only [`Self::ContentAbsent`] qualifies. Both `ContentPresent` and
+    /// `BehindTarget` describe branches whose merge is useless or destructive,
+    /// and `Unknown` means we do not know — none of which may produce a
+    /// confident destructive instruction.
+    pub(crate) fn merge_instruction_is_safe(&self) -> bool {
+        matches!(self, Self::ContentAbsent { .. })
+    }
+}
+
+/// Run `git` in `repo_path`, returning trimmed stdout on success.
+fn git_stdout_lines(
+    repo_path: &std::path::Path,
+    args: &[&str],
+) -> Result<Vec<String>, String> {
+    use std::process::Command;
+
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to run git {}: {error}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {} failed (exit {})",
+            args.join(" "),
+            out.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+/// Classify `branch_ref` against `target_ref` by CONTENT rather than ancestry.
+///
+/// See [`BranchContentDirection`] for why this exists and what each verdict
+/// means. Paths are chunked before being handed to `git` so a lane touching
+/// thousands of files cannot blow the argv limit and silently degrade the
+/// measurement into a wrong answer.
+pub(crate) fn branch_content_direction(
+    repo_path: &std::path::Path,
+    branch_ref: &str,
+    target_ref: &str,
+) -> BranchContentDirection {
+    const PATH_CHUNK: usize = 64;
+
+    if !is_safe_git_refname(branch_ref) || !is_safe_git_refname(target_ref) {
+        return BranchContentDirection::Unknown {
+            reason: format!("unsafe ref name in `{branch_ref}` or `{target_ref}`"),
+        };
+    }
+    if !git_ref_exists(repo_path, branch_ref) {
+        return BranchContentDirection::Unknown {
+            reason: format!("branch ref `{branch_ref}` does not resolve"),
+        };
+    }
+    if !git_ref_exists(repo_path, target_ref) {
+        return BranchContentDirection::Unknown {
+            reason: format!("target ref `{target_ref}` does not resolve"),
+        };
+    }
+
+    let merge_base = match git_stdout_lines(repo_path, &["merge-base", target_ref, branch_ref]) {
+        Ok(lines) => match lines.into_iter().next() {
+            Some(base) => base,
+            None => {
+                return BranchContentDirection::Unknown {
+                    reason: format!(
+                        "`{branch_ref}` and `{target_ref}` share no merge base (unrelated histories)"
+                    ),
+                };
+            }
+        },
+        Err(reason) => return BranchContentDirection::Unknown { reason },
+    };
+
+    // The paths this branch actually delivers, i.e. what its own commits
+    // touched since diverging. Comparing whole trees instead would drown the
+    // signal in every unrelated file the target has moved on.
+    let delivery_paths =
+        match git_stdout_lines(repo_path, &["diff", "--name-only", &merge_base, branch_ref]) {
+            Ok(paths) => paths,
+            Err(reason) => return BranchContentDirection::Unknown { reason },
+        };
+    if delivery_paths.is_empty() {
+        return BranchContentDirection::ContentPresent { paths: Vec::new() };
+    }
+
+    let mut differing: Vec<String> = Vec::new();
+    for chunk in delivery_paths.chunks(PATH_CHUNK) {
+        let mut args: Vec<&str> = vec!["diff", "--name-only", target_ref, branch_ref, "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        match git_stdout_lines(repo_path, &args) {
+            Ok(paths) => differing.extend(paths),
+            Err(reason) => return BranchContentDirection::Unknown { reason },
+        }
+    }
+    if differing.is_empty() {
+        return BranchContentDirection::ContentPresent {
+            paths: delivery_paths,
+        };
+    }
+
+    // For each still-differing delivery path: has the TARGET moved it since the
+    // merge base? If so the branch holds an older version of a file that has
+    // since shipped, and merging re-opens it. If not, the branch may hold work
+    // the target has never seen.
+    let mut stale_paths = Vec::new();
+    let mut candidate_paths = Vec::new();
+    for path in &differing {
+        let range = format!("{merge_base}..{target_ref}");
+        match git_stdout_lines(repo_path, &["rev-list", "--count", &range, "--", path]) {
+            Ok(lines) => {
+                let moved = lines
+                    .first()
+                    .and_then(|line| line.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if moved > 0 {
+                    stale_paths.push(path.clone());
+                } else {
+                    candidate_paths.push(path.clone());
+                }
+            }
+            Err(reason) => return BranchContentDirection::Unknown { reason },
+        }
+    }
+
+    if stale_paths.is_empty() {
+        BranchContentDirection::ContentAbsent {
+            paths: candidate_paths,
+        }
+    } else {
+        BranchContentDirection::BehindTarget {
+            stale_paths,
+            candidate_paths,
+        }
+    }
+}
+
 /// Per-epic close-time guard: reject Epic-task close when ANY child
 /// task's own recorded factory anchor is not merged into the epic branch.
 ///
@@ -10285,6 +10553,7 @@ pub(crate) fn run_epic_close_merge_gate(
     }
     let mut detail = String::new();
     let mut cleaned_worktree_guidance = String::new();
+    let mut any_merge_withheld = false;
     for s in &stranded {
         // Round-1 cas-code-review autofix: use idiomatic `writeln!`
         // rather than the explicit `Write::write_fmt(format_args!(...))`
@@ -10331,34 +10600,127 @@ pub(crate) fn run_epic_close_merge_gate(
             .iter()
             .chain(s.additional_factory_branches.iter())
         {
-            let _ = writeln!(
-                cleaned_worktree_guidance,
-                "  - {task}: `git fetch origin {branch}:refs/remotes/origin/{branch}` then \
-                 `git merge --no-ff {branch}` (or `origin/{branch}` when only the \
-                 remote-tracking ref remains)",
-                task = s.task_id,
-            );
+            // cas-b192: NEVER print a merge instruction without first asking
+            // which way the branch's content points. A lane that is behind the
+            // target holds pre-refactor versions of files that have already
+            // shipped; merging it is a revert wearing a merge's clothes, and
+            // the operator reading this text is being told it is mandatory.
+            let direction = branch_content_direction(repo_path, branch, parent_branch);
+            match &direction {
+                BranchContentDirection::ContentAbsent { .. } => {
+                    let _ = writeln!(
+                        cleaned_worktree_guidance,
+                        "  - {task}: `git fetch origin {branch}:refs/remotes/origin/{branch}` then \
+                         `git merge --no-ff {branch}` (or `origin/{branch}` when only the \
+                         remote-tracking ref remains) — content measured as absent from \
+                         {parent}, so this merge delivers work rather than reverting it",
+                        task = s.task_id,
+                        parent = parent_branch,
+                    );
+                }
+                BranchContentDirection::ContentPresent { .. } => {
+                    let _ = writeln!(
+                        cleaned_worktree_guidance,
+                        "  - {task}: DO NOT MERGE {branch} — every path it delivers is already \
+                         byte-identical on {parent}. Its content has landed (squash or \
+                         cherry-pick loses ancestry, not content); merging would only pollute \
+                         history. Nothing to do for this child.",
+                        task = s.task_id,
+                        parent = parent_branch,
+                    );
+                }
+                BranchContentDirection::BehindTarget {
+                    stale_paths,
+                    candidate_paths,
+                } => {
+                    let rescue = if candidate_paths.is_empty() {
+                        "No delivery path looks unlanded.".to_string()
+                    } else {
+                        format!(
+                            "Inspect these path(s) by hand before discarding the branch — they \
+                             differ and {parent} has NOT touched them, so they may hold real \
+                             unlanded work: {paths}.",
+                            parent = parent_branch,
+                            paths = candidate_paths.join(", "),
+                        )
+                    };
+                    let _ = writeln!(
+                        cleaned_worktree_guidance,
+                        "  - {task}: DO NOT MERGE {branch} — it is BEHIND {parent}. {n} \
+                         delivered path(s) differ because {parent} moved them after this lane \
+                         branched ({sample}), so merging re-opens superseded content. {rescue}",
+                        task = s.task_id,
+                        parent = parent_branch,
+                        n = stale_paths.len(),
+                        sample = stale_paths
+                            .iter()
+                            .take(5)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        rescue = rescue,
+                    );
+                }
+                BranchContentDirection::Unknown { reason } => {
+                    let _ = writeln!(
+                        cleaned_worktree_guidance,
+                        "  - {task}: cannot determine whether {branch}'s content is already on \
+                         {parent}: {reason}. No merge instruction is offered, because a merge \
+                         that cannot be measured may revert shipped work. Resolve by hand.",
+                        task = s.task_id,
+                        parent = parent_branch,
+                    );
+                }
+            }
+            if !direction.merge_instruction_is_safe() {
+                any_merge_withheld = true;
+            }
         }
     }
+    // cas-b192: the headline and the per-child guidance must agree. When any
+    // branch's content was measured as already-landed or behind, telling the
+    // operator "each branch must be merged" is the destructive instruction
+    // itself — a supervisor at 05:45 follows the headline, not the footnotes.
+    let (headline, closing_instruction, guidance_heading) = if any_merge_withheld {
+        (
+            "⚠️ EPIC CLOSE BLOCKED — DO NOT BLIND-MERGE",
+            "At least one branch below was measured as already landed or BEHIND \
+             {parent}. Merging those is a revert, not an integration: it re-opens \
+             files that have already shipped. Follow the per-child guidance \
+             literally and merge only what is marked as delivering absent content.",
+            "Per-child guidance, measured by content rather than by ancestry:",
+        )
+    } else {
+        (
+            "⚠️ MERGE REQUIRED",
+            "Each child's factory branch below was measured as carrying content \
+             absent from {parent}, so each must be merged before the epic can close.",
+            // Unchanged wording for the all-clear-to-merge case: this sentence
+            // is the documented cue for the worktree-already-cleaned path.
+            "If cleanup already removed the worktree, merge the surviving branch \
+             directly from the epic checkout (the branch, not the stale recorded SHA):",
+        )
+    };
     EpicCloseGateOutcome::Reject(format!(
-        "⚠️ MERGE REQUIRED\n\n\
-         Epic {epic_id} cannot close — {n} child task(s) have stranded factory \
-         branches:\n{detail}\n\
-         Each child's factory branch must be merged into {parent} before the \
-         epic can close. This guard cannot be bypassed (use of \
-         bypass_code_review=true does not skip merge-state checks — it is a \
-         data-state guard, not a review gate).\n\n\
+        "{headline}\n\n\
+         Epic {epic_id} cannot close — {n} child task(s) have factory branches \
+         whose delivery is not accounted for on {parent}:\n{detail}\n\
+         {closing_instruction}\n\
+         This guard cannot be bypassed (use of bypass_code_review=true does not \
+         skip merge-state checks — it is a data-state guard, not a review gate).\n\n\
          Remediation when the worker worktree still exists:\n\
          - `mcp__cas__coordination action=worktree_merge id=<factory-branch> \
            task_id=<child-task-id>`\n\n\
-         If cleanup already removed the worktree, merge the surviving branch \
-         directly from the epic checkout (the branch, not the stale recorded SHA):\n\
+         {guidance_heading}\n\
          {cleaned_worktree_guidance}\n\
          Diagnostic: run `mcp__cas__coordination action=epic_status id={epic_id}` \
          for a per-child report.",
+        headline = headline,
+        guidance_heading = guidance_heading,
         epic_id = task.id,
         n = stranded.len(),
         detail = detail,
+        closing_instruction = closing_instruction.replace("{parent}", parent_branch),
         cleaned_worktree_guidance = cleaned_worktree_guidance,
         parent = parent_branch,
     ))
@@ -19961,6 +20323,340 @@ mod epic_status_gate_tests {
                 );
             }
             other => panic!("Bob's live stranded work must block epic close; got {other:?}"),
+        }
+    }
+
+    // --- cas-b192: content direction, not raw reachability -------------------
+    //
+    // Reproduced against the real refs before any of this was written: merging
+    // `factory/young-jaguar-27` into `origin/main` as the old guidance
+    // instructed stops on 11 conflicts, and resolving them the way an operator
+    // naturally would exits 0 while deleting 2,700 shipped lines. These fixtures
+    // are the miniature of exactly that situation.
+
+    /// Build a repo whose lane landed by squash and was then refactored on
+    /// main, the shape that makes reachability and content disagree.
+    ///
+    /// `lane_extra` optionally adds a file that never reaches main — the
+    /// adversarial mixed case: a stale lane that nonetheless holds real work.
+    fn init_squash_landed_repo(lane_extra: Option<(&str, &str)>) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+
+        // The lane delivers feature.rs v1.
+        git(p, &["checkout", "-q", "-b", "factory/lane"]);
+        std::fs::write(p.join("feature.rs"), "fn feature() { v1 }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: deliver feature v1"]);
+        if let Some((name, body)) = lane_extra {
+            std::fs::write(p.join(name), body).unwrap();
+            git(p, &["add", name]);
+            git(p, &["commit", "-q", "-m", "feat: work that never reached main"]);
+        }
+
+        // Main receives the same content by another route (squash), so the
+        // lane's commits are unreachable while its content has landed.
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("feature.rs"), "fn feature() { v1 }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "squash: land the epic"]);
+        dir
+    }
+
+    #[test]
+    fn content_direction_calls_a_squash_landed_lane_present_not_unmerged() {
+        // The noble-octopus-51 shape: reachability says unmerged, content says
+        // landed, and content is right.
+        let dir = init_squash_landed_repo(None);
+        let p = dir.path();
+        assert!(
+            !std::process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", "factory/lane", "main"])
+                .current_dir(p)
+                .status()
+                .unwrap()
+                .success(),
+            "fixture must be unreachable from main, otherwise it proves nothing"
+        );
+        assert!(matches!(
+            branch_content_direction(p, "factory/lane", "main"),
+            BranchContentDirection::ContentPresent { .. }
+        ));
+    }
+
+    #[test]
+    fn content_direction_calls_a_superseded_lane_behind_not_absent() {
+        // Main evolves the delivered file after the lane branched: merging the
+        // lane would re-open v1 over the shipped v2.
+        let dir = init_squash_landed_repo(None);
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        match branch_content_direction(p, "factory/lane", "main") {
+            BranchContentDirection::BehindTarget {
+                stale_paths,
+                candidate_paths,
+            } => {
+                assert_eq!(stale_paths, vec!["feature.rs".to_string()]);
+                assert!(
+                    candidate_paths.is_empty(),
+                    "nothing here is unlanded: {candidate_paths:?}"
+                );
+            }
+            other => panic!("a superseded lane must read as BehindTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_direction_rescues_real_work_stranded_in_a_stale_lane() {
+        // THE CASE THAT DECIDES WHETHER THE FIX IS REAL: a lane that is behind
+        // on its delivered file AND carries a file main has never seen. A
+        // verdict that discards the whole branch would lose `rescue.rs`.
+        let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        match branch_content_direction(p, "factory/lane", "main") {
+            BranchContentDirection::BehindTarget {
+                stale_paths,
+                candidate_paths,
+            } => {
+                assert_eq!(stale_paths, vec!["feature.rs".to_string()]);
+                assert_eq!(
+                    candidate_paths,
+                    vec!["rescue.rs".to_string()],
+                    "genuinely unlanded work must be named, never silently dropped"
+                );
+            }
+            other => panic!("mixed stale/new lane must read as BehindTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_direction_still_calls_genuine_work_absent() {
+        // The guard must keep working where merging IS correct, otherwise the
+        // fix trades a destructive instruction for a useless one.
+        let dir = init_epic_repo(&[("worker", 1)]);
+        assert!(matches!(
+            branch_content_direction(dir.path(), "factory/worker", "main"),
+            BranchContentDirection::ContentAbsent { .. }
+        ));
+    }
+
+    #[test]
+    fn content_direction_says_unknown_rather_than_guessing() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        assert!(matches!(
+            branch_content_direction(dir.path(), "factory/does-not-exist", "main"),
+            BranchContentDirection::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn epic_close_proceeds_when_a_lane_content_landed_by_squash() {
+        // The twin, end to end: reachability says 1 unmerged commit, content
+        // says landed, so the epic must close WITHOUT merging anything.
+        let dir = init_squash_landed_repo(None);
+        let landed = child("cas-twin", TaskStatus::Closed, Some("lane"));
+        let task = epic("cas-epic-twin");
+        let req = base_req(&task.id);
+
+        let statuses = collect_epic_branch_statuses(
+            std::slice::from_ref(&landed),
+            "main",
+            dir.path(),
+        );
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "a lane whose content is fully on main is not stranded"
+        );
+        assert!(
+            statuses[0]
+                .merge_evidence_note
+                .as_deref()
+                .is_some_and(|note| note.contains("squash, ancestry lost")),
+            "must reuse the existing reconciliation vocabulary: {:?}",
+            statuses[0].merge_evidence_note
+        );
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    "main",
+                    dir.path(),
+                    std::slice::from_ref(&landed),
+                ),
+                EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "squash-landed content must not hard-block the epic close"
+        );
+    }
+
+    #[test]
+    fn content_reconciliation_does_not_clear_a_branch_that_delivers_nothing() {
+        // Caught by an existing test while building cas-b192, and worth pinning
+        // directly: a recycled / reset-to-parent branch trivially has "nothing
+        // the target lacks", but that says nothing about whether THIS child's
+        // delivery landed. Reading it as proof would have replaced a confidently
+        // destructive guard with a confidently permissive one.
+        let dir = init_epic_repo(&[("worker", 0)]);
+        assert!(
+            matches!(
+                branch_content_direction(dir.path(), "factory/worker", "main"),
+                BranchContentDirection::ContentPresent { paths } if paths.is_empty()
+            ),
+            "an empty branch still gets no merge instruction"
+        );
+        let mut recycled = child("cas-recycled", TaskStatus::Closed, Some("worker"));
+        recycled.deliverables.factory_branch_anchor = Some("0".repeat(40));
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&recycled), "main", dir.path());
+        assert!(
+            statuses[0].merge_evidence_note.is_none(),
+            "an empty branch must never be minted into merge evidence: {:?}",
+            statuses[0].merge_evidence_note
+        );
+    }
+
+    #[test]
+    fn epic_close_proceeds_when_every_delivered_path_was_superseded() {
+        // cas-69e7's exact shape, reduced: the lane is behind, but every path it
+        // delivered has since been moved on main and none is untouched-and-
+        // different. Nothing is stranded, so the epic must close WITHOUT anyone
+        // merging a stale branch.
+        let dir = init_squash_landed_repo(None);
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        let superseded = child("cas-superseded", TaskStatus::Closed, Some("lane"));
+        let task = epic("cas-epic-superseded");
+        let req = base_req(&task.id);
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&superseded), "main", p);
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "a fully superseded lane strands nothing: {:?}",
+            statuses[0].merge_evidence_note
+        );
+        assert!(matches!(
+            run_epic_close_merge_gate(
+                &task,
+                &req,
+                "main",
+                p,
+                std::slice::from_ref(&superseded),
+            ),
+            EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+    }
+
+    #[test]
+    fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
+        // Fail-closed where it counts: a behind lane that ALSO carries a path
+        // main has never touched may hold real work, so it keeps blocking. This
+        // is the line between cas-69e7 (nothing stranded) and actual data loss.
+        let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        let stale = child("cas-stale", TaskStatus::Closed, Some("lane"));
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&stale), "main", p);
+        assert!(
+            statuses[0].unmerged_count > 0,
+            "a behind lane carrying possibly-unlanded work must keep blocking"
+        );
+    }
+
+    #[test]
+    fn epic_close_never_prints_a_merge_command_for_a_behind_branch() {
+        // The whole point of cas-b192: the text an operator is handed at 05:45
+        // must not tell them to run a merge that reverts shipped work.
+        let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        let stale_child = child("cas-stale", TaskStatus::Closed, Some("lane"));
+        let task = epic("cas-epic-stale");
+        let req = base_req(&task.id);
+        match run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            p,
+            std::slice::from_ref(&stale_child),
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    !message.contains("git merge --no-ff factory/lane"),
+                    "a behind branch must never be handed a merge command: {message}"
+                );
+                assert!(
+                    message.contains("DO NOT MERGE"),
+                    "the refusal must be explicit: {message}"
+                );
+                assert!(
+                    message.contains("BEHIND"),
+                    "the reason must name the direction: {message}"
+                );
+                assert!(
+                    message.contains("rescue.rs"),
+                    "possibly-unlanded work must be surfaced for inspection: {message}"
+                );
+                assert!(
+                    message.contains("DO NOT BLIND-MERGE"),
+                    "the headline must agree with the per-child guidance: {message}"
+                );
+            }
+            other => panic!("a stale lane must still block close, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn epic_close_still_prints_the_merge_command_for_genuinely_absent_work() {
+        // Regression guard on the fix itself: real unmerged work must still get
+        // actionable remediation.
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker"));
+        let task = epic("cas-epic-real");
+        let req = base_req(&task.id);
+        match run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            dir.path(),
+            std::slice::from_ref(&unmerged),
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("git merge --no-ff factory/worker"),
+                    "genuine unmerged work must still be mergeable: {message}"
+                );
+                assert!(
+                    message.contains("MERGE REQUIRED"),
+                    "headline must stay actionable when merging is correct: {message}"
+                );
+                assert!(
+                    !message.contains("DO NOT MERGE"),
+                    "must not scare an operator off a legitimate merge: {message}"
+                );
+            }
+            other => panic!("genuine unmerged work must block close, got {other:?}"),
         }
     }
 

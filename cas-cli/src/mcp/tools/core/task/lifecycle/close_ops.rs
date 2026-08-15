@@ -9994,33 +9994,10 @@ pub(crate) fn collect_epic_branch_statuses(
                     .iter()
                     .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
                     .collect();
-                // "Accounted for" has two shapes, and this codebase already
-                // recognises both: content still byte-identical on the target
-                // (ContentPresent), and content the target has since evolved
-                // (DeliveryContentPresence::Superseded, which the ancestry-clean
-                // path already treats as merged rather than stranded). The only
-                // thing that must still block is a delivered path the target has
-                // NEVER touched and which still differs — that is possible
-                // unlanded work, and BehindTarget reports it as candidate_paths.
-                //
-                // Measured on the five real cas-69e7 / Commander lanes: every
-                // differing delivery path had been moved by main afterwards and
-                // candidate_paths was empty for all of them, which is why the
-                // epic was hard-blocked with nothing actually stranded.
-                let accounted_for = |d: &BranchContentDirection| match d {
-                    BranchContentDirection::ContentPresent { .. } => true,
-                    BranchContentDirection::BehindTarget {
-                        candidate_paths, ..
-                    } => candidate_paths.is_empty(),
-                    _ => false,
-                };
                 let delivered: Vec<String> = directions
                     .iter()
                     .flat_map(|d| match d {
                         BranchContentDirection::ContentPresent { paths } => paths.clone(),
-                        BranchContentDirection::BehindTarget { stale_paths, .. } => {
-                            stale_paths.clone()
-                        }
                         _ => Vec::new(),
                     })
                     .collect();
@@ -10032,16 +10009,18 @@ pub(crate) fn collect_epic_branch_statuses(
                 // such a branch is still correct — that is the guidance layer's
                 // job — but clearing the gate needs positive evidence, so this
                 // path requires at least one compared delivery path.
-                if !delivered.is_empty() && directions.iter().all(accounted_for) {
+                if !delivered.is_empty()
+                    && directions
+                        .iter()
+                        .all(|d| matches!(d, BranchContentDirection::ContentPresent { .. }))
+                {
                     unmerged_count = 0;
                     merge_evidence_note = Some(format!(
                         "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
-                         lost): every path they deliver is either byte-identical on \
-                         `{parent_branch}` or has been superseded there by later work, and no \
-                         delivered path is both untouched by `{parent_branch}` and still \
-                         different. Delivered path(s) checked: {}. Requiring a merge here would \
-                         only pollute history — and where the branch is behind, revert shipped \
-                         work.",
+                         lost): every path they deliver is already byte-identical on \
+                         `{parent_branch}`, so there is nothing left to integrate. Delivered \
+                         path(s) checked: {}. Requiring a merge here would only pollute history \
+                         — and where the branch is additionally behind, revert shipped work.",
                         t.id,
                         fallback_branches.join(", "),
                         delivered.join(", "),
@@ -20528,44 +20507,94 @@ mod epic_status_gate_tests {
     }
 
     #[test]
-    fn epic_close_proceeds_when_every_delivered_path_was_superseded() {
-        // cas-69e7's exact shape, reduced: the lane is behind, but every path it
-        // delivered has since been moved on main and none is untouched-and-
-        // different. Nothing is stranded, so the epic must close WITHOUT anyone
-        // merging a stale branch.
-        let dir = init_squash_landed_repo(None);
+    fn behind_target_is_never_treated_as_proof_that_content_landed() {
+        // A hole in an EARLIER VERSION OF THIS FIX, kept as a permanent guard.
+        // I briefly cleared any lane whose every differing delivery path had
+        // since been moved on the target, reasoning that a moved path was
+        // "superseded". It is not: the target touching a file does not mean the
+        // target absorbed this lane's change. Here the lane's function never
+        // reaches main, main rewrites the same file for unrelated reasons, and
+        // that rule would have silently discarded real work — the permissive
+        // twin of the destructive bug this task exists to fix.
+        let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["checkout", "-q", "-b", "factory/lane"]);
+        std::fs::write(
+            p.join("feature.rs"),
+            "fn existing() {}\nfn only_on_the_lane() {}\n",
+        )
+        .unwrap();
         git(p, &["add", "feature.rs"]);
-        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+        git(p, &["commit", "-q", "-m", "feat: lane work that never lands"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("feature.rs"), "fn existing() { /* rewritten */ }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: unrelated rewrite on main"]);
 
-        let superseded = child("cas-superseded", TaskStatus::Closed, Some("lane"));
-        let task = epic("cas-epic-superseded");
-        let req = base_req(&task.id);
+        let child_task = child("cas-lost", TaskStatus::Closed, Some("lane"));
         let statuses =
-            collect_epic_branch_statuses(std::slice::from_ref(&superseded), "main", p);
-        assert_eq!(
-            statuses[0].unmerged_count, 0,
-            "a fully superseded lane strands nothing: {:?}",
+            collect_epic_branch_statuses(std::slice::from_ref(&child_task), "main", p);
+        assert!(
+            statuses[0].unmerged_count > 0,
+            "content that never landed must keep blocking even though the target \
+             moved the same path: {:?}",
             statuses[0].merge_evidence_note
         );
+        assert!(
+            statuses[0].merge_evidence_note.is_none(),
+            "a moved path is not merge evidence: {:?}",
+            statuses[0].merge_evidence_note
+        );
+    }
+
+    #[test]
+    fn respawn_lane_with_no_task_commits_is_never_called_stranded() {
+        // cas-5c10 shape, live: a task delivered by one worker and then
+        // administratively closed by a freshly spawned second worker gets the
+        // second lane named in the remediation too, though it authored nothing.
+        // The false-positive set otherwise grows with every respawn.
+        let dir = init_epic_repo(&[("original", 1)]);
+        let p = dir.path();
+        git(p, &["merge", "--no-ff", "-m", "land original", "factory/original"]);
+        // The respawn lane is just the reconciled base: zero task commits.
+        git(p, &["branch", "factory/respawn", "main"]);
         assert!(matches!(
-            run_epic_close_merge_gate(
-                &task,
-                &req,
-                "main",
-                p,
-                std::slice::from_ref(&superseded),
-            ),
-            EpicCloseGateOutcome::ProceedWithNote(_)
+            branch_content_direction(p, "factory/respawn", "main"),
+            BranchContentDirection::ContentPresent { .. }
         ));
+        let mut respawned = child("cas-respawn", TaskStatus::Closed, Some("respawn"));
+        respawned.deliverables.parked_branch = Some("factory/original".to_string());
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&respawned), "main", p);
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "a zero-commit respawn lane over a landed delivery strands nothing"
+        );
+        let task = epic("cas-epic-respawn");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    "main",
+                    p,
+                    std::slice::from_ref(&respawned)
+                ),
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "a respawn must not resurrect a solved epic block"
+        );
     }
 
     #[test]
     fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
-        // Fail-closed where it counts: a behind lane that ALSO carries a path
-        // main has never touched may hold real work, so it keeps blocking. This
-        // is the line between cas-69e7 (nothing stranded) and actual data loss.
+        // Fail-closed: being behind is not proof that nothing was lost. The fix
+        // must stop the destructive ADVICE without weakening the GATE.
         let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
         let p = dir.path();
         std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();

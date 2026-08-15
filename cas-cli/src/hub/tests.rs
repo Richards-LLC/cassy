@@ -1153,6 +1153,82 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
     assert_eq!(removed.session.as_deref(), Some("factory-a"));
 }
 
+#[tokio::test]
+async fn commander_attention_event_is_immediate_then_durably_patched_in_place() {
+    let temp = private_tempdir();
+    let path = temp.path().join("events.json");
+    let events = MachineEventBus::open(16, &path).unwrap();
+    let mut broadcast = events.subscribe();
+    let mut enrichment = events.enable_enrichment();
+    events.set_session_context(
+        "factory-a",
+        SessionAttentionContext {
+            title: "Refactor authentication".into(),
+            phase: "testing".into(),
+        },
+    );
+
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::Error {
+            message: "serde panic in auth.rs:44".into(),
+        },
+    );
+    let immediate = broadcast.recv().await.unwrap();
+    assert_eq!(immediate.kind, MachineEventKind::DaemonError);
+    assert!(immediate.enrichment_pending);
+    assert!(immediate.enrichment.is_none());
+    assert_eq!(immediate.session_context.as_ref().unwrap().phase, "testing");
+    assert_eq!(
+        enrichment.recv().await.unwrap().sequence,
+        immediate.sequence
+    );
+
+    events.finish_enrichment(
+        immediate.sequence,
+        Some(AttentionEnrichment {
+            severity: AttentionSeverity::Critical,
+            summary: "Authentication worker crashed".into(),
+            detail: Some("auth.rs:44 serde panic".into()),
+            action: AttentionAction::Retry,
+            fingerprint: "auth.rs-serde-panic".into(),
+        }),
+    );
+    let patch = broadcast.recv().await.unwrap();
+    assert_eq!(patch.sequence, immediate.sequence);
+    assert_eq!(patch.revision, 1);
+    assert!(!patch.enrichment_pending);
+    assert_eq!(
+        patch.enrichment.as_ref().unwrap().fingerprint,
+        "auth.rs-serde-panic"
+    );
+
+    drop(events);
+    let reopened = MachineEventBus::open(16, &path).unwrap();
+    assert_eq!(reopened.history(), vec![patch]);
+}
+
+#[tokio::test]
+async fn commander_attention_api_off_is_complete_without_pending_state() {
+    let events = MachineEventBus::new(4);
+    let mut broadcast = events.subscribe();
+    events.observe_daemon(
+        "factory-a",
+        &DaemonMessage::Error {
+            message: "raw error remains actionable".into(),
+        },
+    );
+
+    let event = broadcast.recv().await.unwrap();
+    assert_eq!(event.kind, MachineEventKind::DaemonError);
+    assert!(!event.enrichment_pending);
+    assert!(event.enrichment.is_none());
+    assert_eq!(
+        event.payload.unwrap()["message"],
+        "raw error remains actionable"
+    );
+}
+
 #[test]
 fn h1_runtime_state_is_single_instance_and_round_trips() {
     let temp = private_tempdir();

@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::ui::factory::{DaemonMessage, SessionManager};
 
+mod attention;
 mod auth;
 mod connector;
 mod death;
@@ -25,6 +26,7 @@ mod server;
 mod state;
 mod tailscale;
 
+pub(crate) use attention::spawn_attention_enricher;
 pub use auth::{
     AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
     PairingExchange, PairingInvitation, PublicJwk, Scope, WsTicket, required_scope,
@@ -34,7 +36,10 @@ pub use death::{DaemonExitEvidenceStore, DaemonExitReceipt, DaemonIdentity};
 #[cfg(unix)]
 pub(crate) use death::{supervise_forked_daemon, supervise_spawned_daemon};
 pub use discovery::{CloudDeviceSuggestion, load_cloud_device_suggestions};
-pub use events::{MachineEvent, MachineEventBus, MachineEventKind};
+pub use events::{
+    AttentionAction, AttentionEnrichment, AttentionSeverity, MachineEvent, MachineEventBus,
+    MachineEventKind, SessionAttentionContext,
+};
 pub use identity::{MachineIdentity, MachineIdentityStore};
 pub use runtime::{HubInstanceLock, HubProcessRecord, HubRuntimePaths};
 pub use server::{HubState, router};

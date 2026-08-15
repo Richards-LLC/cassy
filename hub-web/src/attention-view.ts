@@ -20,6 +20,7 @@ export interface AttentionPanelCallbacks {
 export interface AttentionPanelOptions {
   now?: number;
   animateIds?: ReadonlySet<string>;
+  reclassifyIds?: ReadonlySet<string>;
 }
 
 const ACTION_LABEL: Record<Exclude<AttentionAction, "none">, string> = {
@@ -89,6 +90,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   if (severity === "critical" && options.animateIds?.has(card.latest.id)) {
     article.classList.add("attention-item--new-critical");
   }
+  if (options.reclassifyIds?.has(card.latest.id)) article.classList.add("attention-item--reclassified");
 
   const eyebrow = document.createElement("div");
   eyebrow.className = "attention-eyebrow";

@@ -477,29 +477,43 @@ async fn events<R: SessionReadModel>(
     {
         return unauthorized();
     }
+    // Subscribe before snapshotting. A concurrent event can consequently be
+    // replayed once and then observed live once; sequence+revision make that a
+    // harmless idempotent upsert, while the ordering avoids a lost-event gap.
     let receiver = state.events.subscribe();
-    let output = stream::unfold(receiver, |mut receiver| async move {
+    let replay = stream::iter(
+        state
+            .events
+            .history()
+            .into_iter()
+            .map(|event| Ok::<Event, Infallible>(machine_event_sse(event))),
+    );
+    let live = stream::unfold(receiver, |mut receiver| async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
-                    let item = Event::default()
-                        .id(event.sequence.to_string())
-                        .event(format!("{:?}", event.kind).to_lowercase())
-                        .json_data(event)
-                        .expect("MachineEvent serialization is infallible");
-                    return Some((Ok::<Event, Infallible>(item), receiver));
+                    return Some((Ok::<Event, Infallible>(machine_event_sse(event)), receiver));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
         }
     });
+    let output = replay.chain(live);
     with_cors(
         Sse::new(output)
             .keep_alive(KeepAlive::default())
             .into_response(),
         &headers,
     )
+}
+
+fn machine_event_sse(event: super::MachineEvent) -> Event {
+    Event::default()
+        .id(format!("{}.{}", event.sequence, event.revision))
+        .event(format!("{:?}", event.kind).to_lowercase())
+        .json_data(event)
+        .expect("MachineEvent serialization is infallible")
 }
 
 async fn status<R: SessionReadModel>(

@@ -57,6 +57,7 @@ const leaseExpiryTimers = new Map<string, number>();
 const mobileCollapsedPaneGeometry = "freeze";
 let attention: AttentionItem[] = [];
 const newCriticalAttentionIds = new Set<string>();
+const reclassifiedAttentionIds = new Set<string>();
 let selectedMachineId: string | undefined;
 let selectedSession: string | undefined;
 let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
@@ -214,6 +215,7 @@ async function upsertMachineEventAttention(machine: StoredMachine, event: Record
     ? applyAttentionEnrichment(provisional, enriched, typeof event.enriched_at === "string" ? event.enriched_at : undefined)
     : { ...provisional, enrichmentPending: pending };
   const wasCritical = existing?.severity === "critical";
+  if (existing && existing.severity !== next.severity) reclassifiedAttentionIds.add(id);
   if (!wasCritical && next.severity === "critical") newCriticalAttentionIds.add(id);
   attention = existing
     ? attention.map((item) => item.id === id ? next : item)
@@ -221,6 +223,7 @@ async function upsertMachineEventAttention(machine: StoredMachine, event: Record
   await attentionStore.put(next);
   render();
   newCriticalAttentionIds.delete(id);
+  reclassifiedAttentionIds.delete(id);
 }
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
@@ -1116,7 +1119,7 @@ function renderAttention(): void {
       await navigator.clipboard.writeText(payload);
       toast("Event payload copied");
     },
-  }, { animateIds: newCriticalAttentionIds });
+  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds });
 }
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {

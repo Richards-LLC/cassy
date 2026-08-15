@@ -1135,8 +1135,18 @@ main {
   animation: attention-critical-arrival var(--attention-motion-duration) ease-out 1;
 }
 
+@keyframes attention-tier-move {
+  from { transform: translateX(var(--space-2)); }
+  to { transform: translateX(0); }
+}
+
+.attention-item--reclassified {
+  animation: attention-tier-move var(--attention-motion-duration) ease-out 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .attention-item--new-critical { animation: none; }
+  .attention-item--new-critical,
+  .attention-item--reclassified { animation: none; }
   .connection-spinner { animation: none; }
 }
 

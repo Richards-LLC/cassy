@@ -8,13 +8,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
+use crate::ai_enrichment::HttpAiEnrichmentProvider;
 use crate::cli::Cli;
+use crate::config::Config;
 use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus, MachineIdentityStore,
     MachineMetadata, MachineTransport, PreAuthAuthorizer, Scope, SessionCatalog,
     SessionMultiplexer, TailscaleServeManager, TransportSecurity, load_cloud_device_suggestions,
-    router, validate_control_bind,
+    router, spawn_attention_enricher, validate_control_bind,
 };
 
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -284,6 +286,16 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     let _lock = paths.acquire_instance_lock()?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id.clone())?;
+    // Commander hub is machine-scoped, so its one AI-enrichment opt-in comes
+    // from the host config rather than whichever project launched the daemon.
+    let ai_enrichment = dirs::home_dir()
+        .map(|home| {
+            Config::load(&home.join(".cas"))
+                .unwrap_or_default()
+                .factory()
+                .ai_enrichment
+        })
+        .unwrap_or_default();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -324,7 +336,15 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         }
 
         let catalog = SessionCatalog::new(LocalSessionReadModel);
-        let events = MachineEventBus::new(1024);
+        let events = MachineEventBus::open(1024, paths.events_path())?;
+        let attention_task = ai_enrichment.enabled.then(|| {
+            let receiver = events.enable_enrichment();
+            spawn_attention_enricher(
+                events.clone(),
+                receiver,
+                Arc::new(HttpAiEnrichmentProvider::new(ai_enrichment.clone())),
+            )
+        });
         let connector = DaemonConnector::new(
             SessionMultiplexer::new(DEFAULT_VIEWER_QUEUE_CAPACITY),
             events.clone(),
@@ -372,6 +392,9 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             serve_with_bounded_connection_drain(listener, router(state)).await
         };
         event_task.abort();
+        if let Some(task) = attention_task {
+            task.abort();
+        }
         paths.remove_process_record()?;
         #[cfg(debug_assertions)]
         hold_instance_lock_after_record_removal_for_test()?;

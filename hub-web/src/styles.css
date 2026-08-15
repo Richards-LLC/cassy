@@ -166,6 +166,15 @@ pre,
   grid-template-columns: var(--machine-rail-width) minmax(0, 1fr) var(--machine-rail-width);
 }
 
+/* An open desktop drawer owns a grid track instead of floating above panes. */
+.shell.drawer-open {
+  grid-template-columns: calc(var(--machine-rail-width) + var(--machine-drawer-width)) minmax(0, 1fr) var(--context-panel-width);
+}
+
+.shell.drawer-open.attention-collapsed {
+  grid-template-columns: calc(var(--machine-rail-width) + var(--machine-drawer-width)) minmax(0, 1fr) var(--machine-rail-width);
+}
+
 .machine-navigation {
   position: relative;
   z-index: 5;
@@ -200,9 +209,16 @@ pre,
 
 .commander-mark {
   color: var(--text-hi);
-  font-family: var(--font-mono);
-  font-size: var(--fs-base);
-  font-weight: var(--weight-semibold);
+}
+
+.commander-mark-icon {
+  width: var(--space-5);
+  height: var(--space-5);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
 }
 
 .machine-rail nav {
@@ -1430,14 +1446,21 @@ fieldset {
 
 @media (max-width: 53rem) {
   .shell,
-  .shell.attention-collapsed {
+  .shell.attention-collapsed,
+  .shell.drawer-open {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) var(--machine-rail-width);
     gap: 0;
   }
 
+  /* The expanded context panel receives a row, so it never covers a terminal. */
+  .shell.attention-expanded {
+    grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) var(--machine-rail-width);
+  }
+
   .shell main { grid-column: 1; grid-row: 1; }
   .machine-navigation { grid-column: 1; grid-row: 2; }
+  .shell.attention-expanded .machine-navigation { grid-row: 3; }
 
   .machine-rail {
     flex-direction: row;
@@ -1552,11 +1575,13 @@ fieldset {
   }
 
   .context-panel:not(.collapsed) {
-    inset: auto 0 var(--machine-rail-width) 0;
+    position: static;
+    grid-column: 1;
+    grid-row: 2;
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: var(--space-10) minmax(0, 1fr);
     width: auto;
-    height: min(58dvh, var(--mobile-drawer-max-height));
+    height: 100%;
     background: var(--bg-panel);
   }
 

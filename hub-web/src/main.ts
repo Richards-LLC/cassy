@@ -32,6 +32,7 @@ document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribut
   rootStyles.getPropertyValue("--bg-root").trim(),
 );
 const machines = new Map<string, StoredMachine>();
+let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
@@ -156,6 +157,7 @@ function layoutForPanes(key: string, panes: readonly PaneInfo[], fallbackPrimary
 async function boot(): Promise<void> {
   const stored = await catalog.recoverPending();
   for (const machine of stored.machines) machines.set(machine.id, machine);
+  machineCatalogLoaded = true;
   if (stored.pendingCleanup > 0) {
     pairingStatus = "A canceled credential remains blocked while durable local cleanup is pending.";
   }
@@ -1045,10 +1047,10 @@ function render(captureDraft = true): void {
     surfaces.clear();
   }
   app.innerHTML = `
-    <div class="shell${attentionPanelCollapsed ? " attention-collapsed" : ""}">
+    <div class="shell${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}">
       <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
         <div class="machine-rail">
-          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" aria-expanded="${machineDrawerOpen}">C</button>
+          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}"><svg class="commander-mark-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg></button>
           <nav id="machine-rail-list" aria-label="Machines"></nav>
           <button id="pair-toggle" class="rail-control pair-machine" type="button" aria-label="Pair a machine" title="Pair a machine">+</button>
         </div>
@@ -1102,6 +1104,15 @@ function render(captureDraft = true): void {
   for (const machine of machines.values()) {
     machineRail.append(machineRailButton(machine));
     machineTree.append(machineTreeGroup(machine));
+  }
+  if (!machineCatalogLoaded || machines.size === 0) {
+    const message = document.createElement("p");
+    message.className = "drawer-empty";
+    message.setAttribute("role", "status");
+    message.textContent = machineCatalogLoaded
+      ? "No machines paired yet — press + to pair this machine."
+      : "Loading paired machines…";
+    machineTree.append(message);
   }
   document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
   renderAttention(); renderStatus(status);
@@ -1426,4 +1437,5 @@ function escapeHtml(value: string): string { const span = document.createElement
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
 
 window.addEventListener("keydown", globalShortcut, true);
+render(false);
 void boot();

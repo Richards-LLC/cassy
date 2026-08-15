@@ -131,7 +131,8 @@ These require a major version bump:
    ```
 
    When `cas-cli/src/migration/migrations/mod.rs` changed since the last tag,
-   this runs the required command `cargo test -p cas --test component_output_test`.
+   this runs the required command
+   `cargo nextest run -p cas --test component_output_test`.
    That snapshot suite checks the doctor/status schema and ledger counts that a
    migration moves; the scoped release suites do not build it. If no previous
    tag is reachable, the guard runs the snapshots conservatively.
@@ -147,13 +148,20 @@ These require a major version bump:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
-   ./scripts/check-release-preflight.sh vX.Y.Z
+   ./scripts/check-release-preflight.sh --local vX.Y.Z
    ```
 
    This rejects a dirty tree, a lightweight/stale tag, mismatched release-train
    crate versions, a missing changelog heading, or lockfile drift before the
-   expensive release builds begin. `release.sh` runs the same guard before its
-   local audit and tag push.
+   expensive release builds begin. `release.sh` runs the same `--local` guard
+   before its local audit and tag push.
+
+   `--local` inspects the local tag object. Omit it only on the CI side, where
+   the tag is already pushed: the default lane re-fetches the exact remote tag
+   object first, so `actions/checkout` handing back a peeled ref cannot turn the
+   annotated-tag check into a check of checkout's local ref shape. Running the
+   default lane before the push always fails with
+   `couldn't find remote ref refs/tags/vX.Y.Z`.
 8. After reviewing the audit, `release.sh --publish-tag` pushes the tag and
    starts the workflow. Publishing is deliberately explicit: a bare
    `release.sh` invocation never touches the remote. It builds Linux on its

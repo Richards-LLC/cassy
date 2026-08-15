@@ -129,7 +129,10 @@ ensure_release_tag() {
         echo "Creating annotated tag $TAG on HEAD before release audit..."
         git tag -a "$TAG" -m "$TAG"
     fi
-    ./scripts/check-release-preflight.sh "$TAG"
+    # --local: this runs before the tag is pushed, so the guard must inspect the
+    # local tag object instead of re-fetching one that cannot exist on origin
+    # yet. CI re-runs the same script without --local after the push.
+    ./scripts/check-release-preflight.sh --local "$TAG"
 }
 
 # A registered migration changes the doctor/status component snapshots, while

@@ -1,6 +1,6 @@
 [package]
 name = "cas-mcp"
-version = "2.69.1"
+version = "2.70.0"
 edition = "2024"
 rust-version = "1.85"
 description = "MCP server for CAS"

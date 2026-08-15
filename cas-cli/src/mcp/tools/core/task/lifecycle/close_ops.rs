@@ -9969,6 +9969,64 @@ pub(crate) fn collect_epic_branch_statuses(
                     ));
                 }
             }
+            // cas-b192: the reconciliation above proves content only through
+            // BYTE-IDENTICAL patch equivalence against a recorded anchor. That
+            // fails the moment later lanes refactor the same files, which is
+            // the normal shape of an epic that squash-landed and then evolved —
+            // and it never runs at all for a child with no resolvable anchor.
+            // Both cases then read as "stranded" purely because ancestry was
+            // lost, which is what produced a hard block plus a destructive
+            // merge instruction on five live lanes.
+            //
+            // So fall back to the same question one level down: does the branch
+            // still deliver anything the target does not already have? Only a
+            // positive CONTENT-PRESENT answer clears the child. BehindTarget
+            // and Unknown deliberately keep blocking — being behind is not
+            // proof that nothing was lost, and this guard must stay fail-closed
+            // even while it stops issuing destructive advice.
+            if unmerged_count > 0
+                && dropped_paths.is_empty()
+                && content_check_error.is_none()
+                && merge_evidence_note.is_none()
+                && !fallback_branches.is_empty()
+            {
+                let directions: Vec<BranchContentDirection> = fallback_branches
+                    .iter()
+                    .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
+                    .collect();
+                let delivered: Vec<String> = directions
+                    .iter()
+                    .flat_map(|d| match d {
+                        BranchContentDirection::ContentPresent { paths } => paths.clone(),
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                // A branch that delivers NO paths at all proves nothing about
+                // this child. That is the recycled/reset-to-parent shape: the
+                // branch was reused for other work and no longer represents the
+                // task, so "nothing to merge from it" must not be read as "the
+                // task's delivery landed". Withholding a merge instruction for
+                // such a branch is still correct — that is the guidance layer's
+                // job — but clearing the gate needs positive evidence, so this
+                // path requires at least one compared delivery path.
+                if !delivered.is_empty()
+                    && directions
+                        .iter()
+                        .all(|d| matches!(d, BranchContentDirection::ContentPresent { .. }))
+                {
+                    unmerged_count = 0;
+                    merge_evidence_note = Some(format!(
+                        "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
+                         lost): every path they deliver is already byte-identical on \
+                         `{parent_branch}`, so there is nothing left to integrate. Delivered \
+                         path(s) checked: {}. Requiring a merge here would only pollute history \
+                         — and where the branch is additionally behind, revert shipped work.",
+                        t.id,
+                        fallback_branches.join(", "),
+                        delivered.join(", "),
+                    ));
+                }
+            }
             EpicChildBranchStatus {
                 task_id: t.id.clone(),
                 task_status: t.status,
@@ -20379,6 +20437,92 @@ mod epic_status_gate_tests {
             branch_content_direction(dir.path(), "factory/does-not-exist", "main"),
             BranchContentDirection::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn epic_close_proceeds_when_a_lane_content_landed_by_squash() {
+        // The twin, end to end: reachability says 1 unmerged commit, content
+        // says landed, so the epic must close WITHOUT merging anything.
+        let dir = init_squash_landed_repo(None);
+        let landed = child("cas-twin", TaskStatus::Closed, Some("lane"));
+        let task = epic("cas-epic-twin");
+        let req = base_req(&task.id);
+
+        let statuses = collect_epic_branch_statuses(
+            std::slice::from_ref(&landed),
+            "main",
+            dir.path(),
+        );
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "a lane whose content is fully on main is not stranded"
+        );
+        assert!(
+            statuses[0]
+                .merge_evidence_note
+                .as_deref()
+                .is_some_and(|note| note.contains("squash, ancestry lost")),
+            "must reuse the existing reconciliation vocabulary: {:?}",
+            statuses[0].merge_evidence_note
+        );
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    "main",
+                    dir.path(),
+                    std::slice::from_ref(&landed),
+                ),
+                EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "squash-landed content must not hard-block the epic close"
+        );
+    }
+
+    #[test]
+    fn content_reconciliation_does_not_clear_a_branch_that_delivers_nothing() {
+        // Caught by an existing test while building cas-b192, and worth pinning
+        // directly: a recycled / reset-to-parent branch trivially has "nothing
+        // the target lacks", but that says nothing about whether THIS child's
+        // delivery landed. Reading it as proof would have replaced a confidently
+        // destructive guard with a confidently permissive one.
+        let dir = init_epic_repo(&[("worker", 0)]);
+        assert!(
+            matches!(
+                branch_content_direction(dir.path(), "factory/worker", "main"),
+                BranchContentDirection::ContentPresent { paths } if paths.is_empty()
+            ),
+            "an empty branch still gets no merge instruction"
+        );
+        let mut recycled = child("cas-recycled", TaskStatus::Closed, Some("worker"));
+        recycled.deliverables.factory_branch_anchor = Some("0".repeat(40));
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&recycled), "main", dir.path());
+        assert!(
+            statuses[0].merge_evidence_note.is_none(),
+            "an empty branch must never be minted into merge evidence: {:?}",
+            statuses[0].merge_evidence_note
+        );
+    }
+
+    #[test]
+    fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
+        // Fail-closed: being behind is not proof that nothing was lost. The fix
+        // must stop the destructive ADVICE without weakening the GATE.
+        let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
+        let p = dir.path();
+        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+
+        let stale = child("cas-stale", TaskStatus::Closed, Some("lane"));
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&stale), "main", p);
+        assert!(
+            statuses[0].unmerged_count > 0,
+            "a behind lane carrying possibly-unlanded work must keep blocking"
+        );
     }
 
     #[test]

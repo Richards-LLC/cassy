@@ -90,7 +90,9 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         // Reporting the viewport is part of observing a pane, not terminal
         // input. The lease policy is enforced separately: an unleased pane
         // may follow an observer, while a leased pane follows its controller.
-        ClientMessage::ResizePane { .. } => Some(Scope::PaneRead),
+        ClientMessage::ResizePane { .. }
+        | ClientMessage::RequestPaneKeyframe { .. }
+        | ClientMessage::ScrollbackRequest { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),
         ClientMessage::SpawnWorkers { .. }

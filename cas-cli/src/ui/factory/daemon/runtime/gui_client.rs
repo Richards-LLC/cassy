@@ -44,6 +44,7 @@ impl FactoryDaemon {
                         scrollback: Some(scrollback),
                         protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                         capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                        pane_bootstrap: Vec::new(),
                     };
 
                     let frame = match encode_frame(&welcome) {
@@ -301,6 +302,7 @@ impl FactoryDaemon {
                     scrollback,
                     protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                     capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                    pane_bootstrap: Vec::new(),
                 };
                 if let Some(frame) = encode_frame(&welcome) {
                     if let Some(client) = self.gui_clients.get_mut(&client_id) {
@@ -457,6 +459,15 @@ impl FactoryDaemon {
             }
             ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
                 unreachable!("Commander controls return through the shared dispatcher")
+            }
+            ClientMessage::RequestPaneKeyframe { .. }
+            | ClientMessage::ScrollbackRequest { .. } => {
+                if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                    message: "pane keyframes and paged scrollback require the WebSocket transport"
+                        .to_string(),
+                }) && let Some(client) = self.gui_clients.get_mut(&client_id) {
+                    queue_frame(client, &frame);
+                }
             }
             ClientMessage::GetState => {
                 let state = self.build_session_state();

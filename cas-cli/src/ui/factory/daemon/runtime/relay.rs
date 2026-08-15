@@ -216,10 +216,15 @@ pub(in crate::ui::factory::daemon) fn write_pane_snapshots(
 /// dimensions. This function captures that reflowed viewport as ANSI bytes
 /// suitable for replaying into a web terminal emulator (ghostty-web / xterm.js),
 /// preserving colors, bold/italic, and cursor position.
-fn snapshot_to_ansi(snap: &TerminalSnapshot, in_alt_screen: bool) -> Vec<u8> {
+pub(super) fn snapshot_to_ansi(snap: &TerminalSnapshot, in_alt_screen: bool) -> Vec<u8> {
     let cap = (snap.rows as usize) * (snap.cols as usize) * 4;
     let mut buf = Vec::with_capacity(cap);
     let mut tmp = String::new();
+
+    // RIS resets modes, attributes, cursor state, and both screen buffers. An
+    // arbitrary PTY tail can never make this guarantee because it may begin
+    // inside an escape sequence or depend on modes set before the slice.
+    buf.extend_from_slice(b"\x1bc");
 
     // The snapshot is taken from the currently visible buffer.  When that is
     // an alternate screen, enter it before replaying the rows: a live Ink UI
@@ -743,7 +748,28 @@ mod tests {
         };
 
         let replay = snapshot_to_ansi(&snapshot, true);
-        assert!(replay.starts_with(b"\x1b[?1049h\x1b[0m\x1b[2J\x1b[H"));
+        assert!(replay.starts_with(b"\x1bc\x1b[?1049h\x1b[0m\x1b[2J\x1b[H"));
         assert!(replay.ends_with(b"\x1b[0m\x1b[1;1H"));
+    }
+
+    #[test]
+    fn snapshot_keyframe_always_starts_at_an_escape_boundary_and_resets_modes() {
+        let snapshot = TerminalSnapshot {
+            cells: vec![cas_factory_protocol::TerminalCell {
+                codepoint: 'x' as u32,
+                fg: (0, 0, 0),
+                bg: (0, 0, 0),
+                flags: 0,
+                width: 1,
+            }],
+            cursor: cas_factory_protocol::CursorPosition { x: 0, y: 0 },
+            cols: 1,
+            rows: 1,
+        };
+
+        let replay = snapshot_to_ansi(&snapshot, false);
+        assert!(replay.starts_with(b"\x1bc\x1b[0m\x1b[2J\x1b[H"));
+        assert!(replay.windows(4).any(|window| window == b"\x1b[H"));
+        assert!(!replay.starts_with(b"["), "a keyframe cannot begin mid-CSI");
     }
 }

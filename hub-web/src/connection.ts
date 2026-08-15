@@ -29,8 +29,10 @@ export interface HubCallbacks {
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
   onSessions(sessions: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
-  onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>): void;
+  onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
+  onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
+  onScrollbackPage?(session: string, page: Record<string, any>): void;
   onSocketError(session: string, detail: string): void;
 }
 
@@ -52,6 +54,7 @@ export class HubConnectionSupervisor {
     phase: "idle", stage: "idle", since: Date.now(), attempt: 0, missedHeartbeats: 0, degraded: false,
   };
   private readonly sockets = new Map<string, WebSocket>();
+  private readonly keyframeRequests = new Set<string>();
   private readonly socketAttempts = new Map<string, number>();
   private readonly attachRetryTimers = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
@@ -504,6 +507,25 @@ export class HubConnectionSupervisor {
     return true;
   }
 
+  requestPaneKeyframe(session: string, paneId: string): boolean {
+    const key = `${session}:${paneId}`;
+    if (this.keyframeRequests.has(key)) return true;
+    if (!this.send(session, { RequestPaneKeyframe: { pane_id: paneId } })) return false;
+    this.keyframeRequests.add(key);
+    return true;
+  }
+
+  requestScrollback(session: string, paneId: string, generation: number, startRow: number, count = 200): boolean {
+    return this.send(session, {
+      ScrollbackRequest: {
+        pane_id: paneId,
+        generation,
+        start_row: startRow,
+        count: Math.min(200, Math.max(1, count)),
+      },
+    });
+  }
+
   private async handleDaemonMessage(session: string, input: string | ArrayBuffer | Blob): Promise<void> {
     const text = typeof input === "string" ? input : input instanceof Blob ? await input.text() : new TextDecoder().decode(input);
     const message = JSON.parse(text) as Record<string, any>;
@@ -514,7 +536,28 @@ export class HubConnectionSupervisor {
         this.clearAttachTimeout(session, "ready");
         this.socketAttempts.set(session, 0);
       }
-      this.callbacks.onSessionState(session, message.Welcome.state, message.Welcome.scrollback);
+      const welcome = message.Welcome;
+      const authoritative = Number(welcome.protocol_version ?? 1) >= 3
+        && Array.isArray(welcome.capabilities)
+        && welcome.capabilities.includes("authoritative_pane_keyframes");
+      for (const key of this.keyframeRequests) {
+        if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
+      }
+      if (authoritative) {
+        // The metadata identifies roles, so supervisor content is requested in
+        // the first client turn; mounted workers are requested by the renderer.
+        const supervisor = welcome.state.panes.find((pane: PaneInfo) => pane.kind === "Supervisor");
+        if (supervisor) this.requestPaneKeyframe(session, supervisor.id);
+        this.callbacks.onSessionState(session, welcome.state, undefined, true);
+      } else {
+        this.callbacks.onSessionState(session, welcome.state, welcome.scrollback, false);
+      }
+    } else if (message.PaneKeyframe) {
+      const keyframe = message.PaneKeyframe;
+      this.keyframeRequests.delete(`${session}:${keyframe.pane_id}`);
+      this.callbacks.onPaneKeyframe(session, keyframe.pane_id, new Uint8Array(keyframe.ansi));
+    } else if (message.ScrollbackPage) {
+      this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage);
     } else if (message.StateUpdate) {
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {

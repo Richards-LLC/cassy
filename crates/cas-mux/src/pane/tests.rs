@@ -114,6 +114,23 @@ mod cases {
     }
 
     #[test]
+    fn scrollback_page_is_absolute_and_bounded_without_moving_viewport() {
+        let mut pane = Pane::director("test", 5, 80).expect("create pane");
+        for i in 0..40 {
+            pane.feed(format!("Line {i}\r\n").as_bytes())
+                .expect("feed line");
+        }
+        let offset_before = pane.scroll_offset();
+
+        let rows = pane.scrollback_page(3, 7);
+
+        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.first().map(|row| row.screen_row), Some(3));
+        assert_eq!(rows.last().map(|row| row.screen_row), Some(9));
+        assert_eq!(pane.scroll_offset(), offset_before);
+    }
+
+    #[test]
     fn test_strip_literal_cursor_report_echo() {
         let input = b"hello ^[[12;34R world";
         let cleaned = Pane::strip_literal_cursor_reports(input);

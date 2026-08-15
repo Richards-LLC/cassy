@@ -196,6 +196,7 @@ fn h1_death_05_fixture_process_entry() {
             scrollback: None,
             protocol_version: PROTOCOL_VERSION,
             capabilities: daemon_capabilities(),
+            pane_bootstrap: Vec::new(),
         };
         socket
             .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
@@ -1000,6 +1001,7 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         )])),
         protocol_version: PROTOCOL_VERSION,
         capabilities: daemon_capabilities(),
+        pane_bootstrap: Vec::new(),
     };
     let output = DaemonMessage::Output {
         pane_id: "worker-1".into(),
@@ -1335,6 +1337,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
             scrollback: None,
             protocol_version: PROTOCOL_VERSION,
             capabilities: daemon_capabilities(),
+            pane_bootstrap: Vec::new(),
         };
         socket
             .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
@@ -1513,9 +1516,20 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
         cols: 80,
         rows: 24,
     };
+    let keyframe = ClientMessage::RequestPaneKeyframe {
+        pane_id: "worker-1".into(),
+    };
+    let scrollback = ClientMessage::ScrollbackRequest {
+        pane_id: "worker-1".into(),
+        generation: 42,
+        start_row: 0,
+        count: 200,
+    };
 
     assert_eq!(required_scope(&input), Some(Scope::PaneInput));
     assert_eq!(required_scope(&resize), Some(Scope::PaneRead));
+    assert_eq!(required_scope(&keyframe), Some(Scope::PaneRead));
+    assert_eq!(required_scope(&scrollback), Some(Scope::PaneRead));
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);

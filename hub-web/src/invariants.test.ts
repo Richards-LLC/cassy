@@ -215,7 +215,7 @@ describe("binding Commander browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     (supervisor as unknown as { desired: boolean }).desired = true;
@@ -247,6 +247,18 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain('grid.querySelector(".empty")?.remove();');
   });
 
+  it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {
+    const [connection, main] = await Promise.all(["connection.ts", "main.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(connection.indexOf("this.requestPaneKeyframe(session, supervisor.id)")).toBeLessThan(
+      connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
+    );
+    expect(connection).not.toContain("welcome.scrollback, true");
+    expect(main).toContain('const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches');
+    expect(main.indexOf("if (collapsedOnPhone) continue;")).toBeLessThan(
+      main.indexOf("requestPaneKeyframe(session, pane.id)"),
+    );
+  });
+
   it.each(["stop", "auth-block"] as const)("cancels a scheduled attach retry on %s", async (terminalAction) => {
     vi.useFakeTimers();
     vi.stubGlobal("window", globalThis);
@@ -276,7 +288,7 @@ describe("binding Commander browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const internals = supervisor as unknown as {

@@ -36,6 +36,8 @@ const surfaces = new Map<string, TerminalSurface>();
 const sessionStates = new Map<string, SessionState>();
 const paneBuffers = new Map<string, number[]>();
 const paneLastActivity = new Map<string, number>();
+const authoritativeSessions = new Set<string>();
+const paneKeyframesReady = new Set<string>();
 const selectedPanes = new Map<string, string>();
 const collapsedWorkerPanes = new Set<string>();
 const leaseHeartbeats = new Map<string, number>();
@@ -126,12 +128,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
     },
-    onSessionState: (session, state, scrollback) => {
-      void renderSessionState(machine.id, session, state, scrollback);
+    onSessionState: (session, state, scrollback, authoritativeKeyframes) => {
+      void renderSessionState(machine.id, session, state, scrollback, authoritativeKeyframes);
+    },
+    onPaneKeyframe: (session, pane, data) => {
+      const key = paneKey(machine.id, session, pane);
+      paneKeyframesReady.add(key);
+      paneBuffers.set(key, [...data]);
+      surfaces.get(key)?.write(data);
     },
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       paneLastActivity.set(key, Date.now());
+      if (authoritativeSessions.has(sessionKey(machine.id, session)) && !paneKeyframesReady.has(key)) return;
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
@@ -488,8 +497,19 @@ function resizeViewablePanes(machineId: string, session: string): void {
   }
 }
 
-async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>): Promise<void> {
-  sessionStates.set(sessionKey(machineId, session), state);
+async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): Promise<void> {
+  const selectedKey = sessionKey(machineId, session);
+  sessionStates.set(selectedKey, state);
+  if (authoritativeKeyframes === true) {
+    authoritativeSessions.add(selectedKey);
+    for (const pane of state.panes) {
+      const key = paneKey(machineId, session, pane.id);
+      paneBuffers.delete(key);
+      paneKeyframesReady.delete(key);
+    }
+  } else if (authoritativeKeyframes === false) {
+    authoritativeSessions.delete(selectedKey);
+  }
   if (scrollback) {
     for (const [pane, chunks] of Object.entries(scrollback)) {
       paneBuffers.set(paneKey(machineId, session, pane), chunks.flat().slice(-2_000_000));
@@ -501,7 +521,6 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   grid.querySelector(".empty")?.remove();
   const visiblePanes = state.panes.filter((pane) => pane.kind !== "Director");
   const active = new Set(visiblePanes.map((pane) => pane.id));
-  const selectedKey = sessionKey(machineId, session);
   const selectedPane = selectedPanes.get(selectedKey);
   if (!selectedPane || !active.has(selectedPane)) {
     const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
@@ -607,11 +626,14 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
     (pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card);
+    const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches
+      && pane.id !== layout.primaryPaneId;
     const existingSurface = surfaces.get(key);
-    if (existingSurface && (existingSurface.element !== mount || !existingSurface.element.isConnected)) {
+    if (existingSurface && (collapsedOnPhone || existingSurface.element !== mount || !existingSurface.element.isConnected)) {
       existingSurface.dispose();
       surfaces.delete(key);
     }
+    if (collapsedOnPhone) continue;
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },
@@ -625,6 +647,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       surfaces.set(key, surface);
       const buffered = paneBuffers.get(key);
       if (buffered) surface.write(new Uint8Array(buffered));
+    }
+    if (authoritativeSessions.has(selectedKey) && !paneKeyframesReady.has(key)) {
+      connections.get(machineId)?.requestPaneKeyframe(session, pane.id);
     }
   }
 }

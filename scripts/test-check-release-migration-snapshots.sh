@@ -40,9 +40,12 @@ assert_no_cargo() {
   fi
 }
 
+# Deliberately an exact match, not a substring or regex. The guard must run the
+# component-output snapshots and nothing else, so any change to the invocation
+# should fail here loudly and be re-confirmed on purpose.
 assert_exact_cargo() {
   local description="$1"
-  if [[ "$(cat "$cargo_log")" != 'test -p cas --test component_output_test' ]]; then
+  if [[ "$(cat "$cargo_log")" != 'nextest run -p cas --test component_output_test' ]]; then
     echo "FAIL $description: wrong cargo invocation" >&2
     cat "$cargo_log" >&2
     exit 1

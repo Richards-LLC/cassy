@@ -227,7 +227,10 @@ pub(crate) fn resolve_spawn_base(
     focused_epic_branch: Option<&str>,
     trunk: &str,
 ) -> (String, SpawnBaseSource) {
-    if let Some(target) = task_base.work_target() {
+    if let Some(target) = task_base
+        .work_target()
+        .filter(|target| matches!(target.owner, WorkTargetOwner::Task))
+    {
         return (
             target.target_branch.clone(),
             SpawnBaseSource::WorkTarget {
@@ -236,12 +239,24 @@ pub(crate) fn resolve_spawn_base(
             },
         );
     }
+    // A live epic branch carries its children's sibling integration history.
+    // An epic-owned WorkTarget is its final delivery destination, not a reason
+    // to discard that branch while it exists.
     if let Some(task_epic) = task_base.epic().filter(|t| t.branch_exists) {
         return (
             task_epic.branch.clone(),
             SpawnBaseSource::TaskEpic {
                 task_id: task_epic.task_id.clone(),
                 epic_id: task_epic.epic_id.clone(),
+            },
+        );
+    }
+    if let Some(target) = task_base.work_target() {
+        return (
+            target.target_branch.clone(),
+            SpawnBaseSource::WorkTarget {
+                task_id: target.task_id.clone(),
+                owner: target.owner.clone(),
             },
         );
     }
@@ -399,7 +414,13 @@ pub(crate) fn task_epic_base(
         .map(|target| SpawnWorkTarget {
             task_id: task_id.to_string(),
             target_branch: target.target_branch.clone(),
-            owner: WorkTargetOwner::Task,
+            owner: if task.task_type == cas_types::TaskType::Epic {
+                WorkTargetOwner::Epic {
+                    epic_id: task.id.clone(),
+                }
+            } else {
+                WorkTargetOwner::Task
+            },
         });
     let epic = if task.task_type == cas_types::TaskType::Epic {
         task
@@ -2501,9 +2522,41 @@ mod spawn_base_tests {
         assert_eq!(base.target_branch(), Some("staging"));
         assert_eq!(
             resolve_spawn_base(&base, None, base.target_branch().unwrap()).0,
-            "staging",
-            "an epic WorkTarget must be the spawn base, not its implementation branch"
+            "epic/staging-target",
+            "a live epic branch must retain its child integration history"
         );
+    }
+
+    #[test]
+    fn epic_work_target_bases_spawn_on_declared_branch_when_epic_branch_is_missing_cas_7a87() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "staging", "main");
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-missing-epic".into(), "missing branch".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/not-created".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "staging".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let base = task_epic_base(&cas_dir, &repo, "cas-missing-epic");
+        assert!(!base.epic().unwrap().branch_exists);
+        let (branch, source) = resolve_spawn_base(&base, Some("epic/unrelated"), "main");
+        assert_eq!(branch, "staging");
+        assert!(matches!(
+            source,
+            SpawnBaseSource::WorkTarget {
+                owner: WorkTargetOwner::Epic { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -214,6 +214,17 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain("composer?.focus();");
   });
 
+  it("keeps a focused terminal focused across steady-state renders", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // Re-inserting a pane card blurs its hidden textarea, which closes a phone
+    // keyboard on every five-second heartbeat render. Panes move only when their
+    // slot or position genuinely changed.
+    expect(source).toContain("const placePane = (slot: HTMLElement, card: HTMLElement): void => {");
+    expect(source).toContain("if (slot.children[index] === card) return;");
+    expect(source).toContain("placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);");
+    expect(source).not.toContain("(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card)");
+  });
+
   it("colours connection dots from the phases the supervisor actually emits", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // connectionClass emits lifecycle phases, so styling legacy names such as

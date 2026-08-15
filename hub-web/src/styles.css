@@ -1616,6 +1616,13 @@ fieldset {
     width: calc(100% - var(--space-6));
     margin-left: var(--space-1);
   }
+
+  /* A fixed label column leaves a phone barely 100px for a URL or a scope list,
+     so the term stacks above its value instead of shredding it. */
+  .pair-details div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
   .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); }
   .terminal-search { right: var(--space-1); left: var(--space-1); grid-template-columns: minmax(0, 1fr) auto var(--button-compact-height); }
 

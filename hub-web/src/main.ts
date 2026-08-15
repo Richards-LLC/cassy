@@ -818,6 +818,16 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) { surface.dispose(); surfaces.delete(key); }
   }
   const panesById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
+  // Re-inserting a card blurs whatever it contains, so panes are only moved when
+  // their slot or their position actually changed. A five-second heartbeat render
+  // must not close a phone keyboard mid-command.
+  const slotPositions = new Map<HTMLElement, number>();
+  const placePane = (slot: HTMLElement, card: HTMLElement): void => {
+    const index = slotPositions.get(slot) ?? 0;
+    slotPositions.set(slot, index + 1);
+    if (slot.children[index] === card) return;
+    slot.insertBefore(card, slot.children[index] ?? null);
+  };
   for (const paneId of orderedPaneIds(layout)) {
     const pane = panesById.get(paneId);
     if (!pane) continue;
@@ -919,7 +929,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
-    (pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card);
+    placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);
     const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches && secondaryOnPhone;
     const existingSurface = surfaces.get(key);
     existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);

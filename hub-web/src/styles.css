@@ -1616,7 +1616,9 @@ fieldset {
   .session-header h1 { font-size: var(--fs-sm); }
   .machine-chip, .mode-badge { max-width: none; padding-inline: var(--space-1); }
   .connection-summary { max-width: 52px; padding-inline: var(--space-1); overflow: hidden; text-overflow: ellipsis; }
-  .session-header [data-compact-label] { font-size: 0; }
-  .session-header [data-compact-label]::after { content: attr(data-compact-label); font-size: var(--fs-xs); }
+  .session-header [data-compact-label],
+  .session-header .actions [data-compact-label] { font-size: 0; }
+  .session-header [data-compact-label]::after,
+  .session-header .actions [data-compact-label]::after { content: attr(data-compact-label); font-size: var(--fs-xs); }
   .session-header .actions button { width: 30px; padding: 0; }
 }

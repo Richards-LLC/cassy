@@ -249,6 +249,7 @@ describe("binding Commander browser invariants", () => {
     expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr)');
     expect(css).toContain('.secondary-pane-strip .pane.collapsed');
     expect(css).toContain('grid-template-rows: minmax(0, 1fr) var(--machine-rail-width)');
+    expect(css).toContain('.session-header .actions [data-compact-label] { font-size: 0; }');
     expect(main).not.toContain('class="toolbar"');
     expect(main).not.toContain('class="machines"');
     expect(main).not.toContain('class="sessions"');

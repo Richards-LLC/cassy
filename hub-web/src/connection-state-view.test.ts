@@ -45,7 +45,7 @@ describe("Commander designed connection states", () => {
   });
 
   it("keeps disclosure thresholds on total attach age when the current stage resets", () => {
-    const state = snapshot({ since: startedAt + 14_000, attachSince: startedAt, stage: "backoff", phase: "backoff" });
+    const state = snapshot({ since: startedAt + 14_000, attachSince: startedAt, stage: "dialing", phase: "backoff" });
     expect(connectingView(state, startedAt + 15_000)).toMatchObject({
       elapsedLabel: "15s",
       actionsAvailable: true,

@@ -11,6 +11,7 @@ export interface HubMachineInfo {
 
 export interface HubCallbacks {
   onState(state: ConnectionState, detail?: string): void;
+  onLatency?(latencyMs: number): void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
   onSessions(sessions: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
@@ -85,6 +86,7 @@ export class HubConnectionSupervisor {
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const startedAt = performance.now();
     const headers = await dpopHeaders(this.machine, method, path);
     const response = await fetch(new URL(path, this.machine.baseUrl), {
       method,
@@ -95,6 +97,7 @@ export class HubConnectionSupervisor {
     });
     if (response.status === 401 || response.status === 403) throw new AuthenticationError("pairing expired or was revoked");
     if (!response.ok) throw new Error(`${method} ${path} failed (${response.status})`);
+    this.callbacks.onLatency?.(Math.max(0, Math.round(performance.now() - startedAt)));
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
   }

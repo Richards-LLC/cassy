@@ -136,6 +136,26 @@ describe("binding Commander browser invariants", () => {
     expect(css).toContain(".attention-group-label { max-width: 155px; }");
   });
 
+  it("encodes the supervisor-first Commander shell at desktop and phone widths", async () => {
+    const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
+    expect(main).toContain('id="pair-toggle" class="rail-control pair-machine"');
+    expect(main).toContain('class="session-header"');
+    expect(main).toContain('data-context-tab="status"');
+    expect(main).toContain('Workers &amp; Tasks');
+    expect(main).toContain('visiblePanes.find((pane) => pane.kind === "Supervisor")?.id');
+    expect(main).toContain('data-machine-latency');
+    expect(connection).toContain('onLatency?(latencyMs: number)');
+    expect(css).toContain('grid-template-columns: 48px minmax(0, 1fr) 320px');
+    expect(css).toContain('flex: 0 0 44px; height: 44px');
+    expect(css).toContain('grid-template-rows: minmax(0, 65fr) minmax(32px, 35fr)');
+    expect(css).toContain('.secondary-pane-strip .pane.collapsed');
+    expect(css).toContain('.shell, .shell.attention-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 48px;');
+    expect(main).not.toContain('class="toolbar"');
+    expect(main).not.toContain('class="machines"');
+    expect(main).not.toContain('class="sessions"');
+  });
+
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source.indexOf("if (captureDraft) capturePairingDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));

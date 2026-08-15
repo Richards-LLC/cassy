@@ -1,6 +1,6 @@
 import "./styles.css";
-import { attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
-import { renderAttentionPanel } from "./attention-view";
+import { attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
+import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -27,13 +27,16 @@ const machines = new Map<string, StoredMachine>();
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
+const connectionLatency = new Map<string, number>();
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const sessionStates = new Map<string, SessionState>();
 const paneBuffers = new Map<string, number[]>();
+const paneLastActivity = new Map<string, number>();
 const selectedPanes = new Map<string, string>();
+const collapsedWorkerPanes = new Set<string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
 // A live Claude/Ink proof after cas-9a29 decides whether one-row PTYs are safe.
@@ -49,10 +52,21 @@ let pairingCountdownTimer: number | undefined;
 let pairingCreateInFlight = false;
 let pairingExchangeInFlight = false;
 let pairingDraft = createPairingDraft(location.origin);
+let machineDrawerOpen = false;
+let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
+let activeContextTab: "attention" | "status" = "attention";
 
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
+
+function lastActivityLabel(timestamp: number | undefined): string {
+  if (!timestamp) return "waiting";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 5) return "active now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.floor(seconds / 60)}m ago`;
+}
 
 function paneLayoutStorage(): PaneLayoutStorage | undefined {
   try { return window.localStorage; } catch { return undefined; }
@@ -88,6 +102,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state === "reconnecting") void addAttention(machine, undefined, "hub_disconnected", detail ?? "Hub disconnected");
       render();
     },
+    onLatency: (latencyMs) => {
+      connectionLatency.set(machine.id, latencyMs);
+      const output = document.querySelector<HTMLElement>(`[data-machine-latency="${CSS.escape(machine.id)}"]`);
+      if (output) output.textContent = `${latencyMs}ms`;
+    },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items) => { sessions.set(machine.id, items); render(); },
     onMachineEvent: (event) => {
@@ -104,9 +123,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
+      paneLastActivity.set(key, Date.now());
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
+      const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
+      if (activity && selectedMachineId === machine.id && selectedSession === session) activity.textContent = "active now";
     },
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
@@ -477,7 +499,10 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
     if (fallback) selectedPanes.set(selectedKey, fallback.id);
   }
-  const layout = layoutForPanes(selectedKey, visiblePanes, selectedPanes.get(selectedKey));
+  const defaultPrimaryPaneId = visiblePanes.find((pane) => pane.kind === "Supervisor")?.id
+    ?? selectedPanes.get(selectedKey)
+    ?? visiblePanes[0]?.id;
+  const layout = layoutForPanes(selectedKey, visiblePanes, defaultPrimaryPaneId);
   if (!layout) return;
   grid.classList.add("pane-layout");
   grid.classList.toggle("single-pane", visiblePanes.length === 1);
@@ -503,6 +528,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       card = document.createElement("section");
       card.className = "pane";
       card.dataset.paneId = pane.id;
+      card.dataset.paneRole = pane.kind.toLowerCase();
       if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
       card.onclick = () => {
         selectedPanes.set(selectedKey, pane.id);
@@ -511,8 +537,10 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         surfaces.get(key)?.focus();
       };
       const title = document.createElement("header"); title.className = "pane-header";
-      const label = document.createElement("span"); label.className = "pane-title";
-      label.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
+      const statusDot = document.createElement("span"); statusDot.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
+      const label = document.createElement("span"); label.className = "pane-title"; label.textContent = pane.title || pane.id;
+      const role = document.createElement("span"); role.className = "pane-role"; role.textContent = pane.kind.toLowerCase();
+      const activity = document.createElement("span"); activity.className = "pane-last-activity"; activity.textContent = lastActivityLabel(paneLastActivity.get(key));
       const controls = document.createElement("div"); controls.className = "pane-layout-controls";
       const button = (label: string, className: string, action: () => void) => {
         const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
@@ -533,13 +561,25 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         button("Move earlier", "move-earlier", () => updateLayout((current) => movePane(current, pane.id, -1))),
         button("Move later", "move-later", () => updateLayout((current) => movePane(current, pane.id, 1))),
       );
-      title.append(label, controls);
+      title.append(statusDot, label, role, activity, controls);
+      if (pane.kind !== "Supervisor") {
+        title.title = "Click to collapse or expand this worker";
+        title.onclick = (event) => {
+          event.stopPropagation();
+          if (collapsedWorkerPanes.has(key)) collapsedWorkerPanes.delete(key);
+          else collapsedWorkerPanes.add(key);
+          card?.classList.toggle("collapsed", collapsedWorkerPanes.has(key));
+          if (!collapsedWorkerPanes.has(key)) queueMicrotask(() => surfaces.get(key)?.focus());
+        };
+      }
       mount = document.createElement("div"); mount.className = "terminal-mount";
       card.append(title, mount);
     }
     if (!card || !mount) continue;
     const position = orderedPaneIds(layout).indexOf(pane.id);
     card.classList.toggle("primary", pane.id === layout.primaryPaneId);
+    card.classList.toggle("collapsed", pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key));
+    card.querySelector<HTMLElement>(".pane-last-activity")!.textContent = lastActivityLabel(paneLastActivity.get(key));
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
     const moveLater = card.querySelector<HTMLButtonElement>(".move-later");
@@ -661,12 +701,15 @@ function capturePairingDraft(): void {
 function render(captureDraft = true): void {
   if (captureDraft) capturePairingDraft();
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const machineSessions = selected ? sessions.get(selected.id) ?? [] : [];
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
+  const connectionState = connectionStates.get(selected?.id ?? "") ?? "idle";
+  const latency = selected ? connectionLatency.get(selected.id) : undefined;
+  const counts = attentionCounts(attention);
+  const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -677,17 +720,53 @@ function render(captureDraft = true): void {
     surfaces.clear();
   }
   app.innerHTML = `
-    <div class="shell">
-      <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair this machine</button><nav id="machine-list"></nav></aside>
-      <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
-      <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}</header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
-      <aside class="context"><section id="attention-panel"></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
+    <div class="shell${attentionPanelCollapsed ? " attention-collapsed" : ""}">
+      <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
+        <div class="machine-rail">
+          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" aria-expanded="${machineDrawerOpen}">C</button>
+          <nav id="machine-rail-list" aria-label="Machines"></nav>
+          <button id="pair-toggle" class="rail-control pair-machine" type="button" aria-label="Pair a machine" title="Pair a machine">+</button>
+        </div>
+        <div class="machine-drawer">
+          <header class="drawer-header"><strong>Machines</strong><button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
+          ${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}
+          <nav id="machine-tree" aria-label="Machine sessions"></nav>
+          ${selected ? '<button id="remove-machine" class="remove-machine">Remove selected machine</button>' : ""}
+        </div>
+      </aside>
+      <main>
+        <header class="session-header">
+          <h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
+          <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
+          <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
+          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionState)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? connectionState : `${latency}ms`}</span></span>
+          <div class="actions"><button id="lease" title="${escapeAttr(controlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
+        </header>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section>
+      </main>
+      <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
+        <div class="attention-rail">
+          <button id="attention-panel-toggle" class="rail-control" type="button" aria-label="${attentionPanelCollapsed ? "Expand" : "Collapse"} attention panel" aria-expanded="${!attentionPanelCollapsed}">${attentionPanelCollapsed ? "‹" : "›"}</button>
+          <button id="attention-rail-counts" class="attention-rail-counts" type="button" data-open-context="attention" aria-label="Open attention"></button>
+        </div>
+        <div class="context-body">
+          <div class="context-tabs" role="tablist" aria-label="Operations panel">
+            <button type="button" role="tab" data-context-tab="attention" aria-selected="${activeContextTab === "attention"}">Attention</button>
+            <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
+          </div>
+          <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><div id="status-view"></div><div class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></div></section>
+        </div>
+      </aside>
     </div>${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
-  const machineList = document.querySelector("#machine-list")!;
-  for (const machine of machines.values()) machineList.append(machineButton(machine));
-  const sessionList = document.querySelector("#session-list")!;
-  for (const session of machineSessions) sessionList.append(sessionButton(selected!.id, session));
+  const machineRail = document.querySelector("#machine-rail-list")!;
+  const machineTree = document.querySelector("#machine-tree")!;
+  for (const machine of machines.values()) {
+    machineRail.append(machineRailButton(machine));
+    machineTree.append(machineTreeGroup(machine));
+  }
+  document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
   renderAttention(); renderStatus(status);
   bindEvents(selected, lease);
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
@@ -708,17 +787,56 @@ function compatibilityWarning(machineId: string): string | undefined {
   return undefined;
 }
 
-function machineButton(machine: StoredMachine): HTMLButtonElement {
-  const button = document.createElement("button"); button.className = `nav-item ${machine.id === selectedMachineId ? "active" : ""}`;
-  button.textContent = `${machine.label} · ${connectionStates.get(machine.id) ?? "idle"}`;
-  button.onclick = () => { selectedMachineId = machine.id; selectedSession = undefined; render(); };
+function machineInitials(label: string): string {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0][0]}${words[1][0]}` : words[0]?.slice(0, 2) ?? "?").toUpperCase();
+}
+
+function selectMachine(machine: StoredMachine): void {
+  selectedMachineId = machine.id;
+  selectedSession = undefined;
+  machineDrawerOpen = true;
+  render();
+}
+
+function machineRailButton(machine: StoredMachine): HTMLButtonElement {
+  const state = connectionStates.get(machine.id) ?? "idle";
+  const button = document.createElement("button");
+  button.className = `machine-icon ${machine.id === selectedMachineId ? "active" : ""}`;
+  button.type = "button";
+  button.innerHTML = `<span>${escapeHtml(machineInitials(machine.label))}</span><i class="machine-state ${state}"></i>`;
+  button.title = `${machine.label} · ${state}`;
+  button.setAttribute("aria-label", `${machine.label}, ${state}`);
+  button.onclick = () => selectMachine(machine);
   return button;
+}
+
+function machineTreeGroup(machine: StoredMachine): HTMLElement {
+  const group = document.createElement("section");
+  group.className = `machine-group ${machine.id === selectedMachineId ? "active" : ""}`;
+  const machineRow = document.createElement("button");
+  machineRow.className = "machine-row";
+  machineRow.type = "button";
+  const state = connectionStates.get(machine.id) ?? "idle";
+  machineRow.innerHTML = `<span class="machine-state ${state}"></span><strong>${escapeHtml(machine.label)}</strong><small>${escapeHtml(state)}</small>`;
+  machineRow.onclick = () => selectMachine(machine);
+  group.append(machineRow);
+  if (machine.id === selectedMachineId) {
+    const sessionList = document.createElement("div");
+    sessionList.className = "session-tree";
+    for (const session of sessions.get(machine.id) ?? []) sessionList.append(sessionButton(machine.id, session));
+    if (!sessionList.childElementCount) {
+      const empty = document.createElement("p"); empty.className = "drawer-empty"; empty.textContent = "No live sessions."; sessionList.append(empty);
+    }
+    group.append(sessionList);
+  }
+  return group;
 }
 
 function sessionButton(machineId: string, session: HubSession): HTMLButtonElement {
   const button = document.createElement("button"); button.className = `nav-item ${session.name === selectedSession ? "active" : ""}`;
   button.innerHTML = `<span>${escapeHtml(session.name)}</span><small>${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
-  button.onclick = () => void openSession(machineId, session.name);
+  button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
 
@@ -763,6 +881,15 @@ function renderStatus(status?: Record<string, unknown>): void {
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
+  document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
+  document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
+  document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
+    button.onclick = () => { activeContextTab = "attention"; attentionPanelCollapsed = false; render(); };
+  }
+  for (const tab of document.querySelectorAll<HTMLButtonElement>("[data-context-tab]")) {
+    tab.onclick = () => { activeContextTab = tab.dataset.contextTab === "status" ? "status" : "attention"; render(); };
+  }
   const pairForm = document.querySelector<HTMLFormElement>("#pair-form");
   const pairCancel = document.querySelector<HTMLButtonElement>("#pair-cancel");
   const pairClose = document.querySelector<HTMLButtonElement>("#pair-close");

@@ -35,6 +35,15 @@ describe("binding Commander browser invariants", () => {
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
   });
 
+  it("declares the Commander favicon from the static web source", async () => {
+    const [html, favicon] = await Promise.all([
+      readFile(new URL("../index.html", import.meta.url), "utf8"),
+      readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
+    ]);
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
+    expect(favicon).toContain('>C</text>');
+  });
+
   it("names the remedy when an observer-only credential disables control", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");

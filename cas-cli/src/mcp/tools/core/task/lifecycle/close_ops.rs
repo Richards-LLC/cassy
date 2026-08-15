@@ -8360,29 +8360,60 @@ fn render_close_diff_stat(
     window: Option<&TaskCommitReceiptWindow>,
     explicit_receipt: Option<&str>,
 ) -> String {
-    // cas-0908: when an explicit commit_receipt is provided and successfully
-    // validated, use it directly as the authoritative diff stat basis. This
-    // prevents the contaminated-anchor bug where a MERGE REQUIRED park on a
-    // shared worker lane captures a sibling task's commit as the anchor, and
-    // that anchor then enters the identity's known_commits. The provided
-    // receipt is the exact commit the caller validated and accepted; the diff
-    // stat must reflect that same commit, not a sibling's.
-    if let Some(receipt) = explicit_receipt {
-        if let Some(measurement) =
-            get_explicit_receipt_diff_stat(repo_path, parent_branch, receipt)
-        {
-            if !measurement.stat.is_empty() {
-                return format!(
-                    "\n\n📊 Task-attributed committed diff stat (target {}; basis: {}):\n{}",
-                    measurement.target_ref, measurement.basis, measurement.stat
-                );
+    // cas-0908: when an explicit commit_receipt is provided, use it to filter
+    // and augment the identity's known_commits. This fixes the contaminated-
+    // anchor bug where MERGE REQUIRED on a shared lane captures a sibling's
+    // commit as the anchor. The receipt represents THIS task's delivery point;
+    // any known_commit that is NOT an ancestor of (or equal to) the receipt is
+    // contamination from a sibling's later work and must be excluded.
+    //
+    // The receipt also joins known_commits so that multi-commit tasks work
+    // correctly: all commits attributable to this task (via task_id in message
+    // OR via ancestry to the receipt) are included in the range.
+    let augmented_window: Option<TaskCommitReceiptWindow>;
+    let effective_window = if let (Some(window), Some(receipt)) = (window, explicit_receipt) {
+        if let Ok(full_sha) = resolve_task_commit_receipt_sha(repo_path, receipt) {
+            // Filter known_commits to only those that are ancestors of (or equal
+            // to) the receipt. This removes sibling commits pushed after this
+            // task's delivery.
+            let filtered_commits: Vec<String> = window
+                .identity
+                .known_commits
+                .iter()
+                .filter(|known| {
+                    // Keep if it's the receipt itself or an ancestor of the receipt.
+                    known.trim().eq_ignore_ascii_case(full_sha.trim())
+                        || git_commit_is_ancestor(repo_path, known, &full_sha)
+                })
+                .cloned()
+                .collect();
+            // Add the receipt if not already present.
+            let mut filtered_commits = filtered_commits;
+            if !filtered_commits
+                .iter()
+                .any(|c| c.trim().eq_ignore_ascii_case(full_sha.trim()))
+            {
+                filtered_commits.push(full_sha);
             }
-            return String::new();
+            augmented_window = Some(TaskCommitReceiptWindow {
+                not_before: window.not_before,
+                basis: "durable task commit identity across task lifetime",
+                task_floor: window.task_floor,
+                identity: TaskCommitIdentity {
+                    task_id: window.identity.task_id.clone(),
+                    known_commits: filtered_commits,
+                },
+            });
+            augmented_window.as_ref()
+        } else {
+            // Receipt resolution failed — use original window.
+            Some(window)
         }
-        // Receipt resolution failed — fall through to identity-based or branch-wide.
-    }
+    } else {
+        window
+    };
 
-    match window
+    match effective_window
         .and_then(|window| get_task_attributable_diff_stat(repo_path, parent_branch, window))
     {
         Some(measurement) if !measurement.stat.is_empty() => format!(
@@ -8405,66 +8436,6 @@ fn render_close_diff_stat(
             }
         }
     }
-}
-
-/// cas-0908: compute the diff stat for an explicit commit receipt.
-///
-/// When the caller provides a `commit_receipt` and it has been validated, this
-/// function computes the diff stat for that exact commit's changes. This is the
-/// authoritative attribution basis — it uses the same commit the close validation
-/// accepted, not an identity-based search that can be contaminated by sibling-task
-/// anchors on a shared worker lane.
-///
-/// The diff is computed as `receipt^..receipt`, showing exactly what that single
-/// commit changed relative to its parent. This is correct for merged receipts
-/// (merge-base would equal receipt, giving empty diff) and for receipts where
-/// the task has multiple commits (each close names its own tip commit).
-///
-/// Returns `None` if the receipt cannot be resolved to a commit (caller falls
-/// back to identity-based or branch-wide attribution).
-fn get_explicit_receipt_diff_stat(
-    repo_path: &std::path::Path,
-    parent_branch: &str,
-    receipt: &str,
-) -> Option<TaskAttributedDiffStat> {
-    use std::process::Command;
-
-    let receipt = receipt.trim();
-    if receipt.is_empty() || !is_safe_git_refname(parent_branch) {
-        return None;
-    }
-
-    // Resolve the receipt to a full commit SHA.
-    let full_sha = resolve_task_commit_receipt_sha(repo_path, receipt).ok()?;
-    let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
-
-    // Resolve the receipt's first parent. For a single-commit receipt this is
-    // the base the commit was created on; for the tip of a multi-commit chain,
-    // this is the previous commit in the chain. Either way, receipt^..receipt
-    // shows exactly what the receipt commit itself changed.
-    let parent_out = Command::new("git")
-        .args(["rev-parse", &format!("{full_sha}^")])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !parent_out.status.success() {
-        return None;
-    }
-    let receipt_parent = String::from_utf8_lossy(&parent_out.stdout)
-        .trim()
-        .to_string();
-    if receipt_parent.is_empty() {
-        return None;
-    }
-
-    // The diff stat is from the receipt's parent to the receipt itself.
-    let stat = get_diff_stat_for_range(repo_path, &receipt_parent, &full_sha);
-
-    Some(TaskAttributedDiffStat {
-        stat,
-        target_ref,
-        basis: "explicit commit receipt",
-    })
 }
 
 /// Return the net stat for the contiguous commits durably attributable to this
@@ -20930,6 +20901,8 @@ mod commit_claim_integrity_tests {
         );
 
         // WITH explicit receipt: only commit A's diff should appear.
+        // The receipt filters out commit B (the sibling's) from known_commits
+        // because B is not an ancestor of A — it was pushed AFTER A.
         let with_receipt =
             render_close_diff_stat(p, "main", Some(&contaminated_window), Some(&commit_a));
         assert!(
@@ -20941,8 +20914,82 @@ mod commit_claim_integrity_tests {
             "explicit receipt must EXCLUDE sibling task's file: {with_receipt}"
         );
         assert!(
-            with_receipt.contains("explicit commit receipt"),
-            "basis must name the explicit receipt: {with_receipt}"
+            with_receipt.contains("Task-attributed committed diff stat"),
+            "must use task-attributed stat: {with_receipt}"
+        );
+    }
+
+    /// cas-0908: regression test for multi-commit tasks. When a task has three
+    /// commits and closes with the tip as receipt, the diff stat must show ALL
+    /// three commits' changes, not just the tip.
+    ///
+    /// This tests the exact shape of cas-b192 (PR #414): a task with three
+    /// commits where the tip alone is 9% of the total work.
+    #[test]
+    fn multicommit_task_receipt_shows_all_commits_cas_0908() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+
+        // Create origin/main for the target ref resolution.
+        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        // Create three commits for the same task (cas-b192).
+        git(p, &["checkout", "-q", "-b", "factory/noble-crane-27"]);
+
+        // Commit 1: the bulk of the work (512 insertions in the real case).
+        std::fs::write(p.join("damage_stopper.rs"), "// The critical fix\n").unwrap();
+        git(p, &["add", "damage_stopper.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-b192): damage stopper"]);
+        let _commit_1 = git_rev_parse(p, "HEAD");
+
+        // Commit 2: secondary changes.
+        std::fs::write(p.join("secondary.rs"), "// More fixes\n").unwrap();
+        git(p, &["add", "secondary.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-b192): secondary"]);
+        let _commit_2 = git_rev_parse(p, "HEAD");
+
+        // Commit 3: the tip, which is small (67 insertions in the real case).
+        std::fs::write(p.join("tip.rs"), "// Tip\n").unwrap();
+        git(p, &["add", "tip.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-b192): tip"]);
+        let commit_tip = git_rev_parse(p, "HEAD");
+
+        // Merge all into origin/main so receipt validation passes.
+        git(p, &["update-ref", "refs/remotes/origin/main", &commit_tip]);
+
+        // Build an identity window with the task_id (commits are attributed via message).
+        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        let window = TaskCommitReceiptWindow {
+            not_before: epoch,
+            basis: "task creation time (test)",
+            task_floor: epoch,
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-b192".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+
+        // Close with the tip as receipt — must show ALL THREE files.
+        let stat = render_close_diff_stat(p, "main", Some(&window), Some(&commit_tip));
+        assert!(
+            stat.contains("damage_stopper.rs"),
+            "must include the first commit's file (the critical fix): {stat}"
+        );
+        assert!(
+            stat.contains("secondary.rs"),
+            "must include the second commit's file: {stat}"
+        );
+        assert!(
+            stat.contains("tip.rs"),
+            "must include the tip commit's file: {stat}"
+        );
+        assert!(
+            stat.contains("3 files changed"),
+            "must show all 3 files in summary: {stat}"
         );
     }
 

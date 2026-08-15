@@ -207,6 +207,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
+	cd .. && ./scripts/test-check-release-preflight.sh
 
 # Type check
 check:

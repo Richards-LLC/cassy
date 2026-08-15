@@ -3,16 +3,45 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <annotated-tag>" >&2
-  echo "Example: $0 v2.57.0" >&2
+  echo "Usage: $0 [--local] <annotated-tag>" >&2
+  echo "Example: $0 v2.57.0            # CI lane: re-fetches the remote tag object" >&2
+  echo "Example: $0 --local v2.57.0    # pre-push lane: tag exists only locally" >&2
 }
 
-if [ "$#" -ne 1 ]; then
+# The remote tag re-fetch below is inherently CI-side: it can only pass once the
+# tag has been pushed. --local runs every other gate so the same checks can fail
+# a bad release *before* the tag is pushed.
+local_mode=false
+tag=""
+tag_seen=false
+for arg in "$@"; do
+  case "$arg" in
+    --local|--no-remote-tag) local_mode=true ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "error: unknown option $arg" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if "$tag_seen"; then
+        usage
+        exit 2
+      fi
+      tag="$arg"
+      tag_seen=true
+      ;;
+  esac
+done
+
+if ! "$tag_seen"; then
   usage
   exit 2
 fi
 
-tag="$1"
 if ! [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
   echo "error: release tag must be v<semver>; got $tag" >&2
   exit 1
@@ -28,8 +57,14 @@ echo "ok: working tree is clean"
 # actions/checkout can materialize the event tag as its peeled commit/tree
 # rather than retaining the tag object. Re-fetch the exact remote tag object
 # before inspecting it, so this remains an annotated-tag check instead of an
-# accidental check of checkout's local ref shape.
-git fetch origin --no-tags --force "+refs/tags/$tag:refs/tags/$tag"
+# accidental check of checkout's local ref shape. In --local mode the tag has
+# not been pushed yet, so the local ref is authoritative and the fetch would
+# always fail with "couldn't find remote ref".
+if "$local_mode"; then
+  echo "ok: local mode; inspecting the local $tag object without a remote re-fetch"
+else
+  git fetch origin --no-tags --force "+refs/tags/$tag:refs/tags/$tag"
+fi
 if [ "$(git cat-file -t "refs/tags/$tag" 2>/dev/null || true)" != "tag" ]; then
   echo "error: $tag must exist locally as an annotated tag" >&2
   exit 1

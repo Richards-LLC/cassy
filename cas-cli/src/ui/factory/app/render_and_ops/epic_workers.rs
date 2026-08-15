@@ -101,10 +101,25 @@ pub(crate) struct TaskEpicBase {
     pub branch: String,
     /// Whether `branch` currently resolves to a commit in the repository.
     pub branch_exists: bool,
-    /// The integration branch explicitly declared by the epic, when any.
-    /// Worker-base freshness must be evaluated against this authority rather
-    /// than the factory's ambient configured default (cas-3afc / GH #298).
-    pub target_branch: Option<String>,
+    /// The WorkTarget explicitly declared by the task or its owning epic.
+    /// It is delivery authority for both worker spawn and worktree merge.
+    pub work_target: Option<SpawnWorkTarget>,
+}
+
+/// The concrete delivery branch a `spawn_workers task_id=...` request must
+/// check out. This carries the owner so the receipt can say whether the task
+/// itself or its parent epic provided the authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnWorkTarget {
+    pub task_id: String,
+    pub target_branch: String,
+    pub owner: WorkTargetOwner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkTargetOwner {
+    Task,
+    Epic { epic_id: String },
 }
 
 /// cas-d897 (GH #146): what the task store could tell us about the base for a
@@ -119,7 +134,10 @@ pub(crate) enum TaskBase {
     /// The task resolved to an epic (possibly one whose branch is missing).
     Epic(TaskEpicBase),
     /// The task exists and provably belongs to no epic.
-    NoEpic { task_id: String },
+    NoEpic {
+        task_id: String,
+        work_target: Option<SpawnWorkTarget>,
+    },
     /// No task named, or the store could not answer (missing task, store
     /// error). Legacy focus-based behaviour applies.
     Unresolved,
@@ -134,10 +152,21 @@ impl TaskBase {
         }
     }
 
-    /// The declared integration branch for the task's owning epic.
+    /// The declared WorkTarget for this task, or (when the task has none) its
+    /// owning epic. This is the same explicit authority the System-B merge
+    /// path honors for a directly targeted task.
+    pub(crate) fn work_target(&self) -> Option<&SpawnWorkTarget> {
+        match self {
+            TaskBase::Epic(epic) => epic.work_target.as_ref(),
+            TaskBase::NoEpic { work_target, .. } => work_target.as_ref(),
+            TaskBase::Unresolved => None,
+        }
+    }
+
+    /// The declared integration branch, when a WorkTarget exists.
     pub(crate) fn target_branch(&self) -> Option<&str> {
-        self.epic()
-            .and_then(|epic| epic.target_branch.as_deref())
+        self.work_target()
+            .map(|target| target.target_branch.as_str())
             .map(str::trim)
             .filter(|branch| !branch.is_empty())
     }
@@ -146,6 +175,11 @@ impl TaskBase {
 /// cas-7587 (GH #122): where a worker's spawn base came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SpawnBaseSource {
+    /// The task (or its owning epic) declared the integration branch to use.
+    WorkTarget {
+        task_id: String,
+        owner: WorkTargetOwner,
+    },
     /// Base is the branch of the epic that owns the pre-assigned task.
     /// This outranks the pinned focus — the task, not the operator's last
     /// `focus_epic`, decides which history the worker needs.
@@ -193,6 +227,15 @@ pub(crate) fn resolve_spawn_base(
     focused_epic_branch: Option<&str>,
     trunk: &str,
 ) -> (String, SpawnBaseSource) {
+    if let Some(target) = task_base.work_target() {
+        return (
+            target.target_branch.clone(),
+            SpawnBaseSource::WorkTarget {
+                task_id: target.task_id.clone(),
+                owner: target.owner.clone(),
+            },
+        );
+    }
     if let Some(task_epic) = task_base.epic().filter(|t| t.branch_exists) {
         return (
             task_epic.branch.clone(),
@@ -202,7 +245,7 @@ pub(crate) fn resolve_spawn_base(
             },
         );
     }
-    if let TaskBase::NoEpic { task_id } = task_base {
+    if let TaskBase::NoEpic { task_id, .. } = task_base {
         // cas-d897 (GH #146): no epic means no epic history to inherit. The
         // operator's pinned focus is about *their* current attention, not
         // this task, and it is routinely a stale branch.
@@ -229,6 +272,23 @@ pub(crate) fn spawn_base_provenance_notice(
     focused_epic_branch: Option<&str>,
 ) -> String {
     match source {
+        SpawnBaseSource::WorkTarget { task_id, owner } => {
+            let authority = match owner {
+                WorkTargetOwner::Task => format!("task {task_id}'s WorkTarget"),
+                WorkTargetOwner::Epic { epic_id } => {
+                    format!("parent epic {epic_id}'s WorkTarget for task {task_id}")
+                }
+            };
+            let mut line = format!(
+                "SPAWN BASE: '{base}' — {authority}; declared delivery branch wins over ambient trunk and pinned focus."
+            );
+            if let Some(focus) = focused_epic_branch.filter(|focus| *focus != base) {
+                line.push_str(&format!(
+                    " NOTE: pinned focus branch '{focus}' was not used because the declared WorkTarget is authoritative."
+                ));
+            }
+            line
+        }
         SpawnBaseSource::TaskEpic { task_id, epic_id } => {
             let mut line = format!(
                 "SPAWN BASE: '{base}' — branch of epic {epic_id}, which owns pre-assigned task {task_id}."
@@ -247,8 +307,9 @@ pub(crate) fn spawn_base_provenance_notice(
         }
         SpawnBaseSource::TaskWithoutEpic { task_id } => {
             let mut line = format!(
-                "SPAWN BASE: '{base}' — integration trunk: pre-assigned task {task_id} belongs to \
-                 no epic, so there is no epic history to inherit."
+                "SPAWN BASE: '{base}' — integration trunk fallback: pre-assigned task {task_id} \
+                 has no WorkTarget and belongs to no epic, so there is no declared delivery or \
+                 epic history to inherit."
             );
             match focused_epic_branch {
                 Some(focus) if focus != base => {
@@ -286,7 +347,9 @@ pub(crate) fn base_diverges_from_focus(
 ) -> bool {
     matches!(
         source,
-        SpawnBaseSource::TaskEpic { .. } | SpawnBaseSource::TaskWithoutEpic { .. }
+        SpawnBaseSource::WorkTarget { .. }
+            | SpawnBaseSource::TaskEpic { .. }
+            | SpawnBaseSource::TaskWithoutEpic { .. }
     ) && focused_epic_branch.is_some_and(|focus| focus != base)
 }
 
@@ -329,6 +392,15 @@ pub(crate) fn task_epic_base(
         }
     };
 
+    let task_work_target = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| SpawnWorkTarget {
+            task_id: task_id.to_string(),
+            target_branch: target.target_branch.clone(),
+            owner: WorkTargetOwner::Task,
+        });
     let epic = if task.task_type == cas_types::TaskType::Epic {
         task
     } else {
@@ -341,6 +413,7 @@ pub(crate) fn task_epic_base(
                 );
                 return TaskBase::NoEpic {
                     task_id: task_id.to_string(),
+                    work_target: task_work_target,
                 };
             }
             Err(error) => {
@@ -370,14 +443,21 @@ pub(crate) fn task_epic_base(
 
     TaskBase::Epic(TaskEpicBase {
         task_id: task_id.to_string(),
-        epic_id: epic.id,
+        epic_id: epic.id.clone(),
         branch,
         branch_exists,
-        target_branch: epic
-            .deliverables
-            .work_target
-            .as_ref()
-            .map(|target| target.target_branch.clone()),
+        work_target: task_work_target.or_else(|| {
+            epic.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| SpawnWorkTarget {
+                    task_id: task_id.to_string(),
+                    target_branch: target.target_branch.clone(),
+                    owner: WorkTargetOwner::Epic {
+                        epic_id: epic.id.clone(),
+                    },
+                })
+        }),
     })
 }
 
@@ -635,6 +715,29 @@ fn prefer_fresher_base_ref(
             )),
         ),
     }
+}
+
+/// Resolve the immutable commit a worker will be checked out from, preserving
+/// the logical parent branch used for merge-back. A declared WorkTarget is
+/// always fetched and checked out from its `origin/<branch>` tip, so a stale
+/// local branch cannot make a regression task start before the regression.
+fn checkout_ref_for_spawn_base(
+    repo_root: &std::path::Path,
+    parent_branch: &str,
+    source: &SpawnBaseSource,
+) -> (Option<String>, Option<String>, String) {
+    let (mut base_ref, freshness_notice) = prefer_fresher_base_ref(repo_root, parent_branch);
+    let mut checkout_ref = parent_branch.to_string();
+    if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
+        let remote = format!("origin/{parent_branch}");
+        if ref_exists(repo_root, &remote)
+            && let Some(remote_sha) = full_sha(repo_root, &remote)
+        {
+            base_ref = Some(remote_sha);
+            checkout_ref = remote;
+        }
+    }
+    (base_ref, freshness_notice, checkout_ref)
 }
 
 /// Fast-forward an epic's local base ref from the parent branch it recorded
@@ -1447,7 +1550,9 @@ impl FactoryApp {
                 let base_epic_id = match &base_source {
                     SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
                     SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
-                    SpawnBaseSource::TaskWithoutEpic { .. } | SpawnBaseSource::Trunk => None,
+                    SpawnBaseSource::WorkTarget { .. }
+                    | SpawnBaseSource::TaskWithoutEpic { .. }
+                    | SpawnBaseSource::Trunk => None,
                 };
                 if let Some((epic_branch, recorded_parent)) = base_epic_id
                     .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
@@ -1468,8 +1573,8 @@ impl FactoryApp {
                 // cas-d897 (GH #146): the winning branch name still has to be
                 // resolved to the fresher of its local and origin refs — a
                 // stale local ref silently backdates every worker cut from it.
-                let (base_ref, freshness_notice) =
-                    prefer_fresher_base_ref(manager.repo_root(), &parent_branch);
+                let (base_ref, freshness_notice, checkout_ref) =
+                    checkout_ref_for_spawn_base(manager.repo_root(), &parent_branch, &base_source);
                 if let Some(notice) = freshness_notice {
                     notices.push(notice);
                 }
@@ -1478,11 +1583,15 @@ impl FactoryApp {
                 // must assess that effective checkout ref or they contradict
                 // the successful origin-based refresh they just announced.
                 let effective_base = base_ref.as_deref().unwrap_or(&parent_branch);
-                let provenance = spawn_base_provenance_notice(
+                let mut provenance = spawn_base_provenance_notice(
                     &parent_branch,
                     &base_source,
                     self.epic_branch.as_deref(),
                 );
+                let checkout_sha = short_sha(manager.repo_root(), effective_base);
+                provenance.push_str(&format!(
+                    " CHECKOUT BASE: '{checkout_ref}' @ {checkout_sha}."
+                ));
                 if base_diverges_from_focus(
                     &parent_branch,
                     &base_source,
@@ -1496,6 +1605,7 @@ impl FactoryApp {
                     SpawnBaseSource::TaskEpic { .. } => {
                         task_epic.as_ref().map(|t| t.branch.clone())
                     }
+                    SpawnBaseSource::WorkTarget { .. } => None,
                     _ => self.epic_branch.clone(),
                 };
                 if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
@@ -2391,7 +2501,8 @@ mod spawn_base_tests {
         assert_eq!(base.target_branch(), Some("staging"));
         assert_eq!(
             resolve_spawn_base(&base, None, base.target_branch().unwrap()).0,
-            "epic/staging-target"
+            "staging",
+            "an epic WorkTarget must be the spawn base, not its implementation branch"
         );
     }
 
@@ -2537,7 +2648,8 @@ mod spawn_base_tests {
         assert_eq!(
             task_base,
             TaskBase::NoEpic {
-                task_id: "cas-loner".to_string()
+                task_id: "cas-loner".to_string(),
+                work_target: None,
             },
             "a task with no parent epic must be reported as such, not as 'could not resolve'"
         );
@@ -2582,6 +2694,37 @@ mod spawn_base_tests {
             worker_path.join("main-only.txt").is_file(),
             "epic-less worker must start from trunk's tip (GH #146)"
         );
+    }
+
+    /// CAS #413: an explicit task WorkTarget is the same delivery authority
+    /// that `worktree_merge` uses. A worker must therefore start on that
+    /// branch, not on ambient trunk or the supervisor's focused epic.
+    #[test]
+    fn standalone_task_work_target_bases_spawn_on_declared_branch_cas_7a87() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "staging", "main");
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-targeted".into(), "staging fix".into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "staging".into(),
+        });
+        store.add(&task).unwrap();
+
+        let task_base = task_epic_base(&cas_dir, &repo, "cas-targeted");
+        let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
+        assert_eq!(
+            base, "staging",
+            "CAS #413: a task WorkTarget must outrank trunk and pinned focus"
+        );
+        let receipt = spawn_base_provenance_notice(&base, &source, Some("epic/unrelated"));
+        assert!(receipt.contains("WorkTarget"), "{receipt}");
+        assert!(receipt.contains("staging"), "{receipt}");
     }
 
     /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while
@@ -2664,6 +2807,86 @@ mod spawn_base_tests {
         assert!(
             worker_path.join("remote-only.txt").is_file(),
             "GH #146: the worker must contain the commit that only origin's ref had"
+        );
+    }
+
+    /// CAS #413: WorkTarget spawns must use the freshly fetched remote tip
+    /// even when the matching local branch exists but is stale. This is the
+    /// regression shape that otherwise starts a worker before the bug exists.
+    #[test]
+    fn work_target_checkout_uses_fetched_origin_tip_when_local_branch_is_stale_cas_7a87() {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "staging"])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+        commit_file(&origin, "regression.txt", "only on staging");
+        let remote_sha = short_sha(&origin, "staging");
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+
+        let repo = tmp.path().join("repo");
+        Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ])
+            .output()
+            .expect("git clone");
+        Command::new("git")
+            .args(["branch", "staging", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let local_sha = short_sha(&repo, "staging");
+        assert_ne!(
+            local_sha, remote_sha,
+            "fixture must have a stale local staging ref"
+        );
+
+        let source = SpawnBaseSource::WorkTarget {
+            task_id: "cas-targeted".into(),
+            owner: WorkTargetOwner::Task,
+        };
+        let (base_ref, notice, checkout_ref) =
+            checkout_ref_for_spawn_base(&repo, "staging", &source);
+        let base_ref = base_ref.expect("WorkTarget must check out an immutable fetched tip");
+        assert_eq!(checkout_ref, "origin/staging");
+        assert_eq!(short_sha(&repo, &base_ref), remote_sha);
+        assert!(
+            notice
+                .expect("stale local branch must be disclosed")
+                .contains(&local_sha)
+        );
+
+        let worker_path = repo.join(".cas/worktrees/targeted-worker");
+        WorkerSpawnPrep {
+            worker_name: "targeted-worker".into(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/targeted-worker".into(),
+                parent_branch: "staging".into(),
+                base_ref: Some(base_ref),
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+        .run()
+        .expect("worker worktree should cut from fetched WorkTarget");
+        assert!(
+            worker_path.join("regression.txt").exists(),
+            "the worker must include the target-only regression"
         );
     }
 

@@ -76,6 +76,15 @@ describe("binding Commander browser invariants", () => {
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
+  it("distinguishes a loading catalog from an unpaired Commander drawer", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("let machineCatalogLoaded = false;");
+    expect(source).toContain("machineCatalogLoaded = true;");
+    expect(source).toContain('"Loading paired machines…"');
+    expect(source).toContain('"No machines paired yet — press + to pair this machine."');
+    expect(source).toContain("render(false);");
+  });
+
   it("binds the browser fetch receiver at every pairing handoff", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/fetcher:\s*(?:window\.|globalThis\.)?fetch\s*[,}]/);

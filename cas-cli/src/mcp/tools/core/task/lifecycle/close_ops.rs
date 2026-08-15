@@ -2173,11 +2173,8 @@ impl CasCore {
                 .and_then(|store| store.get(wt_id).ok())
                 .map(|wt| wt.parent_branch.clone())
         });
-        let epic_parent_branch = task_store
-            .get_parent_epic(&req.id)
-            .ok()
-            .flatten()
-            .and_then(|p| p.branch);
+        let parent_epic = task_store.get_parent_epic(&req.id).ok().flatten();
+        let epic_parent_branch = parent_epic.as_ref().and_then(|p| p.branch.clone());
         let parent_branch_resolution = if let Some(context) = declared_repo_context.as_ref() {
             Ok(context.target_branch.clone())
         } else if close_repo_verified {
@@ -2348,6 +2345,49 @@ impl CasCore {
                     }
 
                     return Ok(Self::tool_error(msg));
+                }
+            }
+        }
+
+        // cas-87e7 (GH #382): a child delivery that is already proven on an
+        // epic's declared integration branch is the authority to advance the
+        // epic base.  The worker is not selecting a merge target here: the
+        // parent epic declared both refs, and the ordinary merge gate above
+        // already accepted this delivery.  Advancement is deliberately
+        // best-effort.  A network failure, concurrent pusher, or divergent
+        // epic must never turn a valid child close back into a deadlock; each
+        // outcome is instead preserved on the child's audit trail.
+        if close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic
+            && close_repo_verified
+            && let Some(epic) = parent_epic.as_ref()
+            && !epic.is_terminal()
+            && let (Some(epic_branch), Some(target)) = (
+                epic.branch.as_deref(),
+                epic.deliverables.work_target.as_ref(),
+            )
+        {
+            let integration_branch = target.target_branch.trim();
+            let delivery_proven_on_integration = resolved_parent_branch == integration_branch
+                || req.commit_receipt.as_deref().is_some_and(|receipt| {
+                    commit_receipt_window.as_ref().is_some_and(|window| {
+                        validate_task_commit_receipt(
+                            &close_project_root,
+                            receipt,
+                            integration_branch,
+                            window,
+                        )
+                        .is_ok()
+                    })
+                });
+            if delivery_proven_on_integration {
+                if let Some(note) = advance_clean_epic_after_child_integration(
+                    &close_project_root,
+                    &epic.id,
+                    epic_branch,
+                    integration_branch,
+                ) {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
             }
         }
@@ -9011,13 +9051,8 @@ fn validate_lagging_epic_receipt_on_integration_branch(
         return None;
     }
 
-    let receipt_note = validate_task_commit_receipt(
-        repo_path,
-        receipt,
-        &integration_branch,
-        window,
-    )
-    .ok()?;
+    let receipt_note =
+        validate_task_commit_receipt(repo_path, receipt, &integration_branch, window).ok()?;
 
     Some(format!(
         "decision: CAS_CLOSE_LAGGING_EPIC_RECEIPT_V1 \
@@ -9026,6 +9061,199 @@ fn validate_lagging_epic_receipt_on_integration_branch(
          receipt delivery is fully validated on the integration branch while \
          the epic branch is a clean ancestor and lags behind. {receipt_note}"
     ))
+}
+
+/// Advance an open epic's shared branch only when the declared integration
+/// branch cleanly contains it.  This is intentionally an audit-producing,
+/// never-blocking companion to the child close gate: integration has already
+/// been proven before this runs, while branch maintenance must tolerate an
+/// offline remote, missing credentials, or another child closing concurrently.
+///
+/// The remote is advanced first with Git's ordinary non-force fast-forward
+/// rule.  A rejected push is re-read once: another closer may simply have
+/// advanced the epic further.  We never auto-merge or force-push divergent
+/// shared epic history.
+fn advance_clean_epic_after_child_integration(
+    repo_path: &std::path::Path,
+    epic_id: &str,
+    epic_branch: &str,
+    integration_branch: &str,
+) -> Option<String> {
+    use std::process::Command;
+
+    if epic_branch == integration_branch
+        || !is_safe_git_refname(epic_branch)
+        || !is_safe_git_refname(integration_branch)
+    {
+        return None;
+    }
+
+    fetch_parent_branch_best_effort(repo_path, epic_branch);
+    fetch_parent_branch_best_effort(repo_path, integration_branch);
+    let epic_ref = preferred_diff_target_ref(repo_path, epic_branch);
+    let integration_ref = preferred_diff_target_ref(repo_path, integration_branch);
+    let Some(epic_tip) = resolve_branch_sha(repo_path, &epic_ref) else {
+        return Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
+             integration_branch={integration_branch}; the epic ref `{epic_ref}` could not be resolved. \\
+             Child close remains valid; supervisor action: restore or reconcile the epic branch."
+        ));
+    };
+    let Some(integration_tip) = resolve_branch_sha(repo_path, &integration_ref) else {
+        return Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
+             integration_branch={integration_branch}; the integration ref `{integration_ref}` could not be resolved. \\
+             Child close remains valid; supervisor action: fetch/repair the declared integration branch."
+        ));
+    };
+
+    if epic_tip == integration_tip {
+        return None;
+    }
+    if !git_commit_is_ancestor(repo_path, &epic_tip, &integration_tip) {
+        return Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
+             epic_tip={epic_tip} integration_branch={integration_branch} integration_tip={integration_tip}; \\
+             the branches diverge or the epic carries commits absent from its declared integration branch. \\
+             CAS will not auto-merge or overwrite shared epic history. Child close remains valid; \\
+             supervisor action: inspect and explicitly reconcile `{epic_branch}` with `{integration_branch}`."
+        ));
+    }
+
+    let has_origin = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_origin {
+        return Some(
+            match fast_forward_local_epic_ref(repo_path, epic_branch, &integration_tip) {
+                Ok(()) => format!(
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 LOCAL_ONLY epic={epic_id} branch={epic_branch} \\
+                 advanced from {epic_tip} to declared integration `{integration_branch}` ({integration_tip}); \\
+                 no origin remote is configured, so there was no shared ref to push."
+                ),
+                Err(error) => format!(
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_LOCAL epic={epic_id} branch={epic_branch} \\
+                 integration_branch={integration_branch}; {error}. Child close remains valid; \\
+                 supervisor action: reconcile the local epic ref."
+                ),
+            },
+        );
+    }
+
+    let push = Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "push",
+            "origin",
+            &format!("{integration_tip}:refs/heads/{epic_branch}"),
+        ])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(repo_path)
+        .output();
+    match push {
+        Ok(output) if output.status.success() => {
+            let local_note =
+                match fast_forward_local_epic_ref(repo_path, epic_branch, &integration_tip) {
+                    Ok(()) => String::new(),
+                    Err(error) => {
+                        format!(" Remote ref advanced, but local convergence was refused: {error}.")
+                    }
+                };
+            Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 ADVANCED epic={epic_id} branch={epic_branch} \\
+                 from {epic_tip} to declared integration `{integration_branch}` ({integration_tip}) \\
+                 with a non-force remote fast-forward.{local_note}"
+            ))
+        }
+        Ok(output) => {
+            // A concurrent child close commonly makes this particular source
+            // SHA stale. Fetch once and accept that outcome only if the remote
+            // epic now contains the integration commit we intended to publish.
+            fetch_parent_branch_best_effort(repo_path, epic_branch);
+            if let Some(remote_tip) =
+                remote_epic_contains_integration(repo_path, epic_branch, &integration_tip)
+            {
+                let local_note =
+                    match fast_forward_local_epic_ref(repo_path, epic_branch, &remote_tip) {
+                        Ok(()) => String::new(),
+                        Err(error) => format!(" Local convergence was refused: {error}."),
+                    };
+                return Some(format!(
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 CONCURRENT epic={epic_id} branch={epic_branch} \\
+                     already advanced remotely to {remote_tip}, which contains integration {integration_tip}; \\
+                     no overwrite was attempted.{local_note}"
+                ));
+            }
+            Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id} branch={epic_branch} \\
+                 integration_branch={integration_branch} integration_tip={integration_tip}; non-force push \\
+                 was rejected and re-read did not show an equivalent concurrent advance: {}. \\
+                 Child close remains valid; supervisor action: inspect remote epic history and credentials.",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+        Err(error) => Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id} branch={epic_branch} \\
+             integration_branch={integration_branch}; could not start non-force push: {error}. \\
+             Child close remains valid; supervisor action: retry or inspect remote access."
+        )),
+    }
+}
+
+/// Return the fetched remote epic tip only when it contains the integration
+/// commit a losing concurrent closer intended to publish.  This narrow check
+/// makes a rejected non-force push idempotent without treating an unrelated
+/// remote movement as success.
+fn remote_epic_contains_integration(
+    repo_path: &std::path::Path,
+    epic_branch: &str,
+    integration_tip: &str,
+) -> Option<String> {
+    let remote_epic = format!("origin/{epic_branch}");
+    let remote_tip = resolve_branch_sha(repo_path, &remote_epic)?;
+    git_commit_is_ancestor(repo_path, integration_tip, &remote_tip).then_some(remote_tip)
+}
+
+/// Advance the local branch with a compare-and-swap only when it can move
+/// forward.  Remote success must never overwrite local-only epic work.
+fn fast_forward_local_epic_ref(
+    repo_path: &std::path::Path,
+    epic_branch: &str,
+    target_tip: &str,
+) -> Result<(), String> {
+    use std::process::Command;
+
+    let current = resolve_branch_sha(repo_path, epic_branch)
+        .ok_or_else(|| format!("local epic ref `{epic_branch}` is unavailable"))?;
+    if current == target_tip {
+        return Ok(());
+    }
+    if !git_commit_is_ancestor(repo_path, &current, target_tip) {
+        return Err(format!(
+            "local epic tip {current} is not an ancestor of target {target_tip}; refusing overwrite"
+        ));
+    }
+    let update = Command::new("git")
+        .args([
+            "update-ref",
+            &format!("refs/heads/{epic_branch}"),
+            target_tip,
+            &current,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("could not update local epic ref: {error}"))?;
+    if update.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "local compare-and-swap failed: {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        ))
+    }
 }
 
 /// Find a commit already on the target whose complete tree equals the
@@ -15678,6 +15906,159 @@ mod merge_state_gate_tests {
         }
     }
 
+    #[test]
+    fn child_integration_advances_clean_epic_locally_and_on_origin() {
+        let bare = tempfile::tempdir().unwrap();
+        git_command(bare.path(), &["init", "-q", "--bare"])
+            .status()
+            .expect("init bare");
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic/clean"]);
+        let original_epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "-u", "origin", "main"]);
+        git(p, &["push", "-q", "-u", "origin", "epic/clean"]);
+        commit_file_at(p, "landed.rs", "// landed\n", "2026-08-15T02:00:00Z");
+        let integration_tip = head_sha(p);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        let note = advance_clean_epic_after_child_integration(p, "cas-epic", "epic/clean", "main")
+            .expect("a behind epic must produce an advancement audit note");
+        assert!(note.contains("ADVANCED"), "{note}");
+        assert_eq!(
+            resolve_branch_sha(p, "epic/clean"),
+            Some(integration_tip.clone())
+        );
+        assert_eq!(
+            resolve_branch_sha(p, "origin/epic/clean"),
+            Some(integration_tip),
+            "the shared epic ref, not merely the local branch, must advance"
+        );
+        assert_ne!(
+            original_epic_tip,
+            resolve_branch_sha(p, "epic/clean").unwrap()
+        );
+    }
+
+    #[test]
+    fn child_integration_refuses_divergent_epic_without_overwrite() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic/diverged"]);
+        commit_file_at(
+            p,
+            "epic-only.rs",
+            "// preserve this\n",
+            "2026-08-15T02:00:00Z",
+        );
+        let epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        commit_file_at(
+            p,
+            "main-only.rs",
+            "// landed elsewhere\n",
+            "2026-08-15T02:01:00Z",
+        );
+
+        let note =
+            advance_clean_epic_after_child_integration(p, "cas-epic", "epic/diverged", "main")
+                .expect("divergence must be reported rather than silently skipped");
+        assert!(
+            note.contains("REFUSED") && note.contains("not auto-merge"),
+            "{note}"
+        );
+        assert_eq!(
+            resolve_branch_sha(p, "epic/diverged"),
+            Some(epic_tip),
+            "the close-side maintenance path must never overwrite epic-only work"
+        );
+    }
+
+    #[test]
+    fn remote_advance_failure_is_reported_without_turning_into_a_close_error() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic/offline"]);
+        let epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "/definitely/missing/cas-87e7-origin.git",
+            ],
+        );
+        commit_file_at(p, "landed.rs", "// landed\n", "2026-08-15T02:00:00Z");
+
+        let note =
+            advance_clean_epic_after_child_integration(p, "cas-epic", "epic/offline", "main")
+                .expect("remote failure must return an audit note, not an error");
+        assert!(
+            note.contains("FAILED_REMOTE") && note.contains("Child close remains valid"),
+            "{note}"
+        );
+        assert_eq!(
+            resolve_branch_sha(p, "epic/offline"),
+            Some(epic_tip),
+            "a failed remote push must not advance only the local ref and create split truth"
+        );
+    }
+
+    #[test]
+    fn concurrent_child_advance_is_recognized_only_when_remote_contains_target() {
+        let bare = tempfile::tempdir().unwrap();
+        let bare_status = git_command(bare.path(), &["init", "-q", "--bare"])
+            .status()
+            .expect("init bare");
+        assert!(bare_status.success());
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic/concurrent"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "-u", "origin", "main"]);
+        git(p, &["push", "-q", "-u", "origin", "epic/concurrent"]);
+        commit_file_at(p, "first.rs", "// first child\n", "2026-08-15T02:00:00Z");
+        let first_tip = head_sha(p);
+        // Simulate another child winning the remote update between this
+        // closer's initial read and its non-force push rejection.
+        git(
+            p,
+            &["push", "-q", "origin", "main:refs/heads/epic/concurrent"],
+        );
+        git(p, &["fetch", "-q", "origin", "epic/concurrent"]);
+        assert_eq!(
+            remote_epic_contains_integration(p, "epic/concurrent", &first_tip),
+            resolve_branch_sha(p, "origin/epic/concurrent"),
+            "the losing closer may converge only when the remote contains its integration target"
+        );
+        commit_file_at(
+            p,
+            "second.rs",
+            "// later integration\n",
+            "2026-08-15T02:01:00Z",
+        );
+        let later_tip = head_sha(p);
+        assert!(
+            remote_epic_contains_integration(p, "epic/concurrent", &later_tip).is_none(),
+            "a remote advance that does not contain this closer's target is not a successful race"
+        );
+    }
+
     fn epic_task(assignee: Option<&str>) -> Task {
         Task {
             id: "cas-epic".to_string(),
@@ -16336,7 +16717,12 @@ mod merge_state_gate_tests {
 
         git(p, &["checkout", "-q", "main"]);
         git(p, &["checkout", "-q", "-b", epic]);
-        commit_file_at(p, "epic-only.rs", "// explicit epic work\n", "2026-08-14T11:00:00Z");
+        commit_file_at(
+            p,
+            "epic-only.rs",
+            "// explicit epic work\n",
+            "2026-08-14T11:00:00Z",
+        );
         let epic_tip = head_sha(p);
         git(p, &["checkout", "-q", "factory/worker"]);
         commit_file_at(p, "delivered.rs", "// delivered\n", "2026-08-14T12:00:00Z");

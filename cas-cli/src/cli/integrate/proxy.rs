@@ -175,10 +175,20 @@ impl ProxyClient {
         args: Option<serde_json::Map<String, Value>>,
     ) -> anyhow::Result<Value> {
         let server_name = self.server_name; // &'static str — Copy
+        // This synchronous CLI path is not an MCP agent session. Keep its
+        // identity explicit and non-privileged so a future proxy policy can
+        // deny integration calls rather than seeing an anonymous bypass.
+        let caller = cmcp_core::ProxyCaller {
+            agent_id: "cas-integrate-cli".to_string(),
+            role: crate::types::AgentRole::Standard,
+            session_id: format!("cas-integrate-{}", std::process::id()),
+            factory_session: None,
+            active_task_ids: Vec::new(),
+        };
         self.with_engine(|rt, engine| {
             rt.block_on(async {
                 engine
-                    .call_tool(server_name, tool, args)
+                    .call_tool(&caller, server_name, tool, args)
                     .await
                     .with_context(|| format!("calling {server_name}.{tool}"))
             })

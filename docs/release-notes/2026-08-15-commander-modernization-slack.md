@@ -52,4 +52,16 @@ Was → Now:
 
 ## POSTED
 
-_Intentionally empty until publication._
+Published to **#cas-internal** (`C0B44GUKDK2`) on **2026-08-15**.
+Structure verified by a separate channel read: two top-level messages, each with
+exactly one threaded reply attached to the correct parent.
+
+| # | Message | Type | UTC | Permalink |
+|---|---------|------|-----|-----------|
+| 1 | User top-level | top-level | 2026-08-15 12:43:39Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786797819883899 |
+| 2 | User detail | reply to 1 | 2026-08-15 12:43:48Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786797828984089?thread_ts=1786797819.883899&cid=C0B44GUKDK2 |
+| 3 | Dev top-level | top-level | 2026-08-15 12:43:52Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786797832748759 |
+| 4 | Dev detail | reply to 3 | 2026-08-15 12:44:04Z | https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786797844758099?thread_ts=1786797832.748759&cid=C0B44GUKDK2 |
+
+Announced as a `main` landing (`b6da4319`, PR #406), not a tagged runtime
+release. The next version tag should not re-announce this content.

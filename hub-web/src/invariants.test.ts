@@ -35,6 +35,13 @@ describe("binding Commander browser invariants", () => {
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
   });
 
+  it("binds the browser fetch receiver at every pairing handoff", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source.match(/window\.fetch\.bind\(window\)/g)).toHaveLength(4);
+    expect(source).not.toMatch(/fetcher:\s*fetch\b/);
+    expect(source).not.toMatch(/(?:acknowledgePairing|createPairingRequest|pollPairingRequest)\(\s*fetch\b/);
+  });
+
   it("H4-STORAGE-02 creates a non-extractable P-256 signing key and valid proof", async () => {
     const { privateKey, publicKey } = await createDeviceKey();
     expect(privateKey.extractable).toBe(false);

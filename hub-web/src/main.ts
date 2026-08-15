@@ -130,13 +130,13 @@ async function pairMachine(form: HTMLFormElement): Promise<boolean> {
       deviceLabel: String(values.get("device")),
       operatorLabel: String(values.get("operator")),
       requestedScopes: values.getAll("scope") as Scope[],
-      fetcher: fetch,
+      fetcher: window.fetch.bind(window),
       createKey: createDeviceKey,
       installationGeneration: operation.generation,
       stagePersisted: (candidate, identity) => catalog.stage(candidate, identity, operation.signal),
       activatePersisted: (identity, signal) => catalog.activate(identity, signal),
       rollbackPersisted: (identity) => catalog.rollback(identity),
-      acknowledge: relayOrigin ? (relay, signal) => acknowledgePairing(fetch, relayOrigin, relay, signal) : undefined,
+      acknowledge: relayOrigin ? (relay, signal) => acknowledgePairing(window.fetch.bind(window), relayOrigin, relay, signal) : undefined,
       signal: operation.signal,
       isCurrent: () => pairingOperations.isCurrent(operation),
     });
@@ -214,7 +214,7 @@ async function startRelayPairing(email: string): Promise<boolean> {
     const committed = await commitPairingResult(
       pairingOperations,
       operation,
-      createPairingRequest(fetch, relayOrigin, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined, operation.signal),
+      createPairingRequest(window.fetch.bind(window), relayOrigin, location.origin, DEFAULT_PAIRING_SCOPES, email || undefined, operation.signal),
       (value) => { created = value; },
     );
     if (!committed || !created) return false;
@@ -244,7 +244,7 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
   const operation = pairingOperations.begin();
   try {
     if (!relayOrigin) throw new PairingRelayError("relay_unavailable", "Page-initiated pairing is unavailable in this deployment.");
-    const result = await pollPairingRequest(fetch, relayOrigin, request, operation.signal);
+    const result = await pollPairingRequest(window.fetch.bind(window), relayOrigin, request, operation.signal);
     if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "relay-request" || pendingPairing.pairingRequestId !== request.pairingRequestId) return;
     if (result.kind === "authorized") {
       pendingPairing = result.invitation;

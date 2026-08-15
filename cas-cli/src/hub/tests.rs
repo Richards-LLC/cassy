@@ -456,6 +456,24 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         serde_json::json!({"schema_version": 1, "ready": true})
     );
 
+    let favicon = app
+        .clone()
+        .oneshot(
+            Request::get("/commander/favicon.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(favicon.status(), StatusCode::OK);
+    assert_eq!(favicon.headers()["content-type"], "image/svg+xml");
+    assert!(
+        to_bytes(favicon.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .starts_with(b"<svg")
+    );
+
     let denied = app
         .clone()
         .oneshot(Request::get("/v1/sessions").body(Body::empty()).unwrap())

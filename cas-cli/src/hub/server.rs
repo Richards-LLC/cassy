@@ -92,6 +92,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/", get(commander_index))
         .route("/commander/app.js", get(commander_javascript))
         .route("/commander/app.css", get(commander_stylesheet))
+        .route("/commander/favicon.svg", get(commander_favicon))
         .route("/commander/ghostty-vt.wasm", get(commander_ghostty_wasm))
         .route(
             "/commander/ghostty-write-pty.wasm",
@@ -169,6 +170,13 @@ async fn commander_stylesheet() -> Response {
     commander_asset(
         include_bytes!("../../../hub-web/dist/app.css"),
         "text/css; charset=utf-8",
+    )
+}
+
+async fn commander_favicon() -> Response {
+    commander_asset(
+        include_bytes!("../../../hub-web/dist/favicon.svg"),
+        "image/svg+xml",
     )
 }
 

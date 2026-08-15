@@ -511,10 +511,13 @@ impl FactoryDaemon {
                     // cas-ab80: frame Codex payloads with the same sender
                     // contract as normal delivery (director is the inject source).
                     let harness = self.app.harness_for(&actual);
-                    let payload = super::delivery::frame_pty_payload(
+                    let payload = super::delivery::prepare_pty_machine_delivery(
+                        self.app.cas_dir(),
+                        &actual,
                         harness,
                         super::teams::DIRECTOR_AGENT_NAME,
                         &prompt,
+                        None,
                     );
                     let settle = self.urgent_settle_duration(&actual);
                     let _ = self

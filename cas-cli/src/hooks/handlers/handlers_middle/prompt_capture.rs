@@ -152,16 +152,15 @@ fn handle_user_prompt_submit_capture(
     // stricter gate: conversational questions and recursive control-plane
     // prompts do not earn a durable context entry merely by containing a
     // question word or being very long.
-    // Factory-worker turns include bare relay and lifecycle prose as user
-    // prompts.  Native team delivery strips sender/origin provenance before
-    // this hook runs, so the capture path cannot distinguish that traffic from
-    // a human instruction without guessing from content.  Keep complete prompt
-    // attribution above, but do not let ephemeral coordination compete in
-    // ambient recall as durable Context.  cas-b657 will carry typed provenance
-    // into HookInput and restore selective capture.
-    let factory_worker = crate::harness_policy::is_factory_agent(input)
-        && crate::harness_policy::is_worker(input);
-    if !factory_worker && is_context_memory_worthy_prompt(prompt_text) {
+    // Machine relay metadata reaches this hook as a typed HookInput field, not
+    // by re-parsing a rendered `CAS provenance:` prefix.  Absence is the
+    // explicit operator case: a factory worker's genuine instruction must be
+    // retained while every relay origin stays out of durable Context.
+    let operator_submitted = matches!(
+        input.submitted_prompt_origin(),
+        cas_core::hooks::types::SubmittedPromptOrigin::Operator
+    );
+    if operator_submitted && is_context_memory_worthy_prompt(prompt_text) {
         if let Ok(store) = open_store(cas_root) {
             if let Ok(id) = store.generate_id() {
                 let entry = Entry {

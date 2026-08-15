@@ -34,6 +34,7 @@ export interface HubCallbacks {
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
+  onFlowControlReset?(session: string): void;
   onScrollbackPage?(session: string, page: Record<string, any>): void;
   onSocketError(session: string, detail: string): void;
 }
@@ -63,6 +64,16 @@ export class HubConnectionSupervisor {
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
   private readonly readySockets = new WeakSet<WebSocket>();
+  private machineSocket?: WebSocket;
+  private machineSocketReady = false;
+  private machineSocketOpening?: Promise<boolean>;
+  private machineMultiplex = false;
+  private machineProtocolBlocked = false;
+  private readonly desiredSessions = new Set<string>();
+  private readonly machineSubscriptions = new Set<string>();
+  private readonly sessionPanes = new Map<string, PaneInfo[]>();
+  private healthPing?: { id: number; startedAt: number };
+  private lastMachineEventSequence = 0;
 
   constructor(readonly machine: StoredMachine, private readonly callbacks: HubCallbacks) {}
 
@@ -81,6 +92,14 @@ export class HubConnectionSupervisor {
     this.heartbeatTimer = undefined;
     this.clearAttachRetries();
     this.clearAttachTimeouts();
+    this.machineSocket?.close(1000, "machine removed");
+    this.machineSocket = undefined;
+    this.machineSocketReady = false;
+    this.machineSocketOpening = undefined;
+    this.desiredSessions.clear();
+    this.machineSubscriptions.clear();
+    this.sessionPanes.clear();
+    this.healthPing = undefined;
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
     for (const session of this.attachLifecycles.keys()) {
@@ -257,7 +276,9 @@ export class HubConnectionSupervisor {
 
   private async refreshMachineInfo(signal?: AbortSignal): Promise<void> {
     try {
-      this.callbacks.onMachineInfo?.(await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, signal));
+      const info = await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, signal);
+      this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
+      this.callbacks.onMachineInfo?.(info);
     } catch (error) {
       if (error instanceof AuthenticationError) throw error;
       // Older hubs can still offer the read-only session surface. The UI shows
@@ -324,7 +345,7 @@ export class HubConnectionSupervisor {
         const data = block.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
         if (data) {
           const event = JSON.parse(data) as Record<string, unknown>;
-          this.callbacks.onMachineEvent(event);
+          this.deliverMachineEvent(event);
           await this.refreshSessions();
         }
         boundary = buffer.indexOf("\n\n");
@@ -345,6 +366,20 @@ export class HubConnectionSupervisor {
   private async heartbeat(): Promise<void> {
     const started = performance.now();
     try {
+      if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
+        if (this.healthPing) {
+          this.missedHeartbeats += 1;
+          this.transition("live", "live", { reason: "machine WebSocket heartbeat missed" });
+          if (this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS) {
+            this.machineSocket.close(1012, "heartbeat timeout");
+            return;
+          }
+        }
+        const id = Date.now();
+        this.healthPing = { id, startedAt: started };
+        this.machineSocket.send(JSON.stringify({ channel: "health", ping: id }));
+        return;
+      }
       await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
@@ -380,11 +415,23 @@ export class HubConnectionSupervisor {
 
   private async openAttach(session: string): Promise<void> {
     if (!this.desired) return;
+    this.desiredSessions.add(session);
     const retryTimer = this.attachRetryTimers.get(session);
     if (retryTimer !== undefined) {
       window.clearTimeout(retryTimer);
       this.attachRetryTimers.delete(session);
     }
+    if (this.machineMultiplex && !this.machineProtocolBlocked) {
+      const connected = await this.ensureMachineSocket(session);
+      if (connected) {
+        this.subscribeMachineSession(session);
+        return;
+      }
+    }
+    await this.openLegacyAttach(session);
+  }
+
+  private async openLegacyAttach(session: string): Promise<void> {
     const existing = this.sockets.get(session);
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
     this.transitionAttach(session, "auth", "auth");
@@ -423,6 +470,151 @@ export class HubConnectionSupervisor {
       this.transitionAttach(session, "failed", stage, { reason: "terminal transport error" });
       this.callbacks.onSocketError(session, "terminal transport error");
     };
+  }
+
+  private async ensureMachineSocket(session: string): Promise<boolean> {
+    if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) return true;
+    if (this.machineSocketOpening) return this.machineSocketOpening;
+    this.machineSocketOpening = this.openMachineSocket(session).finally(() => {
+      this.machineSocketOpening = undefined;
+    });
+    return this.machineSocketOpening;
+  }
+
+  private async openMachineSocket(session: string): Promise<boolean> {
+    this.transitionAttach(session, "auth", "auth");
+    let ticket: { ticket: string };
+    try {
+      ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", {});
+    } catch (error) {
+      if (error instanceof AuthenticationError) throw error;
+      // A hub from before machine protocol v2 advertised no capability, but a
+      // rolling upgrade can briefly expose stale machine metadata. Preserve
+      // the old per-session attach as a bounded compatibility fallback.
+      this.machineMultiplex = false;
+      return false;
+    }
+    if (!this.desired) return true;
+    const endpoint = new URL("/v1/attach", this.machine.baseUrl);
+    endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+    endpoint.searchParams.set("ticket", ticket.ticket);
+    const socket = new WebSocket(endpoint);
+    socket.binaryType = "arraybuffer";
+    this.machineSocket = socket;
+    for (const desired of this.desiredSessions) this.transitionAttach(desired, "dialing", "dialing");
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let openTimer: number | undefined = window.setTimeout(() => {
+        if (socket.readyState !== WebSocket.CONNECTING) return;
+        settled = true;
+        resolve(true);
+        for (const desired of this.desiredSessions) {
+          this.transitionAttach(desired, "failed", "dialing", { reason: "Stuck dialing machine WebSocket — node may be offline (5s)" });
+          this.callbacks.onSocketError(desired, "Stuck dialing machine WebSocket — node may be offline (5s). Retrying…");
+          this.scheduleAttach(desired);
+        }
+        socket.close();
+      }, STAGE_TIMEOUT_MS.dialing);
+      let handshakeTimer: number | undefined;
+      const clearTimers = () => {
+        if (openTimer !== undefined) window.clearTimeout(openTimer);
+        if (handshakeTimer !== undefined) window.clearTimeout(handshakeTimer);
+        openTimer = undefined;
+        handshakeTimer = undefined;
+      };
+      const protocolFailure = (detail: string) => {
+        this.machineProtocolBlocked = true;
+        clearTimers();
+        for (const desired of this.desiredSessions) {
+          this.transitionAttach(desired, "failed", "attaching", { reason: detail });
+          this.callbacks.onSocketError(desired, detail);
+        }
+        if (!settled) {
+          settled = true;
+          resolve(true);
+        }
+        socket.close(1002, "protocol mismatch");
+      };
+      socket.onopen = () => {
+        if (this.machineSocket !== socket) return;
+        if (openTimer !== undefined) window.clearTimeout(openTimer);
+        openTimer = undefined;
+        for (const desired of this.desiredSessions) this.transitionAttach(desired, "attaching", "attaching");
+        socket.send(JSON.stringify({ proto: 2 }));
+        handshakeTimer = window.setTimeout(() => {
+          protocolFailure("Machine protocol mismatch: hub did not complete the proto 2 handshake within 3s");
+        }, STAGE_TIMEOUT_MS.attaching);
+      };
+      socket.onmessage = (event) => {
+        if (!this.machineSocketReady) {
+          if (typeof event.data !== "string") {
+            protocolFailure("Machine protocol mismatch: expected a proto 2 JSON handshake");
+            return;
+          }
+          let hello: Record<string, any>;
+          try { hello = JSON.parse(event.data) as Record<string, any>; }
+          catch { protocolFailure("Machine protocol mismatch: hub returned an invalid handshake"); return; }
+          if (hello.proto !== 2) {
+            const supported = hello.error?.supported;
+            protocolFailure(`Machine protocol mismatch: Commander requires proto 2${supported ? `; hub supports ${supported}` : ""}`);
+            return;
+          }
+          clearTimers();
+          this.machineSocketReady = true;
+          if (!settled) {
+            settled = true;
+            resolve(true);
+          }
+          socket.send(JSON.stringify({ channel: "events", subscribe: true }));
+          for (const desired of this.desiredSessions) this.subscribeMachineSession(desired);
+          return;
+        }
+        void this.handleMachineMessage(event.data);
+      };
+      socket.onclose = (event) => {
+        clearTimers();
+        const wasReady = this.machineSocketReady;
+        if (this.machineSocket === socket) this.machineSocket = undefined;
+        this.machineSocketReady = false;
+        this.machineSubscriptions.clear();
+        this.healthPing = undefined;
+        if (!settled) {
+          settled = true;
+          resolve(this.machineProtocolBlocked);
+        }
+        if (!this.desired || !wasReady || event.code === 1000 || this.machineProtocolBlocked) return;
+        for (const desired of this.desiredSessions) {
+          this.transitionAttach(desired, "failed", "dialing", { reason: "Machine terminal transport closed" });
+          this.callbacks.onSocketError(desired, "Machine terminal transport closed. Retrying…");
+          this.scheduleAttach(desired);
+        }
+      };
+      socket.onerror = () => {
+        if (!this.machineSocketReady) return;
+        for (const desired of this.desiredSessions) {
+          this.transitionAttach(desired, "failed", "dialing", { reason: "machine terminal transport error" });
+        }
+      };
+    });
+  }
+
+  private subscribeMachineSession(session: string): void {
+    const socket = this.machineSocket;
+    if (!this.machineSocketReady || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (this.machineSubscriptions.has(session)) return;
+    this.machineSubscriptions.add(session);
+    this.transitionAttach(session, "attaching", "attaching");
+    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true }));
+    const timeouts = this.attachTimeouts.get(session) ?? {};
+    if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
+    timeouts.ready = window.setTimeout(() => {
+      if (!this.machineSocketReady || this.attachLifecycles.get(session)?.phase === "live") return;
+      this.transitionAttach(session, "failed", "attaching", { reason: "Machine stream sent no session state within 3s" });
+      this.callbacks.onSocketError(session, "Machine stream sent no session state within 3s. Retrying…");
+      this.scheduleAttach(session);
+    }, STAGE_TIMEOUT_MS.attaching);
+    this.attachTimeouts.set(session, timeouts);
   }
 
   private async handleAttachFailure(session: string, error: unknown): Promise<void> {
@@ -471,6 +663,11 @@ export class HubConnectionSupervisor {
     this.retryTimer = undefined;
     this.clearAttachRetries();
     this.clearAttachTimeouts();
+    this.machineSocket?.close(1000, "authentication blocked");
+    this.machineSocket = undefined;
+    this.machineSocketReady = false;
+    this.machineSubscriptions.clear();
+    this.healthPing = undefined;
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
     if (session) this.transitionAttach(session, "failed", "auth", { reason: detail, authFailure: kind });
@@ -550,6 +747,13 @@ export class HubConnectionSupervisor {
   }
 
   send(session: string, message: unknown): boolean {
+    if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
+      const resize = typeof message === "object" && message !== null && "ResizePane" in message;
+      this.machineSocket.send(JSON.stringify(resize
+        ? { channel: "resize", session, message }
+        : { channel: `pty:${session}`, message }));
+      return true;
+    }
     const socket = this.sockets.get(session);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     socket.send(JSON.stringify(message));
@@ -575,9 +779,87 @@ export class HubConnectionSupervisor {
     });
   }
 
+  private async handleMachineMessage(input: string | ArrayBuffer | Blob): Promise<void> {
+    if (typeof input !== "string") {
+      const bytes = new Uint8Array(input instanceof Blob ? await input.arrayBuffer() : input);
+      if (bytes.length < 9 || new TextDecoder().decode(bytes.subarray(0, 4)) !== "CAS2") return;
+      const kind = bytes[4];
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const sessionLength = view.getUint16(5);
+      const paneLength = view.getUint16(7);
+      const payloadStart = 9 + sessionLength + paneLength;
+      if (payloadStart > bytes.length) return;
+      const decoder = new TextDecoder();
+      const session = decoder.decode(bytes.subarray(9, 9 + sessionLength));
+      const pane = decoder.decode(bytes.subarray(9 + sessionLength, payloadStart));
+      const payload = bytes.slice(payloadStart);
+      if (kind === 1) this.callbacks.onOutput(session, pane, payload);
+      else if (kind === 2) {
+        this.keyframeRequests.delete(`${session}:${pane}`);
+        this.callbacks.onPaneKeyframe(session, pane, payload);
+      }
+      return;
+    }
+    let envelope: Record<string, any>;
+    try { envelope = JSON.parse(input) as Record<string, any>; }
+    catch { return; }
+    if (envelope.channel === "health" && typeof envelope.pong === "number") {
+      if (this.healthPing?.id !== envelope.pong) return;
+      const latencyMs = Math.max(0, Math.round(performance.now() - this.healthPing.startedAt));
+      this.healthPing = undefined;
+      this.missedHeartbeats = 0;
+      this.lastHeartbeatAt = Date.now();
+      this.transition("live", "live", { latencyMs });
+      this.callbacks.onLatency?.(latencyMs);
+      return;
+    }
+    if (envelope.channel === "events" && envelope.event) {
+      this.deliverMachineEvent(envelope.event as Record<string, unknown>);
+      await this.refreshSessions();
+      return;
+    }
+    const session = typeof envelope.channel === "string" && envelope.channel.startsWith("pty:")
+      ? envelope.channel.slice(4) : undefined;
+    if (!session) return;
+    if (envelope.keyframe_required) {
+      for (const key of this.keyframeRequests) {
+        if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
+      }
+      this.callbacks.onFlowControlReset?.(session);
+      for (const pane of this.sessionPanes.get(session) ?? []) this.requestPaneKeyframe(session, pane.id);
+      return;
+    }
+    if (envelope.closed) {
+      this.machineSubscriptions.delete(session);
+      this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed" });
+      this.callbacks.onSocketError(session, "Session daemon stream closed. Retrying…");
+      this.scheduleAttach(session);
+      return;
+    }
+    if (envelope.error) {
+      const detail = String(envelope.error.message ?? envelope.error.code ?? "machine protocol error");
+      this.callbacks.onSocketError(session, detail);
+      return;
+    }
+    if (envelope.message) this.handleDaemonObject(session, envelope.message as Record<string, any>);
+  }
+
+  private deliverMachineEvent(event: Record<string, unknown>): void {
+    const sequence = Number(event.sequence ?? 0);
+    if (Number.isFinite(sequence) && sequence > 0) {
+      if (sequence <= this.lastMachineEventSequence) return;
+      this.lastMachineEventSequence = sequence;
+    }
+    this.callbacks.onMachineEvent(event);
+  }
+
   private async handleDaemonMessage(session: string, input: string | ArrayBuffer | Blob): Promise<void> {
     const text = typeof input === "string" ? input : input instanceof Blob ? await input.text() : new TextDecoder().decode(input);
     const message = JSON.parse(text) as Record<string, any>;
+    this.handleDaemonObject(session, message);
+  }
+
+  private handleDaemonObject(session: string, message: Record<string, any>): void {
     if (message.Welcome) {
       const socket = this.sockets.get(session);
       if (socket) {
@@ -585,8 +867,13 @@ export class HubConnectionSupervisor {
         this.clearAttachTimeout(session, "ready");
         this.socketAttempts.set(session, 0);
         this.transitionAttach(session, "live", "live");
+      } else if (this.machineSocketReady) {
+        this.clearAttachTimeout(session, "ready");
+        this.socketAttempts.set(session, 0);
+        this.transitionAttach(session, "live", "live");
       }
       const welcome = message.Welcome;
+      this.sessionPanes.set(session, welcome.state.panes);
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3
         && Array.isArray(welcome.capabilities)
         && welcome.capabilities.includes("authoritative_pane_keyframes");
@@ -609,6 +896,7 @@ export class HubConnectionSupervisor {
     } else if (message.ScrollbackPage) {
       this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage);
     } else if (message.StateUpdate) {
+      this.sessionPanes.set(session, message.StateUpdate.state.panes);
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));

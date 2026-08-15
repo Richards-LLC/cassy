@@ -6,13 +6,13 @@ use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::connect_async_with_config;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use super::death::diagnose_disconnect;
 use super::{
-    DaemonExitEvidenceStore, DaemonIdentity, MachineEventBus, ProxyFrame, SessionMultiplexer,
-    ViewerReceiver,
+    DaemonExitEvidenceStore, DaemonIdentity, MachineEventBus, ProxyFrame, ProxyFrameKind,
+    SessionMultiplexer, ViewerReceiver,
 };
 use crate::ui::factory::{
     COMMANDER_REPLAY_BYTES_PER_PANE, ClientMessage, DaemonMessage, PaneKind, ProtocolCapability,
@@ -37,8 +37,13 @@ const COMMANDER_PRE_SUPERVISOR_HARD_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 enum WelcomePreparation {
-    Legacy { replay_before: usize, replay_after: usize },
-    Metadata { removed_content_bytes: usize },
+    Legacy {
+        replay_before: usize,
+        replay_after: usize,
+    },
+    Metadata {
+        removed_content_bytes: usize,
+    },
 }
 
 fn prepare_welcome_for_relay(message: &mut DaemonMessage) -> Option<WelcomePreparation> {
@@ -251,7 +256,9 @@ async fn run_upstream(
         let bytes = if let Some(preparation) = preparation {
             let compacted = serde_json::to_vec(&daemon)?;
             match preparation {
-                WelcomePreparation::Metadata { removed_content_bytes } => {
+                WelcomePreparation::Metadata {
+                    removed_content_bytes,
+                } => {
                     ensure!(
                         compacted.len() <= COMMANDER_WELCOME_METADATA_HARD_BYTES,
                         "Commander Welcome metadata exceeded hard ceiling: {} > {} bytes",
@@ -278,7 +285,8 @@ async fn run_upstream(
                             metadata_bytes = compacted.len(),
                             pane_count = state.panes.len(),
                             pane_metadata_count = match &daemon {
-                                DaemonMessage::Welcome { pane_bootstrap, .. } => pane_bootstrap.len(),
+                                DaemonMessage::Welcome { pane_bootstrap, .. } =>
+                                    pane_bootstrap.len(),
                                 _ => 0,
                             },
                             removed_content_bytes,
@@ -287,7 +295,10 @@ async fn run_upstream(
                         );
                     }
                 }
-                WelcomePreparation::Legacy { replay_before, replay_after } => {
+                WelcomePreparation::Legacy {
+                    replay_before,
+                    replay_after,
+                } => {
                     ensure!(
                         compacted.len() <= COMMANDER_RELAY_MAX_MESSAGE_BYTES,
                         "bounded legacy Commander Welcome is still too large: {} > {} bytes",
@@ -363,7 +374,16 @@ async fn run_upstream(
             DaemonMessage::PaneAdded { pane } => Some(pane.id.clone()),
             _ => None,
         };
-        let frame = ProxyFrame { bytes, pane_id };
+        let kind = match &daemon {
+            DaemonMessage::Output { .. } => ProxyFrameKind::Output,
+            DaemonMessage::PaneKeyframe { .. } => ProxyFrameKind::PaneKeyframe,
+            _ => ProxyFrameKind::Other,
+        };
+        let frame = ProxyFrame {
+            bytes,
+            pane_id,
+            kind,
+        };
         if matches!(daemon, DaemonMessage::Welcome { .. }) {
             mux.publish_snapshot(session, frame).await?;
         } else {
@@ -429,7 +449,10 @@ mod tests {
             scrollback.keys().map(String::as_str).collect::<Vec<_>>(),
             ["active"]
         );
-        assert_eq!(scrollback["active"][0].len(), COMMANDER_REPLAY_BYTES_PER_PANE);
+        assert_eq!(
+            scrollback["active"][0].len(),
+            COMMANDER_REPLAY_BYTES_PER_PANE
+        );
     }
 
     #[test]

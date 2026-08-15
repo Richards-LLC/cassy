@@ -366,6 +366,95 @@ describe("binding Commander browser invariants", () => {
     );
   });
 
+  it("multiplexes sessions on one proto-2 socket and routes raw PTY binary frames", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({ ticket: "machine-ticket" }),
+    })));
+    class FakeWebSocket {
+      static readonly OPEN = 1;
+      static readonly CONNECTING = 0;
+      static instances: FakeWebSocket[] = [];
+      readyState = FakeWebSocket.CONNECTING;
+      binaryType = "";
+      sent: string[] = [];
+      onopen: (() => void) | null = null;
+      onmessage: ((message: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(readonly url: URL) { FakeWebSocket.instances.push(this); }
+      open(): void { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
+      receive(data: string | ArrayBuffer): void { this.onmessage?.({ data } as MessageEvent); }
+      close(code = 1000): void { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
+      send(value: string): void { this.sent.push(value); }
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["pane-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(),
+      onFlowControlReset: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    const internals = supervisor as unknown as { desired: boolean; machineMultiplex: boolean };
+    internals.desired = true;
+    internals.machineMultiplex = true;
+
+    const firstAttach = supervisor.attach("factory-a");
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive(JSON.stringify({ proto: 2, capabilities: ["pty_binary", "machine_multiplex"] }));
+    await firstAttach;
+    await supervisor.attach("factory-b");
+    await supervisor.attach("factory-a");
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.sent.map((value) => JSON.parse(value))).toEqual(expect.arrayContaining([
+      { proto: 2 },
+      { channel: "events", subscribe: true },
+      { channel: "pty:factory-a", subscribe: true },
+      { channel: "pty:factory-b", subscribe: true },
+    ]));
+    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true }))).toHaveLength(1);
+
+    socket.receive(JSON.stringify({
+      channel: "pty:factory-a",
+      message: { Welcome: {
+        session_name: "factory-a",
+        state: { focused_pane: "supervisor", panes: [{ id: "supervisor", kind: "Supervisor" }] },
+        protocol_version: 3,
+        capabilities: ["authoritative_pane_keyframes"],
+      } },
+    }));
+    const session = new TextEncoder().encode("factory-a");
+    const pane = new TextEncoder().encode("supervisor");
+    const payload = new Uint8Array([0x1b, 0x5b, 0x48, 0x4f, 0x4b]);
+    const frame = new Uint8Array(9 + session.length + pane.length + payload.length);
+    frame.set(new TextEncoder().encode("CAS2"));
+    frame[4] = 1;
+    new DataView(frame.buffer).setUint16(5, session.length);
+    new DataView(frame.buffer).setUint16(7, pane.length);
+    frame.set(session, 9);
+    frame.set(pane, 9 + session.length);
+    frame.set(payload, 9 + session.length + pane.length);
+    socket.receive(frame.buffer);
+    expect(callbacks.onOutput).toHaveBeenCalledWith("factory-a", "supervisor", payload);
+
+    socket.receive(JSON.stringify({ channel: "pty:factory-a", keyframe_required: { skipped: 200 } }));
+    expect(callbacks.onFlowControlReset).toHaveBeenCalledWith("factory-a");
+    expect(socket.sent.some((value) => value.includes("RequestPaneKeyframe"))).toBe(true);
+    supervisor.stop();
+  });
+
   it.each(["stop", "auth-block"] as const)("cancels a scheduled attach retry on %s", async (terminalAction) => {
     vi.useFakeTimers();
     vi.stubGlobal("window", globalThis);

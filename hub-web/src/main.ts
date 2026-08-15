@@ -148,6 +148,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, [...data]);
       surfaces.get(key)?.write(data);
     },
+    onFlowControlReset: (session) => {
+      const prefix = `${sessionKey(machine.id, session)}:`;
+      for (const key of paneKeyframesReady) {
+        if (key.startsWith(prefix)) paneKeyframesReady.delete(key);
+      }
+    },
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       paneLastActivity.set(key, Date.now());

@@ -177,19 +177,35 @@ impl HealthResponse {
 pub struct ProxyFrame {
     pub bytes: Vec<u8>,
     pub pane_id: Option<String>,
+    pub kind: ProxyFrameKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyFrameKind {
+    Output,
+    PaneKeyframe,
+    Other,
 }
 
 pub fn proxy_frame(message: DaemonMessage) -> ProxyFrame {
     let pane_id = match &message {
         DaemonMessage::Output { pane_id, .. }
+        | DaemonMessage::PaneKeyframe { pane_id, .. }
+        | DaemonMessage::ScrollbackPage { pane_id, .. }
         | DaemonMessage::PaneExited { pane_id, .. }
         | DaemonMessage::PaneRemoved { pane_id } => Some(pane_id.clone()),
         DaemonMessage::PaneAdded { pane } => Some(pane.id.clone()),
         _ => None,
     };
+    let kind = match &message {
+        DaemonMessage::Output { .. } => ProxyFrameKind::Output,
+        DaemonMessage::PaneKeyframe { .. } => ProxyFrameKind::PaneKeyframe,
+        _ => ProxyFrameKind::Other,
+    };
     ProxyFrame {
         bytes: serde_json::to_vec(&message).expect("DaemonMessage must serialize"),
         pane_id,
+        kind,
     }
 }
 
@@ -333,6 +349,10 @@ impl ViewerReceiver {
     pub async fn recv(&mut self) -> std::result::Result<ProxyFrame, ViewerRecvError> {
         let skipped = self.lagged.swap(0, Ordering::Relaxed);
         if skipped > 0 {
+            // A queued terminal delta is no longer meaningful after any gap.
+            // Discard the bounded backlog so the caller can request a fresh
+            // authoritative keyframe instead of rendering seconds of stale IO.
+            while self.rx.try_recv().is_ok() {}
             return Err(ViewerRecvError::Lagged { skipped });
         }
         self.rx.recv().await.ok_or(ViewerRecvError::Closed)
@@ -341,6 +361,7 @@ impl ViewerReceiver {
     pub fn try_recv(&mut self) -> std::result::Result<ProxyFrame, ViewerRecvError> {
         let skipped = self.lagged.swap(0, Ordering::Relaxed);
         if skipped > 0 {
+            while self.rx.try_recv().is_ok() {}
             return Err(ViewerRecvError::Lagged { skipped });
         }
         self.rx.try_recv().map_err(|_| ViewerRecvError::Closed)
@@ -465,14 +486,15 @@ impl SessionReadModel for LocalSessionReadModel {
             .list_sessions()?
             .into_iter()
             .map(|session| {
-                let daemon_identity = session
-                    .metadata
-                    .daemon_pid_starttime
-                    .map(|pid_starttime| DaemonIdentity {
-                        session: session.name.clone(),
-                        pid: session.metadata.daemon_pid,
-                        pid_starttime,
-                    });
+                let daemon_identity =
+                    session
+                        .metadata
+                        .daemon_pid_starttime
+                        .map(|pid_starttime| DaemonIdentity {
+                            session: session.name.clone(),
+                            pid: session.metadata.daemon_pid,
+                            pid_starttime,
+                        });
                 HubSession {
                     name: session.name,
                     project_dir: session.metadata.project_dir,

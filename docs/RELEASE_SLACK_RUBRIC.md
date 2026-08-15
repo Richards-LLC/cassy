@@ -28,7 +28,77 @@ directly to `main`, and do not create the release tag before the PR lands.
 4. After the required checks are green, merge explicitly:
    `gh pr merge "$PR_URL" --merge`. Do not use `--auto` or an admin bypass.
 5. Fetch the landed commit (`git fetch origin main`), tag that exact
-   `origin/main` commit, then run the artifact/release flow and push the tag.
+   `origin/main` commit, then run `./scripts/release.sh`. It pushes the tag;
+   the tag-triggered GitHub workflow is the normal release publisher.
+
+### Published assets before announcement
+
+The release object becoming visible is not publication proof: GitHub can expose
+it while one asset is still uploading. Do not upload a local `dist/local-audit/`
+archive or copy a digest from it into an announcement. A local audit says that
+the tagged source compiled; it says nothing about the bytes users download.
+
+Start every runtime draft from
+[`docs/release-notes/runtime-release-template.md`](release-notes/runtime-release-template.md).
+After the workflow finishes, fill that draft's checksum placeholders from the
+published release only:
+
+```bash
+cp docs/release-notes/runtime-release-template.md docs/release-notes/YYYY-MM-DD-vX.Y.Z-slack.md
+./scripts/release-published-receipt.sh vX.Y.Z --write-draft docs/release-notes/YYYY-MM-DD-vX.Y.Z-slack.md
+```
+
+It fails closed until the release is published, both required assets
+(`cas-x86_64-unknown-linux-gnu.tar.gz` and
+`cas-aarch64-apple-darwin.tar.gz`) exist, and fresh local downloads match
+GitHub's SHA-256 metadata. `--write-draft` requires each digest placeholder
+and replaces every occurrence, so it fails rather than leaving a human to
+transcribe a local build's values.
+The workflow publishes macOS ARM64 from its macOS runner regardless of the host
+that tagged the release; never describe the release as Linux-only because a
+local audit host cannot build Darwin.
+
+`scripts/release.sh --manual-publish --acknowledge-workflow-conflict` is an
+emergency failover for a disabled or unavailable workflow, not a normal release
+lane. It deliberately competes after its tag push, so disable/cancel the CI
+workflow first when possible; it uses the same receipt command before any
+announcement digest is posted.
+
+### Recovering a failed or partial release
+
+1. Inspect, then run the receipt command. A complete release has both named
+   assets and succeeds; a partial release is one that exists but makes the
+   receipt command fail.
+
+   ```bash
+   gh release view vX.Y.Z --repo pippenz/cas --json isDraft,publishedAt,assets
+   ./scripts/release-published-receipt.sh vX.Y.Z
+   ```
+
+2. If the receipt succeeds, do not rerun or change the release: fill the draft
+   with `--write-draft` and continue to the announcement. Do **not** attach a
+   missing asset by hand; the workflow must remain the normal single publisher.
+3. If the release is partial and nothing has been announced from it, preserve
+   the existing tag, delete only the incomplete release, then rerun the same
+   failed workflow run. The release workflow will create fresh CI assets; it
+   refuses an existing object precisely to prevent replacement-by-rerun.
+
+   ```bash
+   gh release delete vX.Y.Z --repo pippenz/cas --yes
+   gh run rerun <failed-run-id> --repo pippenz/cas
+   ```
+
+   Do not use `--cleanup-tag`, force-push, or retag: the annotated tag remains
+   the source identity for both the retry and its receipt.
+4. If CI cannot publish after that recovery, use the explicitly acknowledged
+   `--manual-publish --acknowledge-workflow-conflict` failover only after the
+   incomplete release is deleted. In every case, run
+   `release-published-receipt.sh --write-draft` after publication and before an
+   announcement.
+5. If any announcement might already name the release, do not delete or replace
+   its assets. Stop and escalate to the release owner; publish a corrective new
+   version instead of making existing verification evidence change underneath
+   users.
 
 If `coordination action=worktree_merge ... allow_trunk=true` encounters the
 ruleset first, it returns `PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` with the
@@ -108,6 +178,10 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] PR URL + required-check status surfaced before the explicit merge (no `--auto` / admin bypass)
 - [ ] After every release-train version bump, regenerate `Cargo.lock` and verify `cargo metadata --locked` before tagging.
 - [ ] Release tag points at the fetched `origin/main` landing and is pushed
+- [ ] Workflow-created release has both Linux x86_64 and macOS ARM64 assets;
+  `release-published-receipt.sh --write-draft` succeeded from fresh downloads
+  before any digest enters the draft (a local audit archive is not
+  shipped-byte evidence)
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

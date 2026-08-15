@@ -135,9 +135,14 @@ These require a major version bump:
    That snapshot suite checks the doctor/status schema and ledger counts that a
    migration moves; the scoped release suites do not build it. If no previous
    tag is reachable, the guard runs the snapshots conservatively.
-6. Prefer `./scripts/release.sh --publish` for the local release path. It runs
-   the same guard before it can create or push a tag, so the check is enforced
-   even if the checklist step is missed.
+6. Run `./scripts/release.sh` to produce local audit evidence and push the
+   annotated tag. The tag-triggered GitHub Release workflow—not the local
+   `dist/local-audit/` archives—creates the normal release. A local archive is
+   evidence that the tagged source builds; it is never evidence of the shipped
+   bytes or an announcement digest. The emergency
+   `--manual-publish --acknowledge-workflow-conflict` path is only for a
+   disabled/unavailable workflow and still requires the published receipt in
+   step 9 before any digest is announced.
 7. Create an annotated tag, then run the fast release preflight **before pushing it**:
 
    ```bash
@@ -147,7 +152,20 @@ These require a major version bump:
 
    This rejects a dirty tree, a lightweight/stale tag, mismatched release-train
    crate versions, a missing changelog heading, or lockfile drift before the
-   expensive release builds begin. `release.sh` runs the same guard automatically
-   for non-`--build-only` releases.
-8. Push: `git push && git push --tags`.
-9. Create GitHub release: `gh release create vX.Y.Z --generate-notes`.
+   expensive release builds begin. `release.sh` runs the same guard before its
+   local audit and tag push.
+8. `release.sh` pushes the tag and starts the workflow. It builds Linux on its
+   host and, on macOS, also builds the Darwin audit target; this host-dependent
+   audit coverage does not change what ships. CI always builds and publishes
+   both Linux x86_64 and macOS ARM64 assets.
+9. Wait for the workflow-created release to be published, then derive every
+   announcement digest from freshly downloaded published bytes:
+
+   ```bash
+   ./scripts/release-published-receipt.sh vX.Y.Z
+   ```
+
+   The command fails closed while the release object is draft, either required
+   asset is still uploading, or a downloaded byte hash disagrees with GitHub.
+   Copy its emitted fields into the release-note draft; never transcribe a
+   digest from `dist/local-audit/`.

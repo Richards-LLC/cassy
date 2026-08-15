@@ -246,10 +246,16 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
 
-          # Delete existing release if it exists (handles retags)
-          gh release delete "$VERSION" --repo ${{ github.repository }} --yes 2>/dev/null || true
+          # A published release is immutable for announcement purposes. Do not
+          # delete/recreate it on a re-tag: that would replace bytes after a
+          # receipt had already verified and announced their digests. A retry
+          # after a partial creation must fail loudly for deliberate recovery,
+          # never silently attach or replace assets.
+          if gh release view "$VERSION" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists; refusing to replace its assets. See docs/RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release before rerunning."
+            exit 1
+          fi
 
-          # Create the release
           gh release create "$VERSION" \
             --repo ${{ github.repository }} \
             --title "CAS $VERSION" \

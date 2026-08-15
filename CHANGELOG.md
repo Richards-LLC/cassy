@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.70.0] - 2026-08-15
+
+### Added
+- **Commander opens a session in kilobytes instead of megabytes.** Attaching sends an authoritative terminal keyframe built from current pane state and then streams live updates, so the first screen arrives in roughly 17 KB where it previously required about 44.7 MB, and history is fetched only when scrolled into view.
+- **Alerts are triaged instead of listed.** Attention cards are grouped by session, ranked critical, warning or info, and repeated failures collapse into a single card with a count that can be dismissed as a group.
+- **The pane you watch gets the room it deserves.** The supervisor pane is dominant by default, panes can be promoted and reordered, and the chosen layout is remembered.
+- **Optional AI enrichment can label session cards and attention events.** It ships default off, applies redaction inside the provider so callers cannot bypass it, and honors a deterministic severity floor that enrichment may raise but never lower.
+
+### Changed
+- **A failing connection explains itself.** Commander reports an explicit staged lifecycle with per-stage deadlines, jittered backoff, heartbeat latency and authenticated diagnosis, and distinguishes an expired credential from a revoked one, instead of showing an indefinite "Connecting" state.
+- **Reporting a viewport is now part of observing a pane, not controlling it.** A read-only viewer can size its own terminal, while a leased pane follows its controller, so an observer can no longer reflow a controller's screen.
+- **Browser pairing can request control when it is needed.** Control is no longer fixed at pairing time, and anything still unavailable states why.
+
+### Fixed
+- **Terminals render at the size of the pane showing them.** Panes no longer arrive as mangled, mid-word-wrapped text, and a replayed byte tail can no longer begin mid-escape or omit terminal modes.
+- **Stopping a registered server is verified rather than assumed.** A stop no longer reports success while a wrapped child process survives it.
+- **Release publication reflects the bytes users actually download.** Local audit archives stay local until publishing is explicit, and announced digests come from the published release.
+- **Integration and recovery handle real branch state.** Clean epic branches advance on integration, clean-behind receipt closes are unblocked, numeric stash recovery references are disambiguated, and relays no longer pollute session context.
+
 ## [2.69.1] - 2026-08-14
 
 ### Fixed

@@ -87,6 +87,8 @@
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 156px;
   --mobile-header-chip-width: 72px;
+  /* Collapsed phone context pill: one attention cell plus one message cell. */
+  --mobile-context-pill-width: 96px;
   --attention-payload-max-height: 180px;
   --attention-motion-duration: 150ms;
   --chrome-motion-duration: 120ms;
@@ -99,6 +101,10 @@
 html {
   font-family: var(--font-ui);
   font-size: var(--root-font-size);
+  /* Phones must not inflate this type ramp or bounce the shell on overscroll. */
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
   font-weight: var(--weight-regular);
   background: var(--bg-root);
   color: var(--text-hi);
@@ -107,6 +113,7 @@ html {
 body {
   margin: 0;
   min-height: 100dvh;
+  overscroll-behavior: none;
   background: var(--bg-root);
   color: var(--text-hi);
   font-size: var(--fs-base);
@@ -125,6 +132,8 @@ button {
   border: 0;
   border-radius: var(--radius-card);
   cursor: pointer;
+  /* Touch taps use the same surface feedback as hover, not a platform flash. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 button:hover:not(:disabled) { background: var(--bg-hover); }
@@ -586,6 +595,8 @@ main {
   gap: var(--space-2);
   overflow-x: auto;
   overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) var(--color-transparent);
 }
 
 .secondary-pane-strip .pane { flex: 1 0 var(--pane-secondary-min-width); }
@@ -917,6 +928,8 @@ main {
   align-items: center;
   gap: var(--space-2);
   margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--weight-semibold);
 }
 
 .attention-counts {
@@ -939,6 +952,7 @@ main {
 .attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }
 .attention-count--warning { color: var(--state-warn); background: var(--tint-warn); }
 .attention-count--info { color: var(--state-info); background: var(--bg-raised); }
+.attention-count--clear { color: var(--text-lo); background: var(--bg-raised); }
 
 .attention-dismiss-info,
 .attention-dismiss-group {
@@ -1472,7 +1486,7 @@ fieldset {
     height: calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
     box-sizing: border-box;
     padding-bottom: env(safe-area-inset-bottom);
-    padding-right: calc(var(--machine-rail-width) + var(--space-1));
+    padding-right: calc(var(--mobile-context-pill-width) + var(--space-1));
   }
 
   .machine-rail nav {
@@ -1503,7 +1517,7 @@ fieldset {
 
   .machine-drawer {
     position: fixed;
-    inset: auto var(--space-2) calc(var(--machine-rail-width) + var(--space-2)) var(--space-2);
+    inset: auto var(--space-2) calc(var(--machine-rail-width) + var(--space-2) + env(safe-area-inset-bottom)) var(--space-2);
     width: auto;
     height: min(58dvh, var(--mobile-drawer-max-height));
     border-radius: var(--radius-pane);
@@ -1558,28 +1572,26 @@ fieldset {
     right: 0;
     bottom: env(safe-area-inset-bottom);
     display: grid;
-    width: var(--machine-rail-width);
+    width: var(--mobile-context-pill-width);
     height: var(--machine-rail-width);
     overflow: visible;
   }
 
+  /* Both collapsed cells stay on one row inside the pill: attention counts open
+     the panel, so the chevron would only duplicate a target the thumb needs. */
   .context-panel.collapsed .attention-rail {
     display: grid;
-    grid-template-columns: var(--space-4) var(--space-8);
+    grid-template-columns: repeat(2, var(--machine-rail-width));
     gap: 0;
-    width: var(--machine-rail-width);
+    width: var(--mobile-context-pill-width);
     height: var(--machine-rail-width);
     padding: 0;
   }
 
-  .context-panel.collapsed .attention-rail .rail-control {
-    width: var(--space-4);
-    min-height: var(--machine-rail-width);
-    padding: 0;
-  }
+  .context-panel.collapsed .attention-rail .rail-control { display: none; }
 
   .context-panel.collapsed .attention-rail-counts {
-    width: var(--space-8);
+    width: var(--machine-rail-width);
     min-height: var(--machine-rail-width);
     padding: 0;
   }
@@ -1587,22 +1599,23 @@ fieldset {
   .mobile-message-toggle {
     display: grid;
     place-items: center;
-    width: var(--space-8);
+    width: var(--machine-rail-width);
     min-height: var(--machine-rail-width);
     padding: 0;
     color: var(--text-hi);
     background: var(--bg-raised);
+    font-size: var(--fs-md);
   }
 
   .context-panel.collapsed .attention-counts--compact {
-    display: grid;
-    grid-template-columns: repeat(3, var(--space-3));
-    gap: 0;
+    display: flex;
+    flex-direction: row;
+    gap: var(--line-width);
   }
 
   .context-panel.collapsed .attention-count {
-    min-width: var(--space-3);
-    padding: var(--line-width) 0;
+    min-width: var(--space-4);
+    padding: var(--line-width) var(--line-width);
     font-size: var(--fs-xs);
   }
 
@@ -1625,20 +1638,27 @@ fieldset {
   }
 
   .context-panel:not(.collapsed) .attention-rail .rail-control,
-  .context-panel:not(.collapsed) .attention-rail-counts {
+  .context-panel:not(.collapsed) .attention-rail-counts,
+  .context-panel:not(.collapsed) .mobile-message-toggle {
     width: auto;
+    min-width: var(--space-8);
     min-height: var(--space-8);
   }
 
   .context-panel:not(.collapsed) .attention-counts--compact { flex-direction: row; }
+
+  /* Toasts clear the bottom rail and the gesture bar instead of landing under them. */
+  #toast { bottom: calc(var(--machine-rail-width) + var(--space-3) + env(safe-area-inset-bottom)); }
   .context-body { min-height: 0; }
   .context-tabs { flex-basis: var(--space-10); }
   .attention-group-label { max-width: var(--mobile-attention-label-width); }
 
-  /* Phone composition keeps the supervisor readable and workers horizontally reachable. */
+  /* Phone composition keeps the supervisor readable and workers horizontally reachable.
+     Workers cannot mount a terminal here, so the strip is sized by its collapsed
+     rows instead of reserving a third of the screen for empty terminal wells. */
   main .pane-grid.pane-layout {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 65fr) minmax(var(--space-8), 35fr);
+    grid-template-rows: minmax(0, 1fr) auto;
     overflow: hidden;
   }
 
@@ -1646,6 +1666,7 @@ fieldset {
 
   .pane-grid.pane-layout .secondary-pane-strip {
     display: flex;
+    max-height: 40dvh;
     gap: var(--space-1);
     overflow-x: auto;
     overflow-y: hidden;
@@ -1659,15 +1680,26 @@ fieldset {
   .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed {
     flex-basis: min(var(--worker-collapsed-width), calc(100vw - var(--space-6)));
     min-width: min(var(--worker-collapsed-width), calc(100vw - var(--space-6)));
+    height: var(--space-10);
+    min-height: var(--space-10);
   }
 
+  .pane-grid.pane-layout .secondary-pane-strip .pane.collapsed .pane-header {
+    min-height: var(--space-10);
+  }
+
+  /* Phone pane controls are icon-only, so every one of them needs a glyph and a
+     target the thumb can actually hit inside the 32px pane header. */
   .pane-grid.pane-layout .pane-layout-controls button {
-    min-width: var(--space-6);
-    min-height: var(--space-6);
-    padding: var(--line-width) var(--space-1);
+    display: grid;
+    place-items: center;
+    min-width: var(--space-8);
+    min-height: var(--space-8);
+    padding: 0;
     font-size: 0;
   }
 
+  .pane-grid.pane-layout .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .make-primary::after { content: "★"; font-size: var(--fs-sm); }
   .pane-grid.pane-layout .move-earlier::after { content: "←"; font-size: var(--fs-md); }
   .pane-grid.pane-layout .move-later::after { content: "→"; font-size: var(--fs-md); }
@@ -1682,5 +1714,9 @@ fieldset {
   .session-header .actions [data-compact-label] { font-size: 0; }
   .session-header [data-compact-label]::after,
   .session-header .actions [data-compact-label]::after { content: attr(data-compact-label); font-size: var(--fs-xs); }
-  .session-header .actions button { width: 30px; padding: 0; }
+  /* The ⌘K chord has no phone equivalent; its width belongs to the two controls
+     a thumb actually uses, which stay wide enough to hit. */
+  .command-palette-trigger { display: none; }
+  .session-header .actions { gap: var(--space-1); }
+  .session-header .actions button { min-width: var(--space-10); padding: 0 var(--space-1); }
 }

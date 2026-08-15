@@ -497,6 +497,7 @@ mod tests {
             resolved_worker_specs: vec![],
             resolved_supervisor_spec: None,
             stall_threshold_secs: crate::config::DEFAULT_STALL_THRESHOLD_SECS,
+            ai_enrichment: crate::config::AiEnrichmentConfig::default(),
         }
     }
 

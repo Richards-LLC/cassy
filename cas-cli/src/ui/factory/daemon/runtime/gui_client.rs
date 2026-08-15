@@ -460,12 +460,12 @@ impl FactoryDaemon {
             ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
                 unreachable!("Commander controls return through the shared dispatcher")
             }
-            ClientMessage::RequestPaneKeyframe { .. }
-            | ClientMessage::ScrollbackRequest { .. } => {
+            ClientMessage::RequestPaneKeyframe { .. } | ClientMessage::ScrollbackRequest { .. } => {
                 if let Some(frame) = encode_frame(&DaemonMessage::Error {
                     message: "pane keyframes and paged scrollback require the WebSocket transport"
                         .to_string(),
-                }) && let Some(client) = self.gui_clients.get_mut(&client_id) {
+                }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                {
                     queue_frame(client, &frame);
                 }
             }

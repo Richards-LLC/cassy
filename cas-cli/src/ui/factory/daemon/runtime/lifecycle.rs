@@ -179,7 +179,10 @@ mod worker_attention_tests {
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
                 && crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt)
         }));
-        assert!(rows.iter().any(|row| row.prompt.contains("kind=\"worker_idle\"")));
+        assert!(
+            rows.iter()
+                .any(|row| row.prompt.contains("kind=\"worker_idle\""))
+        );
         assert!(rows.iter().any(|row| {
             row.prompt.contains("kind=\"worker_stalled\"") && row.prompt.contains("cas-d4ae")
         }));
@@ -194,6 +197,9 @@ impl FactoryDaemon {
         // Extract fields before factory_config is moved
         let project_dir = config.factory_config.cwd.to_string_lossy().to_string();
         let lead_session_id = config.factory_config.lead_session_id.clone();
+        let session_summarizer = super::session_summarizer::SessionSummarizer::new(
+            config.factory_config.ai_enrichment.clone(),
+        );
 
         // Set factory session env var so PTY children (and their MCP servers) inherit it.
         // SAFETY: called before spawning any threads or async tasks in this process.
@@ -359,6 +365,7 @@ impl FactoryDaemon {
             relay_clients: HashMap::new(),
             pane_watchers: HashMap::new(),
             pane_buffers: HashMap::new(),
+            session_summarizer,
             gui_listener,
             gui_clients: HashMap::new(),
             next_gui_client_id: 0,
@@ -511,6 +518,21 @@ impl FactoryDaemon {
             let had_output = bytes_processed > 0;
             for event in events {
                 self.handle_mux_event(event).await;
+            }
+
+            let summary_metadata = format!(
+                "session={} role=supervisor task={}",
+                self.session_name,
+                self.app.epic_state().epic_title().unwrap_or("unassigned")
+            );
+            if let Some(summary) = self
+                .session_summarizer
+                .poll(&self.pane_buffers, &summary_metadata)
+                .await
+            {
+                self.broadcast_daemon_message(
+                    &crate::ui::factory::protocol::DaemonMessage::SessionSummary { summary },
+                );
             }
 
             // Process relay events from cloud (remote terminal attach/input/detach)
@@ -690,6 +712,9 @@ impl FactoryDaemon {
 
                     // Record events for export
                     self.app.record_events(&delivery_events);
+                    if !delivery_events.is_empty() {
+                        self.session_summarizer.note_semantic_event();
+                    }
 
                     // Send notifications for detected events
                     self.app.notify_events(&delivery_events);

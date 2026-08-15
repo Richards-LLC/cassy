@@ -863,29 +863,17 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 worker,
                 json,
                 cas_root: sub_cas_root,
-            } => wedged::execute_is_wedged(
-                sub_cas_root.as_deref().or(cas_root),
-                worker,
-                *json,
-            ),
+            } => wedged::execute_is_wedged(sub_cas_root.as_deref().or(cas_root), worker, *json),
             FactoryCommands::Debug {
                 worker,
                 tail,
                 cas_root: sub_cas_root,
-            } => wedged::execute_debug(
-                sub_cas_root.as_deref().or(cas_root),
-                worker,
-                *tail,
-            ),
+            } => wedged::execute_debug(sub_cas_root.as_deref().or(cas_root), worker, *tail),
             FactoryCommands::Kill {
                 worker,
                 force,
                 cas_root: sub_cas_root,
-            } => wedged::execute_kill(
-                sub_cas_root.as_deref().or(cas_root),
-                worker,
-                *force,
-            ),
+            } => wedged::execute_kill(sub_cas_root.as_deref().or(cas_root), worker, *force),
         };
     }
 
@@ -1013,10 +1001,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                     let theme = crate::ui::theme::ActiveTheme::default();
                     let mut stdout = std::io::stdout();
                     let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-                    fmt.info(&format!(
-                        "Attaching to running session: {}",
-                        session.name
-                    ))?;
+                    fmt.info(&format!("Attaching to running session: {}", session.name))?;
                     fmt.newline()?;
                     return attach(Some(session.name));
                 } else {
@@ -1030,10 +1015,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                         session.worker_count(),
                         session.metadata.daemon_pid
                     ))?;
-                    if crate::cli::interactive::confirm(
-                        "Attach to existing session?",
-                        true,
-                    )? {
+                    if crate::cli::interactive::confirm("Attach to existing session?", true)? {
                         fmt.newline()?;
                         return attach(Some(session.name));
                     } else {
@@ -1048,7 +1030,13 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // Determine theme variant early so we can use themed names
     let theme_variant = {
         let cd = cwd.join(".cas");
-        let cr = cas_root.or_else(|| if cd.exists() { Some(cd.as_path()) } else { None });
+        let cr = cas_root.or_else(|| {
+            if cd.exists() {
+                Some(cd.as_path())
+            } else {
+                None
+            }
+        });
         cr.and_then(|r| Config::load(r).ok())
             .and_then(|c| c.theme.as_ref().map(|t| t.variant))
             .unwrap_or_default()
@@ -1136,9 +1124,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         };
         let fallback_model = cas_factory::configured_factory_default_model(&sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
-        let specs = resolve_specs(args.workers as usize, sources).map_err(|e| {
-            anyhow::anyhow!("Failed to resolve worker specs: {e}")
-        })?;
+        let specs = resolve_specs(args.workers as usize, sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
         (specs, fallback_model)
     };
 
@@ -1192,9 +1179,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         };
         let fallback_model = cas_factory::configured_factory_default_model(&sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
-        let spec = resolve_supervisor_spec(sources).map_err(|e| {
-            anyhow::anyhow!("Failed to resolve supervisor spec: {e}")
-        })?;
+        let spec = resolve_supervisor_spec(sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
         (spec, fallback_model)
     };
 
@@ -1239,7 +1225,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         worker_cli: preflight.worker_cli,
         supervisor_model: llm.model_for_role("supervisor").map(String::from),
         worker_model: llm.model_for_role("worker").map(String::from),
-        supervisor_effort: llm.reasoning_effort_for_role("supervisor").map(String::from),
+        supervisor_effort: llm
+            .reasoning_effort_for_role("supervisor")
+            .map(String::from),
         worker_effort: llm.reasoning_effort_for_role("worker").map(String::from),
         resolved_worker_specs,
         resolved_supervisor_spec: Some(resolved_supervisor_spec),
@@ -1258,6 +1246,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         lead_session_id: Some(lead_session_id),
         minions_theme: is_minions,
         stall_threshold_secs,
+        ai_enrichment: cas_config.factory().ai_enrichment,
     };
 
     let phone_home = !args.no_phone_home;
@@ -1806,7 +1795,10 @@ mod tests {
             msg.contains("fallback 'claude' is not installed"),
             "must explain that neither requested nor fallback harness can run: {msg}"
         );
-        assert!(msg.contains("codex login"), "must give Codex remediation: {msg}");
+        assert!(
+            msg.contains("codex login"),
+            "must give Codex remediation: {msg}"
+        );
         assert!(
             msg.contains("npm install -g @anthropic-ai/claude-cli"),
             "must give Claude remediation: {msg}"
@@ -1857,12 +1849,16 @@ mod tests {
         let sources = ConfigSources {
             worker_spec_jsons: args.worker_spec.clone(),
             // Skip config files: pass non-existent paths so resolver treats them as absent
-            user_config: Some(std::path::PathBuf::from("/nonexistent/user/.cas/config.toml")),
-            project_config: Some(std::path::PathBuf::from("/nonexistent/project/.cas/config.toml")),
+            user_config: Some(std::path::PathBuf::from(
+                "/nonexistent/user/.cas/config.toml",
+            )),
+            project_config: Some(std::path::PathBuf::from(
+                "/nonexistent/project/.cas/config.toml",
+            )),
             ..Default::default()
         };
-        let specs = resolve_specs(args.workers as usize, sources)
-            .expect("resolve_specs should succeed");
+        let specs =
+            resolve_specs(args.workers as usize, sources).expect("resolve_specs should succeed");
 
         assert_eq!(specs.len(), 2, "should produce one spec per worker");
         // First slot gets the JSON override (codex)

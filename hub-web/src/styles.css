@@ -367,6 +367,54 @@ pre,
   line-height: var(--line-terminal);
 }
 
+.session-eyebrow {
+  grid-column: 1 / -1;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.session-summary-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-hi);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-summary-description {
+  display: -webkit-box;
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--text-mid);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.session-summary-description.stale { color: var(--text-lo); }
+
+.phase-chip {
+  align-self: center;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-mid);
+  background: var(--bg-panel);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--line-ui);
+  text-transform: uppercase;
+}
+
+.phase-testing,
+.phase-building { color: var(--state-info); }
+.phase-blocked { color: var(--state-warn); background: var(--tint-warn); }
+.phase-idle { color: var(--state-idle); }
+
 .session-name,
 .session-meta,
 .toolbar-session-title,
@@ -1107,6 +1155,12 @@ main {
 }
 
 .status-identifier { color: var(--text-hi); }
+
+.session-summary-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+}
 
 .message textarea {
   width: 100%;

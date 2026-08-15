@@ -107,6 +107,7 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 
 - Shell/navigation: `.shell`, `.machine-navigation`, `.machine-rail`, `.machine-drawer`, `.context-panel`, and `.nav-item`; selected rows use `--bg-active`, not a saturated fill.
 - Session row: `sessionButton()` in `hub-web/src/main.ts`; `.session-name` and `.session-meta` keep the codename, supervisor, worker count, and liveness mono.
+- Enriched session card: `.session-summary-title`, `.session-summary-description`, and `.phase-chip` consume the single server-broadcast summary. The machine codename remains a mono eyebrow; stale active descriptions dim after ten minutes. Testing/building use info text, blocked alone may use the warning tint, and idle recedes. Enrichment is per-machine, default off, and must plainly warn that redacted terminal transcript excerpts are sent to the configured model provider.
 - Header: `.session-header` in `hub-web/src/styles.css` and `render()` in `hub-web/src/main.ts`; only an active session receives `.toolbar-session-title` mono styling.
 - Terminal pane: `.pane`, `.pane.selected`, `.pane-header`, and `.terminal-mount`; the terminal canvas owns its independent ANSI palette.
 - Attention/status cards: `.attention-item` and `.status-row`; prose stays UI face while `.attention-group-label`, `.attention-ticket`, and `.status-identifier` isolate machine copy.

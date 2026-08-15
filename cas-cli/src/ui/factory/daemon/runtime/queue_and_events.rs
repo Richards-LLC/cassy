@@ -1579,6 +1579,7 @@ impl FactoryDaemon {
             cas_mux::MuxEvent::PaneOutput { pane_id, data } => {
                 // Always buffer raw PTY bytes (warm buffer for future viewers)
                 self.buffer_pane_output(&pane_id, &data);
+                self.session_summarizer.note_output(data.len());
                 // Forward to any active web viewers
                 self.forward_pane_output(&pane_id, &data);
                 // Forward to GUI and WebSocket clients
@@ -2967,7 +2968,9 @@ impl FactoryDaemon {
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
                 "{}\n\n{}",
-                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(&queued),
+                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
+                    &queued
+                ),
                 prompt_with_instructions,
             );
 
@@ -5560,8 +5563,11 @@ mod tests {
     /// the original wording.
     #[test]
     fn registration_timeout_names_the_codex_trust_cause() {
-        let codex =
-            registration_timeout_detail(Duration::from_secs(60), cas_mux::SupervisorCli::Codex, None);
+        let codex = registration_timeout_detail(
+            Duration::from_secs(60),
+            cas_mux::SupervisorCli::Codex,
+            None,
+        );
         assert!(
             codex.contains("did not register with CAS within 60 seconds"),
             "must keep the base diagnostic: {codex}"

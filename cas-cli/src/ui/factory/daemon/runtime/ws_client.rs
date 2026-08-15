@@ -73,7 +73,10 @@ pub(super) fn commander_control_from_ws_message(
 }
 
 impl FactoryDaemon {
-    fn commander_pane_bootstrap(&self, state: &crate::ui::factory::SessionState) -> Vec<PaneBootstrap> {
+    fn commander_pane_bootstrap(
+        &self,
+        state: &crate::ui::factory::SessionState,
+    ) -> Vec<PaneBootstrap> {
         let epoch = commander_epoch();
         state
             .panes
@@ -350,7 +353,8 @@ impl FactoryDaemon {
                 if generation != commander_epoch() {
                     if let Some(frame) = ws_encode(&DaemonMessage::Error {
                         message: format!("scrollback generation expired for pane '{actual}'"),
-                    }) && let Some(client) = self.ws_clients.get_mut(&client_id) {
+                    }) && let Some(client) = self.ws_clients.get_mut(&client_id)
+                    {
                         let _ = client.sink.feed(frame).now_or_never();
                     }
                     return;
@@ -379,9 +383,10 @@ impl FactoryDaemon {
                         *page_rows = rows.clone();
                         *next_row = rows.last().map(|row| row.screen_row.saturating_add(1));
                     }
-                    if serde_json::to_vec(&page).is_ok_and(|bytes| {
-                        bytes.len() <= COMMANDER_SCROLLBACK_PAGE_HARD_BYTES
-                    }) || rows.is_empty() {
+                    if serde_json::to_vec(&page)
+                        .is_ok_and(|bytes| bytes.len() <= COMMANDER_SCROLLBACK_PAGE_HARD_BYTES)
+                        || rows.is_empty()
+                    {
                         break;
                     }
                     rows.pop();

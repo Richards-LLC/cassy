@@ -54,6 +54,16 @@ export interface SessionState {
   rows: number;
 }
 
+export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";
+
+export interface SessionCardSummary {
+  title: string;
+  description: string;
+  phase: SessionPhase;
+  blocked_on?: string;
+  generated_at: string;
+}
+
 export interface LeaseState {
   controller_device_id?: string;
   controller_label?: string;

@@ -22,6 +22,7 @@ compile_error!(
 
 // Core modules
 pub mod agent_id;
+pub(crate) mod ai_enrichment;
 pub(crate) mod ambient_recall;
 pub mod async_runtime;
 mod bounded_process;
@@ -46,8 +47,8 @@ pub mod git_log;
 pub mod harness_policy;
 pub mod history;
 pub mod hooks;
-pub mod hybrid_search;
 pub mod hub;
+pub mod hybrid_search;
 pub(crate) mod internal_llm;
 pub mod knowledge;
 pub mod logging;
@@ -76,8 +77,8 @@ mod test_env_guard;
 /// would race against the other's.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::Path;
     pub(crate) use crate::test_env_guard::TestEnvGuard;
+    use std::path::Path;
 
     #[test]
     fn nested_test_env_guard_panics_instead_of_deadlocking() {
@@ -144,14 +145,13 @@ pub(crate) mod test_support {
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let source = std::fs::read_to_string(&path).expect("read Rust source");
                     for (line_index, line) in source.lines().enumerate() {
-                        let mutates_sensitive_var = ["HOME", "XDG_CONFIG_HOME", "PATH"]
-                            .iter()
-                            .any(|key| {
+                        let mutates_sensitive_var =
+                            ["HOME", "XDG_CONFIG_HOME", "PATH"].iter().any(|key| {
                                 line.contains(&format!("std::env::set_var(\"{key}\""))
                                     || line.contains(&format!("std::env::remove_var(\"{key}\""))
                             });
-                        let mutates_path_through_guard = line.contains(".set(\"PATH\"")
-                            || line.contains(".remove(\"PATH\"");
+                        let mutates_path_through_guard =
+                            line.contains(".set(\"PATH\"") || line.contains(".remove(\"PATH\"");
                         if mutates_sensitive_var || mutates_path_through_guard {
                             hits.push(format!("{}:{}", path.display(), line_index + 1));
                         }
@@ -161,7 +161,10 @@ pub(crate) mod test_support {
         }
 
         let mut hits = Vec::new();
-        visit(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(), &mut hits);
+        visit(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+            &mut hits,
+        );
         assert!(
             hits.is_empty(),
             "HOME/XDG_CONFIG_HOME mutations must use TestEnvGuard, and lib tests must not mutate \

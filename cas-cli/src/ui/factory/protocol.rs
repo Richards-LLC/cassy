@@ -91,9 +91,7 @@ pub enum ClientMessage {
     },
 
     /// Request a fresh, authoritative terminal-state keyframe for one pane.
-    RequestPaneKeyframe {
-        pane_id: String,
-    },
+    RequestPaneKeyframe { pane_id: String },
 
     /// Request a bounded page from the pane's historical screen rows.
     ScrollbackRequest {
@@ -275,6 +273,10 @@ pub enum DaemonMessage {
         data: Vec<u8>,
     },
 
+    /// Best-effort, server-computed description of the current session.
+    /// All observers receive the same value; terminal content is never sent.
+    SessionSummary { summary: SessionCardSummary },
+
     /// A pane exited
     PaneExited {
         /// Pane ID that exited
@@ -347,6 +349,16 @@ pub enum DaemonMessage {
 
     /// Initialization complete - daemon ready for TUI
     InitComplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCardSummary {
+    pub title: String,
+    pub description: String,
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_on: Option<String>,
+    pub generated_at: String,
 }
 
 /// Snapshot of session state
@@ -591,12 +603,20 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::SpawnWorkers { count, names, specs } => {
+            ClientMessage::SpawnWorkers {
+                count,
+                names,
+                specs,
+            } => {
                 assert_eq!(count, 1);
                 assert_eq!(names, vec!["alice"]);
                 assert_eq!(specs.len(), 1);
                 let s = specs[0].as_ref().unwrap();
-                assert_eq!(s.name.as_deref(), Some("alice"), "WorkerSpec.name must survive wire round-trip");
+                assert_eq!(
+                    s.name.as_deref(),
+                    Some("alice"),
+                    "WorkerSpec.name must survive wire round-trip"
+                );
                 assert_eq!(s.cli, SupervisorCli::Codex);
                 assert_eq!(s.model.as_deref(), Some("gpt-5.5"));
                 assert_eq!(s.effort, Some(cas_mux::Effort::Medium));
@@ -612,10 +632,17 @@ mod tests {
         let json = r#"{"SpawnWorkers":{"count":2,"names":["bob","carol"]}}"#;
         let decoded: ClientMessage = serde_json::from_str(json).unwrap();
         match decoded {
-            ClientMessage::SpawnWorkers { count, names, specs } => {
+            ClientMessage::SpawnWorkers {
+                count,
+                names,
+                specs,
+            } => {
                 assert_eq!(count, 2);
                 assert_eq!(names, vec!["bob", "carol"]);
-                assert!(specs.is_empty(), "missing specs field should default to empty vec");
+                assert!(
+                    specs.is_empty(),
+                    "missing specs field should default to empty vec"
+                );
             }
             _ => panic!("Wrong message type decoded"),
         }

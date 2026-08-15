@@ -9,6 +9,7 @@ mod lifecycle;
 mod output;
 mod queue_and_events;
 pub(super) mod relay;
+pub(super) mod session_summarizer;
 pub(crate) mod teams;
 mod ws_client;
 

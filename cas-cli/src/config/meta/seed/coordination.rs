@@ -21,6 +21,85 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         ],
     });
 
+    registry.register(ConfigMeta {
+        key: "factory.ai_enrichment.enabled",
+        section: "factory",
+        name: "AI Enrichment",
+        description: "DEFAULT OFF. Enabling this sends redacted terminal transcript excerpts to a third-party API from a machine that may hold secrets. Configure a local OpenAI-compatible endpoint when transcripts must not leave the machine or tailnet.",
+        value_type: ConfigType::Bool,
+        default: "false",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["commander", "summary", "session", "privacy", "transcript", "AI"],
+        use_cases: &["Enable concise session titles and phase cards", "Keep disabled when terminal excerpts must never reach a provider"],
+    });
+    registry.register(ConfigMeta {
+        key: "factory.ai_enrichment.endpoint",
+        section: "factory",
+        name: "Session Summary Provider Endpoint",
+        description: "OpenAI Responses-compatible endpoint used for opt-in session summaries. Point this at a local provider to keep redacted transcript excerpts on the machine or tailnet.",
+        value_type: ConfigType::String,
+        default: "https://api.openai.com/v1/responses",
+        constraint: Constraint::NotEmpty,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["summary", "provider", "endpoint", "local model", "privacy"],
+        use_cases: &["Use the OpenAI Responses API", "Use an OpenAI-compatible local model server"],
+    });
+    registry.register(ConfigMeta {
+        key: "factory.ai_enrichment.provider",
+        section: "factory",
+        name: "AI Enrichment Provider",
+        description: "Provider protocol for the shared AI enrichment worker. Use openai or openai-compatible.",
+        value_type: ConfigType::String,
+        default: "openai",
+        constraint: Constraint::OneOf(vec!["openai".to_string(), "openai-compatible".to_string()]),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["AI", "provider", "local model"],
+        use_cases: &["Use OpenAI", "Use an OpenAI-compatible local endpoint"],
+    });
+    registry.register(ConfigMeta {
+        key: "factory.ai_enrichment.api_key_env",
+        section: "factory",
+        name: "AI Enrichment API Key Environment Variable",
+        description: "Name of the environment variable containing the provider credential. The credential is used only as an Authorization header and is never placed in model input.",
+        value_type: ConfigType::String,
+        default: "OPENAI_API_KEY",
+        constraint: Constraint::NotEmpty,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["AI", "API key", "environment", "credential"],
+        use_cases: &["Use OPENAI_API_KEY", "Use a local provider without setting the variable"],
+    });
+    registry.register(ConfigMeta {
+        key: "factory.ai_enrichment.model",
+        section: "factory",
+        name: "Session Summary Model",
+        description: "Low-cost model used for session-card summaries.",
+        value_type: ConfigType::String,
+        default: "gpt-5.6-luna",
+        constraint: Constraint::NotEmpty,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["summary", "model", "luna"],
+        use_cases: &["Pin the guide-recommended gpt-5.6-luna model"],
+    });
+    registry.register(ConfigMeta {
+        key: "factory.ai_enrichment.effort",
+        section: "factory",
+        name: "AI Enrichment Reasoning Effort",
+        description: "Reasoning effort for low-latency enrichment. The shared worker requires low effort.",
+        value_type: ConfigType::String,
+        default: "low",
+        constraint: Constraint::OneOf(vec!["low".to_string()]),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["AI", "effort", "latency", "cost"],
+        use_cases: &["Keep low for fast, inexpensive summarization"],
+    });
+
     // COORDINATION SECTION
     // ============================================================
     registry.register(ConfigMeta {

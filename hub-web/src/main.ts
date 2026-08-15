@@ -17,7 +17,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
-import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionState, StoredMachine } from "./types";
+import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
@@ -41,6 +41,9 @@ const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const sessionStates = new Map<string, SessionState>();
+// Shared data source for session drawers, status rows, pane tooltips, and the
+// Cmd+K integration lane. Values are produced once by the daemon.
+export const sessionSummaries = new Map<string, SessionCardSummary>();
 const paneBuffers = new Map<string, number[]>();
 const paneLastActivity = new Map<string, number>();
 const authoritativeSessions = new Set<string>();
@@ -162,6 +165,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       surfaces.get(key)?.write(data);
       const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
       if (activity && selectedMachineId === machine.id && selectedSession === session) activity.textContent = "active now";
+    },
+    onSessionSummary: (session, summary) => {
+      sessionSummaries.set(sessionKey(machine.id, session), summary);
+      if (selectedMachineId === machine.id && selectedSession === session) {
+        const state = sessionStates.get(sessionKey(machine.id, session));
+        if (state) void renderSessionState(machine.id, session, state);
+      }
+      render();
     },
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
@@ -762,8 +773,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         button("Move later", "move-later", () => updateLayout((current) => movePane(current, pane.id, 1))),
       );
       title.append(statusDot, label, role, activity, controls);
+      title.title = sessionSummaries.get(selectedKey)?.title ?? "";
       if (pane.kind !== "Supervisor") {
-        title.title = "Click to collapse or expand this worker";
+        title.title = [sessionSummaries.get(selectedKey)?.title, "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
         title.tabIndex = 0;
         title.setAttribute("role", "button");
         title.onclick = (event) => {
@@ -791,6 +803,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     card.classList.toggle("collapsed", pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key));
     card.querySelector<HTMLElement>(".pane-status-dot")!.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
     card.querySelector<HTMLElement>(".pane-title")!.textContent = pane.title || pane.id;
+    const paneHeader = card.querySelector<HTMLElement>(".pane-header");
+    if (paneHeader) paneHeader.title = [sessionSummaries.get(selectedKey)?.title, pane.kind === "Supervisor" ? undefined : "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
     card.querySelector<HTMLElement>(".pane-last-activity")!.textContent = lastActivityLabel(paneLastActivity.get(key));
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
@@ -1083,7 +1097,11 @@ function machineTreeGroup(machine: StoredMachine): HTMLElement {
 
 function sessionButton(machineId: string, session: HubSession): HTMLButtonElement {
   const button = document.createElement("button"); button.className = `nav-item ${session.name === selectedSession ? "active" : ""}`;
-  button.innerHTML = `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
+  const summary = sessionSummaries.get(sessionKey(machineId, session.name));
+  const stale = summary && summary.phase !== "idle" && Date.now() - Date.parse(summary.generated_at) > 10 * 60 * 1000;
+  button.innerHTML = summary
+    ? `<small class="session-name session-eyebrow">${escapeHtml(session.name)}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
+    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
   button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
@@ -1121,6 +1139,14 @@ async function performAttentionAction(item: AttentionItem, action: AttentionActi
 function renderStatus(status?: Record<string, unknown>): void {
   const container = document.querySelector("#status-view")!;
   if (!status) { container.textContent = "Open a session for push-refreshed status."; return; }
+  const summary = selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
+  if (summary) {
+    const row = document.createElement("article");
+    row.className = "status-row session-summary-status";
+    row.title = summary.description;
+    row.innerHTML = `<span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description">${escapeHtml(summary.description)}</small>`;
+    container.append(row);
+  }
   const agents = (status.agents as any[]) ?? [];
   const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
   const identifier = (value: unknown): HTMLSpanElement => {

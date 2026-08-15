@@ -2314,11 +2314,7 @@ impl CasService {
                         .as_deref()
                         .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli))
                     {
-                        Some(total) => {
-                            let band = context_band(total);
-                            let ktok = total / 1_000;
-                            format!("\n    context: {band} (~{ktok}k tk)")
-                        }
+                        Some(usage) => format_context_usage(usage),
                         None => String::new(),
                     }
                 };
@@ -7064,24 +7060,41 @@ fn render_transcript_block(
 // cas-573c: Context-usage indicator for worker_status
 // ============================================================================
 
-/// Standard Claude context window in tokens. Most frontier models (Sonnet,
-/// Opus) support 200 K input tokens. Haiku is 100 K but we don't distinguish
-/// at this layer — the bands are conservative enough that a Haiku worker only
-/// reaches `near-limit` when it's genuinely close to compaction.
-const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+/// A transcript's latest prompt occupancy and, where the harness reports it,
+/// its model's actual context window. Never infer the latter from a model name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContextUsage {
+    input_tokens: u64,
+    model_context_window: Option<u64>,
+}
 
-/// Classify a token count as a coarse context-usage band.
-///
-/// Thresholds (against `DEFAULT_CONTEXT_WINDOW = 200k`):
-/// - `ok`          — 0–49 % (< 100k) — no action needed
-/// - `approaching` — 50–79 % (100k–159k) — warn supervisor
-/// - `near-limit`  — ≥ 80 % (≥ 160k) — proactively preserve work
-pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
-    let pct = total_input_tokens * 100 / DEFAULT_CONTEXT_WINDOW;
+/// Classify live prompt occupancy against the harness-reported context window.
+fn context_band(input_tokens: u64, model_context_window: u64) -> &'static str {
+    let pct = input_tokens.saturating_mul(100) / model_context_window;
     match pct {
         0..=49 => "ok",
         50..=79 => "approaching",
         _ => "near-limit",
+    }
+}
+
+/// Render context state without guessing a model window. A raw input-token
+/// count alone does not establish how close a worker is to compaction.
+fn format_context_usage(usage: ContextUsage) -> String {
+    let ktok = usage.input_tokens / 1_000;
+    match usage.model_context_window {
+        Some(window) if window > 0 => {
+            let band = context_band(usage.input_tokens, window);
+            let headroom = window
+                .saturating_sub(usage.input_tokens)
+                .saturating_mul(100)
+                / window;
+            format!(
+                "\n    context: {band} (~{ktok}k / {}k tk; ~{headroom}% headroom)",
+                window / 1_000,
+            )
+        }
+        _ => format!("\n    context input: ~{ktok}k tk (model window unavailable)"),
     }
 }
 
@@ -7204,15 +7217,19 @@ pub(crate) fn read_context_usage_from_tail(path: &std::path::Path) -> Option<u64
     None
 }
 
-/// Harness-aware context usage reader. Claude retains its existing parser
-/// byte-for-byte; Codex reads the latest rollout `token_count` event's
-/// per-turn input total. Grok has no equivalent parser at this layer yet.
+/// Harness-aware live-context reader. Claude has no reported window, so its
+/// observed input is deliberately not classified as remaining capacity. Codex
+/// reports both the latest prompt occupancy and its actual context window in
+/// each rollout `token_count` event. Grok has no equivalent parser yet.
 fn read_context_usage_from_tail_for_cli(
     path: &std::path::Path,
     cli: cas_mux::SupervisorCli,
-) -> Option<u64> {
+) -> Option<ContextUsage> {
     if cli != cas_mux::SupervisorCli::Codex {
-        return read_context_usage_from_tail(path);
+        return read_context_usage_from_tail(path).map(|input_tokens| ContextUsage {
+            input_tokens,
+            model_context_window: None,
+        });
     }
 
     use std::io::{Read, Seek, SeekFrom};
@@ -7244,9 +7261,15 @@ fn read_context_usage_from_tail_for_cli(
         if value.pointer("/payload/type").and_then(|v| v.as_str()) != Some("token_count") {
             continue;
         }
-        return value
+        let input_tokens = value
             .pointer("/payload/info/last_token_usage/input_tokens")
-            .and_then(|v| v.as_u64());
+            .and_then(|v| v.as_u64())?;
+        return Some(ContextUsage {
+            input_tokens,
+            model_context_window: value
+                .pointer("/payload/info/model_context_window")
+                .and_then(|v| v.as_u64()),
+        });
     }
     None
 }
@@ -11388,27 +11411,48 @@ effort = "high"
 
     #[test]
     fn context_band_ok_below_50_pct() {
-        assert_eq!(context_band(0), "ok");
-        assert_eq!(context_band(49_999), "ok");
-        // 99_999 / 200_000 * 100 = 49 → ok
-        assert_eq!(context_band(99_999), "ok");
+        assert_eq!(context_band(0, 200_000), "ok");
+        assert_eq!(context_band(49_999, 100_000), "ok");
+        assert_eq!(context_band(99_999, 200_000), "ok");
     }
 
     #[test]
     fn context_band_approaching_50_to_79_pct() {
-        // 100_000 / 200_000 * 100 = 50 → approaching
-        assert_eq!(context_band(100_000), "approaching");
-        assert_eq!(context_band(150_000), "approaching");
-        // 159_999 / 200_000 * 100 = 79 → approaching
-        assert_eq!(context_band(159_999), "approaching");
+        assert_eq!(context_band(100_000, 200_000), "approaching");
+        assert_eq!(context_band(150_000, 200_000), "approaching");
+        assert_eq!(context_band(159_999, 200_000), "approaching");
     }
 
     #[test]
     fn context_band_near_limit_at_80_pct_and_above() {
-        // 160_000 / 200_000 * 100 = 80 → near-limit
-        assert_eq!(context_band(160_000), "near-limit");
-        assert_eq!(context_band(200_000), "near-limit");
-        assert_eq!(context_band(210_000), "near-limit");
+        assert_eq!(context_band(160_000, 200_000), "near-limit");
+        assert_eq!(context_band(200_000, 200_000), "near-limit");
+        assert_eq!(context_band(210_000, 200_000), "near-limit");
+    }
+
+    #[test]
+    fn context_usage_display_reports_actual_headroom() {
+        assert_eq!(
+            format_context_usage(ContextUsage {
+                input_tokens: 40_000,
+                model_context_window: Some(1_000_000),
+            }),
+            "\n    context: ok (~40k / 1000k tk; ~96% headroom)"
+        );
+    }
+
+    #[test]
+    fn context_usage_display_never_guesses_a_window() {
+        let display = format_context_usage(ContextUsage {
+            input_tokens: 203_000,
+            model_context_window: None,
+        });
+
+        assert_eq!(
+            display,
+            "\n    context input: ~203k tk (model window unavailable)"
+        );
+        assert!(!display.contains("near-limit"));
     }
 
     /// `read_context_usage_from_tail` must extract the correct total from a
@@ -11443,10 +11487,42 @@ effort = "high"
         )
         .unwrap();
 
-        let total = read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+        let usage = read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
             .expect("Codex token_count event should produce a context reading");
-        assert_eq!(total, 123_456);
-        assert_eq!(context_band(total), "approaching");
+        assert_eq!(usage.input_tokens, 123_456);
+        assert_eq!(usage.model_context_window, Some(258_400));
+        assert_eq!(
+            context_band(usage.input_tokens, usage.model_context_window.unwrap()),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn codex_context_after_compaction_uses_the_new_live_window_occupancy() {
+        use std::io::Write;
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // The first event is the pre-compaction high-water prompt. The second
+        // is the new, compacted turn and must be the only value supervisors use.
+        writeln!(
+            tmp.as_file(),
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":203000}},"model_context_window":1000000}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            tmp.as_file(),
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":40000}},"model_context_window":1000000}}}}}}"#
+        )
+        .unwrap();
+
+        let usage = read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+            .expect("latest compacted turn should produce a context reading");
+        assert_eq!(usage.input_tokens, 40_000);
+        assert_eq!(usage.model_context_window, Some(1_000_000));
+        assert_eq!(
+            context_band(usage.input_tokens, usage.model_context_window.unwrap()),
+            "ok"
+        );
     }
 
     #[test]
@@ -11476,7 +11552,7 @@ effort = "high"
 
         let total = read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
             .expect("a split UTF-8 code point at the seek boundary must not hide usage");
-        assert_eq!(total, 123_456);
+        assert_eq!(total.input_tokens, 123_456);
     }
 
     /// When the tail has multiple assistant entries, the LAST one wins.

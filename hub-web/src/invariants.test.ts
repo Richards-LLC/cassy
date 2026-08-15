@@ -325,16 +325,18 @@ describe("binding Commander browser invariants", () => {
     supervisor.stop();
   });
 
-  it("turns terminal failures into an explanation and direct retry action", async () => {
+  it("turns connection failures into timed actions while retaining prior terminal frames", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
-    expect(source).toContain("Attaching terminal (3s deadline). Existing pane output stays visible while Commander retries.");
-    expect(source).toContain("Terminal unavailable: ${detail}");
-    expect(source).toContain('retry.textContent = "Try again"');
-    expect(source).toContain("void connections.get(machineId)?.attach(session)");
+    expect(source).toContain("const view = connectingView(snapshot, now)");
+    expect(source).toContain('retry.textContent = "Retry"');
+    expect(source).toContain('diagnose.textContent = "Diagnose"');
+    expect(source).toContain("openConnectionLog(machineId)");
+    expect(source).toContain("const view = disconnectedView(snapshot, now)");
+    expect(source).toContain("Disconnected ${view.elapsedSeconds}s ago");
     expect(styles).toContain(".terminal-state");
-    expect(styles).toContain("background: var(--tint-warn)");
-    expect(styles).toContain("color: var(--state-warn)");
+    expect(styles).toContain(".terminal-connecting-step");
+    expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
   });
 
   it("removes the connecting instruction when the terminal state arrives", async () => {

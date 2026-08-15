@@ -3,6 +3,7 @@ import { attentionCounts, attentionUrl, createAttentionItem, machineEventAttenti
 import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
+import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -58,6 +59,7 @@ let selectedSession: string | undefined;
 let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
 let pairingPollTimer: number | undefined;
 let pairingCountdownTimer: number | undefined;
+let connectionViewTicker: number | undefined;
 let pairingCreateInFlight = false;
 let pairingExchangeInFlight = false;
 let pairingDraft = createPairingDraft(location.origin);
@@ -121,9 +123,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (output) output.textContent = `${latencyMs}ms`;
     },
     onAuthFailure: (kind, detail) => {
-      pairingStatus = kind === "expired"
-        ? "Credential refresh failed. Re-pair this machine to continue."
-        : `${detail}. Re-pair in Commander; no browser reset is required.`;
+      if (kind === "expired") return;
+      pairingStatus = `${detail}. Re-pair in Commander; no browser reset is required.`;
       render();
     },
     onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
@@ -425,8 +426,107 @@ function renderTerminalConnecting(machineId: string, session: string): void {
   const placeholder = grid.querySelector<HTMLElement>(".empty");
   if (placeholder) {
     placeholder.classList.remove("terminal-state");
-    placeholder.textContent = "Attaching terminal (3s deadline). Existing pane output stays visible while Commander retries.";
+    placeholder.textContent = `Connecting to ${session}…`;
   }
+}
+
+function clearDisconnectedState(grid: HTMLElement): void {
+  grid.classList.remove("terminal-disconnected");
+  grid.querySelector(".terminal-disconnected-banner")?.remove();
+}
+
+function openConnectionLog(machineId: string): void {
+  let dialog = document.querySelector<HTMLDialogElement>("#connection-log");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.id = "connection-log";
+    dialog.className = "connection-log";
+    dialog.innerHTML = '<header><h2>Connection log</h2><form method="dialog"><button type="submit" aria-label="Close connection log">×</button></form></header><pre>Running diagnostics…</pre>';
+    document.body.append(dialog);
+  }
+  const output = dialog.querySelector("pre")!;
+  output.textContent = "Running diagnostics…";
+  dialog.showModal();
+  void connections.get(machineId)?.diagnose().then((result) => {
+    output.textContent = JSON.stringify(result, null, 2);
+  }).catch((error) => {
+    output.textContent = error instanceof Error ? error.message : "Diagnosis failed";
+  });
+}
+
+function renderConnectionSurface(machineId: string, session: string, snapshot: ConnectionState, now = Date.now()): void {
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  const hasLastFrame = grid.querySelector(".pane") !== null;
+  if (hasLastFrame && shouldRetainDisconnectedFrame(snapshot)) {
+    const view = disconnectedView(snapshot, now);
+    let banner = grid.querySelector<HTMLElement>(".terminal-disconnected-banner");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.className = "terminal-disconnected-banner";
+      banner.setAttribute("role", "status");
+      grid.prepend(banner);
+    }
+    banner.textContent = `Disconnected ${view.elapsedSeconds}s ago — ${view.retryLabel} (attempt ${view.attempt})`;
+    grid.classList.add("terminal-disconnected");
+    return;
+  }
+  clearDisconnectedState(grid);
+  if (snapshot.phase === "live") return;
+  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  if (!placeholder) return;
+  const view = connectingView(snapshot, now);
+  placeholder.className = "empty terminal-state terminal-connecting";
+  const spinner = document.createElement("span");
+  spinner.className = "connection-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+  const title = document.createElement("p");
+  title.className = "terminal-connecting-title";
+  title.textContent = `Connecting to ${session}…`;
+  const elapsed = document.createElement("time");
+  elapsed.className = "terminal-connecting-elapsed";
+  elapsed.textContent = view.elapsedLabel;
+  placeholder.replaceChildren(spinner, title, elapsed);
+  if (view.step) {
+    const step = document.createElement("p");
+    step.className = "terminal-connecting-step";
+    step.textContent = view.step;
+    placeholder.append(step);
+  }
+  if (view.actionsAvailable) {
+    const actions = document.createElement("div");
+    actions.className = "terminal-connecting-actions";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.onclick = () => connections.get(machineId)?.retry();
+    const diagnose = document.createElement("button");
+    diagnose.type = "button";
+    diagnose.textContent = "Diagnose";
+    diagnose.onclick = () => openConnectionLog(machineId);
+    actions.append(retry, diagnose);
+    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch") {
+      const repair = document.createElement("button");
+      repair.type = "button";
+      repair.textContent = "Re-pair";
+      repair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+      actions.append(repair);
+    }
+    placeholder.append(actions);
+  }
+}
+
+function syncConnectionViewTicker(): void {
+  if (connectionViewTicker !== undefined) window.clearInterval(connectionViewTicker);
+  connectionViewTicker = undefined;
+  const connection = activeConnection();
+  if (!selectedMachineId || !selectedSession || !connection) return;
+  const snapshot = connection.snapshot();
+  if (snapshot.phase === "live" && !snapshot.degraded) return;
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  connectionViewTicker = window.setInterval(() => renderConnectionSurface(machineId, session, connection.snapshot()), 1_000);
 }
 
 function renderTerminalFailure(machineId: string, session: string, detail: string): void {
@@ -835,7 +935,7 @@ function render(captureDraft = true): void {
           <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
           <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
-          <div class="actions"><span class="control-action" title="${escapeAttr(takeControlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}"><button id="lease"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button></span><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
+          <div class="actions"><span class="control-action" title="${escapeAttr(takeControlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}"><button id="lease"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
       </main>
@@ -863,6 +963,8 @@ function render(captureDraft = true): void {
   }
   document.querySelector("#attention-rail-counts")?.append(renderAttentionCounts(counts, true));
   renderAttention(); renderStatus(status);
+  if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
+  syncConnectionViewTicker();
   bindEvents(selected, lease);
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
   if (selected && selectedSession) {
@@ -1034,15 +1136,6 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     });
   };
   if (pairForm) pairForm.onsubmit = (event) => { event.preventDefault(); void pairMachine(pairForm).then((paired) => { if (paired) document.querySelector<HTMLDialogElement>("#pair-dialog")?.close(); }).catch((error) => toast(error instanceof Error ? error.message : "Pairing failed")); };
-  const retry = document.querySelector<HTMLButtonElement>("#retry-connection");
-  if (retry && selected) retry.onclick = () => connections.get(selected.id)?.retry();
-  const diagnose = document.querySelector<HTMLButtonElement>("#diagnose-connection");
-  if (diagnose && selected) diagnose.onclick = () => void connections.get(selected.id)?.diagnose().then((result) => {
-    const output = document.querySelector<HTMLElement>("#diagnostic-output");
-    if (output) { output.hidden = false; output.textContent = JSON.stringify(result, null, 2); }
-  }).catch((error) => toast(error instanceof Error ? error.message : "Diagnosis failed"));
-  const repair = document.querySelector<HTMLButtonElement>("#repair-machine");
-  if (repair) repair.onclick = () => { pairingStatus = `Re-pair ${selected?.label ?? "this machine"} with a short-lived code.`; document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal(); };
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {
     connections.get(selected.id)?.stop();

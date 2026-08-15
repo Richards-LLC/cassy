@@ -1,23 +1,16 @@
-export type ConnectionStage = "idle" | "resolving" | "dialing" | "auth" | "attaching" | "live";
-export type ConnectionPhase = ConnectionStage | "failed" | "backoff";
+import {
+  attachElapsedSeconds,
+  elapsedSeconds as stageElapsedSeconds,
+  type AttachSnapshot,
+  type ConnectionSnapshot,
+} from "./connection-state";
 
 /**
  * Structural consumer view of HubConnectionSupervisor's connection snapshot.
  * Keeping this interface at the view seam lets the lifecycle own all state and
  * timing while the UI owns only presentation thresholds.
  */
-export interface ConnectionSnapshotView {
-  readonly phase: ConnectionPhase;
-  readonly stage: ConnectionStage;
-  readonly since: number;
-  readonly attempt: number;
-  readonly reason?: string;
-  readonly retryInMs?: number;
-  readonly latencyMs?: number;
-  readonly missedHeartbeats: number;
-  readonly degraded: boolean;
-  readonly authFailure?: "expired" | "revoked" | "scope-mismatch";
-}
+export type ConnectionSnapshotView = ConnectionSnapshot | AttachSnapshot;
 
 export interface ConnectingView {
   readonly elapsedSeconds: number;
@@ -32,7 +25,7 @@ export interface DisconnectedView {
   readonly retryLabel: string;
 }
 
-const STAGE_COPY: Record<ConnectionStage, string> = {
+const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
   idle: "waiting to start the connection",
   resolving: "resolving the target node",
   dialing: "dialing the relay",
@@ -41,8 +34,10 @@ const STAGE_COPY: Record<ConnectionStage, string> = {
   live: "waiting for the terminal heartbeat",
 };
 
-export function elapsedSeconds(snapshot: Pick<ConnectionSnapshotView, "since">, now = Date.now()): number {
-  return Math.max(0, Math.floor((now - snapshot.since) / 1_000));
+export function elapsedSeconds(snapshot: ConnectionSnapshotView, now = Date.now()): number {
+  return "session" in snapshot
+    ? attachElapsedSeconds(snapshot, now)
+    : stageElapsedSeconds(snapshot, now);
 }
 
 export function formatElapsed(seconds: number): string {
@@ -72,5 +67,5 @@ export function disconnectedView(snapshot: ConnectionSnapshotView, now = Date.no
 }
 
 export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView): boolean {
-  return snapshot.degraded || snapshot.phase === "failed" || snapshot.phase === "backoff";
+  return snapshot.degraded || snapshot.phase !== "live";
 }

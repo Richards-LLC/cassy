@@ -11,9 +11,11 @@ const startedAt = Date.parse("2026-08-15T04:00:00Z");
 
 function snapshot(overrides: Partial<ConnectionSnapshotView> = {}): ConnectionSnapshotView {
   return {
+    session: "factory-a",
     phase: "attaching",
     stage: "attaching",
     since: startedAt,
+    attachSince: startedAt,
     attempt: 1,
     missedHeartbeats: 0,
     degraded: false,
@@ -42,6 +44,14 @@ describe("Commander designed connection states", () => {
     });
   });
 
+  it("keeps disclosure thresholds on total attach age when the current stage resets", () => {
+    const state = snapshot({ since: startedAt + 14_000, attachSince: startedAt, stage: "backoff", phase: "backoff" });
+    expect(connectingView(state, startedAt + 15_000)).toMatchObject({
+      elapsedLabel: "15s",
+      actionsAvailable: true,
+    });
+  });
+
   it("formats long-running attempts without introducing another state clock", () => {
     expect(connectingView(snapshot(), startedAt + 72_000).elapsedLabel).toBe("1m 12s");
   });
@@ -54,6 +64,7 @@ describe("Commander designed connection states", () => {
       retryLabel: "reconnecting in 3s",
     });
     expect(shouldRetainDisconnectedFrame(state)).toBe(true);
+    expect(shouldRetainDisconnectedFrame(snapshot({ phase: "dialing", stage: "dialing" }))).toBe(true);
     expect(shouldRetainDisconnectedFrame(snapshot({ phase: "live" }))).toBe(false);
   });
 });

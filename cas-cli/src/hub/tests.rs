@@ -1700,6 +1700,20 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&resize), Some(Scope::PaneRead));
     assert_eq!(required_scope(&keyframe), Some(Scope::PaneRead));
     assert_eq!(required_scope(&scrollback), Some(Scope::PaneRead));
+    assert!(super::server::is_pane_read_message(&keyframe));
+    assert!(super::server::is_pane_read_message(&scrollback));
+    assert!(
+        !super::server::is_pane_read_message(&resize),
+        "ResizePane retains may_resize_panes lease policy"
+    );
+    assert!(
+        !super::server::is_pane_read_message(&input),
+        "input remains a leased mutation"
+    );
+    assert!(
+        !super::server::is_pane_read_message(&semantic),
+        "SendMessage remains a leased mutation"
+    );
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);

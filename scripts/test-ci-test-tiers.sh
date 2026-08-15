@@ -193,8 +193,45 @@ fi
 require_text "$ci_text" 'SCCACHE_GHA_ENABLED: "true"' 'CI enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'needs: [verify, build, build-macos]' 'release publication waits for both Linux and macOS builds'
-require_text "$(<"$release")" 'cas-aarch64-apple-darwin.tar.gz > SHA256SUMS' 'release emits a two-target checksum manifest'
 require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
+require_text "$(<"$release")" 'refusing to replace its assets' 'release rerun with an existing release fails loudly'
+
+# Exercise the actual Create Release shell body with a fake gh client. A
+# release run that failed after creating its release object must not silently
+# attach/replace assets on retry; a release object that does not exist must
+# still proceed to its one normal create operation.
+release_create_body="$(awk '
+    $0 == "      - name: Create Release" { in_step = 1; next }
+    in_step && $0 == "        run: |" { in_body = 1; next }
+    in_body { sub(/^          /, ""); print }
+' "$release" | sed -E 's/\$\{\{[^}]+\}\}/workflow-expression/g')"
+retry_tmp="$(mktemp -d)"
+trap 'rm -rf "$retry_tmp"' EXIT
+mkdir -p "$retry_tmp/bin"
+cat >"$retry_tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "release view") exit "${FAKE_RELEASE_EXISTS:?}" ;;
+  "release create") printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}" ;;
+  *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$retry_tmp/bin/gh"
+
+set +e
+existing_output="$(GITHUB_REF=refs/tags/v9.9.9 FAKE_RELEASE_EXISTS=0 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body" 2>&1)"
+existing_status=$?
+set -e
+test "$existing_status" -eq 1
+grep -qF 'Release v9.9.9 already exists; refusing to replace its assets' <<<"$existing_output"
+test ! -e "$retry_tmp/creates"
+echo 'ok   partial-release retry refuses loudly and does not upload replacement bytes'
+
+GITHUB_REF=refs/tags/v9.9.9 FAKE_RELEASE_EXISTS=1 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body"
+grep -qF 'release create v9.9.9' "$retry_tmp/creates"
+echo 'ok   first release run creates the release when no object exists'
+rm -rf "$retry_tmp"
+trap - EXIT
 
 # The cache is an optimization, never a CI availability dependency. The shared
 # Linux setup must survive both a failed action download and a failed backend

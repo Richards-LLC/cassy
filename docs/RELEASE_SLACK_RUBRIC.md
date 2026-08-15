@@ -38,17 +38,22 @@ it while one asset is still uploading. Do not upload a local `dist/local-audit/`
 archive or copy a digest from it into an announcement. A local audit says that
 the tagged source compiled; it says nothing about the bytes users download.
 
-After the workflow finishes, derive the exact announcement fields from the
+Start every runtime draft from
+[`docs/release-notes/runtime-release-template.md`](release-notes/runtime-release-template.md).
+After the workflow finishes, fill that draft's checksum placeholders from the
 published release only:
 
 ```bash
-./scripts/release-published-receipt.sh vX.Y.Z
+cp docs/release-notes/runtime-release-template.md docs/release-notes/YYYY-MM-DD-vX.Y.Z-slack.md
+./scripts/release-published-receipt.sh vX.Y.Z --write-draft docs/release-notes/YYYY-MM-DD-vX.Y.Z-slack.md
 ```
 
 It fails closed until the release is published, both required assets
 (`cas-x86_64-unknown-linux-gnu.tar.gz` and
 `cas-aarch64-apple-darwin.tar.gz`) exist, and fresh local downloads match
-GitHub's SHA-256 metadata. Use the printed fields mechanically in the draft.
+GitHub's SHA-256 metadata. `--write-draft` requires each digest placeholder
+and replaces every occurrence, so it fails rather than leaving a human to
+transcribe a local build's values.
 The workflow publishes macOS ARM64 from its macOS runner regardless of the host
 that tagged the release; never describe the release as Linux-only because a
 local audit host cannot build Darwin.
@@ -138,8 +143,9 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] After every release-train version bump, regenerate `Cargo.lock` and verify `cargo metadata --locked` before tagging.
 - [ ] Release tag points at the fetched `origin/main` landing and is pushed
 - [ ] Workflow-created release has both Linux x86_64 and macOS ARM64 assets;
-  `release-published-receipt.sh` succeeded from fresh downloads before any
-  digest enters the draft (a local audit archive is not shipped-byte evidence)
+  `release-published-receipt.sh --write-draft` succeeded from fresh downloads
+  before any digest enters the draft (a local audit archive is not
+  shipped-byte evidence)
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

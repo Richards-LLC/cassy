@@ -4,10 +4,10 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: scripts/release-published-receipt.sh <vX.Y.Z>" >&2
+    echo "Usage: scripts/release-published-receipt.sh <vX.Y.Z> [--write-draft <path>]" >&2
 }
 
-if [[ "$#" -ne 1 ]]; then
+if [[ "$#" -ne 1 && "$#" -ne 3 ]]; then
     usage
     exit 2
 fi
@@ -16,6 +16,15 @@ tag="$1"
 if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "error: expected an annotated release tag like vX.Y.Z; got $tag" >&2
     exit 2
+fi
+
+draft=""
+if [[ "$#" -eq 3 ]]; then
+    if [[ "$2" != "--write-draft" || ! -f "$3" ]]; then
+        echo "error: --write-draft requires an existing draft path" >&2
+        exit 2
+    fi
+    draft="$3"
 fi
 
 gh_bin="${GH_BIN:-gh}"
@@ -59,9 +68,36 @@ for asset in "$linux_asset" "$macos_asset"; do
     fi
 done
 
+linux_sha="$(sha256sum "$workdir/$linux_asset" | awk '{print $1}')"
+macos_sha="$(sha256sum "$workdir/$macos_asset" | awk '{print $1}')"
+
+replace_draft_token() {
+    local token="$1" value="$2" replacement
+    replacement="$(mktemp)"
+    if ! awk -v token="$token" -v value="$value" '
+        BEGIN { replacements = 0 }
+        {
+            occurrences = gsub(token, value)
+            replacements += occurrences
+            print
+        }
+        END { exit replacements >= 1 ? 0 : 1 }
+    ' "$draft" >"$replacement"; then
+        rm -f "$replacement"
+        echo "error: draft $draft must contain a $token placeholder" >&2
+        exit 1
+    fi
+    mv "$replacement" "$draft"
+}
+
+if [[ -n "$draft" ]]; then
+    replace_draft_token '{{LINUX_SHA256}}' "$linux_sha"
+    replace_draft_token '{{MACOS_SHA256}}' "$macos_sha"
+fi
+
 printf 'TAG=%s\n' "$tag"
 printf 'PUBLISHED_AT=%s\n' "$(jq -r '.publishedAt' "$release_json")"
 printf 'LINUX_ASSET=%s\n' "$linux_asset"
-printf 'LINUX_SHA256=%s\n' "$(sha256sum "$workdir/$linux_asset" | awk '{print $1}')"
+printf 'LINUX_SHA256=%s\n' "$linux_sha"
 printf 'MACOS_ASSET=%s\n' "$macos_asset"
-printf 'MACOS_SHA256=%s\n' "$(sha256sum "$workdir/$macos_asset" | awk '{print $1}')"
+printf 'MACOS_SHA256=%s\n' "$macos_sha"

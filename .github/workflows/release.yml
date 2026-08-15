@@ -224,14 +224,6 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -name "*.tar.gz" -exec mv {} release/ \;
-          # This manifest names the bytes that CI is about to publish. Release
-          # announcements must still run the receipt script against the
-          # downloaded assets, rather than copying a local-build checksum.
-          (
-            cd release
-            sha256sum cas-x86_64-unknown-linux-gnu.tar.gz \
-              cas-aarch64-apple-darwin.tar.gz > SHA256SUMS
-          )
           ls -la release/
 
       - name: Generate release notes
@@ -256,7 +248,14 @@ jobs:
 
           # A published release is immutable for announcement purposes. Do not
           # delete/recreate it on a re-tag: that would replace bytes after a
-          # receipt had already verified and announced their digests.
+          # receipt had already verified and announced their digests. A retry
+          # after a partial creation must fail loudly for deliberate recovery,
+          # never silently attach or replace assets.
+          if gh release view "$VERSION" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists; refusing to replace its assets. Inspect the published release and perform documented recovery before rerunning."
+            exit 1
+          fi
+
           gh release create "$VERSION" \
             --repo ${{ github.repository }} \
             --title "CAS $VERSION" \

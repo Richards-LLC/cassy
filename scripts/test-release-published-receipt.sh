@@ -4,6 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 receipt="$script_dir/release-published-receipt.sh"
+template="$script_dir/../docs/release-notes/runtime-release-template.md"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -64,8 +65,22 @@ grep -qF 'does not match GitHub digest' <<<"$mismatch_output"
 echo 'ok   mismatched downloaded bytes fail closed'
 
 write_release "[{\"name\":\"cas-x86_64-unknown-linux-gnu.tar.gz\",\"digest\":\"sha256:$linux_sha\"},{\"name\":\"cas-aarch64-apple-darwin.tar.gz\",\"digest\":\"sha256:$macos_sha\"}]"
-success_output="$(FIXTURE="$fixture" GH_BIN="$fake_gh" "$receipt" v2.69.1)"
+draft="$fixture/draft.md"
+printf 'Linux {{LINUX_SHA256}} / {{LINUX_SHA256}}; macOS {{MACOS_SHA256}} / {{MACOS_SHA256}}\n' >"$draft"
+success_output="$(FIXTURE="$fixture" GH_BIN="$fake_gh" "$receipt" v2.69.1 --write-draft "$draft")"
 grep -qFx 'TAG=v2.69.1' <<<"$success_output"
 grep -qFx "LINUX_SHA256=$linux_sha" <<<"$success_output"
 grep -qFx "MACOS_SHA256=$macos_sha" <<<"$success_output"
-echo 'ok   complete published release emits freshly downloaded digests'
+grep -qF "$linux_sha" "$draft"
+grep -qF "$macos_sha" "$draft"
+test "$(rg -oF "$linux_sha" "$draft" | wc -l)" -eq 2
+test "$(rg -oF "$macos_sha" "$draft" | wc -l)" -eq 2
+if rg -qF '{{LINUX_SHA256}}|{{MACOS_SHA256}}' "$draft"; then
+    echo 'FAIL receipt left a digest placeholder in the draft' >&2
+    exit 1
+fi
+echo 'ok   complete published release emits and mechanically writes fresh digests'
+
+test "$(rg -oF '{{LINUX_SHA256}}' "$template" | wc -l)" -eq 2
+test "$(rg -oF '{{MACOS_SHA256}}' "$template" | wc -l)" -eq 2
+echo 'ok   runtime draft template exposes only receipt-fillable digest placeholders'

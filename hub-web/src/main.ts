@@ -80,14 +80,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
     },
-    onSessionState: (session, state, scrollback) => void renderSessionState(machine.id, session, state, scrollback),
+    onSessionState: (session, state, scrollback) => {
+      void renderSessionState(machine.id, session, state, scrollback);
+    },
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
     },
-    onSocketError: (session, detail) => void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "incident" }),
+    onSocketError: (session, detail) => {
+      renderTerminalFailure(machine.id, session, detail);
+      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "incident" });
+    },
   });
 }
 
@@ -341,8 +346,39 @@ async function openSession(machineId: string, session: string): Promise<void> {
   selectedMachineId = machineId;
   selectedSession = session;
   render();
+  renderTerminalConnecting(machineId, session);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
   await connections.get(machineId)?.attach(session);
+}
+
+function renderTerminalConnecting(machineId: string, session: string): void {
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  if (placeholder) {
+    placeholder.classList.remove("terminal-state");
+    placeholder.textContent = "Opening the terminal connection. This can take up to 10 seconds.";
+  }
+}
+
+function renderTerminalFailure(machineId: string, session: string, detail: string): void {
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  if (!placeholder) return;
+  const message = document.createElement("p");
+  message.textContent = `Terminal unavailable: ${detail}`;
+  const retry = document.createElement("button");
+  retry.className = "primary retry-terminal";
+  retry.textContent = "Try again";
+  retry.onclick = () => {
+    renderTerminalConnecting(machineId, session);
+    void connections.get(machineId)?.attach(session);
+  };
+  placeholder.classList.add("terminal-state");
+  placeholder.replaceChildren(message, retry);
 }
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
@@ -401,6 +437,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
+  grid.querySelector(".empty")?.remove();
   const active = new Set(state.panes.filter((pane) => pane.kind !== "Director").map((pane) => pane.id));
   const selectedKey = sessionKey(machineId, session);
   const selectedPane = selectedPanes.get(selectedKey);

@@ -31,7 +31,8 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .t3-ghostty-canvas { display: block; width: 100%; height: 100%; cursor: text; }.t3-ghostty-canvas.link { cursor: pointer; }
 .t3-ghostty-input { position: absolute; left: 4px; top: 4px; width: 1px; height: 1px; opacity: 0; padding: 0; border: 0; resize: none; pointer-events: none; }
 .t3-ghostty-scrollbar { display: none; }
-.empty { place-self: center; color: #6e7681; }
+.empty { place-self: center; color: #8b949e; }
+.terminal-state { display: grid; gap: 12px; max-width: 360px; padding: 16px; border: 1px solid #a36c2c; border-radius: 10px; background: rgba(163,108,44,.16); color: #ffe2a8; font-size: 14px; line-height: 1.4; }.terminal-state p { margin: 0; }.terminal-state .retry-terminal { width: auto; justify-self: start; padding: 0 14px; }
 .context section { margin-bottom: 22px; }.badge { color: #f0f6fc; background: #da3633; border-radius: 999px; padding: 2px 7px; }
 .attention-group { margin: 0 0 12px; }.attention-group-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 0 0 5px; }.attention-group-label { min-width: 0; overflow: hidden; color: #8b949e; font: 11px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }.attention-group-ack { flex: none; min-height: 26px; padding: 2px 7px; font-size: 11px; }
 .attention-item, .status-row { border: 1px solid #30363d; border-radius: 8px; padding: 8px; margin: 6px 0; font-size: 12px; line-height: 1.35; }.attention-item--incident { border-color: #da3633; background: rgba(218,54,51,.12); box-shadow: inset 3px 0 #da3633; }.attention-item--incident .attention-title { color: #ff7b72; }.attention-item--notice { background: #0d1117; }

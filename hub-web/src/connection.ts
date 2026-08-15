@@ -20,6 +20,8 @@ export interface HubCallbacks {
 }
 
 const RETRY_DELAYS = [1_000, 2_000, 4_000, 8_000, 16_000];
+const ATTACH_OPEN_TIMEOUT_MS = 10_000;
+const ATTACH_READY_TIMEOUT_MS = 10_000;
 
 class AuthenticationError extends Error {}
 
@@ -31,6 +33,9 @@ export class HubConnectionSupervisor {
   private readonly sockets = new Map<string, WebSocket>();
   private readonly socketAttempts = new Map<string, number>();
   private readonly attachRetryTimers = new Map<string, number>();
+  private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
+  private readonly timedOutSockets = new WeakSet<WebSocket>();
+  private readonly readySockets = new WeakSet<WebSocket>();
 
   constructor(readonly machine: StoredMachine, private readonly callbacks: HubCallbacks) {}
 
@@ -46,6 +51,7 @@ export class HubConnectionSupervisor {
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.clearAttachRetries();
+    this.clearAttachTimeouts();
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
     this.callbacks.onState("idle");
@@ -158,6 +164,14 @@ export class HubConnectionSupervisor {
   }
 
   async attach(session: string): Promise<void> {
+    try {
+      await this.openAttach(session);
+    } catch (error) {
+      await this.handleAttachFailure(session, error);
+    }
+  }
+
+  private async openAttach(session: string): Promise<void> {
     if (!this.desired) return;
     const retryTimer = this.attachRetryTimers.get(session);
     if (retryTimer !== undefined) {
@@ -174,11 +188,25 @@ export class HubConnectionSupervisor {
     const socket = new WebSocket(endpoint);
     socket.binaryType = "arraybuffer";
     this.sockets.set(session, socket);
-    socket.onopen = () => this.socketAttempts.set(session, 0);
+    this.startOpenTimeout(session, socket);
+    socket.onopen = () => {
+      if (this.sockets.get(session) !== socket) return;
+      this.clearAttachTimeout(session, "open");
+      this.startReadyTimeout(session, socket);
+    };
     socket.onmessage = (message) => this.handleDaemonMessage(session, message.data);
     socket.onclose = (event) => {
+      const timedOut = this.timedOutSockets.has(socket);
+      const becameReady = this.readySockets.has(socket);
+      this.clearAttachTimeouts(session);
       if (this.sockets.get(session) === socket) this.sockets.delete(session);
       if (!this.desired || event.code === 1000) return;
+      if (!timedOut) {
+        this.callbacks.onSocketError(
+          session,
+          becameReady ? "Terminal connection closed. Retrying…" : "Terminal connection closed before it became ready. Retrying…",
+        );
+      }
       this.scheduleAttach(session);
     };
     socket.onerror = () => this.callbacks.onSocketError(session, "terminal transport error");
@@ -199,6 +227,8 @@ export class HubConnectionSupervisor {
       this.blockAuthentication("pairing expired or was revoked", session);
       return;
     }
+    const detail = error instanceof Error ? error.message : "unknown terminal attach failure";
+    this.callbacks.onSocketError(session, `Terminal attach failed: ${detail}. Retrying…`);
     this.scheduleAttach(session);
   }
 
@@ -223,6 +253,7 @@ export class HubConnectionSupervisor {
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.clearAttachRetries();
+    this.clearAttachTimeouts();
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
     this.callbacks.onState("auth-blocked", detail);
@@ -237,7 +268,7 @@ export class HubConnectionSupervisor {
     const timer = window.setTimeout(() => {
       this.attachRetryTimers.delete(session);
       if (!this.desired) return;
-      void this.attach(session).catch((error) => this.handleAttachFailure(session, error));
+      void this.attach(session);
     }, delay);
     this.attachRetryTimers.set(session, timer);
   }
@@ -246,6 +277,53 @@ export class HubConnectionSupervisor {
     for (const timer of this.attachRetryTimers.values()) window.clearTimeout(timer);
     this.attachRetryTimers.clear();
     this.socketAttempts.clear();
+  }
+
+  private startOpenTimeout(session: string, socket: WebSocket): void {
+    this.clearAttachTimeouts(session);
+    const timeouts = this.attachTimeouts.get(session) ?? {};
+    timeouts.open = window.setTimeout(() => {
+      if (this.sockets.get(session) !== socket || socket.readyState !== WebSocket.CONNECTING) return;
+      this.timedOutSockets.add(socket);
+      this.callbacks.onSocketError(session, "Terminal connection timed out after 10 seconds before opening. Retrying…");
+      socket.close();
+    }, ATTACH_OPEN_TIMEOUT_MS);
+    this.attachTimeouts.set(session, timeouts);
+  }
+
+  private startReadyTimeout(session: string, socket: WebSocket): void {
+    const timeouts = this.attachTimeouts.get(session) ?? {};
+    timeouts.ready = window.setTimeout(() => {
+      if (this.sockets.get(session) !== socket || socket.readyState !== WebSocket.OPEN) return;
+      this.timedOutSockets.add(socket);
+      this.callbacks.onSocketError(session, "Terminal connection opened but sent no session state within 10 seconds. Retrying…");
+      socket.close();
+    }, ATTACH_READY_TIMEOUT_MS);
+    this.attachTimeouts.set(session, timeouts);
+  }
+
+  private clearAttachTimeout(session: string, kind: "open" | "ready"): void {
+    const timeouts = this.attachTimeouts.get(session);
+    const timer = timeouts?.[kind];
+    if (timer !== undefined) window.clearTimeout(timer);
+    if (timeouts) delete timeouts[kind];
+    if (timeouts && timeouts.open === undefined && timeouts.ready === undefined) this.attachTimeouts.delete(session);
+  }
+
+  private clearAttachTimeouts(session?: string): void {
+    const clear = (key: string, timeouts: { open?: number; ready?: number } | undefined) => {
+      if (!timeouts) return;
+      if (timeouts.open !== undefined) window.clearTimeout(timeouts.open);
+      if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
+      this.attachTimeouts.delete(key);
+    };
+    if (session) {
+      clear(session, this.attachTimeouts.get(session));
+      return;
+    }
+    for (const [key, timeouts] of this.attachTimeouts) {
+      clear(key, timeouts);
+    }
   }
 
   send(session: string, message: unknown): boolean {
@@ -259,6 +337,12 @@ export class HubConnectionSupervisor {
     const text = typeof input === "string" ? input : input instanceof Blob ? await input.text() : new TextDecoder().decode(input);
     const message = JSON.parse(text) as Record<string, any>;
     if (message.Welcome) {
+      const socket = this.sockets.get(session);
+      if (socket) {
+        this.readySockets.add(socket);
+        this.clearAttachTimeout(session, "ready");
+        this.socketAttempts.set(session, 0);
+      }
       this.callbacks.onSessionState(session, message.Welcome.state, message.Welcome.scrollback);
     } else if (message.StateUpdate) {
       this.callbacks.onSessionState(session, message.StateUpdate.state);

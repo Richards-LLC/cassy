@@ -148,6 +148,67 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain('this.callbacks.onState("auth-blocked", detail)');
   });
 
+  it("bounds a terminal that opens but never sends its initial session state", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ status: 200, ok: true, json: async () => ({ ticket: "unused" }) })));
+    class FakeWebSocket {
+      static readonly OPEN = 1;
+      static readonly CONNECTING = 0;
+      static instances: FakeWebSocket[] = [];
+      readyState = FakeWebSocket.CONNECTING;
+      binaryType = "";
+      onopen: (() => void) | null = null;
+      onmessage: ((message: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor() { FakeWebSocket.instances.push(this); }
+      open(): void { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
+      close(): void { this.readyState = 3; this.onclose?.({ code: 1006 } as CloseEvent); }
+      send(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["pane-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    (supervisor as unknown as { desired: boolean }).desired = true;
+
+    await supervisor.attach("factory-a");
+    FakeWebSocket.instances[0].open();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(callbacks.onSocketError).toHaveBeenCalledWith(
+      "factory-a",
+      "Terminal connection opened but sent no session state within 10 seconds. Retrying…",
+    );
+    supervisor.stop();
+  });
+
+  it("turns terminal failures into an explanation and direct retry action", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
+    expect(source).toContain("Opening the terminal connection. This can take up to 10 seconds.");
+    expect(source).toContain("Terminal unavailable: ${detail}");
+    expect(source).toContain('retry.textContent = "Try again"');
+    expect(source).toContain("void connections.get(machineId)?.attach(session)");
+    expect(styles).toContain(".terminal-state");
+    expect(styles).toContain("#a36c2c");
+  });
+
+  it("removes the connecting instruction when the terminal state arrives", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('grid.querySelector(".empty")?.remove();');
+  });
+
   it.each(["stop", "auth-block"] as const)("cancels a scheduled attach retry on %s", async (terminalAction) => {
     vi.useFakeTimers();
     vi.stubGlobal("window", globalThis);

@@ -106,12 +106,18 @@ describe("wire-v1 reverse pairing", () => {
     expect((fixtures[5].invitation as Record<string, unknown>).scopes).toEqual(["machine-read", "session-read", "pane-read"]);
   });
 
+  it("requests Commander control scopes through the relay while continuing to accept narrowed invitations", () => {
+    expect(DEFAULT_PAIRING_SCOPES).toEqual([
+      "machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt",
+    ]);
+  });
+
   it.each([
     ["embedded controller hub", "https://controller.tail.example"],
     ["hosted static controller", "https://hub.petrastella.io"],
   ])("routes %s create traffic to the explicit relay, never the controller origin", async (_mode, controllerOrigin) => {
-    const createResponse = { ...await fixture("create-response"), controller_origin: controllerOrigin };
-    const createRequest = { ...await fixture("create-request"), controller_origin: controllerOrigin };
+    const createResponse = { ...await fixture("create-response"), controller_origin: controllerOrigin, requested_scopes: DEFAULT_PAIRING_SCOPES };
+    const createRequest = { ...await fixture("create-request"), controller_origin: controllerOrigin, requested_scopes: DEFAULT_PAIRING_SCOPES };
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(201, createResponse));
     await expect(createPairingRequest(fetcher, relayOrigin, controllerOrigin, DEFAULT_PAIRING_SCOPES, "operator@example.com")).resolves.toMatchObject({
       kind: "relay-request", controllerOrigin,

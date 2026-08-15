@@ -1,4 +1,5 @@
 import type { Scope } from "./types";
+import { DEFAULT_PAIRING_SCOPES } from "./pairing-relay";
 
 export interface PairingDraft {
   hubUrl: string;
@@ -9,15 +10,13 @@ export interface PairingDraft {
   email: string;
 }
 
-const DEFAULT_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
-
 export function createPairingDraft(controllerOrigin: string): PairingDraft {
   return {
     hubUrl: controllerOrigin,
     machineLabel: "",
     deviceLabel: "Commander browser",
     operatorLabel: "",
-    scopes: [...DEFAULT_SCOPES],
+    scopes: [...DEFAULT_PAIRING_SCOPES],
     email: "",
   };
 }

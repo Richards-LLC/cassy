@@ -1,7 +1,10 @@
 import type { PairingRelayDelivery, PendingInvitation, PendingRelayRequest } from "./pending-pairing";
 import type { Scope } from "./types";
 
-export const DEFAULT_PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read"];
+// The relay may only request these Commander scopes. The machine-side
+// `cas hub authorize` prompt is the consent boundary: it displays the origin
+// and requested/granted scopes and may narrow, but never elevate, this set.
+export const DEFAULT_PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
 const USER_CODE = /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/;
 const CREATE_PATH = "/api/hub/pairing/requests";
 const POLL_PATH = "/api/hub/pairing/requests/poll";
@@ -98,7 +101,7 @@ function relayError(status: number, code: unknown): PairingRelayError {
 
 export async function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string, signal?: AbortSignal): Promise<PendingRelayRequest> {
   if (!requestedScopes.length || new Set(requestedScopes).size !== requestedScopes.length || requestedScopes.some((scope) => !DEFAULT_PAIRING_SCOPES.includes(scope))) {
-    throw new PairingRelayError("unsupported_scope", "Page-initiated pairing supports read-only access only.");
+    throw new PairingRelayError("unsupported_scope", "Page-initiated pairing requested an unsupported Commander scope.");
   }
   const body: Record<string, unknown> = { wire_version: 1, controller_origin: controllerOrigin, requested_scopes: requestedScopes };
   if (email) body.email = email;

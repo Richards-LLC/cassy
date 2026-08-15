@@ -203,11 +203,20 @@ test-scoped-selftest:
 
 # Prove factory pushes stay scoped while epic/main/tag gates retain the full
 # matrix, including macOS, and reject the retired sccache cache protocol.
+#
+# Every scripts/test-*.sh suite that guards the release path runs here. A
+# release guard whose own self-test runs in no lane drifts silently and only
+# surfaces mid-release with a tag already pushed: that is how the publish-path
+# preflight shipped unable to pass (cas-069d), and how this target's own
+# migration-snapshot suite went stale for five days (cas-66ee). Keep this list
+# exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
+	cd .. && ./scripts/test-check-release-host.sh
+	cd .. && ./scripts/test-check-release-migration-snapshots.sh
 
 # Type check
 check:

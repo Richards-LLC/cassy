@@ -131,7 +131,8 @@ These require a major version bump:
    ```
 
    When `cas-cli/src/migration/migrations/mod.rs` changed since the last tag,
-   this runs the required command `cargo test -p cas --test component_output_test`.
+   this runs the required command
+   `cargo nextest run -p cas --test component_output_test`.
    That snapshot suite checks the doctor/status schema and ledger counts that a
    migration moves; the scoped release suites do not build it. If no previous
    tag is reachable, the guard runs the snapshots conservatively.

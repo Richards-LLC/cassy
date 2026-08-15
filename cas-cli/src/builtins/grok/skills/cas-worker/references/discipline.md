@@ -225,6 +225,18 @@ still an order, and a scope change you missed means your last hour needs redoing
 Context is a consumable the operator pays for. Auto-compaction is not a safety net — it is the
 expensive failure mode. Budget it the way you budget wall-clock.
 
+### Measure Codex live occupancy, never cumulative totals
+
+For Codex, calculate occupancy from the newest rollout `token_count` event:
+`last_token_usage.input_tokens / model_context_window`. `total_token_usage` is a cumulative,
+cache-heavy history counter, not current prompt occupancy and never a checkpoint trigger.
+
+Worked incident: `last_token_usage.input_tokens = 37,952` against
+`model_context_window = 258,400` is about **15% occupied** (about **85% headroom**). The same
+rollout reported `total_token_usage.input_tokens = 356,457`, including about 330k cached tokens;
+that total does **not** mean the worker is near exhaustion. Keep working unless the live
+occupancy or another real failure signal requires a checkpoint.
+
 ### Report headroom in every milestone note
 
 Every `note_type=progress` milestone note ends with your remaining context, plainly:

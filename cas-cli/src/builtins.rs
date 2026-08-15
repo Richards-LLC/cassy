@@ -2964,9 +2964,11 @@ This is the body content."#;
                 "~2 minutes",
                 "gh run watch",
                 "action=remind",
-                "context headroom",
                 "Checkpoint, never compact",
                 "discipline.md",
+                "last_token_usage",
+                "model_context_window",
+                "total_token_usage",
             ] {
                 assert!(
                     skill_content.contains(required),
@@ -3017,6 +3019,9 @@ This is the body content."#;
                 "git push",
                 "respawn",
                 "auto-compaction",
+                "37,952",
+                "258,400",
+                "356,457",
             ] {
                 assert!(
                     ref_content.contains(required),

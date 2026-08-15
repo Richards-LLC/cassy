@@ -69,8 +69,8 @@ Your scope is locked at assignment:
 - **Document important choices.** Use `mcp__cs__task action=notes note_type=decision` for non-obvious decisions.
 - **Keep durable discoveries deliberately.** Relays are attributed, not auto-saved; use `mcp__cs__memory action=remember` for cross-session facts.
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
-- **Report context headroom** ("context: ~60% used") in every milestone progress note.
-- **Checkpoint, never compact.** When context is low: commit, push, leave a handoff note, and ask for respawn. Prefer small pushed commits. See [discipline.md](cas-worker/references/discipline.md).
+- Codex: checkpoint on last_token_usage/model_context_window, never total_token_usage; see discipline.md.
+- **Checkpoint, never compact.** When context is low: commit, push, hand off, and request a respawn. See [discipline.md](cas-worker/references/discipline.md).
 
 ## cas-src surface checklist — required before close
 

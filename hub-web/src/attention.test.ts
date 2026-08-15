@@ -6,10 +6,12 @@ import {
   coalesceAttention,
   createAttentionItem,
   daemonAttention,
+  dismissableInfoItems,
   groupAttention,
   machineEventAttention,
   severityForEvent,
 } from "./attention";
+import { cycleAttentionGroup } from "./attention-view";
 import type { AttentionItem } from "./types";
 
 const createdAt = "2026-08-15T02:30:00Z";
@@ -212,6 +214,35 @@ describe("Commander attention triage queue", () => {
       item({ id: "dismissed", kind: "progress_note", acknowledgedAt: createdAt }),
     ];
     expect(attentionCounts(events)).toEqual({ critical: 2, warning: 1, info: 1 });
+  });
+
+  it("returns only outstanding info items for bulk dismissal", () => {
+    const events = [
+      item({ id: "info", kind: "progress_note" }),
+      item({ id: "acknowledged", kind: "progress_note", acknowledgedAt: createdAt }),
+      item({ id: "warning", kind: "config_drift" }),
+    ];
+
+    expect(dismissableInfoItems(events).map((event) => event.id)).toEqual(["info"]);
+  });
+
+  it("cycles rendered attention group toggles in either direction", () => {
+    const focused: string[] = [];
+    const toggles = ["first", "second", "third"].map((id) => ({
+      id,
+      focus() { focused.push(id); ownerDocument.activeElement = this; },
+      scrollIntoView() { /* exercised by the keyboard API */ },
+    }));
+    const ownerDocument = { activeElement: toggles[0] };
+    for (const toggle of toggles) Object.assign(toggle, { ownerDocument });
+    const container = {
+      ownerDocument,
+      querySelectorAll: () => toggles,
+    } as unknown as HTMLElement;
+
+    expect(cycleAttentionGroup(container, 1)?.id).toBe("second");
+    expect(cycleAttentionGroup(container, -1)?.id).toBe("first");
+    expect(focused).toEqual(["second", "first"]);
   });
 
   it("gives an exited worker an actionable critical card without exposing the wire name", () => {

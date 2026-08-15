@@ -366,6 +366,10 @@ export function attentionCounts(items: readonly AttentionItem[]): AttentionCount
   return counts;
 }
 
+export function dismissableInfoItems(items: readonly AttentionItem[]): AttentionItem[] {
+  return items.filter((item) => !item.acknowledgedAt && severityForEvent(item.kind, item.severity) === "info");
+}
+
 export function relativeTime(createdAt: string, now = Date.now()): string {
   const elapsed = Math.max(0, now - Date.parse(createdAt));
   if (elapsed < 60_000) return "now";

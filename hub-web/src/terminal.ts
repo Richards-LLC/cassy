@@ -5,6 +5,7 @@ export interface TerminalSurface {
   write(data: Uint8Array): void;
   setControlMode(enabled: boolean): void;
   focus(): void;
+  search(query: string): boolean;
   dispose(): void;
 }
 

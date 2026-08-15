@@ -130,6 +130,18 @@ button {
 button:hover:not(:disabled) { background: var(--bg-hover); }
 button:disabled { opacity: .42; cursor: not-allowed; }
 
+.machine-row,
+.nav-item,
+.status-row,
+.attention-item,
+.palette-command { transition: background-color 100ms ease; }
+
+.machine-row:hover,
+.nav-item:hover,
+.status-row:hover,
+.attention-item:hover,
+.palette-command:hover { background: var(--bg-hover); }
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
@@ -567,6 +579,7 @@ main {
 }
 
 .pane.selected { border-color: var(--line-strong); }
+.pane.selected .pane-title { color: var(--text-hi); }
 
 .pane > header {
   flex: 0 0 var(--pane-header-height);
@@ -652,6 +665,34 @@ main {
   overflow: hidden;
   background: var(--bg-terminal);
 }
+
+.terminal-search {
+  position: absolute;
+  z-index: 4;
+  top: calc(var(--pane-header-height) + var(--space-2));
+  right: var(--space-2);
+  display: grid;
+  grid-template-columns: minmax(120px, 220px) auto var(--button-compact-height);
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  color: var(--text-mid);
+  background: var(--bg-raised);
+  border-radius: var(--radius-card);
+  font-size: var(--fs-xs);
+}
+
+.terminal-search input {
+  min-width: 0;
+  height: var(--button-compact-height);
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-hi);
+  background: var(--bg-terminal);
+  border: var(--line-width) solid var(--line-subtle);
+  border-radius: var(--radius-card);
+}
+
+.terminal-search button { width: var(--button-compact-height); min-height: var(--button-compact-height); padding: 0; }
 
 .t3-ghostty-canvas {
   display: block;
@@ -1148,6 +1189,8 @@ main {
   .attention-item--new-critical,
   .attention-item--reclassified { animation: none; }
   .connection-spinner { animation: none; }
+  .machine-drawer { transition-property: opacity; }
+  #toast { transform: translate(-50%, 0); transition-property: opacity; }
 }
 
 @media (hover: none) {
@@ -1240,6 +1283,23 @@ dialog {
 }
 
 dialog::backdrop { background: var(--overlay-backdrop); }
+
+.command-palette {
+  width: min(620px, calc(100vw - var(--space-6)));
+  max-height: min(76dvh, 680px);
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.command-palette > section { display: flex; flex-direction: column; gap: var(--space-2); min-height: 0; padding: var(--space-3); }
+.command-palette header { display: flex; min-height: var(--space-8); align-items: center; justify-content: space-between; }
+.command-palette header button { width: var(--space-8); min-height: var(--space-8); padding: 0; }
+.command-palette input { min-height: var(--space-10); padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--bg-terminal); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
+.palette-commands { display: grid; gap: var(--space-1); overflow: auto; }
+.palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
+.palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-command small, .palette-empty { color: var(--text-lo); }
 
 dialog form,
 .pair-flow {
@@ -1438,6 +1498,8 @@ fieldset {
     width: calc(100% - var(--space-6));
     margin-left: var(--space-1);
   }
+  .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); }
+  .terminal-search { right: var(--space-1); left: var(--space-1); grid-template-columns: minmax(0, 1fr) auto var(--button-compact-height); }
 
   .context-panel,
   .context-panel.collapsed {

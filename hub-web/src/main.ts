@@ -1,6 +1,6 @@
 import "./styles.css";
-import { applyAttentionEnrichment, attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
-import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
+import { applyAttentionEnrichment, attentionCounts, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { cycleAttentionGroup, renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
 import { connectingView, disconnectedView, shouldRetainDisconnectedFrame } from "./connection-state-view";
@@ -16,6 +16,7 @@ import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest }
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -35,7 +36,6 @@ const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
 const attachStates = new Map<string, AttachSnapshot>();
-const connectionLatency = new Map<string, number>();
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
@@ -70,17 +70,75 @@ let pairingDraft = createPairingDraft(location.origin);
 let machineDrawerOpen = false;
 let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
 let activeContextTab: "attention" | "status" = "attention";
+let commandPaletteOpen = false;
 
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
 
 function lastActivityLabel(timestamp: number | undefined): string {
-  if (!timestamp) return "waiting";
-  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
-  if (seconds < 5) return "active now";
-  if (seconds < 60) return `${seconds}s ago`;
-  return `${Math.floor(seconds / 60)}m ago`;
+  return relativeTimestamp(timestamp);
+}
+
+function updatePaneActivity(element: HTMLElement, timestamp: number | undefined): void {
+  element.textContent = lastActivityLabel(timestamp);
+  element.title = timestamp === undefined ? "No activity received" : absoluteTimestamp(timestamp);
+}
+
+function focusPane(machineId: string, session: string, paneId: string): void {
+  const selectedKey = sessionKey(machineId, session);
+  const key = paneKey(machineId, session, paneId);
+  selectedPanes.set(selectedKey, paneId);
+  collapsedWorkerPanes.delete(key);
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  for (const pane of grid?.querySelectorAll<HTMLElement>(".pane") ?? []) {
+    const selected = pane.dataset.paneId === paneId;
+    pane.classList.toggle("selected", selected);
+    if (selected) pane.classList.remove("collapsed");
+  }
+  surfaces.get(key)?.focus();
+}
+
+function activePaneContext(): { machineId: string; session: string; paneId: string; surface: TerminalSurface } | undefined {
+  if (!selectedMachineId || !selectedSession) return undefined;
+  const paneId = selectedPanes.get(sessionKey(selectedMachineId, selectedSession));
+  const surface = paneId ? surfaces.get(paneKey(selectedMachineId, selectedSession, paneId)) : undefined;
+  return paneId && surface ? { machineId: selectedMachineId, session: selectedSession, paneId, surface } : undefined;
+}
+
+function openTerminalSearch(): void {
+  const active = activePaneContext();
+  if (!active) return;
+  const pane = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(active.paneId)}"]`);
+  if (!pane) return;
+  pane.querySelector<HTMLElement>(".terminal-search")?.remove();
+  const form = document.createElement("form");
+  form.className = "terminal-search";
+  form.setAttribute("role", "search");
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "Find in terminal";
+  input.setAttribute("aria-label", "Find in focused terminal");
+  const result = document.createElement("span");
+  result.setAttribute("role", "status");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "Close terminal search");
+  const closeSearch = () => { form.remove(); active.surface.focus(); };
+  close.onclick = closeSearch;
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    result.textContent = active.surface.search(input.value) ? "Match selected" : "No match";
+  };
+  form.onkeydown = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeSearch();
+  };
+  form.append(input, result, close);
+  pane.append(form);
+  input.focus();
 }
 
 function paneLayoutStorage(): PaneLayoutStorage | undefined {
@@ -121,11 +179,6 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       attachStates.set(sessionKey(machine.id, session), state);
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
-    onLatency: (latencyMs) => {
-      connectionLatency.set(machine.id, latencyMs);
-      const output = document.querySelector<HTMLElement>(`[data-machine-latency="${CSS.escape(machine.id)}"]`);
-      if (output) output.textContent = `${latencyMs}ms`;
-    },
     onAuthFailure: (kind, detail) => {
       if (kind === "expired") return;
       pairingStatus = `${detail}. Re-pair in Commander; no browser reset is required.`;
@@ -165,7 +218,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
       const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
-      if (activity && selectedMachineId === machine.id && selectedSession === session) activity.textContent = "active now";
+      if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, paneLastActivity.get(key));
     },
     onSessionSummary: (session, summary) => {
       sessionSummaries.set(sessionKey(machine.id, session), summary);
@@ -745,16 +798,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       card.dataset.paneRole = pane.kind.toLowerCase();
       if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
       card.onclick = () => {
-        selectedPanes.set(selectedKey, pane.id);
-        for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
-        card?.classList.add("selected");
-        surfaces.get(key)?.focus();
+        focusPane(machineId, session, pane.id);
       };
       const title = document.createElement("header"); title.className = "pane-header";
       const statusDot = document.createElement("span"); statusDot.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
       const label = document.createElement("span"); label.className = "pane-title"; label.textContent = pane.title || pane.id;
       const role = document.createElement("span"); role.className = "pane-role"; role.textContent = pane.kind.toLowerCase();
-      const activity = document.createElement("span"); activity.className = "pane-last-activity"; activity.textContent = lastActivityLabel(paneLastActivity.get(key));
+      const activity = document.createElement("span"); activity.className = "pane-last-activity"; updatePaneActivity(activity, paneLastActivity.get(key));
       const controls = document.createElement("div"); controls.className = "pane-layout-controls";
       const button = (label: string, className: string, action: () => void) => {
         const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
@@ -771,6 +821,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         void renderSessionState(machineId, session, state);
       };
       controls.append(
+        button("Find", "pane-search", () => { focusPane(machineId, session, pane.id); openTerminalSearch(); }),
         button("Make primary", "make-primary", () => updateLayout((current) => promotePane(current, pane.id))),
         button("Move earlier", "move-earlier", () => updateLayout((current) => movePane(current, pane.id, -1))),
         button("Move later", "move-later", () => updateLayout((current) => movePane(current, pane.id, 1))),
@@ -783,11 +834,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         title.setAttribute("role", "button");
         title.onclick = (event) => {
           event.stopPropagation();
-          selectedPanes.set(selectedKey, pane.id);
-          for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
-          card?.classList.add("selected");
-          if (collapsedWorkerPanes.has(key)) collapsedWorkerPanes.delete(key);
-          else collapsedWorkerPanes.add(key);
+          const wasCollapsed = collapsedWorkerPanes.has(key);
+          focusPane(machineId, session, pane.id);
+          if (!wasCollapsed) collapsedWorkerPanes.add(key);
           card?.classList.toggle("collapsed", collapsedWorkerPanes.has(key));
           if (!collapsedWorkerPanes.has(key)) queueMicrotask(() => surfaces.get(key)?.focus());
         };
@@ -803,12 +852,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (!card || !mount) continue;
     const position = orderedPaneIds(layout).indexOf(pane.id);
     card.classList.toggle("primary", pane.id === layout.primaryPaneId);
+    card.classList.toggle("selected", selectedPanes.get(selectedKey) === pane.id);
     card.classList.toggle("collapsed", pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key));
     card.querySelector<HTMLElement>(".pane-status-dot")!.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
     card.querySelector<HTMLElement>(".pane-title")!.textContent = pane.title || pane.id;
     const paneHeader = card.querySelector<HTMLElement>(".pane-header");
     if (paneHeader) paneHeader.title = [sessionSummaries.get(selectedKey)?.title, pane.kind === "Supervisor" ? undefined : "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
-    card.querySelector<HTMLElement>(".pane-last-activity")!.textContent = lastActivityLabel(paneLastActivity.get(key));
+    updatePaneActivity(card.querySelector<HTMLElement>(".pane-last-activity")!, paneLastActivity.get(key));
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
     const moveLater = card.querySelector<HTMLButtonElement>(".move-later");
@@ -968,9 +1018,14 @@ function render(captureDraft = true): void {
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const connectionState = connectionClass(connectionSnapshot);
   const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
-  const latency = machineConnectionSnapshot?.latencyMs ?? (selected ? connectionLatency.get(selected.id) : undefined);
+  const latency = machineConnectionSnapshot?.latencyMs;
   const counts = attentionCounts(attention);
+  const infoItems = dismissableInfoItems(attention);
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
+  const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
+  const controlActionDisabled = takeControlReason !== undefined;
+  const sessionCommands = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).map((session) => `
+    <button type="button" class="palette-command" data-palette-machine="${escapeAttr(machine.id)}" data-palette-session="${escapeAttr(session.name)}"><span>Jump to ${escapeHtml(session.name)}</span><small>${escapeHtml(machine.label)}</small></button>`)).join("");
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -1001,7 +1056,7 @@ function render(captureDraft = true): void {
           <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
           <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
-          <div class="actions"><span class="control-action" title="${escapeAttr(takeControlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}"><button id="lease"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
       </main>
@@ -1019,7 +1074,19 @@ function render(captureDraft = true): void {
           <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><div id="status-view"></div><div class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></div></section>
         </div>
       </aside>
-    </div>${pairDialogMarkup()}<div id="toast" role="status"></div>`;
+    </div>
+    <dialog id="command-palette" class="command-palette">
+      <section>
+        <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
+        <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
+        <div class="palette-commands">
+          <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
+          <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
+          ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
+        </div>
+      </section>
+    </dialog>
+    ${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
   const machineRail = document.querySelector("#machine-rail-list")!;
   const machineTree = document.querySelector("#machine-tree")!;
@@ -1032,6 +1099,10 @@ function render(captureDraft = true): void {
   if (selected && selectedSession && connectionSnapshot) renderConnectionSurface(selected.id, selectedSession, connectionSnapshot);
   syncConnectionViewTicker();
   bindEvents(selected, lease);
+  if (commandPaletteOpen) {
+    document.querySelector<HTMLDialogElement>("#command-palette")?.showModal();
+    queueMicrotask(() => document.querySelector<HTMLInputElement>("#command-palette-query")?.focus());
+  }
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
   if (selected && selectedSession) {
     const state = sessionStates.get(sessionKey(selected.id, selectedSession));
@@ -1172,7 +1243,97 @@ function renderStatus(status?: Record<string, unknown>): void {
   }
 }
 
+async function toggleControl(selected: StoredMachine | undefined, lease: LeaseState | undefined): Promise<void> {
+  if (!selected || !selectedSession) return;
+  if (lease?.held_by_me) {
+    await connections.get(selected.id)?.releaseLease(selectedSession);
+    invalidateMachineLeases(selected.id);
+  } else {
+    await connections.get(selected.id)?.requestControl(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
+  }
+  await loadLease(selected.id, selectedSession);
+}
+
+function openCommandPalette(): void {
+  commandPaletteOpen = true;
+  render();
+}
+
+function focusPaneByNumber(index: number): void {
+  if (!selectedMachineId || !selectedSession) return;
+  const state = sessionStates.get(sessionKey(selectedMachineId, selectedSession));
+  if (!state) return;
+  const panes = state.panes.filter((pane) => pane.kind !== "Director");
+  const layout = layoutForPanes(sessionKey(selectedMachineId, selectedSession), panes, panes.find((pane) => pane.kind === "Supervisor")?.id);
+  const paneId = layout ? orderedPaneIds(layout)[index] : undefined;
+  if (paneId) focusPane(selectedMachineId, selectedSession, paneId);
+}
+
+function cycleRenderedAttention(direction: number): void {
+  if (attentionPanelCollapsed || activeContextTab !== "attention") {
+    attentionPanelCollapsed = false;
+    activeContextTab = "attention";
+    render();
+  }
+  queueMicrotask(() => {
+    const container = document.querySelector<HTMLElement>("#attention-panel");
+    if (container) cycleAttentionGroup(container, direction);
+  });
+}
+
+function globalShortcut(event: KeyboardEvent): void {
+  const command = event.metaKey || event.ctrlKey;
+  if (command && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    event.stopPropagation();
+    openCommandPalette();
+    return;
+  }
+  if (command && event.key.toLowerCase() === "f" && activePaneContext()) {
+    event.preventDefault();
+    event.stopPropagation();
+    openTerminalSearch();
+    return;
+  }
+  if (command && /^[1-9]$/.test(event.key)) {
+    event.preventDefault();
+    event.stopPropagation();
+    focusPaneByNumber(Number(event.key) - 1);
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  const editing = target?.matches("input, textarea, [contenteditable='true']") === true;
+  if (!command && !event.altKey && !editing && (event.key === "[" || event.key === "]")) {
+    event.preventDefault();
+    cycleRenderedAttention(event.key === "[" ? -1 : 1);
+  }
+}
+
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
+  document.querySelector<HTMLButtonElement>("#command-palette-toggle")!.onclick = openCommandPalette;
+  const palette = document.querySelector<HTMLDialogElement>("#command-palette")!;
+  const closePalette = () => { commandPaletteOpen = false; palette.close(); };
+  document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
+  palette.oncancel = () => { commandPaletteOpen = false; };
+  const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
+  paletteQuery.oninput = () => {
+    const query = paletteQuery.value.trim().toLocaleLowerCase();
+    for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
+      command.hidden = query.length > 0 && !command.textContent?.toLocaleLowerCase().includes(query);
+    }
+  };
+  for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-machine]")) {
+    command.onclick = () => {
+      commandPaletteOpen = false;
+      selectedMachineId = command.dataset.paletteMachine;
+      const session = command.dataset.paletteSession;
+      if (selectedMachineId && session) void openSession(selectedMachineId, session);
+    };
+  }
+  const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");
+  if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
+  const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
+  if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
   document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
   document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
@@ -1222,16 +1383,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     selectedMachineId = machines.keys().next().value; selectedSession = undefined;
     render();
   };
-  document.querySelector<HTMLButtonElement>("#lease")!.onclick = async () => {
-    if (!selected || !selectedSession) return;
-    if (lease?.held_by_me) {
-      await connections.get(selected.id)?.releaseLease(selectedSession);
-      invalidateMachineLeases(selected.id);
-    } else {
-      await connections.get(selected.id)?.requestControl(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
-    }
-    await loadLease(selected.id, selectedSession);
-  };
+  document.querySelector<HTMLButtonElement>("#lease")!.onclick = () => void toggleControl(selected, lease);
   document.querySelector<HTMLButtonElement>("#interrupt")!.onclick = () => {
     if (!selected || !selectedSession) return;
     const pane = selectedPanes.get(sessionKey(selected.id, selectedSession));
@@ -1254,4 +1406,5 @@ function scopeChecks(selectedScopes: readonly Scope[]): string {
 function escapeHtml(value: string): string { const span = document.createElement("span"); span.textContent = value; return span.innerHTML; }
 function escapeAttr(value: string): string { return escapeHtml(value).replaceAll('"', "&quot;"); }
 
+window.addEventListener("keydown", globalShortcut, true);
 void boot();

@@ -10,6 +10,7 @@ import {
   type AttentionSeverity,
 } from "./attention";
 import type { AttentionItem } from "./types";
+import { absoluteTimestamp } from "./time";
 
 export interface AttentionPanelCallbacks {
   dismiss(items: AttentionItem[]): Promise<void> | void;
@@ -62,6 +63,19 @@ export function renderAttentionCounts(counts: AttentionCounts, compact = false):
   return container;
 }
 
+export function cycleAttentionGroup(container: HTMLElement, direction: number): HTMLButtonElement | undefined {
+  const groups = [...container.querySelectorAll<HTMLButtonElement>(".attention-group-toggle")];
+  if (groups.length === 0) return undefined;
+  const activeIndex = groups.indexOf(container.ownerDocument.activeElement as HTMLButtonElement);
+  const nextIndex = activeIndex < 0
+    ? direction < 0 ? groups.length - 1 : 0
+    : (activeIndex + (direction < 0 ? -1 : 1) + groups.length) % groups.length;
+  const next = groups[nextIndex];
+  next.focus();
+  next.scrollIntoView({ block: "nearest" });
+  return next;
+}
+
 function cardDetail(card: AttentionCard): string | undefined {
   if (card.content.cause && card.content.detail) return `${card.content.cause} · ${card.content.detail}`;
   return card.content.cause ?? card.content.detail;
@@ -110,6 +124,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   const time = document.createElement("time");
   time.dateTime = card.latest.createdAt;
   time.textContent = relativeTime(card.latest.createdAt, options.now);
+  time.title = absoluteTimestamp(card.latest.createdAt);
   eyebrow.append(identity, time);
   if (severity !== "critical") {
     const dismiss = button("×", "attention-dismiss", () => void callbacks.dismiss(card.items));

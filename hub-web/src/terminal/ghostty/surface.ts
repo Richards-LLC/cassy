@@ -266,6 +266,30 @@ function terminalColumnAtOffset(row: GhosttySnapshot["rowData"][number], offset:
   return Math.max(0, row.cells.length - 1);
 }
 
+export interface TerminalSearchMatch {
+  readonly start: { readonly x: number; readonly y: number };
+  readonly end: { readonly x: number; readonly y: number };
+}
+
+export function terminalSearchMatch(
+  rows: GhosttySnapshot["rowData"],
+  query: string,
+): TerminalSearchMatch | null {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return null;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    const offset = terminalRowText(row, false).toLocaleLowerCase().indexOf(needle);
+    if (offset < 0) continue;
+    return {
+      start: { x: terminalColumnAtOffset(row, offset), y: rowIndex },
+      end: { x: terminalColumnAtOffset(row, offset + needle.length - 1), y: rowIndex },
+    };
+  }
+  return null;
+}
+
 export function terminalLinkAtPositionWithRange(
   rows: GhosttySnapshot["rowData"],
   rowIndex: number,
@@ -806,6 +830,16 @@ export class GhosttyTerminalSurface {
 
   focus(): void {
     this.input.focus({ preventScroll: true });
+  }
+
+  search(query: string): boolean {
+    const match = terminalSearchMatch(this.core.snapshot().rowData, query);
+    if (!match) return false;
+    this.core.setSelection({ ...match.start, tag: 1 }, { ...match.end, tag: 1 });
+    this.selectionAnchorScreen = this.core.viewportPointToScreen(match.start.x, match.start.y);
+    this.selectionEndScreen = this.core.viewportPointToScreen(match.end.x, match.end.y);
+    this.requestRender();
+    return true;
   }
 
   hasSelection(): boolean {

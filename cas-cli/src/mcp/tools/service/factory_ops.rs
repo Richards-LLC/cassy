@@ -5351,15 +5351,22 @@ pub(crate) fn stash_recovery_command(stash_ref: &str) -> String {
     )
 }
 
-/// Resolve the stash just pushed to a durable ref (`refs/stash`'s SHA) so the
-/// recovery instruction survives later pushes shifting `stash@{0}`.
+/// Resolve the stash just pushed to a durable revision so the recovery
+/// instruction survives later pushes shifting `stash@{0}`.
 ///
-/// Returns a bare ref token — never annotated prose — because callers splice
-/// it straight into a shell command.
+/// The `^0` suffix is significant: `git stash` treats a revision made only of
+/// decimal digits as a positional stash index. A randomly generated short SHA
+/// can be all-decimal, which would make a recovery command address
+/// `stash@{N}` instead of this stash. Dereferencing the commit keeps it a
+/// shell-safe single token while unambiguously selecting the recorded object.
 fn resolve_stash_ref(path: &std::path::Path) -> String {
     run_git(path, &["rev-parse", "refs/stash"])
-        .map(|sha| sha[..sha.len().min(12)].to_string())
+        .map(|sha| durable_stash_ref(&sha))
         .unwrap_or_else(|_| "stash@{0}".to_string())
+}
+
+fn durable_stash_ref(sha: &str) -> String {
+    format!("{}^0", &sha[..sha.len().min(12)])
 }
 
 fn sync_worker_clone(
@@ -12598,6 +12605,21 @@ mod sync_safety_tests {
     fn stash_pop_failure_reports_the_stash_ref_and_does_not_lose_wip() {
         let (_temp, repo) = repo_with_upstream_commit();
 
+        // This worker may already have unrelated stashed work. The recovery
+        // must name the new stash object, not rely on a position in its reflog.
+        std::fs::write(repo.join("unrelated.txt"), "unrelated prior WIP").unwrap();
+        git(
+            &repo,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "unrelated prior WIP",
+            ],
+        );
+        let unrelated_stash = git(&repo, &["rev-parse", "refs/stash"]);
+
         // WIP that collides with the incoming upstream commit: the rebase
         // succeeds (the file is untracked locally) and the pop then fails.
         std::fs::write(repo.join("upstream.txt"), "local uncommitted version").unwrap();
@@ -12616,6 +12638,25 @@ mod sync_safety_tests {
         assert!(
             !stash_ref.contains(' '),
             "the ref is spliced into a shell command — it must be a single token, got {stash_ref:?}"
+        );
+        let reported_sha = stash_ref
+            .strip_suffix("^0")
+            .expect("the reported SHA must be disambiguated from a numeric stash index");
+        let current_stash = git(&repo, &["rev-parse", "refs/stash"]);
+        assert_eq!(
+            reported_sha,
+            &current_stash[..reported_sha.len()],
+            "the recovery token must identify the stash created by this sync"
+        );
+        assert_ne!(
+            reported_sha,
+            &unrelated_stash[..reported_sha.len()],
+            "the reported stash must not point at the worker's unrelated prior WIP"
+        );
+        assert_eq!(
+            git(&repo, &["stash", "list"]).lines().count(),
+            2,
+            "the fixture must exercise recovery with an unrelated pre-existing stash"
         );
 
         let line = failure.report_line();
@@ -12683,6 +12724,16 @@ mod sync_safety_tests {
         assert!(
             guidance.contains("--include-untracked") && !guidance.contains("stash pop"),
             "guidance must inspect untracked WIP and must not use `pop`, which rejects a SHA: {guidance}"
+        );
+    }
+
+    #[test]
+    fn durable_stash_ref_disambiguates_an_all_decimal_sha_from_a_stash_index() {
+        let decimal_sha = "1234567890123456789012345678901234567890";
+        assert_eq!(
+            durable_stash_ref(decimal_sha),
+            "123456789012^0",
+            "Git stash treats a bare all-decimal token as stash@{{N}}, not a commit"
         );
     }
 

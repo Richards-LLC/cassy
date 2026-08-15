@@ -782,7 +782,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     }
     const empty = document.createElement("div");
     empty.className = "empty empty-pane-slot";
-    empty.textContent = "No session — pick one from the drawer or drag it here.";
+    const emptyTitle = document.createElement("p");
+    emptyTitle.className = "empty-title";
+    emptyTitle.textContent = "No panes in this session yet";
+    const emptyHint = document.createElement("p");
+    emptyHint.className = "empty-hint";
+    emptyHint.textContent = "Terminals appear here as soon as the session starts one.";
+    empty.replaceChildren(emptyTitle, emptyHint);
     grid.classList.remove("pane-layout", "single-pane");
     grid.replaceChildren(empty);
     return;
@@ -1119,7 +1125,7 @@ function render(captureDraft = true): void {
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? "—" : `${latency}ms`}</span></span>
           <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
-        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : '<p class="empty-title">No session open</p><p class="empty-hint">Pick a session to attach its supervisor and workers.</p><button id="open-machines" class="primary" type="button">Open machines</button>'}</div></section>
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
         <div class="attention-rail">
@@ -1419,6 +1425,8 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
   document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
   document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
+  const openMachines = document.querySelector<HTMLButtonElement>("#open-machines");
+  if (openMachines) openMachines.onclick = () => { machineDrawerOpen = true; render(); };
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
   document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = () => {
     activeContextTab = "status"; attentionPanelCollapsed = false; render();

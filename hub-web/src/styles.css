@@ -82,7 +82,7 @@
   --button-compact-height: 28px;
   --dialog-width: 520px;
   --terminal-state-width: 360px;
-  --pair-detail-label-width: 120px;
+  --pair-detail-label-width: 140px;
   --mobile-drawer-max-height: 520px;
   --mobile-pane-min-width: 260px;
   --mobile-attention-label-width: 156px;
@@ -662,12 +662,19 @@ main {
   gap: var(--space-1);
 }
 
+/* Pane controls sit inside the title bar, so they recede until they are wanted
+   rather than competing with the pane name for attention. */
 .pane-layout-controls button {
   min-height: var(--button-compact-height);
   padding: var(--space-1) var(--space-2);
+  color: var(--text-lo);
+  background: var(--color-transparent);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
+
+.pane-layout-controls button:hover:not(:disabled),
+.pane-layout-controls button:focus-visible { color: var(--text-hi); background: var(--bg-hover); }
 
 .secondary-pane-strip .pane .pane-layout-controls {
   position: absolute;
@@ -755,7 +762,9 @@ main {
 .empty-pane-slot {
   place-self: stretch;
   display: grid;
-  place-items: center;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-2);
   margin: var(--space-2);
   color: var(--text-mid);
   border: var(--line-width) dashed var(--line-strong);
@@ -763,6 +772,11 @@ main {
   font-size: var(--fs-sm);
   text-align: center;
 }
+
+.empty-pane-slot p { margin: 0; }
+.empty-title { color: var(--text-hi); font-size: var(--fs-md); font-weight: var(--weight-medium); }
+.empty-hint { max-width: var(--terminal-state-width); color: var(--text-mid); }
+.empty-pane-slot .primary { width: auto; padding: 0 var(--space-4); }
 
 .terminal-state {
   place-self: center start;
@@ -862,6 +876,10 @@ main {
   padding: var(--space-1);
   background: var(--color-transparent);
 }
+
+/* An open panel already states its counts in the heading; the rail must not
+   print the same numbers a second time. */
+.context-panel:not(.collapsed) .attention-rail-counts { display: none; }
 
 .attention-rail .attention-counts--compact {
   display: flex;
@@ -1389,14 +1407,24 @@ fieldset {
 
 .dialog-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
 }
 
+/* Action labels are single-line commitments; they must not fold into columns. */
+.dialog-actions button {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The explanation reads as prose above the actions, not as a squeezed column
+   wedged between two buttons. */
 .pairing-disabled-reason {
-  max-width: var(--pane-secondary-min-width);
-  margin-right: auto;
+  flex: 1 0 100%;
+  order: -1;
+  margin: 0;
   font-size: var(--fs-sm);
 }
 

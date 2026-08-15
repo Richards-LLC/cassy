@@ -1085,7 +1085,7 @@ fn merge_required_idle_prompt_text(
     } else {
         format!(
             "2. Merge {factory_branch} into {target} (FF preferred; else \
-             `git merge --no-ff {factory_branch}` on the epic branch)"
+             `git merge --no-ff {factory_branch}` on {target})"
         )
     };
 
@@ -1098,7 +1098,7 @@ fn merge_required_idle_prompt_text(
          Next action — drain the merge queue before free-form user chat:\n\
          1. Confirm: {epic_status} and/or {list_awaiting}\n\
          {merge_step}\n\
-         3. Push the epic branch if remote tracking applies\n\
+         3. Push {target} if remote tracking applies\n\
          4. Tell {worker} to re-close with {reclose} (or use the supervisor escape-hatch close after merge if the worker is unresponsive)\n\
          5. Then clear context / hand the worker their next task if more work is ready\n\
          Live task state: {show}\n\
@@ -3140,6 +3140,20 @@ mod tests {
                 .text
                 .contains("epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77"),
             "must name merge target epic branch: {}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains(
+                "git merge --no-ff factory/recipe-be` on epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77"
+            ),
+            "epic-target relay must retain its epic branch merge command: {}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains(
+                "Push epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77 if remote tracking applies"
+            ),
+            "epic-target relay must retain its epic branch push instruction: {}",
             prompt.text
         );
         assert!(
@@ -5810,6 +5824,21 @@ mod tests {
             assert!(
                 prompt.text.contains("Merge target: main"),
                 "relay must name the WorkTarget branch: {}",
+                prompt.text
+            );
+            assert!(
+                prompt.text.contains("git merge --no-ff factory/recipe-be` on main"),
+                "main-target relay must derive its merge command from the WorkTarget: {}",
+                prompt.text
+            );
+            assert!(
+                prompt.text.contains("Push main if remote tracking applies"),
+                "main-target relay must derive its push instruction from the WorkTarget: {}",
+                prompt.text
+            );
+            assert!(
+                !prompt.text.contains("epic branch"),
+                "main-target relay must not redirect the merge to an epic branch: {}",
                 prompt.text
             );
             assert!(

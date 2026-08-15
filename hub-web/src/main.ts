@@ -1023,6 +1023,8 @@ function render(captureDraft = true): void {
   const infoItems = dismissableInfoItems(attention);
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
+  const machineLabel = selected?.label ?? "No machine";
+  const compactMachineLabel = machineLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "—";
   const controlActionDisabled = takeControlReason !== undefined;
   const sessionCommands = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).map((session) => `
     <button type="button" class="palette-command" data-palette-machine="${escapeAttr(machine.id)}" data-palette-session="${escapeAttr(session.name)}"><span>Jump to ${escapeHtml(session.name)}</span><small>${escapeHtml(machine.label)}</small></button>`)).join("");
@@ -1053,10 +1055,10 @@ function render(captureDraft = true): void {
       <main>
         <header class="session-header">
           <h1 class="${selectedSession ? "toolbar-session-title" : ""}">${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
-          <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
-          <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
+          <span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span>
+          <span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span>
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
       </main>

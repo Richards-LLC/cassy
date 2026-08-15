@@ -204,6 +204,10 @@ mod internal_llm_tests {
         // The marker is the boundary, not the prompt shape: a real user turn
         // still follows the ordinary memory path.
         env.remove(crate::internal_llm::INTERNAL_LLM_ENV);
+        env.remove("CAS_AGENT_ROLE");
+        env.remove("CAS_AGENT_NAME");
+        env.remove("CAS_SESSION_ID");
+        env.remove("CAS_FACTORY_MODE");
         handle_hook(
             "UserPromptSubmit",
             HookInput {

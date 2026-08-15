@@ -346,6 +346,47 @@ fn supervisor_turn_surfaces_matching_same_day_learnings() {
     assert!(ci_context.contains("2026-08-14-3"), "{ci_context}");
 }
 
+/// cas-2880 (GH #375): native factory delivery supplies workers bare relay
+/// prose as UserPromptSubmit input. The hook has no sender/origin provenance,
+/// so automatic Context is deliberately disabled for factory workers rather
+/// than pretending content can distinguish a relay from an operator request.
+/// Prompt attribution remains complete; an unmarked decision relay is the
+/// explicit accepted loss until cas-b657 adds typed provenance to HookInput.
+#[test]
+fn factory_worker_turns_keep_attribution_but_never_auto_capture_context() {
+    let _lock = super::env_lock();
+    let project = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+
+    let mut worker = input("worker");
+    worker.cwd = project.path().to_string_lossy().into_owned();
+    {
+        let _env = worker_env();
+        worker.user_prompt = Some(
+            "PR #392 merged; Scoped Validation remains in progress. Hold the branch clean and wait for the re-close instruction.".into(),
+        );
+        handle_user_prompt_submit(&worker, Some(&cas_root)).unwrap();
+
+        worker.user_prompt = Some(
+            "GitHub check-run updatedAt changes only on state transitions; use status/conclusion and a known wall-clock bound before declaring CI stalled.".into(),
+        );
+        handle_user_prompt_submit(&worker, Some(&cas_root)).unwrap();
+    }
+
+    let prompt_store = crate::store::open_prompt_store(&cas_root).unwrap();
+    assert_eq!(
+        prompt_store.list_by_session(&worker.session_id, 10).unwrap().len(),
+        2,
+        "factory-worker relay turns remain available for attribution"
+    );
+
+    let entries = crate::store::open_store_local(&cas_root).unwrap().list().unwrap();
+    assert!(
+        entries.iter().all(|entry| entry.entry_type != EntryType::Context),
+        "routine and decision-bearing relay prose are an explicit accepted loss from auto Context: {entries:#?}"
+    );
+}
+
 /// Session isolation must hold on the surfacing path exactly as it does on the
 /// drain: another factory session's mail is not this worker's mail.
 #[test]

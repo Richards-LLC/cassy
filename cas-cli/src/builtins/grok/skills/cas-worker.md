@@ -67,6 +67,7 @@ Your scope is locked at assignment:
   - Bad (observed): after a `/dev/null` denial, retry it or switch to an arbitrary host path.
   - Good: stop, classify the output as source, durable proof, or ephemeral, then use its sanctioned location.
 - **Document important choices.** Use `cas__task action=notes note_type=decision` for non-obvious decisions.
+- **Keep durable discoveries deliberately.** Relays are attributed, not auto-saved; use `cas__memory action=remember` for cross-session facts.
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
 - **Report context headroom** ("context: ~60% used") in every milestone progress note.
 - **Checkpoint, never compact.** When context is low: commit, push, leave a handoff note, and ask for respawn. Prefer small pushed commits. See [discipline.md](cas-worker/references/discipline.md).

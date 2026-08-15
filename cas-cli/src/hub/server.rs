@@ -736,10 +736,7 @@ async fn handle_client_message(
     let mut message: ClientMessage = serde_json::from_slice(bytes)?;
     let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
-    let read_message = matches!(
-        message,
-        ClientMessage::RequestPaneKeyframe { .. } | ClientMessage::ScrollbackRequest { .. }
-    );
+    let read_message = is_pane_read_message(&message);
     let allowed = if matches!(message, ClientMessage::ResizePane { .. }) {
         store.may_resize_panes(context, session, now)?
     } else if read_message {
@@ -784,6 +781,13 @@ async fn handle_client_message(
         Some(scope),
         Some(session),
         now,
+    )
+}
+
+pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
+    matches!(
+        message,
+        ClientMessage::RequestPaneKeyframe { .. } | ClientMessage::ScrollbackRequest { .. }
     )
 }
 

@@ -24,6 +24,7 @@
 //! ```
 
 mod context;
+pub(crate) mod delivery_provenance;
 pub(crate) mod handlers;
 pub mod scorer;
 pub mod transcript;
@@ -109,7 +110,7 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 ///
 /// This is the single entry point that resolves cas_root once and passes it
 /// to all handlers, eliminating redundant find_cas_root() calls.
-pub fn handle_hook(event_name: &str, input: HookInput) -> Result<HookOutput, MemError> {
+pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput, MemError> {
     // CAS-owned headless model calls are implementation details, not user
     // sessions. Their prompts must never be captured as memory and their
     // short-lived harnesses must never register as factory workers.
@@ -125,6 +126,26 @@ pub fn handle_hook(event_name: &str, input: HookInput) -> Result<HookOutput, Mem
     // IMPORTANT: We use find_cas_root() not find_cas_root_from() to preserve
     // CAS_ROOT env var priority for factory mode compatibility.
     let cas_root: Option<PathBuf> = find_cas_root().ok();
+
+    // The harness submits a raw prompt string. The delivery authority records
+    // a one-shot typed envelope keyed to that exact string before it injects
+    // machine traffic. Consume the envelope before prompt capture; do not
+    // recover provenance by parsing its human-facing rendered text.
+    if event_name == "UserPromptSubmit" && input.machine_prompt_provenance.is_none() {
+        input.machine_prompt_provenance = cas_root
+            .as_deref()
+            .and_then(|root| {
+                input
+                    .submitted_prompt()
+                    .and_then(|prompt| {
+                        std::env::var("CAS_AGENT_NAME")
+                            .ok()
+                            .and_then(|recipient| {
+                                delivery_provenance::consume(root, &recipient, prompt)
+                            })
+                    })
+            });
+    }
 
     match event_name {
         "SessionStart" => handle_session_start(&input, cas_root.as_deref()),

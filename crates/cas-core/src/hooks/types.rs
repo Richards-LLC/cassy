@@ -4,6 +4,40 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The origin of a machine-generated turn handed to an agent.
+///
+/// This is deliberately a closed set.  Prompt capture uses the presence of a
+/// [`MachinePromptProvenance`] value as an authority boundary, so accepting an
+/// arbitrary display string here would recreate the fragile marker heuristic
+/// that cas-b657 replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MachinePromptOrigin {
+    AgentAuthored,
+    LifecycleRelay,
+    DirectorGenerated,
+}
+
+/// Structured delivery facts for a machine-originated user turn.
+///
+/// The factory delivery authority, rather than the rendered prompt body,
+/// supplies this metadata.  `None` is an intentional and meaningful value:
+/// it identifies an operator-originated prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachinePromptProvenance {
+    pub notification_id: i64,
+    pub origin: MachinePromptOrigin,
+    pub queued_at: String,
+    pub delivery: String,
+}
+
+/// Whether the submitted prompt came from an operator or a factory relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmittedPromptOrigin<'a> {
+    Operator,
+    Machine(&'a MachinePromptProvenance),
+}
+
 /// The hook runner that will interpret a PreToolUse response.
 ///
 /// Claude Code accepts `permissionDecision: "allow"`; Codex 0.147 accepts
@@ -96,6 +130,16 @@ pub struct HookInput {
     /// so blank-vs-absent is handled in one place.
     #[serde(default, alias = "userPrompt", alias = "prompt")]
     pub user_prompt: Option<String>,
+
+    /// Typed factory-delivery provenance for `UserPromptSubmit`.
+    ///
+    /// This field is intentionally separate from [`Self::user_prompt`]: hook
+    /// consumers must never recover sender provenance by parsing a rendered
+    /// `CAS provenance:` display line. The factory delivery bridge registers
+    /// an envelope for machine traffic and hook dispatch supplies it here;
+    /// absence explicitly denotes an operator submission.
+    #[serde(default, rename = "machinePromptProvenance")]
+    pub machine_prompt_provenance: Option<MachinePromptProvenance>,
 
     /// Session start source (SessionStart)
     #[serde(default)]
@@ -232,6 +276,18 @@ impl HookInput {
             .as_deref()
             .map(str::trim)
             .filter(|text| !text.is_empty())
+    }
+
+    /// Return the submitted prompt's authoritative sender class.
+    ///
+    /// Absence is deliberately mapped to [`SubmittedPromptOrigin::Operator`]
+    /// rather than treated as an implicit default in a caller.  That makes the
+    /// operator-capture case visible at every decision point.
+    pub fn submitted_prompt_origin(&self) -> SubmittedPromptOrigin<'_> {
+        match self.machine_prompt_provenance.as_ref() {
+            Some(provenance) => SubmittedPromptOrigin::Machine(provenance),
+            None => SubmittedPromptOrigin::Operator,
+        }
     }
 
     /// True when this `Stop` / `SubagentStop` fired while the session was

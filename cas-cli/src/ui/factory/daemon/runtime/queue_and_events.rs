@@ -1317,13 +1317,19 @@ impl FactoryDaemon {
                 }
                 NormalDeliveryProbeAction::Wait => {}
                 NormalDeliveryProbeAction::RetryNormalNudge => {
+                    let source = "lifecycle-wake:delivery-watchdog";
+                    let payload = super::delivery::prepare_pty_machine_delivery(
+                        self.app.cas_dir(),
+                        &pane,
+                        self.app.harness_for(&pane),
+                        source,
+                        "CAS delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
+                        Some(row_id),
+                    );
                     let _ = self
                         .app
                         .mux
-                        .inject(
-                            &pane,
-                            "CAS delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
-                        )
+                        .inject(&pane, &payload)
                         .await;
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
                         probe.nudge_sent_at = Some(now);
@@ -3434,10 +3440,13 @@ impl FactoryDaemon {
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
                         let harness = self.app.harness_for(name);
-                        let payload = super::delivery::frame_pty_payload(
+                        let payload = super::delivery::prepare_pty_machine_delivery(
+                            self.app.cas_dir(),
+                            name,
                             harness,
                             &inbox_source,
                             &prompt_with_instructions,
+                            Some(queued.id),
                         );
                         let settle = self.urgent_settle_duration(name);
                         self.app
@@ -3580,10 +3589,13 @@ impl FactoryDaemon {
                     // cas-ab80: apply shared Codex framing before inject so
                     // urgent direct delivery matches normal PTY framing.
                     let harness = self.app.harness_for(&pane_target);
-                    let payload = super::delivery::frame_pty_payload(
+                    let payload = super::delivery::prepare_pty_machine_delivery(
+                        self.app.cas_dir(),
+                        &pane_target,
                         harness,
                         &inbox_source,
                         &prompt_with_instructions,
+                        Some(queued.id),
                     );
                     let settle = self.urgent_settle_duration(&pane_target);
                     tracing::info!(

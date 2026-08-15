@@ -171,6 +171,8 @@ describe("binding Commander browser invariants", () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
     expect(source).toContain("replaceWith(preservedGrid)");
+    expect(source).toContain('document.activeElement?.matches(".t3-ghostty-input")');
+    expect(source).toContain("terminalWasFocused) queueMicrotask(() => activePaneContext()?.surface.focus())");
     expect(source).toContain("data-session-key");
   });
 

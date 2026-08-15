@@ -1059,6 +1059,11 @@ function render(captureDraft = true): void {
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
+  // Moving the live grid through app.innerHTML temporarily detaches its hidden
+  // textarea. Remember terminal focus so a heartbeat render cannot dismiss a
+  // phone keyboard mid-command.
+  const terminalWasFocused = preservedGrid?.contains(document.activeElement) === true
+    && document.activeElement?.matches(".t3-ghostty-input") === true;
   if (preservedGrid) {
     preservedGrid.remove();
   } else {
@@ -1118,6 +1123,7 @@ function render(captureDraft = true): void {
     </dialog>
     ${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
+  if (terminalWasFocused) queueMicrotask(() => activePaneContext()?.surface.focus());
   const machineRail = document.querySelector("#machine-rail-list")!;
   const machineTree = document.querySelector("#machine-tree")!;
   for (const machine of machines.values()) {

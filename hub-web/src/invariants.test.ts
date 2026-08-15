@@ -190,6 +190,14 @@ describe("binding Commander browser invariants", () => {
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");
   });
 
+  it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('id="mobile-message-toggle"');
+    expect(main).toContain('activeContextTab = "status"; attentionPanelCollapsed = false; render();');
+    expect(css).toContain(".mobile-message-toggle { display: none; }");
+    expect(css).toContain(".mobile-message-toggle {");
+  });
+
   it("keeps the section 2 visual system tokenized and machine copy mono", async () => {
     const [main, css, html, renderer, surface] = await Promise.all([
       "main.ts",

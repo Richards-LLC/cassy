@@ -1094,6 +1094,7 @@ function render(captureDraft = true): void {
         <div class="attention-rail">
           <button id="attention-panel-toggle" class="rail-control" type="button" aria-label="${attentionPanelCollapsed ? "Expand" : "Collapse"} attention panel" aria-expanded="${!attentionPanelCollapsed}">${attentionPanelCollapsed ? "‹" : "›"}</button>
           <button id="attention-rail-counts" class="attention-rail-counts" type="button" data-open-context="attention" aria-label="Open attention"></button>
+          <button id="mobile-message-toggle" class="mobile-message-toggle" type="button" aria-label="Message supervisor">✉</button>
         </div>
         <div class="context-body">
           <div class="context-tabs" role="tablist" aria-label="Operations panel">
@@ -1387,6 +1388,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
   document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = () => { activeContextTab = "status"; attentionPanelCollapsed = false; render(); };
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
     button.onclick = () => { activeContextTab = "attention"; attentionPanelCollapsed = false; render(); };
   }

@@ -35,7 +35,7 @@ describe("Commander ATTENTION presentation", () => {
 
   it("upgrades already-persisted raw daemon JSON without showing the envelope", () => {
     const content = attentionContent(item({
-      message: 'Daemon ended: {"cause":{"kind":"transport_lost"},"next_action":"Inspect the local transport."}',
+      message: 'soundwave / gabber-studio-sturdy-cardinal-20: Daemon ended: {"cause":{"kind":"transport_lost"},"next_action":"Inspect the local transport."}',
     }));
 
     expect(content).toMatchObject({ headline: "Daemon connection lost", detail: "Inspect the local transport.", severity: "incident" });
@@ -43,11 +43,42 @@ describe("Commander ATTENTION presentation", () => {
   });
 
   it("keeps task meaning ahead of its small identifier and separates incidents from notices", () => {
-    const task = attentionContent(item({ kind: "blocked", message: "cas-87e7: Nothing advances an epic branch after its children merge to main" }));
+    const task = attentionContent(item({ kind: "blocked", message: "soundwave / gabber-studio-sturdy-cardinal-20: cas-87e7: Nothing advances an epic branch after its children merge to main" }));
     const incident = attentionContent(item({ kind: "session_transport", message: "terminal transport error" }));
 
     expect(task).toEqual({ headline: "Nothing advances an epic branch after its children merge to main", severity: "notice", ticketId: "cas-87e7" });
     expect(incident.severity).toBe("incident");
+  });
+
+  it("only strips this item's exact machine and session context", () => {
+    const content = attentionContent(item({
+      kind: "blocked",
+      message: "soundwave / a-different-session: cas-87e7: Keep the original context",
+    }));
+
+    expect(content.headline).toContain("Soundwave / A-Different-Session:");
+    expect(content.ticketId).toBeUndefined();
+  });
+
+  it("does not mistake arbitrary hyphenated labels or colon prose for task ids", () => {
+    const hyphenated = attentionContent(item({ kind: "blocked", message: "worker-3: Keep this headline intact" }));
+    const colonProse = attentionContent(item({ kind: "blocked", message: "Recovery note: preserve everything after this colon" }));
+
+    expect(hyphenated.headline).toContain("Worker-3:");
+    expect(hyphenated.ticketId).toBeUndefined();
+    expect(colonProse.headline).toContain("Recovery Note:");
+    expect(colonProse.ticketId).toBeUndefined();
+  });
+
+  it("is idempotent for items already normalized at creation", () => {
+    const stale = item({
+      kind: "blocked",
+      message: "soundwave / gabber-studio-sturdy-cardinal-20: cas-fc6fa: Keep the human title",
+    });
+    const once = attentionContent(stale);
+    const twice = attentionContent({ ...stale, message: once.headline, ...once });
+
+    expect(twice).toEqual(once);
   });
 
   it("gives an exited worker an actionable incident without exposing its wire event name", () => {

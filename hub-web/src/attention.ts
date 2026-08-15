@@ -18,7 +18,7 @@ export interface AttentionGroup {
 }
 
 const INCIDENT_KINDS = new Set(["daemon_disconnected", "session_transport", "pane_exited"]);
-const TASK_PREFIX = /^([a-z]+-[a-z0-9]+):\s+(.+)$/i;
+const TASK_PREFIX = /^(cas-[0-9a-f]{4,16}):\s+(.+)$/i;
 const LEGACY_DIAGNOSTIC_PREFIX = "Daemon ended: ";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -68,30 +68,48 @@ export function machineEventAttention(kind: string, diagnostic: unknown): Attent
   return { headline: sentenceCase(kind), severity: INCIDENT_KINDS.has(kind) ? "incident" : "notice" };
 }
 
-export function attentionContent(item: AttentionItem): AttentionContent {
-  if (item.headline) {
-    return {
-      headline: item.headline,
-      detail: item.detail,
-      cause: item.cause,
-      severity: item.severity ?? (INCIDENT_KINDS.has(item.kind) ? "incident" : "notice"),
-      ticketId: item.ticketId,
-    };
-  }
+function storedHeadline(item: AttentionItem): string {
+  const stored = item.headline ?? item.message;
+  if (!item.session) return stored;
 
-  if (item.message.startsWith(LEGACY_DIAGNOSTIC_PREFIX)) {
+  const ownContext = `${item.machineLabel} / ${item.session}:`;
+  if (!stored.startsWith(ownContext)) return stored;
+  const remainder = stored.slice(ownContext.length);
+  return /^\s/.test(remainder) ? remainder.trimStart() : stored;
+}
+
+export function attentionContent(item: AttentionItem): AttentionContent {
+  // Canonicalize on every render. Records created before structured attention
+  // fields existed (or later written by an older client) must not be able to
+  // put their baked machine/session prefix back into the card.
+  const stored = storedHeadline(item);
+
+  if (stored.startsWith(LEGACY_DIAGNOSTIC_PREFIX)) {
     try {
-      return daemonAttention(JSON.parse(item.message.slice(LEGACY_DIAGNOSTIC_PREFIX.length)));
+      return daemonAttention(JSON.parse(stored.slice(LEGACY_DIAGNOSTIC_PREFIX.length)));
     } catch {
       return daemonAttention(undefined);
     }
   }
 
-  const task = item.message.match(TASK_PREFIX);
+  const severity = item.severity ?? (INCIDENT_KINDS.has(item.kind) ? "incident" : "notice");
+  const task = stored.match(TASK_PREFIX);
   if (task) {
-    return { headline: task[2], severity: "notice", ticketId: task[1] };
+    return {
+      headline: task[2],
+      detail: item.detail,
+      cause: item.cause,
+      severity,
+      ticketId: item.ticketId ?? task[1].toLowerCase(),
+    };
   }
-  return { headline: sentenceCase(item.message), severity: INCIDENT_KINDS.has(item.kind) ? "incident" : "notice" };
+  return {
+    headline: item.headline ? stored : sentenceCase(stored),
+    detail: item.detail,
+    cause: item.cause,
+    severity,
+    ticketId: item.ticketId,
+  };
 }
 
 export function groupAttention(items: AttentionItem[]): AttentionGroup[] {

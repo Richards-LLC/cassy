@@ -28,14 +28,14 @@ test "$missing_publish_status" -eq 2
 grep -qF -- '--manual-publish requires --publish-tag' <<<"$missing_publish_output"
 echo 'ok   manual publication cannot bypass explicit tag publication'
 
-audit_guard_line="$(rg -nF 'if ! "$PUBLISH_TAG"; then' "$release" | tail -n1 | cut -d: -f1)"
-push_line="$(rg -nF 'git push origin "$TAG"' "$release" | cut -d: -f1)"
-manual_create_line="$(rg -nF 'gh release create "$TAG"' "$release" | cut -d: -f1)"
+audit_guard_line="$(grep -nF 'if ! "$PUBLISH_TAG"; then' "$release" | tail -n1 | cut -d: -f1)"
+push_line="$(grep -nF 'git push origin "$TAG"' "$release" | cut -d: -f1)"
+manual_create_line="$(grep -nF 'gh release create "$TAG"' "$release" | cut -d: -f1)"
 test -n "$audit_guard_line"
 test -n "$push_line"
 test -n "$manual_create_line"
 test "$audit_guard_line" -lt "$push_line"
 test "$push_line" -lt "$manual_create_line"
-rg -qF 'dist/local-audit' "$release"
-rg -qF 'never the shipped bytes' "$release"
+grep -qF 'dist/local-audit' "$release"
+grep -qF 'never the shipped bytes' "$release"
 echo 'ok   audit exits before the explicit tag push and manual publisher'

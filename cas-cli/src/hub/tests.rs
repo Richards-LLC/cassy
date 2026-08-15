@@ -12,8 +12,8 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::ui::factory::{
-    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneInfo, PaneKind, SessionState,
-    daemon_capabilities,
+    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneBootstrap, PaneInfo, PaneKind,
+    SessionState, daemon_capabilities,
 };
 
 /// Hub state initialization intentionally refuses to traverse symlinked path
@@ -973,7 +973,7 @@ async fn h0_tls_hsts_policy_is_bound_to_server_transport_not_client_headers() {
 }
 
 #[tokio::test]
-async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session() {
+async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_upstream() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -985,7 +985,7 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
             focused_pane: Some("worker-1".into()),
             panes: vec![PaneInfo {
                 id: "worker-1".into(),
-                kind: PaneKind::Worker,
+                kind: PaneKind::Supervisor,
                 focused: true,
                 title: "Worker 1".into(),
                 exited: false,
@@ -1001,13 +1001,34 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         )])),
         protocol_version: PROTOCOL_VERSION,
         capabilities: daemon_capabilities(),
-        pane_bootstrap: Vec::new(),
+        pane_bootstrap: vec![PaneBootstrap {
+            pane_id: "worker-1".into(),
+            epoch: 1_723_456_789_012,
+            cols: 120,
+            rows: 40,
+            scrollback_start_row: 17,
+            scrollback_end_row: 817,
+        }],
     };
     let output = DaemonMessage::Output {
         pane_id: "worker-1".into(),
         data: b"\x1b[32mlive bytes\x1b[0m".to_vec(),
     };
     let welcome_bytes = serde_json::to_vec(&welcome).unwrap();
+    let mut expected_welcome = welcome.clone();
+    let DaemonMessage::Welcome {
+        scrollback: expected_scrollback,
+        ..
+    } = &mut expected_welcome
+    else {
+        unreachable!()
+    };
+    *expected_scrollback = None;
+    let expected_welcome_bytes = serde_json::to_vec(&expected_welcome).unwrap();
+    assert!(
+        expected_welcome_bytes.len() <= super::connector::COMMANDER_WELCOME_METADATA_HARD_BYTES,
+        "canonical Welcome must remain within the metadata hard ceiling"
+    );
     let output_bytes = serde_json::to_vec(&output).unwrap();
 
     let daemon_connections = connections.clone();
@@ -1037,7 +1058,11 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         .attach("factory-a", port, ["worker-1"], None)
         .await
         .unwrap();
-    assert_eq!(first.recv().await.unwrap().bytes, welcome_bytes);
+    assert_eq!(
+        first.recv().await.unwrap().bytes,
+        expected_welcome_bytes,
+        "v3 Welcome must be transformed exactly to metadata-only form"
+    );
 
     let mut second = connector
         .attach("factory-a", port, ["worker-1"], None)
@@ -1045,13 +1070,19 @@ async fn h1_real_daemon_connector_preserves_bytes_and_one_upstream_per_session()
         .unwrap();
     assert_eq!(
         second.recv().await.unwrap().bytes,
-        welcome_bytes,
-        "late viewers rehydrate from the byte-identical canonical Welcome"
+        expected_welcome_bytes,
+        "late viewers rehydrate from the same deterministic canonical Welcome"
     );
 
     release_output.notify_waiters();
     assert_eq!(first.recv().await.unwrap().bytes, output_bytes);
     assert_eq!(second.recv().await.unwrap().bytes, output_bytes);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), first.recv())
+            .await
+            .is_err(),
+        "PTY output must be delivered exactly once"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     assert_eq!(connections.load(Ordering::SeqCst), 1);
     assert_eq!(connector.upstream_connection_count("factory-a").await, 1);

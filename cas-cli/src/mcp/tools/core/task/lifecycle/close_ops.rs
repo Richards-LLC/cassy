@@ -10525,13 +10525,82 @@ fn git_stdout_lines(
         .collect())
 }
 
-/// Classify `branch_ref` against `target_ref` by CONTENT rather than ancestry.
+/// Classify `branch_ref` against the integration target named by `target_ref`,
+/// reading BOTH the local ref and its remote-tracking counterpart (cas-69f0).
 ///
-/// See [`BranchContentDirection`] for why this exists and what each verdict
-/// means. Paths are chunked before being handed to `git` so a lane touching
-/// thousands of files cannot blow the argv limit and silently degrade the
-/// measurement into a wrong answer.
+/// A checkout whose local `main` trails `origin/main` otherwise measures every
+/// lane against stale main. Measured on the real repo: with local main two
+/// merges behind, `factory/steady-kestrel-84` read ContentAbsent and the guard
+/// offered a merge command for content that was already on `origin/main`,
+/// where the same lane read ContentPresent. Same code, same lane, opposite
+/// verdict, differing only in which ref the name resolved to.
+///
+/// This deliberately reuses the local-or-remote pattern the squash-content
+/// reconciliation already applies, rather than inventing a third resolution
+/// strategy: a second, subtly different notion of "which ref is the target"
+/// would itself be the next defect.
+///
+/// Combining rule, chosen to fail safe in the direction that matters: content
+/// PRESENT on either reading wins, because merging is then unnecessary under
+/// any plausible reading; a merge instruction is emitted only when EVERY
+/// reading says the content is absent.
 pub(crate) fn branch_content_direction(
+    repo_path: &std::path::Path,
+    branch_ref: &str,
+    target_ref: &str,
+) -> BranchContentDirection {
+    // `origin/main` passed explicitly needs no second reading, and a ref that
+    // does not resolve locally is already handled by the remote candidate.
+    let mut candidates: Vec<String> = vec![target_ref.to_string()];
+    if !target_ref.starts_with("origin/") {
+        candidates.push(format!("origin/{target_ref}"));
+    }
+    let readings: Vec<BranchContentDirection> = candidates
+        .iter()
+        .filter(|candidate| git_ref_exists(repo_path, candidate))
+        .map(|candidate| branch_content_direction_against_ref(repo_path, branch_ref, candidate))
+        .collect();
+
+    if readings.is_empty() {
+        // Preserve the single-ref function's own diagnostics (unsafe name,
+        // missing target, ...) instead of inventing a vaguer message here.
+        return branch_content_direction_against_ref(repo_path, branch_ref, target_ref);
+    }
+    if let Some(present) = readings
+        .iter()
+        .find(|r| matches!(r, BranchContentDirection::ContentPresent { .. }))
+    {
+        return present.clone();
+    }
+    if let Some(behind) = readings
+        .iter()
+        .find(|r| matches!(r, BranchContentDirection::BehindTarget { .. }))
+    {
+        return behind.clone();
+    }
+    if let Some(absent) = readings
+        .iter()
+        .find(|r| matches!(r, BranchContentDirection::ContentAbsent { .. }))
+        && readings
+            .iter()
+            .all(|r| matches!(r, BranchContentDirection::ContentAbsent { .. }))
+    {
+        return absent.clone();
+    }
+    readings
+        .into_iter()
+        .find(|r| matches!(r, BranchContentDirection::Unknown { .. }))
+        .unwrap_or(BranchContentDirection::Unknown {
+            reason: format!("no usable reading of target `{target_ref}`"),
+        })
+}
+
+/// Single-ref core of [`branch_content_direction`].
+///
+/// Paths are chunked before being handed to `git` so a lane touching thousands
+/// of files cannot blow the argv limit and silently degrade the measurement
+/// into a wrong answer.
+fn branch_content_direction_against_ref(
     repo_path: &std::path::Path,
     branch_ref: &str,
     target_ref: &str,
@@ -20662,6 +20731,132 @@ mod epic_status_gate_tests {
             "an empty branch must never be minted into merge evidence: {:?}",
             statuses[0].merge_evidence_note
         );
+    }
+
+    /// Build a repo whose LOCAL `main` deliberately trails `origin/main`, the
+    /// condition that made the guard offer a merge for already-landed work
+    /// (cas-69f0). The lane's content is on origin/main and nowhere else.
+    fn init_stale_local_main_repo() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let remote = p.join("origin.git");
+        let work = p.join("work");
+        git(p, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(p, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        let w = work.as_path();
+        git(w, &["config", "user.email", "t@example.test"]);
+        git(w, &["config", "user.name", "t"]);
+        git(w, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        std::fs::write(w.join("seed.txt"), "seed\n").unwrap();
+        git(w, &["add", "seed.txt"]);
+        git(w, &["commit", "-q", "-m", "seed"]);
+        git(w, &["push", "-q", "origin", "main"]);
+
+        // The lane delivers a file.
+        git(w, &["checkout", "-q", "-b", "factory/lane"]);
+        std::fs::write(w.join("delivered.rs"), "fn delivered() {}\n").unwrap();
+        git(w, &["add", "delivered.rs"]);
+        git(w, &["commit", "-q", "-m", "feat: deliver"]);
+
+        // That content lands on the REMOTE main by another route (squash),
+        // while the local main ref is deliberately left where it was.
+        git(w, &["checkout", "-q", "main"]);
+        std::fs::write(w.join("delivered.rs"), "fn delivered() {}\n").unwrap();
+        git(w, &["add", "delivered.rs"]);
+        git(w, &["commit", "-q", "-m", "squash: land the lane"]);
+        git(w, &["push", "-q", "origin", "main"]);
+        git(w, &["update-ref", "refs/heads/main", "HEAD~1"]);
+        dir
+    }
+
+    #[test]
+    fn stale_local_target_does_not_produce_a_false_merge_instruction() {
+        let dir = init_stale_local_main_repo();
+        let w = dir.path().join("work");
+        let p = w.as_path();
+        // Precondition: the fixture really is stale, or it proves nothing.
+        let local = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "main"])
+                .current_dir(p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let remote = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "origin/main"])
+                .current_dir(p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_ne!(
+            local.trim(),
+            remote.trim(),
+            "fixture must leave local main behind origin/main"
+        );
+
+        // Pin the defect itself: measured against the stale LOCAL ref alone,
+        // this reads ContentAbsent and the guard would print a merge command
+        // for content that is already on the real integration branch.
+        let stale_only = branch_content_direction_against_ref(p, "factory/lane", "main");
+        assert!(
+            matches!(stale_only, BranchContentDirection::ContentAbsent { .. }),
+            "fixture must reproduce the stale-ref misread, else the fix proves nothing: {stale_only:?}"
+        );
+        assert!(stale_only.merge_instruction_is_safe());
+
+        // The combined reading is the fix.
+        let direction = branch_content_direction(p, "factory/lane", "main");
+        assert!(
+            matches!(direction, BranchContentDirection::ContentPresent { .. }),
+            "content on origin/main must read ContentPresent despite a stale local ref: {direction:?}"
+        );
+        assert!(
+            !direction.merge_instruction_is_safe(),
+            "no merge instruction may be offered for already-landed content"
+        );
+
+        let landed = child("cas-stale-ref", TaskStatus::Closed, Some("lane"));
+        let task = epic("cas-epic-stale-ref");
+        let req = base_req(&task.id);
+        match run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            p,
+            std::slice::from_ref(&landed),
+        ) {
+            EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_) => {}
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    !message.contains("git merge --no-ff"),
+                    "a stale local ref must not resurrect the destructive instruction: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_local_target_still_reports_genuinely_absent_work() {
+        // The fix must not make everything look present: work on neither the
+        // local nor the remote target is still absent and still mergeable.
+        let dir = init_stale_local_main_repo();
+        let w = dir.path().join("work");
+        let p = w.as_path();
+        git(p, &["checkout", "-q", "-b", "factory/newlane", "main"]);
+        std::fs::write(p.join("brand-new.rs"), "fn brand_new() {}\n").unwrap();
+        git(p, &["add", "brand-new.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: never pushed anywhere"]);
+        let direction = branch_content_direction(p, "factory/newlane", "main");
+        assert!(
+            matches!(direction, BranchContentDirection::ContentAbsent { .. }),
+            "work absent from both readings is still absent: {direction:?}"
+        );
+        assert!(direction.merge_instruction_is_safe());
     }
 
     #[test]

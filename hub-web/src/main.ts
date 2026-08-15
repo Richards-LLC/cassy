@@ -1324,6 +1324,15 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       command.hidden = query.length > 0 && !command.textContent?.toLocaleLowerCase().includes(query);
     }
   };
+  paletteQuery.onkeydown = (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "Enter") return;
+    const first = [...palette.querySelectorAll<HTMLButtonElement>(".palette-command")]
+      .find((command) => !command.hidden && !command.disabled);
+    if (!first) return;
+    event.preventDefault();
+    if (event.key === "Enter") first.click();
+    else first.focus();
+  };
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-machine]")) {
     command.onclick = () => {
       commandPaletteOpen = false;

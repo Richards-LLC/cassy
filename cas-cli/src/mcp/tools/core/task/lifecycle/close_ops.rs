@@ -6630,7 +6630,33 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                              delivery and remain the lane's own residue."
                         ));
                     }
-                    Err(reason) => receipt_rejection_reason = Some(reason),
+                    Err(reason) => {
+                        // cas-da3f (GH #382): an un-targeted child of an epic
+                        // can be squash-delivered to the configured integration
+                        // branch while its epic ref has not yet advanced. The
+                        // normal receipt validation above correctly rejects that
+                        // receipt against the epic, but the delivery is not
+                        // missing. Permit this narrow shape only when the epic
+                        // is a clean ancestor of the integration target and the
+                        // same receipt passes every existing validator there.
+                        // A divergent epic stays fail-closed: advancing it needs
+                        // an explicit conflict/authority decision, not a close
+                        // gate side effect.
+                        if let Some(note) = validate_lagging_epic_receipt_on_integration_branch(
+                            repo_path,
+                            receipt,
+                            parent_branch,
+                            window,
+                        ) {
+                            return MergeStateGateOutcome::ProceedWithNote(format!(
+                                "{note} merge-state guard: cleared by delivery receipt; \
+                                 {factory_branch} still carries {stranded} commit(s) not on \
+                                 {parent_branch}, which are not attributable to this task's \
+                                 delivery and remain the lane's own residue."
+                            ));
+                        }
+                        receipt_rejection_reason = Some(reason);
+                    }
                 }
             }
             None => {
@@ -8939,6 +8965,66 @@ pub(crate) fn validate_task_commit_receipt(
         window.basis,
         COMMIT_RECEIPT_CLOCK_SKEW_SECS,
         prior_cycle_basis.unwrap_or_default()
+    ))
+}
+
+/// cas-da3f (GH #382): reconcile a receipt delivered to the configured
+/// integration branch while the task's otherwise-authoritative epic branch is
+/// merely behind it.
+///
+/// This is deliberately narrower than automatic epic advancement. It accepts
+/// only an `epic/*` parent whose current tip is a strict ancestor of the
+/// configured integration target, and only after the supplied receipt passes
+/// the normal full receipt validator against that target. A missing ref,
+/// equal tips, a divergent epic, or any receipt failure returns `None` so the
+/// caller retains the normal, detailed rejection against the epic branch.
+///
+/// The success note starts with a stable machine-readable marker because an
+/// accepted close must make its lagging epic visible to later `epic_status`,
+/// verification, and supervisor review rather than silently normalize drift.
+fn validate_lagging_epic_receipt_on_integration_branch(
+    repo_path: &std::path::Path,
+    receipt: &str,
+    epic_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<String> {
+    if !epic_branch.starts_with("epic/") {
+        return None;
+    }
+
+    let integration_branch = resolve_standalone_merge_target(repo_path).ok()?;
+    if integration_branch == epic_branch || !is_safe_git_refname(&integration_branch) {
+        return None;
+    }
+
+    // Use the freshest remote-tracking refs when present. The close worker's
+    // local refs routinely lag a supervisor merge, and the note must record
+    // the exact tips that supplied the clean-ancestor evidence.
+    fetch_parent_branch_best_effort(repo_path, &integration_branch);
+    let epic_ref = preferred_diff_target_ref(repo_path, epic_branch);
+    let integration_ref = preferred_diff_target_ref(repo_path, &integration_branch);
+    let epic_tip = resolve_branch_sha(repo_path, &epic_ref)?;
+    let integration_tip = resolve_branch_sha(repo_path, &integration_ref)?;
+    if epic_tip == integration_tip
+        || !git_commit_is_ancestor(repo_path, &epic_tip, &integration_tip)
+    {
+        return None;
+    }
+
+    let receipt_note = validate_task_commit_receipt(
+        repo_path,
+        receipt,
+        &integration_branch,
+        window,
+    )
+    .ok()?;
+
+    Some(format!(
+        "decision: CAS_CLOSE_LAGGING_EPIC_RECEIPT_V1 \
+         integration_branch={integration_branch} epic_branch={epic_branch} \
+         epic_tip={epic_tip} integration_tip={integration_tip}; \
+         receipt delivery is fully validated on the integration branch while \
+         the epic branch is a clean ancestor and lags behind. {receipt_note}"
     ))
 }
 
@@ -16164,6 +16250,138 @@ mod merge_state_gate_tests {
                 );
             }
             other => panic!("valid receipt must clear the lane guard, got {other:?}"),
+        }
+    }
+
+    /// cas-da3f (GH #382): a child whose parent epic has not been advanced
+    /// after a squash delivery to main must not deadlock. The receipt is the
+    /// integration commit (not the rewritten factory SHA), and the note must
+    /// preserve the exact stale-epic evidence for later status/review flows.
+    #[test]
+    fn lagging_clean_epic_accepts_receipt_fully_validated_on_integration_branch() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let epic = "epic/lagging-after-main-delivery";
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", epic]);
+        let epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        commit_file_at(p, "delivered.rs", "// delivered\n", "2026-08-14T12:00:00Z");
+
+        // GitHub-style squash delivery creates integration commit B rather
+        // than retaining worker commit A in main's ancestry.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--squash", "factory/worker"]);
+        git_at(
+            p,
+            &["commit", "-q", "-m", "feat: delivered via squash"],
+            "2026-08-14T12:01:00Z",
+        );
+        let receipt = head_sha(p);
+        let integration_tip = receipt.clone();
+        assert!(
+            git_commit_is_ancestor(p, &epic_tip, &integration_tip),
+            "precondition: epic must be a clean ancestor of main"
+        );
+        assert_ne!(epic_tip, integration_tip, "precondition: epic must lag");
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            epic,
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+
+        match out {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains("CAS_CLOSE_LAGGING_EPIC_RECEIPT_V1"),
+                    "lagging-epic acceptance must be machine-readable: {note}"
+                );
+                assert!(
+                    note.contains("integration_branch=main")
+                        && note.contains(&format!("epic_branch={epic}"))
+                        && note.contains(&format!("epic_tip={epic_tip}"))
+                        && note.contains(&format!("integration_tip={integration_tip}")),
+                    "lagging-epic note must retain resolved branch and exact tips: {note}"
+                );
+                assert!(
+                    note.contains(&receipt) && note.contains("accepted commit_receipt"),
+                    "the ordinary receipt proof must remain visible in the audit note: {note}"
+                );
+            }
+            other => panic!(
+                "clean-behind epic with a receipt fully valid on main must proceed, got {other:?}"
+            ),
+        }
+    }
+
+    /// A diverged epic cannot be advanced safely by a close gate. Even a
+    /// receipt valid on main must retain the normal epic-target rejection.
+    #[test]
+    fn divergent_epic_does_not_accept_main_receipt_fallback() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let epic = "epic/diverged-from-main";
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", epic]);
+        commit_file_at(p, "epic-only.rs", "// explicit epic work\n", "2026-08-14T11:00:00Z");
+        let epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        commit_file_at(p, "delivered.rs", "// delivered\n", "2026-08-14T12:00:00Z");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--squash", "factory/worker"]);
+        git_at(
+            p,
+            &["commit", "-q", "-m", "feat: delivered via squash"],
+            "2026-08-14T12:01:00Z",
+        );
+        let receipt = head_sha(p);
+        assert!(
+            !git_commit_is_ancestor(p, &epic_tip, &receipt),
+            "precondition: an epic with its own commit must diverge from main"
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            epic,
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+
+        match out {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("not an ancestor of epic/diverged-from-main"),
+                    "divergent epic must retain the detailed epic-target receipt rejection: {message}"
+                );
+                assert!(
+                    !message.contains("CAS_CLOSE_LAGGING_EPIC_RECEIPT_V1"),
+                    "a divergent epic must never receive the lagging-epic acceptance: {message}"
+                );
+            }
+            other => panic!("divergent epic must remain fail-closed, got {other:?}"),
         }
     }
 

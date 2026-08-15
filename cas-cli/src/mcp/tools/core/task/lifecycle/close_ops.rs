@@ -4593,11 +4593,15 @@ impl CasCore {
         // the same durable task identity/work-cycle evidence as the gates;
         // merge-base(HEAD, stale-local-main)..HEAD attributed every commit
         // inherited from a fresher origin/main to whichever task closed next.
+        // cas-0908: when an explicit commit_receipt is provided, pass it through
+        // so the diff stat uses the exact commit the close validation accepted,
+        // not a potentially-contaminated identity anchor from a shared worker lane.
         let diff_stat_msg = if let Some(worker_wt) = worker_worktree_path.as_ref() {
             render_close_diff_stat(
                 worker_wt,
                 &resolved_parent_branch,
                 commit_receipt_window.as_ref(),
+                req.commit_receipt.as_deref(),
             )
         } else {
             String::new()
@@ -8354,7 +8358,30 @@ fn render_close_diff_stat(
     repo_path: &std::path::Path,
     parent_branch: &str,
     window: Option<&TaskCommitReceiptWindow>,
+    explicit_receipt: Option<&str>,
 ) -> String {
+    // cas-0908: when an explicit commit_receipt is provided and successfully
+    // validated, use it directly as the authoritative diff stat basis. This
+    // prevents the contaminated-anchor bug where a MERGE REQUIRED park on a
+    // shared worker lane captures a sibling task's commit as the anchor, and
+    // that anchor then enters the identity's known_commits. The provided
+    // receipt is the exact commit the caller validated and accepted; the diff
+    // stat must reflect that same commit, not a sibling's.
+    if let Some(receipt) = explicit_receipt {
+        if let Some(measurement) =
+            get_explicit_receipt_diff_stat(repo_path, parent_branch, receipt)
+        {
+            if !measurement.stat.is_empty() {
+                return format!(
+                    "\n\n📊 Task-attributed committed diff stat (target {}; basis: {}):\n{}",
+                    measurement.target_ref, measurement.basis, measurement.stat
+                );
+            }
+            return String::new();
+        }
+        // Receipt resolution failed — fall through to identity-based or branch-wide.
+    }
+
     match window
         .and_then(|window| get_task_attributable_diff_stat(repo_path, parent_branch, window))
     {
@@ -8378,6 +8405,66 @@ fn render_close_diff_stat(
             }
         }
     }
+}
+
+/// cas-0908: compute the diff stat for an explicit commit receipt.
+///
+/// When the caller provides a `commit_receipt` and it has been validated, this
+/// function computes the diff stat for that exact commit's changes. This is the
+/// authoritative attribution basis — it uses the same commit the close validation
+/// accepted, not an identity-based search that can be contaminated by sibling-task
+/// anchors on a shared worker lane.
+///
+/// The diff is computed as `receipt^..receipt`, showing exactly what that single
+/// commit changed relative to its parent. This is correct for merged receipts
+/// (merge-base would equal receipt, giving empty diff) and for receipts where
+/// the task has multiple commits (each close names its own tip commit).
+///
+/// Returns `None` if the receipt cannot be resolved to a commit (caller falls
+/// back to identity-based or branch-wide attribution).
+fn get_explicit_receipt_diff_stat(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    receipt: &str,
+) -> Option<TaskAttributedDiffStat> {
+    use std::process::Command;
+
+    let receipt = receipt.trim();
+    if receipt.is_empty() || !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+
+    // Resolve the receipt to a full commit SHA.
+    let full_sha = resolve_task_commit_receipt_sha(repo_path, receipt).ok()?;
+    let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
+
+    // Resolve the receipt's first parent. For a single-commit receipt this is
+    // the base the commit was created on; for the tip of a multi-commit chain,
+    // this is the previous commit in the chain. Either way, receipt^..receipt
+    // shows exactly what the receipt commit itself changed.
+    let parent_out = Command::new("git")
+        .args(["rev-parse", &format!("{full_sha}^")])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !parent_out.status.success() {
+        return None;
+    }
+    let receipt_parent = String::from_utf8_lossy(&parent_out.stdout)
+        .trim()
+        .to_string();
+    if receipt_parent.is_empty() {
+        return None;
+    }
+
+    // The diff stat is from the receipt's parent to the receipt itself.
+    let stat = get_diff_stat_for_range(repo_path, &receipt_parent, &full_sha);
+
+    Some(TaskAttributedDiffStat {
+        stat,
+        target_ref,
+        basis: "explicit commit receipt",
+    })
 }
 
 /// Return the net stat for the contiguous commits durably attributable to this
@@ -20740,7 +20827,7 @@ mod commit_claim_integrity_tests {
         git(p, &["add", "task.rs"]);
         git(p, &["commit", "-q", "-m", "fix: task work (cas-203e)"]);
 
-        let fallback = render_close_diff_stat(p, "main", None);
+        let fallback = render_close_diff_stat(p, "main", None, None);
         assert!(
             fallback.contains("Branch-wide committed context")
                 && fallback.contains("vs origin/main")
@@ -20767,7 +20854,7 @@ mod commit_claim_integrity_tests {
                 known_commits: Vec::new(),
             },
         };
-        let rendered = render_close_diff_stat(p, "main", Some(&window));
+        let rendered = render_close_diff_stat(p, "main", Some(&window), None);
         assert!(
             rendered.contains("Task-attributed committed diff stat")
                 && rendered.contains("target origin/main")
@@ -20780,6 +20867,93 @@ mod commit_claim_integrity_tests {
             "must not attribute the inherited remote-target commit: {}",
             rendered
         );
+    }
+
+    /// cas-0908: regression test for the contaminated-anchor bug. When two tasks
+    /// share one worker branch and the sibling's commit is pushed before this
+    /// task closes with an explicit commit_receipt, the diff stat must show
+    /// ONLY the receipt's changes, not the sibling's.
+    ///
+    /// EXACT BUG SHAPE: Worker delivers cas-069d (commit A) then cas-66ee (commit B)
+    /// from one factory/noble-crane-27 branch. Closing cas-069d with commit_receipt=A
+    /// printed commit B's diff because the identity's known_commits included B (via
+    /// a contaminated MERGE REQUIRED anchor) and B passed the --since filter while
+    /// A was outside the window due to clock skew.
+    #[test]
+    fn explicit_receipt_excludes_sibling_task_commit_cas_0908() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+
+        // Create origin/main for the target ref resolution.
+        git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        // Start the worker branch and create commit A for cas-069d.
+        git(p, &["checkout", "-q", "-b", "factory/noble-crane-27"]);
+        std::fs::write(p.join("task_a.rs"), "// cas-069d work\n").unwrap();
+        git(p, &["add", "task_a.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-069d): release preflight"]);
+        let commit_a = git_rev_parse(p, "HEAD");
+
+        // Create commit B for cas-66ee ON TOP of A.
+        std::fs::write(p.join("task_b.rs"), "// cas-66ee work\n").unwrap();
+        git(p, &["add", "task_b.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-66ee): ci wiring"]);
+        let commit_b = git_rev_parse(p, "HEAD");
+
+        // Merge both into origin/main so the receipt validation passes.
+        git(p, &["update-ref", "refs/remotes/origin/main", &commit_b]);
+
+        // Build an identity window that simulates the contaminated-anchor case:
+        // known_commits contains commit B (the sibling's) via a MERGE REQUIRED
+        // park that captured HEAD at the wrong moment.
+        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        let contaminated_window = TaskCommitReceiptWindow {
+            not_before: epoch,
+            basis: "task creation time (test)",
+            task_floor: epoch,
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-069d".to_string()),
+                // This is the contamination: sibling's commit is in known_commits.
+                known_commits: vec![commit_b.clone()],
+            },
+        };
+
+        // WITHOUT explicit receipt: the contaminated identity attributes commit B.
+        let without_receipt = render_close_diff_stat(p, "main", Some(&contaminated_window), None);
+        assert!(
+            without_receipt.contains("task_b.rs"),
+            "precondition: contaminated identity must include sibling's file: {without_receipt}"
+        );
+
+        // WITH explicit receipt: only commit A's diff should appear.
+        let with_receipt =
+            render_close_diff_stat(p, "main", Some(&contaminated_window), Some(&commit_a));
+        assert!(
+            with_receipt.contains("task_a.rs"),
+            "explicit receipt must include this task's file: {with_receipt}"
+        );
+        assert!(
+            !with_receipt.contains("task_b.rs"),
+            "explicit receipt must EXCLUDE sibling task's file: {with_receipt}"
+        );
+        assert!(
+            with_receipt.contains("explicit commit receipt"),
+            "basis must name the explicit receipt: {with_receipt}"
+        );
+    }
+
+    /// Helper: resolve HEAD to a full SHA (used by the cas-0908 test).
+    fn git_rev_parse(repo_path: &std::path::Path, rev: &str) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", rev])
+            .current_dir(repo_path)
+            .output()
+            .expect("git rev-parse failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     /// Pure-logic test for the truncation/annotation policy, independent of

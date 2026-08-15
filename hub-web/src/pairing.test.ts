@@ -380,6 +380,17 @@ describe("wire-v1 reverse pairing", () => {
     expect(acknowledge).not.toHaveBeenCalled();
   });
 
+  it("surfaces the hub's exchange error instead of a generic expired invitation", async () => {
+    const invitation = { kind: "invitation" as const, token: "one-time-token", hubId: "machine-uuid", hubUrl: "https://workstation.tail.example", controllerOrigin: request.controllerOrigin, scopes: ["machine-read"] as const };
+    await expect(exchangePendingPairing({
+      invitation, controllerOrigin: request.controllerOrigin, deviceLabel: "Browser", operatorLabel: "Operator",
+      fetcher: async () => response(403, { error: "This device is not approved for this hub." }),
+      createKey: async () => ({ privateKey: {} as CryptoKey, publicKey: { kty: "EC" } }),
+      installationGeneration: 1,
+      stagePersisted: async () => undefined, activatePersisted: async () => true, rollbackPersisted: async () => true,
+    })).rejects.toThrow("This device is not approved for this hub.");
+  });
+
   it("keeps a cleanup-rejected credential non-activatable after reload, then restores the exact prior row", async () => {
     const backend = new MemoryMachineCatalogBackend();
     const catalog = new MachineCatalog(backend);

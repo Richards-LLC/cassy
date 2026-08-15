@@ -69,7 +69,16 @@ export async function exchangePendingPairing(options: ExchangeOptions): Promise<
     }),
   });
   ensureCurrent(options);
-  if (!response.ok) throw new PairingExchangeError();
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    let message = detail;
+    try {
+      const payload = JSON.parse(detail) as { error_description?: unknown; error?: unknown };
+      message = typeof payload.error_description === "string" ? payload.error_description
+        : typeof payload.error === "string" ? payload.error : detail;
+    } catch { /* a plain-text hub error is already suitable for the dialog */ }
+    throw new PairingExchangeError(message || `The hub rejected this pairing exchange (${response.status}).`);
+  }
   const credential = await response.json().catch(() => null) as Record<string, unknown> | null;
   ensureCurrent(options);
   if (!credential || typeof credential.device_id !== "string" || typeof credential.credential_id !== "string" || typeof credential.credential !== "string" || typeof credential.expires_at !== "string" || !Array.isArray(credential.scopes)) {

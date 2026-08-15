@@ -448,8 +448,27 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
     if (result.kind === "authorized") {
       pendingPairing = result.invitation;
       pendingPairingStore.save(result.invitation);
-      pairingStatus = "Machine authorized. Confirm the exact details and finish pairing.";
+      pairingStatus = "Approved. Checking that this device can reach the machine…";
       render();
+      const hubUrl = result.invitation.hubUrl;
+      if (hubUrl) {
+        try {
+          await fetch(new URL("/v1/health", hubUrl), {
+            method: "GET",
+            mode: "no-cors",
+            cache: "no-store",
+            credentials: "omit",
+            signal: AbortSignal.timeout(3_000),
+          });
+          if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
+          pairingStatus = "Machine authorized. Confirm the exact details and finish pairing.";
+        } catch {
+          if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
+          const machine = result.invitation.machineLabel ?? result.invitation.hubId;
+          pairingStatus = `Approved — but this device can't reach ${machine}'s hub. Check that Tailscale (VPN) is connected on this device and that Private DNS or secure DNS isn't overriding it, then try a fresh code.`;
+        }
+        render();
+      }
       return;
     }
     request.interval = result.interval;

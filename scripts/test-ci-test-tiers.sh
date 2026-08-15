@@ -71,6 +71,7 @@ fi
 require_text "$ci_text" '- "factory/**"' 'factory pushes trigger CI'
 require_text "$ci_text" '- "epic/**"' 'epic pushes trigger CI'
 require_text "$ci_text" '- "v*"' 'release tags trigger CI'
+require_text "$ci_text" 'make -C cas-cli test-ci-tiers' 'Fast Validation invokes release publication guard scripts'
 
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'

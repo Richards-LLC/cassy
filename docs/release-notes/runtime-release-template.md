@@ -32,7 +32,9 @@ Live on production — **Dev** — {{DEV_IMPACT_PUNCH}}
 ## Posting sequence
 
 1. Replace the narrative placeholders after the release PR is merged.
-2. Tag the fetched `origin/main` landing and run `./scripts/release.sh`.
+2. Tag the fetched `origin/main` landing and run
+   `./scripts/release.sh --publish-tag`. A bare `release.sh` is a local audit
+   and does not touch the remote.
 3. Run `release-published-receipt.sh --write-draft` against this draft. It
    downloads and hashes both published assets before replacing every digest
    placeholder; never type a digest from a local audit archive.

@@ -28,8 +28,10 @@ directly to `main`, and do not create the release tag before the PR lands.
 4. After the required checks are green, merge explicitly:
    `gh pr merge "$PR_URL" --merge`. Do not use `--auto` or an admin bypass.
 5. Fetch the landed commit (`git fetch origin main`), tag that exact
-   `origin/main` commit, then run `./scripts/release.sh`. It pushes the tag;
-   the tag-triggered GitHub workflow is the normal release publisher.
+   `origin/main` commit, then run `./scripts/release.sh --publish-tag`. The
+   explicit flag pushes the tag; the tag-triggered GitHub workflow is the
+   normal release publisher. A bare `release.sh` is audit-only and never
+   touches the remote.
 
 ### Published assets before announcement
 
@@ -58,11 +60,11 @@ The workflow publishes macOS ARM64 from its macOS runner regardless of the host
 that tagged the release; never describe the release as Linux-only because a
 local audit host cannot build Darwin.
 
-`scripts/release.sh --manual-publish --acknowledge-workflow-conflict` is an
-emergency failover for a disabled or unavailable workflow, not a normal release
-lane. It deliberately competes after its tag push, so disable/cancel the CI
-workflow first when possible; it uses the same receipt command before any
-announcement digest is posted.
+`scripts/release.sh --publish-tag --manual-publish
+--acknowledge-workflow-conflict` is an emergency failover for a disabled or
+unavailable workflow, not a normal release lane. It deliberately competes
+after its tag push, so disable/cancel the CI workflow first when possible; it
+uses the same receipt command before any announcement digest is posted.
 
 ### Recovering a failed or partial release
 
@@ -91,8 +93,8 @@ announcement digest is posted.
    Do not use `--cleanup-tag`, force-push, or retag: the annotated tag remains
    the source identity for both the retry and its receipt.
 4. If CI cannot publish after that recovery, use the explicitly acknowledged
-   `--manual-publish --acknowledge-workflow-conflict` failover only after the
-   incomplete release is deleted. In every case, run
+   `--publish-tag --manual-publish --acknowledge-workflow-conflict` failover
+   only after the incomplete release is deleted. In every case, run
    `release-published-receipt.sh --write-draft` after publication and before an
    announcement.
 5. If any announcement might already name the release, do not delete or replace

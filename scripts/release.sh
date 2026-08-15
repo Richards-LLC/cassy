@@ -3,10 +3,10 @@
 # Local release audit and tag-push script for CAS.
 #
 # GitHub's tag-triggered Release workflow is the sole normal publisher. This
-# script builds local audit evidence and pushes the annotated tag that starts
-# that workflow; its dist/local-audit archives are never the shipped bytes and
-# must never supply an announced digest. Use release-published-receipt.sh only
-# after the workflow has published both assets.
+# script builds local audit evidence by default. Only --publish-tag pushes the
+# annotated tag that starts that workflow; its dist/local-audit archives are
+# never the shipped bytes and must never supply an announced digest. Use
+# release-published-receipt.sh only after the workflow has published both assets.
 #
 # A deliberately loud manual failover remains for a disabled or unavailable CI
 # workflow. It deliberately competes with the tag-triggered workflow, so use
@@ -21,8 +21,9 @@
 #   - Environment variables: CAS_POSTHOG_API_KEY, CAS_SENTRY_DSN
 #
 # Usage:
-#   ./scripts/release.sh
-#   ./scripts/release.sh --manual-publish --acknowledge-workflow-conflict
+#   ./scripts/release.sh                 # local audit only; no remote mutation
+#   ./scripts/release.sh --publish-tag   # push tag and start CI publication
+#   ./scripts/release.sh --publish-tag --manual-publish --acknowledge-workflow-conflict
 
 set -euo pipefail
 
@@ -36,23 +37,29 @@ if [[ "$HOST_OS" == "Darwin" ]]; then
 fi
 
 DIST_DIR="$REPO_ROOT/dist/local-audit"
+PUBLISH_TAG=false
 MANUAL_PUBLISH=false
 ACKNOWLEDGED_CONFLICT=false
 
 for arg in "$@"; do
     case "$arg" in
+        --publish-tag) PUBLISH_TAG=true ;;
         --manual-publish) MANUAL_PUBLISH=true ;;
         --acknowledge-workflow-conflict) ACKNOWLEDGED_CONFLICT=true ;;
         -h|--help)
             cat <<'EOF'
-Usage: scripts/release.sh [--manual-publish --acknowledge-workflow-conflict]
+Usage: scripts/release.sh [--publish-tag [--manual-publish --acknowledge-workflow-conflict]]
 
-Build local audit archives and push the annotated tag. The tag-triggered
-GitHub Release workflow creates the normal published release.
+Build local audit archives without touching the remote. Add --publish-tag to
+push the annotated tag; the tag-triggered GitHub Release workflow creates the
+normal published release.
 
+  --publish-tag
+      Explicitly push the annotated tag after a successful local audit. This
+      starts the normal CI publisher.
   --manual-publish
       Emergency failover only: create a release from local audit archives
-      after pushing the tag. Use only while the workflow is disabled or
+      after --publish-tag. Use only while the workflow is disabled or
       unavailable; it deliberately conflicts with the normal CI publisher.
   --acknowledge-workflow-conflict
       Required with --manual-publish. Published digests must still come from
@@ -69,6 +76,10 @@ done
 
 if "$MANUAL_PUBLISH" && ! "$ACKNOWLEDGED_CONFLICT"; then
     echo "error: --manual-publish requires --acknowledge-workflow-conflict" >&2
+    exit 2
+fi
+if "$MANUAL_PUBLISH" && ! "$PUBLISH_TAG"; then
+    echo "error: --manual-publish requires --publish-tag" >&2
     exit 2
 fi
 if ! "$MANUAL_PUBLISH" && "$ACKNOWLEDGED_CONFLICT"; then
@@ -133,7 +144,11 @@ export ZIG="$REPO_ROOT/.context/zig/zig"
 export PATH="$REPO_ROOT/.context/zig:$PATH"
 echo "Zig: $(zig version)"
 
-ensure_release_tag
+if "$PUBLISH_TAG"; then
+    ensure_release_tag
+else
+    echo "Audit-only mode: no tag will be created or pushed."
+fi
 git submodule update --init --recursive
 
 INSTALLED_TARGETS="$(rustup target list --installed)"
@@ -179,6 +194,11 @@ done
 echo ""
 echo "=== Local Audit Complete ==="
 ls -lh "$DIST_DIR"/*.tar.gz
+
+if ! "$PUBLISH_TAG"; then
+    echo "Audit completed without creating or pushing a tag; no release was published."
+    exit 0
+fi
 
 echo "Pushing annotated tag $TAG to trigger the authoritative Release workflow..."
 git push origin "$TAG"

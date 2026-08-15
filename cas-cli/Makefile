@@ -204,7 +204,9 @@ test-scoped-selftest:
 # Prove factory pushes stay scoped while epic/main/tag gates retain the full
 # matrix, including macOS, and reject the retired sccache cache protocol.
 test-ci-tiers:
-	../scripts/test-ci-test-tiers.sh
+	cd .. && ./scripts/test-ci-test-tiers.sh
+	cd .. && ./scripts/test-release-publication-policy.sh
+	cd .. && ./scripts/test-release-published-receipt.sh
 
 # Type check
 check:

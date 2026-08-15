@@ -370,18 +370,65 @@ fn confirm(yes: bool, cli: &Cli, claim: &ClaimResponse, granted: &BTreeSet<Scope
     if cli.json || !std::io::stdin().is_terminal() {
         return Ok(false);
     }
-    println!("Commander origin: {}", claim.controller_origin);
-    println!(
-        "Requested scopes: {}",
-        display_scopes(&claim.requested_scopes)
-    );
-    println!("Machine-granted scopes: {}", display_scopes(granted));
+    print_confirmation_summary(claim, granted);
     println!("Claim expires at: {}", claim.claim_expires_at.to_rfc3339());
     Ok(
         inquire::Confirm::new("Deliver a one-time pairing invitation?")
             .with_default(false)
             .prompt()
             .unwrap_or(false),
+    )
+}
+
+/// Print the consent boundary for a relay request. Control scopes are separate
+/// from discovery so an operator cannot mistake terminal input for read-only
+/// pairing while approving a code from an untrusted page.
+fn print_confirmation_summary(claim: &ClaimResponse, granted: &BTreeSet<Scope>) {
+    println!("Commander origin to verify: {}", claim.controller_origin);
+    println!(
+        "Read access requested: {}",
+        display_scopes_by_kind(&claim.requested_scopes, false)
+    );
+    println!(
+        "CONTROL ACCESS REQUESTED: {}",
+        display_scopes_by_kind(&claim.requested_scopes, true)
+    );
+    println!(
+        "Read access to grant: {}",
+        display_scopes_by_kind(granted, false)
+    );
+    println!(
+        "CONTROL ACCESS TO GRANT: {}",
+        display_scopes_by_kind(granted, true)
+    );
+    println!("Verify the Commander origin before approving this one-time invitation.");
+}
+
+fn display_scopes_by_kind(
+    scopes: impl IntoIterator<Item = impl std::borrow::Borrow<Scope>>,
+    control: bool,
+) -> String {
+    let scopes = scopes
+        .into_iter()
+        .map(|scope| *scope.borrow())
+        .filter(|scope| is_control_scope(*scope) == control)
+        .map(Scope::as_str)
+        .collect::<Vec<_>>();
+    if scopes.is_empty() {
+        "none".to_owned()
+    } else {
+        scopes.join(", ")
+    }
+}
+
+fn is_control_scope(scope: Scope) -> bool {
+    matches!(
+        scope,
+        Scope::PaneInput
+            | Scope::MessageSend
+            | Scope::PaneInterrupt
+            | Scope::FactoryManage
+            | Scope::HubAdmin
     )
 }
 
@@ -463,14 +510,6 @@ fn parse_override_scopes(scopes: Option<&[String]>) -> Result<Option<BTreeSet<Sc
                 .collect::<Result<BTreeSet<_>>>()
         })
         .transpose()
-}
-
-fn display_scopes(scopes: impl IntoIterator<Item = impl std::borrow::Borrow<Scope>>) -> String {
-    scopes
-        .into_iter()
-        .map(|scope| scope.borrow().as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn relay_error(error: ureq::Error) -> anyhow::Error {
@@ -634,6 +673,27 @@ mod tests {
         let escalation_override = parse_override_scopes(Some(&["hub:admin".to_owned()])).unwrap();
         let escalation = granted_scopes(&requested, escalation_override.as_ref()).unwrap_err();
         assert!(escalation.to_string().contains("may reduce"));
+    }
+
+    #[test]
+    fn confirmation_separates_terminal_control_from_read_access() {
+        let scopes = [
+            Scope::MachineRead,
+            Scope::SessionRead,
+            Scope::PaneRead,
+            Scope::PaneInput,
+            Scope::MessageSend,
+            Scope::PaneInterrupt,
+        ];
+        assert_eq!(
+            display_scopes_by_kind(scopes, false),
+            "machine:read, session:read, pane:read"
+        );
+        assert_eq!(
+            display_scopes_by_kind(scopes, true),
+            "pane:input, message:send, pane:interrupt"
+        );
+        assert_eq!(display_scopes_by_kind([Scope::MachineRead], true), "none");
     }
 
     #[test]

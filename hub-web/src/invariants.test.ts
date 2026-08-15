@@ -35,6 +35,13 @@ describe("binding Commander browser invariants", () => {
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
   });
 
+  it("names the remedy when an observer-only credential disables control", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("This credential can only observe from ${location.origin}");
+    expect(source).toContain("Pairings are specific to each Commander origin.");
+    expect(source).toContain('class="control-disabled-reason"');
+  });
+
   it("binds the browser fetch receiver at every pairing handoff", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/fetcher:\s*(?:window\.|globalThis\.)?fetch\s*[,}]/);

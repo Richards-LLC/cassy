@@ -117,7 +117,7 @@ The stylesheet has a single `max-width: 850px` compact breakpoint rather than a 
 - ✅ Escape every origin, URL, label, code, and scope before inserting generated dialog markup with `escapeHtml`/`escapeAttr`.
 - ❌ Never interpolate relay secrets, invitations, credentials, or server error bodies into Commander UI.
 - ✅ Display exact kebab-case JSON wire scopes; the binding ADR defines the one-to-one translation from canonical colon-form policy names.
-- ❌ Never make elevated scopes selectable in page-initiated pairing; its visual contract is the three read-only scopes.
+- ✅ Page-initiated pairing requests Commander read and control scopes together, but the target machine is the consent boundary: its `cas hub authorize` confirmation must make the exact origin and control scopes prominent and may only narrow the page request.
 - ✅ Preserve an open pairing dialog across background fleet renders so polling and connection events do not dismiss the task.
 - ❌ Never rebuild or dispose the live terminal grid merely to update pairing status; retain the existing preserved-grid path.
 - ✅ Keep code, origin, scopes, hub URL, machine label, and countdown visible together when authorization arrives.

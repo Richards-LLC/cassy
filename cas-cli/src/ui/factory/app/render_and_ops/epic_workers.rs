@@ -97,10 +97,16 @@ pub(crate) struct TaskEpicBase {
     pub task_id: String,
     /// The epic that owns that task (or the task itself when it *is* an epic).
     pub epic_id: String,
-    /// Branch recorded on that epic (or derived from its title).
+    /// Branch recorded on that epic (or, for a legacy epic, derived from its
+    /// title only as a last-resort fallback).
     pub branch: String,
     /// Whether `branch` currently resolves to a commit in the repository.
     pub branch_exists: bool,
+    /// `true` only when `branch` was synthesized from the title because the
+    /// legacy `epic.branch` field is absent. A declared epic WorkTarget must
+    /// outrank this cosmetic fallback; it must not be mistaken for a live
+    /// coordination branch.
+    pub branch_is_title_slug_fallback: bool,
     /// The WorkTarget explicitly declared by the task or its owning epic.
     /// It is delivery authority for both worker spawn and worktree merge.
     pub work_target: Option<SpawnWorkTarget>,
@@ -211,15 +217,18 @@ pub(crate) enum SpawnBaseSource {
 /// commits behind trunk.
 ///
 /// Precedence, highest first:
-///   1. the task's epic branch, when the spawn names a task and that epic's
-///      branch exists in the repo;
-///   2. trunk, when the spawn names a task that provably belongs to no epic
+///   1. the task's declared WorkTarget;
+///   2. the task epic's recorded live branch;
+///   3. the task epic's declared WorkTarget;
+///   4. a legacy title-derived epic branch, only when no declared target
+///      exists and that branch resolves in the repo;
+///   5. trunk, when the spawn names a task that provably belongs to no epic
 ///      (cas-d897 / GH #146);
-///   3. the pinned epic focus (taskless spawns, tasks the store could not
+///   6. the pinned epic focus (taskless spawns, tasks the store could not
 ///      resolve, and tasks whose epic has no branch yet — falling back to
 ///      focus there preserves pre-fix behavior rather than silently dropping
 ///      a worker onto trunk);
-///   4. configured trunk / detected default branch.
+///   7. configured trunk / detected default branch.
 ///
 /// Pure so the precedence itself is unit-testable without a factory app.
 pub(crate) fn resolve_spawn_base(
@@ -242,7 +251,10 @@ pub(crate) fn resolve_spawn_base(
     // A live epic branch carries its children's sibling integration history.
     // An epic-owned WorkTarget is its final delivery destination, not a reason
     // to discard that branch while it exists.
-    if let Some(task_epic) = task_base.epic().filter(|t| t.branch_exists) {
+    if let Some(task_epic) = task_base
+        .epic()
+        .filter(|t| t.branch_exists && !t.branch_is_title_slug_fallback)
+    {
         return (
             task_epic.branch.clone(),
             SpawnBaseSource::TaskEpic {
@@ -257,6 +269,21 @@ pub(crate) fn resolve_spawn_base(
             SpawnBaseSource::WorkTarget {
                 task_id: target.task_id.clone(),
                 owner: target.owner.clone(),
+            },
+        );
+    }
+    // Preserve legacy behaviour only after all declared delivery authority
+    // has been exhausted. A title slug is merely a guessed old branch name;
+    // it must never override a WorkTarget that MCP can actually maintain.
+    if let Some(task_epic) = task_base
+        .epic()
+        .filter(|t| t.branch_exists && t.branch_is_title_slug_fallback)
+    {
+        return (
+            task_epic.branch.clone(),
+            SpawnBaseSource::TaskEpic {
+                task_id: task_epic.task_id.clone(),
+                epic_id: task_epic.epic_id.clone(),
             },
         );
     }
@@ -347,6 +374,31 @@ pub(crate) fn spawn_base_provenance_notice(
     }
 }
 
+/// Surface the one hazardous legacy shape: an epic with no persisted branch
+/// has both a title-derived branch and a different declared WorkTarget. The
+/// declared target wins, but the old branch is visible evidence that an
+/// operator may otherwise mistake it for the integration lane.
+fn stale_legacy_slug_notice(
+    task_epic: Option<&TaskEpicBase>,
+    base: &str,
+    source: &SpawnBaseSource,
+) -> Option<String> {
+    let SpawnBaseSource::WorkTarget {
+        owner: WorkTargetOwner::Epic { .. },
+        ..
+    } = source
+    else {
+        return None;
+    };
+    let legacy_slug = task_epic.filter(|epic| {
+        epic.branch_is_title_slug_fallback && epic.branch_exists && epic.branch != base
+    })?;
+    Some(format!(
+        "SPAWN BASE: declared epic WorkTarget '{base}' won over legacy title-derived branch '{}' for epic {}. The legacy slug is stale and was not used.",
+        legacy_slug.branch, legacy_slug.epic_id
+    ))
+}
+
 /// cas-7587 (GH #122): `true` when the task's epic decided the base *and* that
 /// base is not the pinned focus branch. That divergence is exactly what used to
 /// happen silently (and wrongly, in the other direction), so it is escalated to
@@ -371,8 +423,8 @@ pub(crate) fn base_diverges_from_focus(
 /// cas-7587: resolve `task_id` → its epic → that epic's branch.
 ///
 /// A task that *is* an epic resolves to itself. The branch is the one persisted
-/// on the epic task, falling back to the title-derived name for legacy epics
-/// (same precedence as `epic_branch_for_state`). `branch_exists` records
+/// on the epic task, falling back to the title-derived name only for legacy
+/// epics. `branch_exists` records
 /// whether that branch is actually present in `repo_root` — the caller uses it
 /// to decide whether the task epic may outrank the pinned focus.
 ///
@@ -447,11 +499,10 @@ pub(crate) fn task_epic_base(
         }
     };
 
-    let branch = epic
-        .branch
-        .clone()
-        .filter(|b| !b.trim().is_empty())
-        .unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
+    let recorded_branch = epic.branch.clone().filter(|b| !b.trim().is_empty());
+    let branch_is_title_slug_fallback = recorded_branch.is_none();
+    let branch =
+        recorded_branch.unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
     let branch_exists = ref_exists(repo_root, &branch);
     if !branch_exists {
         tracing::warn!(
@@ -467,6 +518,7 @@ pub(crate) fn task_epic_base(
         epic_id: epic.id.clone(),
         branch,
         branch_exists,
+        branch_is_title_slug_fallback,
         work_target: task_work_target.or_else(|| {
             epic.deliverables
                 .work_target
@@ -1637,7 +1689,9 @@ impl FactoryApp {
                 // cas-7587: a task whose epic branch does not exist locally
                 // still lands on the focus base — say so instead of letting it
                 // look like the task's epic was honoured.
-                if let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists) {
+                if !matches!(base_source, SpawnBaseSource::WorkTarget { .. })
+                    && let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists)
+                {
                     notices.push(format!(
                         "SPAWN BASE FALLBACK: task {} belongs to epic {} whose branch '{}' does \
                          not exist in this repository; the worker was cut from '{parent_branch}' \
@@ -1645,6 +1699,11 @@ impl FactoryApp {
                          relying on this worker's base.",
                         unresolved.task_id, unresolved.epic_id, unresolved.branch
                     ));
+                }
+                if let Some(notice) =
+                    stale_legacy_slug_notice(task_epic.as_ref(), &parent_branch, &base_source)
+                {
+                    notices.push(notice);
                 }
                 // cas-ecf7 (GH #118): the base ref is resolved live, but the
                 // branch it names can be far behind trunk. Surface that at
@@ -2557,6 +2616,55 @@ mod spawn_base_tests {
                 ..
             }
         ));
+    }
+
+    /// GH #433: an older title-derived branch may still exist even though the
+    /// epic was subsequently given the authoritative WorkTarget that MCP can
+    /// maintain. The slug must be a fallback, never a competing live lane.
+    #[test]
+    fn epic_work_target_beats_an_existing_legacy_title_slug_cas_0f97() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let legacy_slug = "epic/shockwave-migrate-ai-stack-home-onto-the-new-4tb-e";
+        let declared_target = "epic/shockwave-4tb-migration";
+        branch_at(&repo, legacy_slug, "main");
+        branch_at(&repo, declared_target, "main");
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new(
+            "cas-shockwave".into(),
+            "Shockwave migrate AI stack home onto the new 4TB E".into(),
+        );
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: declared_target.into(),
+        });
+        store.add(&epic).unwrap();
+        seed_child(&cas_dir, "cas-shockwave-child", "cas-shockwave");
+
+        let task_base = task_epic_base(&cas_dir, &repo, "cas-shockwave-child");
+        let task_epic = task_base.epic().unwrap();
+        assert_eq!(task_epic.branch, legacy_slug);
+        assert!(task_epic.branch_exists);
+        assert!(task_epic.branch_is_title_slug_fallback);
+
+        let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
+        assert_eq!(base, declared_target, "the declared WorkTarget must win");
+        assert!(matches!(
+            source,
+            SpawnBaseSource::WorkTarget {
+                owner: WorkTargetOwner::Epic { .. },
+                ..
+            }
+        ));
+        let warning = stale_legacy_slug_notice(task_base.epic(), &base, &source)
+            .expect("the stale legacy slug must be surfaced");
+        assert!(warning.contains(legacy_slug), "{warning}");
+        assert!(warning.contains(declared_target), "{warning}");
     }
 
     #[test]

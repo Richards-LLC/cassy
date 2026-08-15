@@ -200,9 +200,16 @@ pre,
 
 .commander-mark {
   color: var(--text-hi);
-  font-family: var(--font-mono);
-  font-size: var(--fs-base);
-  font-weight: var(--weight-semibold);
+}
+
+.commander-mark-icon {
+  width: var(--space-5);
+  height: var(--space-5);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
 }
 
 .machine-rail nav {

@@ -1,8 +1,8 @@
 pub mod config;
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -42,6 +42,78 @@ pub struct CatalogEntry {
 }
 
 type McpClientService = RunningService<rmcp::RoleClient, ()>;
+
+/// Registered CAS actor that initiated a proxied upstream call.
+///
+/// The CAS MCP service constructs this from its registered agent store; it is
+/// deliberately separate from the JSON dispatch arguments so an upstream
+/// caller cannot nominate its own role, session, or task attribution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyCaller {
+    /// Stable registered CAS agent identifier.
+    pub agent_id: String,
+    /// CAS role resolved from the registered agent row.
+    pub role: cas_types::AgentRole,
+    /// The caller's CAS session identifier.
+    pub session_id: String,
+    /// Owning factory session when the caller belongs to a factory.
+    pub factory_session: Option<String>,
+    /// Active task leases held by this caller at dispatch time.
+    pub active_task_ids: Vec<String>,
+}
+
+/// A policy decision requested before an upstream MCP tool call is forwarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyPolicyDecision {
+    Allow,
+    /// `reason` must be safe to expose in an operator audit entry and MCP
+    /// error. Policies must not copy request arguments or upstream content.
+    Deny { reason: String },
+}
+
+/// Input presented to a proxy policy.
+///
+/// Arguments are available to allow provider-specific resource adapters to
+/// derive a canonical resource key. They are intentionally excluded from the
+/// audit record below so request content is never retained by this seam.
+pub struct ProxyPolicyRequest<'a> {
+    pub caller: &'a ProxyCaller,
+    pub server: &'a str,
+    pub tool: &'a str,
+    pub arguments: &'a Option<serde_json::Map<String, Value>>,
+}
+
+/// Authorization seam for upstream MCP calls.
+///
+/// Policies must return a decision synchronously and must not perform an
+/// upstream request themselves. A future resource-lease or delegation policy
+/// can use this hook to deny a call before `ProxyEngine` forwards it.
+pub trait ProxyPolicy: Send + Sync {
+    fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision;
+}
+
+/// Default policy for installations that have not opted into protected tools.
+#[derive(Debug, Default)]
+pub struct AllowAllProxyPolicy;
+
+impl ProxyPolicy for AllowAllProxyPolicy {
+    fn decide(&self, _request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
+        ProxyPolicyDecision::Allow
+    }
+}
+
+/// Request-free record of an authorization decision made by the proxy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyPolicyAuditEntry {
+    pub timestamp_ms: u64,
+    pub caller: ProxyCaller,
+    pub server: String,
+    pub tool: String,
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
+const POLICY_AUDIT_LIMIT: usize = 256;
 
 /// A connected upstream MCP server with its tool catalog.
 struct ConnectedServer {
@@ -126,6 +198,8 @@ pub struct ProxyEngine {
     configs: RwLock<HashMap<String, ServerConfig>>,
     health: RwLock<HashMap<String, UpstreamHealth>>,
     session_id: String,
+    policy: RwLock<Arc<dyn ProxyPolicy>>,
+    policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
 }
 
 fn validate_configs(configs: &HashMap<String, ServerConfig>) -> Result<()> {
@@ -161,6 +235,8 @@ impl ProxyEngine {
             configs: RwLock::new(configs.clone()),
             health: RwLock::new(health),
             session_id,
+            policy: RwLock::new(Arc::new(AllowAllProxyPolicy)),
+            policy_audit: Mutex::new(VecDeque::new()),
         };
 
         let mut names: Vec<_> = configs.keys().cloned().collect();
@@ -173,6 +249,25 @@ impl ProxyEngine {
         .await;
 
         Ok(engine)
+    }
+
+    /// Install the policy used for subsequent upstream calls.
+    ///
+    /// Replacing a policy is intentionally explicit and leaves existing audit
+    /// records intact for operator inspection.
+    pub async fn set_policy(&self, policy: Arc<dyn ProxyPolicy>) {
+        *self.policy.write().await = policy;
+    }
+
+    /// Return the bounded, redacted authorization audit trail for this proxy
+    /// process. Entries never include forwarded arguments or upstream output.
+    pub fn policy_audit(&self) -> Vec<ProxyPolicyAuditEntry> {
+        self.policy_audit
+            .lock()
+            .expect("proxy policy audit mutex poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Snapshot optional-upstream health without exposing endpoints or secrets.
@@ -377,7 +472,12 @@ impl ProxyEngine {
     /// ```text
     /// server.tool_name({ "param": "value" })
     /// ```
-    pub async fn execute(&self, code: &str, max_length: Option<usize>) -> Result<ExecuteResult> {
+    pub async fn execute(
+        &self,
+        caller: &ProxyCaller,
+        code: &str,
+        max_length: Option<usize>,
+    ) -> Result<ExecuteResult> {
         let calls = parse_dispatch(code)?;
 
         let mut text_parts: Vec<String> = Vec::new();
@@ -386,14 +486,14 @@ impl ProxyEngine {
         if calls.len() == 1 {
             let call = &calls[0];
             let result = self
-                .call_tool_raw(&call.server, &call.tool, call.args.clone())
+                .call_tool_raw(caller, &call.server, &call.tool, call.args.clone())
                 .await?;
             collect_result(&result, &mut text_parts, &mut images);
         } else {
             // Execute in parallel
             let futures: Vec<_> = calls
                 .iter()
-                .map(|call| self.call_tool_raw(&call.server, &call.tool, call.args.clone()))
+                .map(|call| self.call_tool_raw(caller, &call.server, &call.tool, call.args.clone()))
                 .collect();
 
             let results = futures::future::join_all(futures).await;
@@ -533,22 +633,13 @@ impl ProxyEngine {
     /// Call a tool on a specific server by name.
     pub async fn call_tool(
         &self,
+        caller: &ProxyCaller,
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, Value>>,
     ) -> Result<Value> {
-        use rmcp::model::CallToolRequestParams;
-
         let result = self
-            .call_upstream(
-                server_name,
-                CallToolRequestParams {
-                    name: tool_name.to_string().into(),
-                    arguments,
-                    meta: None,
-                    task: None,
-                },
-            )
+            .call_tool_raw(caller, server_name, tool_name, arguments)
             .await?;
 
         serde_json::to_value(result).context("failed to serialize tool result")
@@ -557,11 +648,15 @@ impl ProxyEngine {
     /// Call a tool and return the raw rmcp result (for internal use by execute).
     async fn call_tool_raw(
         &self,
+        caller: &ProxyCaller,
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, Value>>,
     ) -> Result<rmcp::model::CallToolResult> {
         use rmcp::model::CallToolRequestParams;
+
+        self.authorize(caller, server_name, tool_name, &arguments)
+            .await?;
 
         self.call_upstream(
             server_name,
@@ -573,6 +668,81 @@ impl ProxyEngine {
             },
         )
         .await
+    }
+
+    async fn authorize(
+        &self,
+        caller: &ProxyCaller,
+        server_name: &str,
+        tool_name: &str,
+        arguments: &Option<serde_json::Map<String, Value>>,
+    ) -> Result<()> {
+        let policy = self.policy.read().await.clone();
+        let request = ProxyPolicyRequest {
+            caller,
+            server: server_name,
+            tool: tool_name,
+            arguments,
+        };
+        let decision = policy.decide(&request);
+        let (allowed, reason) = match decision {
+            ProxyPolicyDecision::Allow => (true, None),
+            ProxyPolicyDecision::Deny { reason } => (false, Some(reason)),
+        };
+        self.record_policy_decision(caller, server_name, tool_name, allowed, reason.as_deref());
+
+        if allowed {
+            tracing::debug!(
+                agent_id = %caller.agent_id,
+                role = %caller.role,
+                server = %public_upstream_id(server_name),
+                tool = %public_tool_id(tool_name),
+                "MCP proxy policy allowed upstream call"
+            );
+            Ok(())
+        } else {
+            let reason = reason.unwrap_or_else(|| "policy denied this call".to_string());
+            tracing::warn!(
+                agent_id = %caller.agent_id,
+                role = %caller.role,
+                server = %public_upstream_id(server_name),
+                tool = %public_tool_id(tool_name),
+                reason = %reason,
+                "MCP proxy policy denied upstream call before forwarding"
+            );
+            anyhow::bail!(
+                "proxy policy denied tool '{}' on '{}': {}",
+                public_tool_id(tool_name),
+                public_upstream_id(server_name),
+                reason
+            );
+        }
+    }
+
+    fn record_policy_decision(
+        &self,
+        caller: &ProxyCaller,
+        server: &str,
+        tool: &str,
+        allowed: bool,
+        reason: Option<&str>,
+    ) {
+        let entry = ProxyPolicyAuditEntry {
+            timestamp_ms: now_ms(),
+            caller: caller.clone(),
+            server: public_upstream_id(server),
+            tool: public_tool_id(tool),
+            allowed,
+            reason: reason.map(str::to_string),
+        };
+        let mut audit = self
+            .policy_audit
+            .lock()
+            .expect("proxy policy audit mutex poisoned");
+        if audit.len() == POLICY_AUDIT_LIMIT {
+            audit.pop_front();
+        }
+        audit.push_back(entry);
     }
 
     async fn call_upstream(
@@ -1165,6 +1335,69 @@ mod tests {
             meta: None,
             execution: None,
         }
+    }
+
+    #[derive(Debug)]
+    struct DenyWorkerPolicy;
+
+    impl ProxyPolicy for DenyWorkerPolicy {
+        fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
+            assert_eq!(request.caller.agent_id, "registered-worker");
+            assert_eq!(request.caller.role, cas_types::AgentRole::Worker);
+            assert_eq!(request.caller.session_id, "registered-worker");
+            assert_eq!(request.caller.factory_session.as_deref(), Some("factory-1"));
+            assert_eq!(request.caller.active_task_ids, ["cas-8750"]);
+            assert_eq!(
+                request.arguments.as_ref().unwrap()["resource"],
+                "customer-42"
+            );
+            ProxyPolicyDecision::Deny {
+                reason: "resource lease is held by another worker".to_string(),
+            }
+        }
+    }
+
+    fn registered_worker_caller() -> ProxyCaller {
+        ProxyCaller {
+            agent_id: "registered-worker".to_string(),
+            role: cas_types::AgentRole::Worker,
+            session_id: "registered-worker".to_string(),
+            factory_session: Some("factory-1".to_string()),
+            active_task_ids: vec!["cas-8750".to_string()],
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_denial_is_audited_before_any_upstream_routing() {
+        let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
+        engine.set_policy(Arc::new(DenyWorkerPolicy)).await;
+
+        let error = match engine
+            .execute(
+                &registered_worker_caller(),
+                r#"{"server":"unconfigured","tool":"send","args":{"resource":"customer-42"}}"#,
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("denied policy call must not reach upstream routing"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "proxy policy denied tool 'send' on 'unconfigured': resource lease is held by another worker"
+        );
+        let audit = engine.policy_audit();
+        assert_eq!(audit.len(), 1);
+        assert!(!audit[0].allowed);
+        assert_eq!(audit[0].caller, registered_worker_caller());
+        assert_eq!(audit[0].server, "unconfigured");
+        assert_eq!(audit[0].tool, "send");
+        assert_eq!(
+            audit[0].reason.as_deref(),
+            Some("resource lease is held by another worker")
+        );
     }
 
     fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {

@@ -42,7 +42,21 @@ url = "https://example.com/sse"
 
 ## Execute
 
-`ProxyEngine::execute(code, max_length)` dispatches tool calls:
+`ProxyEngine::execute(caller, code, max_length)` dispatches tool calls. The
+CAS MCP service derives `caller` from its registered agent row and active task
+leases; it is never accepted from the dispatch payload. Before every upstream
+request, the engine evaluates its `ProxyPolicy` hook and records a
+request-free allow/deny audit entry. A denial is returned without forwarding
+the request.
+
+The default policy allows calls for backwards-compatible installations. A
+protected integration installs a `ProxyPolicy` with `set_policy`; policies can
+inspect the registered caller and arguments to enforce server/tool or
+resource-specific rules without retaining arguments in the audit trail. Policy
+deny reasons must be safe for the operator audit and MCP error; they must not
+copy request arguments or upstream output.
+
+The dispatch formats remain:
 
 **JSON dispatch** (preferred):
 ```json

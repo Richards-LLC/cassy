@@ -181,6 +181,44 @@ impl CasService {
     fn error(code: ErrorCode, message: impl Into<String>) -> McpError {
         CasCore::error(code, message)
     }
+
+    /// Resolve proxy authority exclusively from the server's registered CAS
+    /// identity and durable task leases. The dispatch payload never supplies
+    /// any of these fields, so a caller cannot nominate a stronger role or a
+    /// different task to an upstream policy.
+    #[cfg(feature = "mcp-proxy")]
+    fn proxy_caller(&self) -> Result<cmcp_core::ProxyCaller, McpError> {
+        let agent_id = self.inner.get_registered_agent_id_read_only()?;
+        let agent_store = self.inner.open_agent_store()?;
+        let agent = agent_store.get(&agent_id).map_err(|_| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "MCP proxy execution requires an authenticated registered CAS session.",
+            )
+        })?;
+        let mut active_task_ids: Vec<String> = agent_store
+            .list_agent_leases(&agent_id)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to resolve active task leases for MCP proxy policy: {error}"),
+                )
+            })?
+            .into_iter()
+            .map(|lease| lease.task_id)
+            .collect();
+        active_task_ids.sort();
+
+        Ok(cmcp_core::ProxyCaller {
+            agent_id: agent.id.clone(),
+            role: agent.role,
+            // Agent IDs are the canonical CAS session IDs. Keep this explicit
+            // in the proxy contract so policies do not have to infer it.
+            session_id: agent.id,
+            factory_session: agent.factory_session,
+            active_task_ids,
+        })
+    }
 }
 
 #[tool_router]
@@ -1152,7 +1190,7 @@ impl CasService {
     )]
     pub async fn mcp_execute(
         &self,
-        #[allow(unused_variables)] Parameters(req): Parameters<ExecuteRequest>,
+        Parameters(req): Parameters<ExecuteRequest>,
     ) -> Result<CallToolResult, McpError> {
         #[cfg(feature = "mcp-proxy")]
         {
@@ -1162,8 +1200,9 @@ impl CasService {
                     "MCP proxy not configured. Add upstream servers to .cas/proxy.toml",
                 )
             })?;
+            let caller = self.proxy_caller()?;
 
-            match proxy.execute(&req.code, req.max_length).await {
+            match proxy.execute(&caller, &req.code, req.max_length).await {
                 Ok(result) => {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", true);
                     let mut content = vec![Content::text(result.text)];
@@ -1276,6 +1315,39 @@ mod worktree_verification_team_ops;
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn proxy_caller_uses_registered_agent_role_factory_session_and_task_leases() {
+        let dir = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+        core.register_agent(
+            "registered-session".to_string(),
+            "proxy worker".to_string(),
+            None,
+        )
+        .unwrap();
+        let agent_store = core.open_agent_store().unwrap();
+        let mut agent = agent_store.get("registered-session").unwrap();
+        agent.role = crate::types::AgentRole::Worker;
+        agent.factory_session = Some("factory-proxy-test".to_string());
+        agent_store.update(&agent).unwrap();
+        agent_store
+            .try_claim("cas-8750", "registered-session", 600, None)
+            .unwrap();
+
+        let service = CasService::new(core, None);
+        let caller = service.proxy_caller().unwrap();
+
+        assert_eq!(caller.agent_id, "registered-session");
+        assert_eq!(caller.session_id, "registered-session");
+        assert_eq!(caller.role, crate::types::AgentRole::Worker);
+        assert_eq!(
+            caller.factory_session.as_deref(),
+            Some("factory-proxy-test")
+        );
+        assert_eq!(caller.active_task_ids, ["cas-8750"]);
+    }
 
     /// Guards `cas serve`'s startup banner and empty-registry guard against
     /// silent registry shrink. If the `#[tool_router]` macro ever stops

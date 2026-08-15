@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   attentionContent,
   attentionCounts,
+  applyAttentionEnrichment,
   coalesceAttention,
   createAttentionItem,
   daemonAttention,
@@ -109,6 +110,46 @@ describe("Commander attention triage queue", () => {
     expect(severityForEvent("daemon_ended", "info")).toBe("critical");
   });
 
+  it("patches the same provisional record while enforcing schema bounds and the severity floor", () => {
+    const provisional = createAttentionItem({
+      id: "event-7",
+      machineId: "soundwave",
+      machineLabel: "soundwave",
+      session: "session",
+      kind: "daemon_ended",
+      createdAt,
+    }, { ...machineEventAttention("daemon_ended", undefined), enrichmentPending: true });
+    const enriched = applyAttentionEnrichment(provisional, {
+      severity: "info",
+      summary: "Daemon crashed while testing the auth refactor ".repeat(4),
+      detail: "auth.rs:44 serde_json panic ".repeat(8),
+      action: "retry",
+      fingerprint: " auth.rs-serde-panic ",
+    }, "2026-08-15T03:00:00Z");
+
+    expect(enriched).toMatchObject({
+      id: "event-7",
+      severity: "critical",
+      action: "retry",
+      fingerprint: "auth.rs-serde-panic",
+      enrichmentPending: false,
+      enrichedAt: "2026-08-15T03:00:00Z",
+    });
+    expect(enriched.headline!.length).toBeLessThanOrEqual(90);
+    expect(enriched.detail!.length).toBeLessThanOrEqual(120);
+  });
+
+  it("renders unknown free text immediately as one-line provisional info", () => {
+    const content = machineEventAttention("daemon_error", "serde panic in auth.rs:44\n{\"secret\":true}", true);
+
+    expect(content).toMatchObject({
+      headline: "serde panic in auth.rs:44",
+      severity: "info",
+      action: "none",
+      enrichmentPending: true,
+    });
+  });
+
   it("sorts critical, warning, info and newest-first within each level", () => {
     const cards = coalesceAttention([
       item({ id: "info", kind: "progress_note", createdAt: "2026-08-15T03:00:00Z", message: "Progress" }),
@@ -130,6 +171,19 @@ describe("Commander attention triage queue", () => {
     expect(cards).toHaveLength(2);
     expect(cards[0]).toMatchObject({ count: 2, latest: { id: "repeat" } });
     expect(cards[0].items.map((queued) => queued.id)).toEqual(["first", "repeat"]);
+  });
+
+  it("coalesces differently-worded failures after enrichment supplies one stable fingerprint", () => {
+    const first = applyAttentionEnrichment(item({ id: "first", kind: "daemon_error", message: "thread panicked in auth" }), {
+      severity: "critical", summary: "Authentication worker crashed", detail: "auth.rs:44", action: "retry", fingerprint: "auth.rs-serde-panic",
+    });
+    const second = applyAttentionEnrichment(item({ id: "second", kind: "daemon_error", message: "serde unwrap terminated daemon", createdAt: "2026-08-15T03:00:00Z" }), {
+      severity: "critical", summary: "Daemon stopped parsing authentication", detail: "serde_json error", action: "retry", fingerprint: "auth.rs-serde-panic",
+    });
+
+    const cards = coalesceAttention([first, second]);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ count: 2, latest: { id: "second" } });
   });
 
   it("groups consecutive same-session cards and bounds a 20+ event queue to six visible groups", () => {

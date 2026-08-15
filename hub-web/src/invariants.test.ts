@@ -149,13 +149,15 @@ describe("binding Commander browser invariants", () => {
 
   it("keeps the phone ATTENTION hierarchy human-readable and group-actionable", async () => {
     const [main, attentionView, css] = await Promise.all(["main.ts", "attention-view.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
-    expect(main).toContain('machineEventAttention(kind, event.diagnostic)');
+    expect(main).toContain('machineEventAttention(kind, payload, pending)');
+    expect(main).toContain('applyAttentionEnrichment(provisional, enriched');
     expect(main).toContain('renderAttentionPanel(container, attention');
     expect(attentionView).toContain('headline.textContent = card.content.headline');
     expect(attentionView).toContain('button("Dismiss all info"');
     expect(attentionView).toContain('button("Dismiss group"');
     expect(attentionView).toContain('severity !== "critical"');
     expect(css).toContain(".attention-item--critical");
+    expect(css).toContain(".attention-item--enriching .attention-title::after");
     expect(css).toContain("prefers-reduced-motion: reduce");
     expect(css).toContain("@media (max-width: 53rem)");
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");

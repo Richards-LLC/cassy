@@ -85,6 +85,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   const severity = card.content.severity;
   const article = document.createElement("article");
   article.className = `attention-item attention-item--${severity}`;
+  if (card.content.enrichmentPending) article.classList.add("attention-item--enriching");
   if (severity === "critical" && options.animateIds?.has(card.latest.id)) {
     article.classList.add("attention-item--new-critical");
   }
@@ -116,6 +117,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
 
   const headline = document.createElement("p");
   headline.className = "attention-title";
+  if (card.content.enrichmentPending) headline.setAttribute("aria-label", "Summary pending AI enrichment");
   headline.textContent = card.content.headline;
   article.append(eyebrow, headline);
 

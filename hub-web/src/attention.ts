@@ -12,6 +12,15 @@ export interface AttentionContent {
   ticketId?: string;
   payload?: unknown;
   fingerprint?: string;
+  enrichmentPending?: boolean;
+}
+
+export interface AttentionEnrichment {
+  severity: AttentionSeverity;
+  summary: string;
+  detail?: string | null;
+  action: AttentionAction;
+  fingerprint: string;
 }
 
 export interface AttentionCard {
@@ -40,16 +49,50 @@ const LEGACY_DIAGNOSTIC_PREFIX = "Daemon ended: ";
 const TASK_PREFIX = /^(cas-[0-9a-f]{4,16}):\s+(.+)$/i;
 const URL = /https:\/\/[^\s<>"']+/i;
 const MAX_SUMMARY_LENGTH = 90;
+const MAX_DETAIL_LENGTH = 120;
 
-const CRITICAL_KINDS = new Set([
-  "daemon_disconnected", "daemon_died", "daemon_ended", "auth_blocked", "auth_loss",
-  "repair_required", "ci_failed", "ci_hard_failure", "build_failed", "build_hard_failure",
-  "session_transport", "session_unreachable", "pane_exited",
-]);
-const WARNING_KINDS = new Set([
-  "awaiting_merge", "retry", "retry_loop", "retrying", "hub_disconnected", "reconnecting",
-  "connection_degraded", "degraded_connection", "config_drift",
-]);
+interface DeterministicTemplate {
+  headline: string;
+  detail?: string;
+  severity: AttentionSeverity;
+  action: AttentionAction;
+}
+
+// This is the single deterministic type table. Keep severity, prose, and action
+// together so a newly-known event cannot acquire a second, drifting mapper.
+const MACHINE_EVENT_TEMPLATES: Record<string, DeterministicTemplate> = {
+  daemon_disconnected: { headline: "Daemon connection lost", severity: "critical", action: "retry" },
+  daemon_died: { headline: "Daemon stopped", severity: "critical", action: "retry" },
+  daemon_ended: { headline: "Daemon stopped", severity: "critical", action: "retry" },
+  auth_blocked: { headline: "Authentication blocked", severity: "critical", action: "repair" },
+  auth_loss: { headline: "Authentication expired", severity: "critical", action: "repair" },
+  repair_required: { headline: "Machine needs re-pairing", severity: "critical", action: "repair" },
+  ci_failed: { headline: "CI failed", severity: "critical", action: "retry" },
+  ci_hard_failure: { headline: "CI failed", severity: "critical", action: "retry" },
+  build_failed: { headline: "Build failed", severity: "critical", action: "retry" },
+  build_hard_failure: { headline: "Build failed", severity: "critical", action: "retry" },
+  session_transport: { headline: "Terminal transport problem", severity: "critical", action: "view_pane" },
+  session_unreachable: { headline: "Session unreachable", severity: "critical", action: "view_pane" },
+  pane_exited: { headline: "Worker stopped", detail: "Open the session to inspect the worker and its terminal output.", severity: "critical", action: "view_pane" },
+  awaiting_merge: { headline: "Change is ready to merge", severity: "warning", action: "open_pr" },
+  retry: { headline: "Operation will retry", severity: "warning", action: "retry" },
+  retry_loop: { headline: "Operation is retrying", severity: "warning", action: "retry" },
+  retrying: { headline: "Operation is retrying", severity: "warning", action: "retry" },
+  hub_disconnected: { headline: "Hub connection lost", severity: "warning", action: "retry" },
+  reconnecting: { headline: "Reconnecting to hub", severity: "warning", action: "retry" },
+  connection_degraded: { headline: "Connection degraded", severity: "warning", action: "none" },
+  degraded_connection: { headline: "Connection degraded", severity: "warning", action: "none" },
+  config_drift: { headline: "Configuration changed", severity: "warning", action: "none" },
+  checkpoint: { headline: "Checkpoint saved", severity: "info", action: "none" },
+  checkpoint_recorded: { headline: "Checkpoint saved", severity: "info", action: "none" },
+  session_removed: { headline: "Session ended", detail: "Open the machine to confirm whether the session was intentionally removed.", severity: "info", action: "none" },
+  session_added: { headline: "Session started", severity: "info", action: "none" },
+  pane_added: { headline: "Worker started", severity: "info", action: "view_pane" },
+  pane_removed: { headline: "Worker removed", severity: "info", action: "none" },
+  controller_changed: { headline: "Terminal control changed", severity: "info", action: "none" },
+  task_summary: { headline: "Task updated", severity: "info", action: "none" },
+  progress_note: { headline: "Progress updated", severity: "info", action: "none" },
+};
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -73,6 +116,11 @@ function clampSummary(value: string): string {
   return clean.length <= MAX_SUMMARY_LENGTH ? clean : `${clean.slice(0, MAX_SUMMARY_LENGTH - 1).trimEnd()}…`;
 }
 
+function clampDetail(value: string): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length <= MAX_DETAIL_LENGTH ? clean : `${clean.slice(0, MAX_DETAIL_LENGTH - 1).trimEnd()}…`;
+}
+
 function looksLikePayload(value: string): boolean {
   const trimmed = value.trim();
   return trimmed.startsWith("{") || trimmed.startsWith("[") || /"[\w-]+"\s*:/.test(trimmed);
@@ -87,22 +135,17 @@ function severityFromStored(value: AttentionItem["severity"]): AttentionSeverity
 
 export function severityForEvent(kind: string, proposed?: AttentionItem["severity"]): AttentionSeverity {
   const normalized = normalizedKind(kind);
-  const deterministic = CRITICAL_KINDS.has(normalized)
-    ? "critical"
-    : WARNING_KINDS.has(normalized)
-      ? "warning"
-      : "info";
+  const deterministic = MACHINE_EVENT_TEMPLATES[normalized]?.severity ?? "info";
   const candidate = severityFromStored(proposed);
   return candidate && SEVERITY_RANK[candidate] < SEVERITY_RANK[deterministic] ? candidate : deterministic;
 }
 
 export function actionForEvent(kind: string): AttentionAction {
-  const normalized = normalizedKind(kind);
-  if (["auth_blocked", "auth_loss", "repair_required"].includes(normalized)) return "repair";
-  if (["awaiting_merge"].includes(normalized)) return "open_pr";
-  if (["retry", "retry_loop", "retrying", "hub_disconnected", "reconnecting", "ci_failed", "ci_hard_failure", "build_failed", "build_hard_failure", "daemon_disconnected", "daemon_died", "daemon_ended"].includes(normalized)) return "retry";
-  if (["session_transport", "session_unreachable", "pane_exited"].includes(normalized)) return "view_pane";
-  return "none";
+  return MACHINE_EVENT_TEMPLATES[normalizedKind(kind)]?.action ?? "none";
+}
+
+export function hasDeterministicAttention(kind: string): boolean {
+  return MACHINE_EVENT_TEMPLATES[normalizedKind(kind)] !== undefined;
 }
 
 function daemonCause(value: unknown): string | undefined {
@@ -135,31 +178,27 @@ export function daemonAttention(diagnostic: unknown): AttentionContent {
   };
 }
 
-export function machineEventAttention(kind: string, diagnostic: unknown): AttentionContent {
-  if (normalizedKind(kind) === "daemon_disconnected") return daemonAttention(diagnostic);
-  if (normalizedKind(kind) === "pane_exited") {
-    return {
-      headline: "Worker stopped",
-      detail: "Open the session to inspect the worker and its terminal output.",
-      severity: "critical",
-      action: "view_pane",
-      payload: diagnostic,
-    };
+function rawEventTitle(kind: string, diagnostic: unknown): string {
+  if (typeof diagnostic === "string" && diagnostic.trim()) return clampSummary(diagnostic.split(/\r?\n/, 1)[0]!);
+  const record = asRecord(diagnostic);
+  for (const key of ["title", "summary", "message", "error", "reason"]) {
+    const value = record?.[key];
+    if (typeof value === "string" && value.trim()) return clampSummary(value.split(/\r?\n/, 1)[0]!);
   }
-  if (normalizedKind(kind) === "session_removed") {
-    return {
-      headline: "Session ended",
-      detail: "Open the machine to confirm whether the session was intentionally removed.",
-      severity: "info",
-      action: "none",
-      payload: diagnostic,
-    };
-  }
+  return sentenceCase(normalizedKind(kind));
+}
+
+export function machineEventAttention(kind: string, diagnostic: unknown, enrichmentPending = false): AttentionContent {
+  const normalized = normalizedKind(kind);
+  if (normalized === "daemon_disconnected") return { ...daemonAttention(diagnostic), enrichmentPending: false };
+  const template = MACHINE_EVENT_TEMPLATES[normalized];
+  if (template) return { ...template, payload: diagnostic, enrichmentPending: false };
   return {
-    headline: sentenceCase(kind),
-    severity: severityForEvent(kind),
-    action: actionForEvent(kind),
+    headline: rawEventTitle(kind, diagnostic),
+    severity: "info",
+    action: "none",
     payload: diagnostic,
+    enrichmentPending,
   };
 }
 
@@ -201,6 +240,7 @@ export function attentionContent(item: AttentionItem): AttentionContent {
     ticketId: item.ticketId ?? task?.[1].toLowerCase(),
     payload: item.payload,
     fingerprint: item.fingerprint,
+    enrichmentPending: item.enrichmentPending,
   };
 }
 
@@ -222,6 +262,26 @@ export function createAttentionItem(
     ticketId: normalized.ticketId,
     payload: normalized.payload,
     fingerprint: normalized.fingerprint,
+    enrichmentPending: normalized.enrichmentPending,
+  };
+}
+
+/** Apply model output to the same durable card while enforcing deterministic safety floors. */
+export function applyAttentionEnrichment(
+  item: AttentionItem,
+  enrichment: AttentionEnrichment,
+  enrichedAt = new Date().toISOString(),
+): AttentionItem {
+  return {
+    ...item,
+    message: clampSummary(enrichment.summary),
+    headline: clampSummary(enrichment.summary),
+    detail: enrichment.detail ? clampDetail(enrichment.detail) : undefined,
+    severity: severityForEvent(item.kind, enrichment.severity),
+    action: enrichment.action,
+    fingerprint: enrichment.fingerprint.trim(),
+    enrichmentPending: false,
+    enrichedAt,
   };
 }
 

@@ -1,5 +1,5 @@
 import "./styles.css";
-import { attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
+import { applyAttentionEnrichment, attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
@@ -132,9 +132,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onSessions: (items) => { sessions.set(machine.id, items); render(); },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
-      if (["daemon_disconnected", "pane_exited", "session_removed"].includes(kind)) {
-        const content = machineEventAttention(kind, event.diagnostic);
-        void addAttention(machine, event.session as string | undefined, kind, { ...content, payload: event });
+      if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
+        void upsertMachineEventAttention(machine, event);
       }
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
@@ -169,6 +168,48 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "critical", action: "view_pane", payload: detail });
     },
   });
+}
+
+function attentionEnrichment(value: unknown): AttentionEnrichment | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (!["critical", "warning", "info"].includes(String(candidate.severity))) return undefined;
+  if (!["repair", "view_pane", "retry", "open_pr", "none"].includes(String(candidate.action))) return undefined;
+  if (typeof candidate.summary !== "string" || typeof candidate.fingerprint !== "string") return undefined;
+  if (candidate.detail !== undefined && candidate.detail !== null && typeof candidate.detail !== "string") return undefined;
+  return candidate as unknown as AttentionEnrichment;
+}
+
+async function upsertMachineEventAttention(machine: StoredMachine, event: Record<string, unknown>): Promise<void> {
+  const kind = String(event.kind ?? "hub_event");
+  const session = typeof event.session === "string" ? event.session : undefined;
+  const sequence = typeof event.sequence === "number" || typeof event.sequence === "string"
+    ? String(event.sequence)
+    : crypto.randomUUID();
+  const id = `${machine.id}:event:${sequence}`;
+  const existing = attention.find((item) => item.id === id);
+  const payload = event.payload ?? event.diagnostic ?? event;
+  const pending = event.enrichment_pending === true;
+  const provisional = existing ?? createAttentionItem({
+    id,
+    machineId: machine.id,
+    machineLabel: machine.label,
+    session,
+    kind,
+    createdAt: typeof event.at === "string" ? event.at : new Date().toISOString(),
+  }, machineEventAttention(kind, payload, pending));
+  const enriched = attentionEnrichment(event.enrichment);
+  const next = enriched
+    ? applyAttentionEnrichment(provisional, enriched, typeof event.enriched_at === "string" ? event.enriched_at : undefined)
+    : { ...provisional, enrichmentPending: pending };
+  const wasCritical = existing?.severity === "critical";
+  if (!wasCritical && next.severity === "critical") newCriticalAttentionIds.add(id);
+  attention = existing
+    ? attention.map((item) => item.id === id ? next : item)
+    : [next, ...attention];
+  await attentionStore.put(next);
+  render();
+  newCriticalAttentionIds.delete(id);
 }
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {

@@ -952,6 +952,28 @@ main {
   font-weight: var(--weight-semibold);
 }
 
+.attention-item--enriching .attention-title {
+  position: relative;
+}
+
+.attention-item--enriching .attention-title::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--text-mid) 12%, transparent) 50%, transparent 80%);
+  content: "";
+  pointer-events: none;
+  transform: translateX(-100%);
+  animation: attention-summary-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes attention-summary-shimmer {
+  to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-item--enriching .attention-title::after { animation: none; }
+}
+
 .attention-detail {
   margin: 0;
   overflow: hidden;

@@ -77,6 +77,8 @@ export interface AttentionItem {
   ticketId?: string;
   payload?: unknown;
   fingerprint?: string;
+  enrichmentPending?: boolean;
+  enrichedAt?: string;
   createdAt: string;
   seenAt?: string;
   acknowledgedAt?: string;

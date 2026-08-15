@@ -627,7 +627,12 @@ async fn handle_client_message(
     let mut message: ClientMessage = serde_json::from_slice(bytes)?;
     let scope = required_scope(&message).context("operation is not exposed by Commander")?;
     let now = chrono::Utc::now();
-    if !context.has(scope) || !store.has_active_lease(context, session, now)? {
+    let allowed = if matches!(message, ClientMessage::ResizePane { .. }) {
+        store.may_resize_panes(context, session, now)?
+    } else {
+        context.has(scope) && store.has_active_lease(context, session, now)?
+    };
+    if !allowed {
         store.audit(
             Some(context),
             "denied",

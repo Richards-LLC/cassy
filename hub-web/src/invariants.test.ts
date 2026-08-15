@@ -143,10 +143,12 @@ describe("binding Commander browser invariants", () => {
     }
   });
 
-  it("resends the live grid size when observer mode becomes controller mode", async () => {
+  it("lets unleased observers size panes but preserves controller-owned geometry", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
-    expect(source).toContain("const becameController = state.held_by_me && !leases.get(key)?.held_by_me");
-    expect(source).toContain("if (becameController) resizeControlledPanes(machineId, session)");
+    expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
+    expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
+    expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
+    expect(source).toContain("if (canResizePanes(machineId, session)) sendControl");
     expect(source).toContain("{ ResizePane: { pane_id: pane.id, cols: surface.cols, rows: surface.rows } }");
   });
 

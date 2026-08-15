@@ -3,9 +3,19 @@ use crate::ui::factory::protocol::{ClientMessage, DaemonMessage};
 use futures_util::{FutureExt, SinkExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+const COMMANDER_WELCOME_WARN_BYTES: usize = 2 * 1024 * 1024;
+
 /// Encode a DaemonMessage as a WebSocket Binary frame (raw JSON, no length prefix).
 fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
-    serde_json::to_vec(msg).ok().map(WsMessage::Binary)
+    let bytes = serde_json::to_vec(msg).ok()?;
+    if matches!(msg, DaemonMessage::Welcome { .. }) && bytes.len() > COMMANDER_WELCOME_WARN_BYTES {
+        tracing::warn!(
+            bytes = bytes.len(),
+            expected_max_bytes = COMMANDER_WELCOME_WARN_BYTES,
+            "Commander Welcome exceeded the expected bounded replay envelope"
+        );
+    }
+    Some(WsMessage::Binary(bytes))
 }
 
 /// WebSocket transport adapter for the shared Commander control dispatcher.
@@ -44,7 +54,7 @@ impl FactoryDaemon {
 
             // Build and send Welcome message
             let state = self.build_session_state();
-            let scrollback = self.build_scrollback();
+            let scrollback = self.build_scrollback(&state);
             let welcome = DaemonMessage::Welcome {
                 session_name: self.session_name.clone(),
                 state,
@@ -221,13 +231,13 @@ impl FactoryDaemon {
         }
 
         match msg {
-            ClientMessage::Attach { .. } => {
+            ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
-                let scrollback = self.build_scrollback();
+                let scrollback = request_scrollback.then(|| self.build_scrollback(&state));
                 let welcome = DaemonMessage::Welcome {
                     session_name: self.session_name.clone(),
                     state,
-                    scrollback: Some(scrollback),
+                    scrollback,
                     protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
                     capabilities: crate::ui::factory::protocol::daemon_capabilities(),
                 };

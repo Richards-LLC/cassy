@@ -8,9 +8,15 @@ use cas_factory_protocol::{
 
 use crate::ui::factory::daemon::FactoryDaemon;
 use crate::ui::factory::daemon::cloud_client::RelayEvent;
+use crate::ui::factory::protocol::COMMANDER_REPLAY_BYTES_PER_PANE;
 
-/// Max bytes to keep per pane for replay on attach (256 KB).
-const PANE_BUFFER_CAPACITY: usize = 256 * 1024;
+/// Max bytes to keep per active pane for replay on attach (64 KiB).
+///
+/// This is enough for the visible viewport plus a bounded recent tail while
+/// keeping a reconnect small enough for Commander on a phone. Older output is
+/// still available through the task/pane logs instead of being paid on every
+/// attach.
+const PANE_BUFFER_CAPACITY: usize = COMMANDER_REPLAY_BYTES_PER_PANE;
 
 /// Tracks a remote relay client connected via cloud WebSocket
 #[derive(Debug)]
@@ -710,6 +716,15 @@ mod tests {
         let mut buf = PaneBuffer::default();
         buf.append(b"\x1b[1;31mhello\x1b[0m world");
         assert_eq!(buf.as_plain_text(), "hello world");
+    }
+
+    #[test]
+    fn pane_buffer_keeps_only_the_bounded_recent_tail() {
+        let mut buf = PaneBuffer::default();
+        let bytes = vec![b'x'; PANE_BUFFER_CAPACITY + 97];
+        buf.append(&bytes);
+
+        assert_eq!(buf.as_bytes().len(), PANE_BUFFER_CAPACITY);
     }
 
     #[test]

@@ -10,6 +10,8 @@ use std::collections::HashMap;
 pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
 /// Current additive daemon protocol version.
 pub const PROTOCOL_VERSION: u32 = 2;
+/// Maximum recent PTY output replayed per active pane on client attach.
+pub(crate) const COMMANDER_REPLAY_BYTES_PER_PANE: usize = 64 * 1024;
 
 /// Independently negotiable daemon protocol features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

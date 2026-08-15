@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::death::diagnose_disconnect;
@@ -12,7 +14,54 @@ use super::{
     DaemonExitEvidenceStore, DaemonIdentity, MachineEventBus, ProxyFrame, SessionMultiplexer,
     ViewerReceiver,
 };
-use crate::ui::factory::{ClientMessage, DaemonMessage};
+use crate::ui::factory::{
+    COMMANDER_REPLAY_BYTES_PER_PANE, ClientMessage, DaemonMessage,
+};
+
+// Existing session daemons keep running their original binary across a hub
+// upgrade. Accept the observed 44.7 MB legacy Welcome with narrow headroom so
+// the hub can compact it before relaying; newly-started daemons emit bounded
+// replay directly.
+const COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
+// The browser-facing canonical snapshot must stay far below the legacy input.
+// At 64 KiB per active pane, 8 MiB allows a large multi-worker session while
+// still catching a return to unbounded/stale-pane replay.
+const COMMANDER_RELAY_MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
+fn compact_welcome_replay(message: &mut DaemonMessage) -> Option<(usize, usize)> {
+    let DaemonMessage::Welcome {
+        state, scrollback, ..
+    } = message
+    else {
+        return None;
+    };
+    let scrollback = scrollback.as_mut()?;
+    let active: std::collections::HashSet<&str> =
+        state.panes.iter().map(|pane| pane.id.as_str()).collect();
+    let before = scrollback
+        .values()
+        .flat_map(|chunks| chunks.iter())
+        .map(Vec::len)
+        .sum();
+    scrollback.retain(|pane_id, _| active.contains(pane_id.as_str()));
+    for chunks in scrollback.values_mut() {
+        let total = chunks.iter().map(Vec::len).sum::<usize>();
+        let mut skip = total.saturating_sub(COMMANDER_REPLAY_BYTES_PER_PANE);
+        let mut tail = Vec::with_capacity(total.min(COMMANDER_REPLAY_BYTES_PER_PANE));
+        for chunk in chunks.iter() {
+            let start = skip.min(chunk.len());
+            skip -= start;
+            tail.extend_from_slice(&chunk[start..]);
+        }
+        *chunks = vec![tail];
+    }
+    let after = scrollback
+        .values()
+        .flat_map(|chunks| chunks.iter())
+        .map(Vec::len)
+        .sum();
+    Some((before, after))
+}
 
 struct UpstreamSlot {
     running: AtomicBool,
@@ -131,17 +180,14 @@ async fn run_upstream(
     mut controls: mpsc::Receiver<ClientMessage>,
 ) -> Result<()> {
     let url = format!("ws://127.0.0.1:{port}");
-    let (mut socket, _) = tokio_tungstenite::connect_async(&url)
+    let config = WebSocketConfig {
+        max_message_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
+        max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
+        ..WebSocketConfig::default()
+    };
+    let (mut socket, _) = connect_async_with_config(&url, Some(config), false)
         .await
         .with_context(|| format!("connect to daemon for session '{session}'"))?;
-    socket
-        .send(Message::Binary(serde_json::to_vec(
-            &ClientMessage::Attach {
-                request_scrollback: true,
-            },
-        )?))
-        .await?;
-
     loop {
         let message = tokio::select! {
             message = socket.next() => match message {
@@ -156,14 +202,34 @@ async fn run_upstream(
                 None => break,
             }
         };
-        let bytes = match message {
+        let upstream_bytes = match message {
             Message::Binary(bytes) => bytes,
             Message::Text(text) => text.as_bytes().to_vec(),
             Message::Close(_) => break,
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
         };
-        let daemon: DaemonMessage = serde_json::from_slice(&bytes)
+        let mut daemon: DaemonMessage = serde_json::from_slice(&upstream_bytes)
             .context("daemon sent an invalid Commander protocol frame")?;
+        let bytes = if let Some((replay_before, replay_after)) = compact_welcome_replay(&mut daemon)
+        {
+            let compacted = serde_json::to_vec(&daemon)?;
+            ensure!(
+                compacted.len() <= COMMANDER_RELAY_MAX_MESSAGE_BYTES,
+                "bounded Commander Welcome is still too large: {} > {} bytes",
+                compacted.len(),
+                COMMANDER_RELAY_MAX_MESSAGE_BYTES
+            );
+            tracing::info!(
+                upstream_bytes = upstream_bytes.len(),
+                relay_bytes = compacted.len(),
+                replay_before,
+                replay_after,
+                "compacted Commander Welcome for relay"
+            );
+            compacted
+        } else {
+            upstream_bytes
+        };
         events.observe_daemon(session, &daemon);
         let pane_id = match &daemon {
             DaemonMessage::Output { pane_id, .. }
@@ -180,4 +246,57 @@ async fn run_upstream(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::factory::{PaneInfo, PaneKind, SessionState};
+
+    #[test]
+    fn welcome_replay_drops_departed_panes_and_keeps_a_bounded_active_tail() {
+        let mut message = DaemonMessage::Welcome {
+            session_name: "factory-a".into(),
+            state: SessionState {
+                focused_pane: Some("active".into()),
+                panes: vec![PaneInfo {
+                    id: "active".into(),
+                    kind: PaneKind::Supervisor,
+                    focused: true,
+                    title: "active".into(),
+                    exited: false,
+                }],
+                epic_id: None,
+                epic_title: None,
+                cols: 80,
+                rows: 24,
+            },
+            scrollback: Some(HashMap::from([
+                (
+                    "active".into(),
+                    vec![vec![b'a'; COMMANDER_REPLAY_BYTES_PER_PANE + 17]],
+                ),
+                ("departed".into(), vec![vec![b'x'; 1024]]),
+            ])),
+            protocol_version: 2,
+            capabilities: Vec::new(),
+        };
+
+        let (before, after) = compact_welcome_replay(&mut message).unwrap();
+
+        assert_eq!(before, COMMANDER_REPLAY_BYTES_PER_PANE + 17 + 1024);
+        assert_eq!(after, COMMANDER_REPLAY_BYTES_PER_PANE);
+        let DaemonMessage::Welcome {
+            scrollback: Some(scrollback),
+            ..
+        } = message
+        else {
+            panic!("expected Welcome scrollback");
+        };
+        assert_eq!(
+            scrollback.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["active"]
+        );
+        assert_eq!(scrollback["active"][0].len(), COMMANDER_REPLAY_BYTES_PER_PANE);
+    }
 }

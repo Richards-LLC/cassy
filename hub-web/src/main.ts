@@ -419,9 +419,12 @@ async function loadLease(machineId: string, session: string): Promise<void> {
     const state = await connections.get(machineId)?.lease(session);
     if (state) {
       const key = sessionKey(machineId, session);
-      const becameController = state.held_by_me && !leases.get(key)?.held_by_me;
+      const previousLease = leases.get(key);
+      const becameGeometryOwner =
+        (state.held_by_me && !previousLease?.held_by_me) ||
+        (!state.controller_label && Boolean(previousLease?.controller_label));
       leases.set(key, state);
-      if (becameController) resizeControlledPanes(machineId, session);
+      if (becameGeometryOwner) resizeViewablePanes(machineId, session);
       const expiryTimer = leaseExpiryTimers.get(key);
       if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
       if (state.expires_at) {
@@ -434,7 +437,8 @@ async function loadLease(machineId: string, session: string): Promise<void> {
   } catch { /* legacy hub may not expose lease status */ }
 }
 
-function resizeControlledPanes(machineId: string, session: string): void {
+function resizeViewablePanes(machineId: string, session: string): void {
+  if (!canResizePanes(machineId, session)) return;
   const state = sessionStates.get(sessionKey(machineId, session));
   if (!state) return;
   for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
@@ -540,7 +544,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },
-        onResize: (cols, rows) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
+        onResize: (cols, rows) => { if (canResizePanes(machineId, session)) sendControl(machineId, session, { ResizePane: { pane_id: pane.id, cols, rows } }); },
       });
       const currentMount = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
       if (selectedMachineId !== machineId || selectedSession !== session || !mount.isConnected || currentMount !== mount) {
@@ -560,6 +564,12 @@ function hubSupports(machineId: string, capability: string): boolean {
 
 function canControl(machineId: string, session: string, scope: Scope): boolean {
   return hubSupports(machineId, "daemon_attach") && machines.get(machineId)?.scopes.includes(scope) === true && leases.get(sessionKey(machineId, session))?.held_by_me === true;
+}
+
+function canResizePanes(machineId: string, session: string): boolean {
+  if (!hubSupports(machineId, "daemon_attach") || machines.get(machineId)?.scopes.includes("pane-read") !== true) return false;
+  const lease = leases.get(sessionKey(machineId, session));
+  return !lease?.controller_label || lease.held_by_me;
 }
 
 function controlDisabledReason(machine: StoredMachine | undefined, session: string | undefined, lease: LeaseState | undefined): string | undefined {

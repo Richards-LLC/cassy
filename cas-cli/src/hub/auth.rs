@@ -85,8 +85,11 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         | ClientMessage::Focus { .. }
         | ClientMessage::FocusNext
         | ClientMessage::FocusPrev
-        | ClientMessage::Resize { .. }
-        | ClientMessage::ResizePane { .. } => Some(Scope::PaneInput),
+        | ClientMessage::Resize { .. } => Some(Scope::PaneInput),
+        // Reporting the viewport is part of observing a pane, not terminal
+        // input. The lease policy is enforced separately: an unleased pane
+        // may follow an observer, while a leased pane follows its controller.
+        ClientMessage::ResizePane { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),
         ClientMessage::SpawnWorkers { .. }
@@ -840,6 +843,24 @@ impl AuthStore {
             .leases
             .get(session)
             .is_some_and(|lease| lease.device_id == context.device_id && lease.expires_at >= now))
+    }
+
+    /// Whether this viewer owns the shared PTY geometry for a session.
+    ///
+    /// With no controller, any pane reader may establish a usable viewport.
+    /// Once a controller lease exists, only that device may resize; otherwise
+    /// a phone observer could unexpectedly reflow a desktop controller's TUI.
+    pub fn may_resize_panes(
+        &self,
+        context: &AuthContext,
+        session: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        if !context.has(Scope::PaneRead) {
+            return Ok(false);
+        }
+        let lease = self.lease_status(context, session, now)?;
+        Ok(lease.controller_device_id.is_none() || lease.held_by_me)
     }
 
     pub fn audit(

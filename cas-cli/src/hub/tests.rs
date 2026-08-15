@@ -1508,8 +1508,14 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
             request_id: None,
         },
     };
+    let resize = ClientMessage::ResizePane {
+        pane_id: "worker-1".into(),
+        cols: 80,
+        rows: 24,
+    };
 
     assert_eq!(required_scope(&input), Some(Scope::PaneInput));
+    assert_eq!(required_scope(&resize), Some(Scope::PaneRead));
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);
@@ -1556,7 +1562,11 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
     let phone = pair("phone");
     let laptop = pair("laptop");
 
+    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
+    assert!(auth.may_resize_panes(&laptop, "factory-a", now).unwrap());
     auth.acquire_lease(&phone, "factory-a", now).unwrap();
+    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
+    assert!(!auth.may_resize_panes(&laptop, "factory-a", now).unwrap());
     assert!(
         auth.lease_status(&phone, "factory-a", now)
             .unwrap()
@@ -1577,6 +1587,7 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
         Some("laptop")
     );
     auth.release_lease(&laptop, "factory-a", now).unwrap();
+    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
     assert!(
         auth.lease_status(&phone, "factory-a", now)
             .unwrap()

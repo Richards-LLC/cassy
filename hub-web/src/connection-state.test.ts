@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  attachElapsedSeconds,
   backoffDelay,
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   elapsedSeconds,
@@ -35,5 +36,12 @@ describe("Commander connection lifecycle contract", () => {
       phase: "dialing", stage: "dialing", since: 10_000, attempt: 0, missedHeartbeats: 0, degraded: false,
     };
     expect(elapsedSeconds(snapshot, 17_900)).toBe(7);
+  });
+
+  it("reports total attach time independently of the current stage", () => {
+    expect(attachElapsedSeconds({
+      session: "factory-a", phase: "backoff", stage: "attaching", since: 18_000,
+      attachSince: 1_000, attempt: 3, missedHeartbeats: 0, degraded: false,
+    }, 21_500)).toBe(20);
   });
 });

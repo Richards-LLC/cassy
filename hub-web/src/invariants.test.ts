@@ -295,6 +295,7 @@ describe("binding Commander browser invariants", () => {
       ["failed", "attaching"],
       ["backoff", "attaching"],
     ]);
+    expect(new Set(callbacks.onAttachState.mock.calls.slice(0, -1).map(([, state]) => state.attachSince)).size).toBe(1);
     expect(supervisor.attachSnapshot("factory-a")?.phase).toBe("backoff");
     supervisor.stop();
   });

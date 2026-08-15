@@ -16,6 +16,8 @@ export interface ConnectionSnapshot {
 
 export interface AttachSnapshot extends ConnectionSnapshot {
   session: string;
+  /** Start of the uninterrupted not-live lifecycle; stable across retries. */
+  attachSince?: number;
 }
 
 export const STAGE_TIMEOUT_MS: Readonly<Record<Exclude<ConnectionStage, "idle" | "live">, number>> = {
@@ -50,4 +52,8 @@ export function stageFailureDetail(stage: ConnectionStage, target: string, reaso
 
 export function elapsedSeconds(snapshot: ConnectionSnapshot, now = Date.now()): number {
   return Math.max(0, Math.floor((now - snapshot.since) / 1_000));
+}
+
+export function attachElapsedSeconds(snapshot: AttachSnapshot, now = Date.now()): number {
+  return Math.max(0, Math.floor((now - (snapshot.attachSince ?? snapshot.since)) / 1_000));
 }

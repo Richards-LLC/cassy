@@ -121,11 +121,19 @@ export class HubConnectionSupervisor {
   }
 
   private transitionAttach(session: string, phase: ConnectionPhase, stage: ConnectionStage, update: Partial<AttachSnapshot> = {}): void {
+    const now = Date.now();
+    const prior = this.attachLifecycles.get(session);
+    const attachSince = phase === "live" || phase === "idle"
+      ? undefined
+      : prior && prior.phase !== "live" && prior.phase !== "idle"
+        ? (prior.attachSince ?? prior.since)
+        : now;
     const snapshot: AttachSnapshot = {
       session,
       phase,
       stage,
-      since: Date.now(),
+      since: now,
+      attachSince,
       attempt: this.socketAttempts.get(session) ?? 0,
       missedHeartbeats: 0,
       degraded: false,

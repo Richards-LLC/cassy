@@ -2,7 +2,7 @@ import "./styles.css";
 import { attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
 import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { elapsedSeconds, type AttachSnapshot } from "./connection-state";
+import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -725,12 +725,13 @@ function toast(message: string): void {
   window.setTimeout(() => output.classList.remove("visible"), 3200);
 }
 
-function connectionLabel(state: ConnectionState | undefined): string {
+function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): string {
   if (!state) return "idle";
   if (state.phase === "live") return state.degraded ? `degraded · ${state.missedHeartbeats} missed` : `live · ${state.latencyMs ?? 0}ms`;
   if (state.phase === "backoff") return `retrying ${state.stage} in ${Math.ceil((state.retryInMs ?? 0) / 1000)}s`;
   if (state.phase === "failed") return state.reason ?? `failed during ${state.stage}`;
-  return `${state.phase} · ${elapsedSeconds(state)}s`;
+  const elapsed = "session" in state ? attachElapsedSeconds(state) : elapsedSeconds(state);
+  return `${state.phase} · ${elapsed}s`;
 }
 
 function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }

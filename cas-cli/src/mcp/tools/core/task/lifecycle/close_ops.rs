@@ -18082,6 +18082,61 @@ mod merge_state_gate_tests {
         }
     }
 
+    /// cas-aaf18: a merged worker delivery remains valid close evidence after
+    /// an administrative `request_changes` starts a fresh lease epoch, even
+    /// when adjacent sibling-lane changes defeat the normal context-sensitive
+    /// reverse-patch proof. This composes the GH #82 receipt-window exception
+    /// with cas-fe81's zero-context hunk-survival proof.
+    #[test]
+    fn administrative_restart_accepts_worker_receipt_after_adjacent_batch_merge_cas_aaf18() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("shared.rs"), "alpha\nbeta\ngamma\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: seed shared file"]);
+        git(p, &["branch", "-f", "main", "HEAD"]);
+        let base = rev_parse_local(p, "main");
+
+        // Worker delivery A, subsequently parked and batch-merged by the
+        // supervisor before an administrative request_changes reopens it.
+        std::fs::write(p.join("shared.rs"), "alpha\nworker\nbeta\ngamma\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat(cas-test1): worker delivery"],
+        );
+        let receipt = rev_parse_local(p, "HEAD");
+
+        // A sibling lane changes adjacent context in the same file, which
+        // makes the old reverse-patch-only proof fail while A's hunk survives.
+        git(p, &["checkout", "-q", "-b", "factory/sibling", &base]);
+        std::fs::write(p.join("shared.rs"), "alpha\nbeta\nsibling\ngamma\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: sibling lane"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling"]);
+
+        // `request_changes` reopens the parked task and the next worker start
+        // moves the receipt window after A. The task itself predates A, and A
+        // is task-attributable, so the administrative reset must not disown
+        // the real merged receipt.
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer after administrative request_changes",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-test1".to_string()),
+                known_commits: vec![receipt.clone()],
+            },
+        };
+        let note = validate_task_commit_receipt(p, &receipt, "main", &window)
+            .expect("worker receipt must close after administrative restart and adjacent merge");
+        assert!(note.contains("earlier work cycle of this task"), "{note}");
+        assert!(note.contains(&receipt), "{note}");
+    }
+
     /// cas-b278 / GH #324: ancestry survives a later conflicting merge even
     /// when that merge's resolution removes the delivery. Both the task close
     /// gate and epic_status must inspect the current target tree, refuse the

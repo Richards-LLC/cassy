@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   attachElapsedSeconds,
@@ -15,6 +16,14 @@ describe("Commander connection lifecycle contract", () => {
     expect(STAGE_TIMEOUT_MS).toEqual({ resolving: 3_000, dialing: 5_000, auth: 3_000, attaching: 3_000 });
     expect(DEGRADED_AFTER_MISSED_HEARTBEATS).toBe(2);
     expect(RECONNECT_AFTER_MISSED_HEARTBEATS).toBe(4);
+  });
+
+  it("keeps latency absent until a heartbeat round trip measures it", async () => {
+    const source = await readFile(new URL("connection.ts", import.meta.url), "utf8");
+    expect(source).toContain('this.transition("live", "live");');
+    expect(source).not.toContain('{ latencyMs: 0 }');
+    expect(source).toContain('latencyMs: Math.round(performance.now() - started)');
+    expect(source).toContain('Math.max(0, Math.round(performance.now() - this.healthPing.startedAt))');
   });
 
   it("backs off exponentially with bounded jitter and a 30 second ceiling", () => {

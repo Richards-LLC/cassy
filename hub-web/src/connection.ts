@@ -191,7 +191,7 @@ export class HubConnectionSupervisor {
       this.resumeStage = "resolving";
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
-      this.transition("live", "live", { latencyMs: 0 });
+      this.transition("live", "live");
       this.startHeartbeat();
       await this.consumeEvents(response);
       if (this.desired) throw new Error("hub event stream closed");

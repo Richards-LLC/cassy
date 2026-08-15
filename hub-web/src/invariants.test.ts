@@ -237,6 +237,8 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain('Workers &amp; Tasks');
     expect(main).toContain('visiblePanes.find((pane) => pane.kind === "Supervisor")?.id');
     expect(main).toContain('data-machine-latency');
+    expect(main).toContain('state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`');
+    expect(main).not.toContain("state.latencyMs ?? 0");
     expect(connection).toContain('onLatency?(latencyMs: number)');
     expect(css).toContain('--machine-rail-width: 48px');
     expect(css).toContain('--context-panel-width: 320px');

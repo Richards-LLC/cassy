@@ -967,7 +967,10 @@ function toast(message: string): void {
 
 function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): string {
   if (!state) return "idle";
-  if (state.phase === "live") return state.degraded ? `degraded · ${state.missedHeartbeats} missed` : `live · ${state.latencyMs ?? 0}ms`;
+  if (state.phase === "live") {
+    if (state.degraded) return `degraded · ${state.missedHeartbeats} missed`;
+    return state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`;
+  }
   if (state.phase === "backoff") return `retrying ${state.stage} in ${Math.ceil((state.retryInMs ?? 0) / 1000)}s`;
   if (state.phase === "failed") return state.reason ?? `failed during ${state.stage}`;
   const elapsed = "session" in state ? attachElapsedSeconds(state) : elapsedSeconds(state);
@@ -1061,7 +1064,7 @@ function render(captureDraft = true): void {
           <h1 class="${selectedSession ? "toolbar-session-title" : ""}">${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
           <span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span>
           <span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span>
-          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
+          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? "—" : `${latency}ms`}</span></span>
           <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>

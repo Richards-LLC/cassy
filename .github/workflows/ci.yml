@@ -124,6 +124,10 @@ jobs:
         if: steps.classify-diff.outputs.fast-pass != 'true'
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
+      - name: Test release publication guards
+        if: steps.classify-diff.outputs.fast-pass != 'true'
+        run: make -C cas-cli test-ci-tiers
+
       - name: Build (without MCP proxy)
         if: steps.classify-diff.outputs.fast-pass != 'true'
         env:

@@ -44,6 +44,15 @@ write_release() {
 EOF
 }
 
+assert_no_digest_placeholders() {
+  local candidate="$1"
+
+  if grep -qF '{{LINUX_SHA256}}' "$candidate" || grep -qF '{{MACOS_SHA256}}' "$candidate"; then
+    echo 'FAIL receipt left a digest placeholder in the draft' >&2
+    return 1
+  fi
+}
+
 # A release object alone is insufficient: this pins the exact half-uploaded
 # state that used to let a local digest reach the announcement.
 write_release "[{\"name\":\"cas-x86_64-unknown-linux-gnu.tar.gz\",\"digest\":\"sha256:$linux_sha\"}]"
@@ -73,14 +82,20 @@ grep -qFx "LINUX_SHA256=$linux_sha" <<<"$success_output"
 grep -qFx "MACOS_SHA256=$macos_sha" <<<"$success_output"
 grep -qF "$linux_sha" "$draft"
 grep -qF "$macos_sha" "$draft"
-test "$(rg -oF "$linux_sha" "$draft" | wc -l)" -eq 2
-test "$(rg -oF "$macos_sha" "$draft" | wc -l)" -eq 2
-if rg -qF '{{LINUX_SHA256}}|{{MACOS_SHA256}}' "$draft"; then
-    echo 'FAIL receipt left a digest placeholder in the draft' >&2
-    exit 1
-fi
+test "$(grep -oF "$linux_sha" "$draft" | wc -l)" -eq 2
+test "$(grep -oF "$macos_sha" "$draft" | wc -l)" -eq 2
+assert_no_digest_placeholders "$draft"
 echo 'ok   complete published release emits and mechanically writes fresh digests'
 
-test "$(rg -oF '{{LINUX_SHA256}}' "$template" | wc -l)" -eq 2
-test "$(rg -oF '{{MACOS_SHA256}}' "$template" | wc -l)" -eq 2
+placeholder_draft="$fixture/draft-with-placeholder.md"
+printf 'Linux {{LINUX_SHA256}} / verified macOS digest\n' >"$placeholder_draft"
+set +e
+assert_no_digest_placeholders "$placeholder_draft" >/dev/null 2>&1
+placeholder_status=$?
+set -e
+test "$placeholder_status" -ne 0
+echo 'ok   residual digest placeholder is rejected'
+
+test "$(grep -oF '{{LINUX_SHA256}}' "$template" | wc -l)" -eq 2
+test "$(grep -oF '{{MACOS_SHA256}}' "$template" | wc -l)" -eq 2
 echo 'ok   runtime draft template exposes only receipt-fillable digest placeholders'

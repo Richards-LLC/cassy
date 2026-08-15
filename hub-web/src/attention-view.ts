@@ -161,7 +161,7 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   label.className = "attention-group-label";
   label.textContent = group.overflow
     ? group.machineLabel
-    : `${group.machineLabel}${group.session ? ` / ${group.session}` : ""}`;
+    : group.session ?? group.machineLabel;
   const count = document.createElement("span");
   count.className = "attention-group-count";
   count.textContent = String(group.count);

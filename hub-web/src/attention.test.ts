@@ -65,7 +65,7 @@ describe("Commander attention triage queue", () => {
     }));
 
     expect(task).toMatchObject({ headline: "Epic branch advanced", severity: "info", ticketId: "cas-87e7" });
-    expect(otherContext.headline).toContain("Soundwave / A-Different-Session:");
+    expect(otherContext.headline).toContain("soundwave / a-different-session:");
     expect(otherContext.ticketId).toBeUndefined();
   });
 

@@ -41,7 +41,7 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .empty { place-self: center; color: #8b949e; }
 .terminal-state { display: grid; gap: 12px; max-width: 360px; padding: 16px; border: 1px solid #a36c2c; border-radius: 10px; background: rgba(163,108,44,.16); color: #ffe2a8; font-size: 14px; line-height: 1.4; }.terminal-state p { margin: 0; }.terminal-state .retry-terminal { width: auto; justify-self: start; padding: 0 14px; }
 .context section { margin-bottom: 22px; }
-.attention-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+.attention-panel-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
 .attention-panel-header h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
 .attention-counts { display: inline-flex; align-items: center; gap: 4px; font: 500 var(--fs-xs) var(--font-mono, ui-monospace, monospace); letter-spacing: .06em; }
 .attention-count { min-width: 20px; padding: 2px 6px; border-radius: 999px; text-align: center; }
@@ -49,7 +49,8 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .attention-count--critical { color: var(--state-crit); background: var(--tint-crit); }
 .attention-count--warning { color: var(--state-warn); background: var(--tint-warn); }
 .attention-count--info { color: var(--state-info); background: var(--bg-raised); }
-.attention-dismiss-info, .attention-dismiss-group { min-height: 26px; padding: 2px 7px; border-color: var(--line-subtle); background: var(--bg-raised); color: var(--text-mid); font-size: var(--fs-xs); }
+.attention-dismiss-info, .attention-dismiss-group { min-height: 26px; padding: 2px 7px; border-color: var(--line-subtle); background: var(--bg-raised); color: var(--text-mid); font-size: var(--fs-xs); white-space: nowrap; }
+.attention-dismiss-info { margin-left: auto; }
 .attention-list { display: grid; gap: 8px; }
 .attention-group { min-width: 0; }
 .attention-group-header { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; }

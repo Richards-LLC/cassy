@@ -188,8 +188,9 @@ export function attentionContent(item: AttentionItem): AttentionContent {
   const severity = severityForEvent(item.kind, item.severity);
   const task = stored.match(TASK_PREFIX);
   const fallback = sentenceCase(normalizedKind(item.kind));
+  const storedSummary = /^[a-z0-9_]+$/i.test(stored.trim()) ? sentenceCase(stored) : stored;
   const headline = task?.[2]
-    ?? (looksLikePayload(stored) ? fallback : item.headline ? stored : sentenceCase(stored));
+    ?? (looksLikePayload(stored) ? fallback : storedSummary);
 
   return {
     headline: clampSummary(headline || fallback),

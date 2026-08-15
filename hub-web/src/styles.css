@@ -57,7 +57,7 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .primary-pane-slot .pane { flex: 1; }
 .secondary-pane-strip { display: flex; align-items: stretch; gap: 8px; min-height: 32px; overflow-x: auto; overflow-y: hidden; }
 .secondary-pane-strip .pane { flex: 1 0 280px; }
-.pane { min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid transparent; border-radius: 8px; background: var(--bg-terminal); }
+.pane { position: relative; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid transparent; border-radius: 8px; background: var(--bg-terminal); }
 .pane.selected { border-color: var(--line-strong); }
 .pane > header { flex: 0 0 32px; min-height: 32px; padding: 3px 6px 3px 8px; color: var(--text-mid); background: var(--bg-raised); font: var(--fs-xs) ui-monospace, monospace; }
 .pane-header { display: flex; align-items: center; gap: 7px; cursor: pointer; }
@@ -67,6 +67,8 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .pane-last-activity { margin-left: auto; overflow: hidden; color: var(--text-lo); text-overflow: ellipsis; white-space: nowrap; }
 .pane-layout-controls { display: flex; flex: none; gap: 3px; }
 .pane-layout-controls button { min-height: 24px; padding: 2px 5px; font-size: 10px; white-space: nowrap; }
+.secondary-pane-strip .pane .pane-layout-controls { position: absolute; z-index: 2; top: 36px; right: 4px; display: none; padding: 3px; border-radius: 6px; background: var(--bg-raised); }
+.secondary-pane-strip .pane:hover:not(.collapsed) .pane-layout-controls, .secondary-pane-strip .pane.selected:not(.collapsed) .pane-layout-controls { display: flex; }
 .secondary-pane-strip .pane.collapsed { flex-basis: 240px; height: 32px; min-height: 32px; align-self: flex-start; }
 .secondary-pane-strip .pane.collapsed .terminal-mount { display: none; }
 .terminal-mount { position: relative; flex: 1; min-height: 0; overflow: hidden; }

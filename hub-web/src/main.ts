@@ -564,12 +564,22 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       title.append(statusDot, label, role, activity, controls);
       if (pane.kind !== "Supervisor") {
         title.title = "Click to collapse or expand this worker";
+        title.tabIndex = 0;
+        title.setAttribute("role", "button");
         title.onclick = (event) => {
           event.stopPropagation();
+          selectedPanes.set(selectedKey, pane.id);
+          for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
+          card?.classList.add("selected");
           if (collapsedWorkerPanes.has(key)) collapsedWorkerPanes.delete(key);
           else collapsedWorkerPanes.add(key);
           card?.classList.toggle("collapsed", collapsedWorkerPanes.has(key));
           if (!collapsedWorkerPanes.has(key)) queueMicrotask(() => surfaces.get(key)?.focus());
+        };
+        title.onkeydown = (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          title.click();
         };
       }
       mount = document.createElement("div"); mount.className = "terminal-mount";
@@ -579,6 +589,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     const position = orderedPaneIds(layout).indexOf(pane.id);
     card.classList.toggle("primary", pane.id === layout.primaryPaneId);
     card.classList.toggle("collapsed", pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key));
+    card.querySelector<HTMLElement>(".pane-status-dot")!.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
+    card.querySelector<HTMLElement>(".pane-title")!.textContent = pane.title || pane.id;
     card.querySelector<HTMLElement>(".pane-last-activity")!.textContent = lastActivityLabel(paneLastActivity.get(key));
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");

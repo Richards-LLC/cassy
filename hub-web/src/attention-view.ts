@@ -197,9 +197,20 @@ export function renderAttentionPanel(
 
   const groups = groupAttention(items);
   if (groups.length === 0) {
-    const empty = document.createElement("p");
+    const empty = document.createElement("div");
     empty.className = "attention-empty";
-    empty.textContent = "No events need triage.";
+    const message = document.createElement("p");
+    message.textContent = "All clear";
+    const latest = items.toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    const timestamp = document.createElement("time");
+    timestamp.className = "attention-last-event";
+    if (latest) {
+      timestamp.dateTime = latest.createdAt;
+      timestamp.textContent = `Last event ${new Date(latest.createdAt).toLocaleString()}`;
+    } else {
+      timestamp.textContent = "No events recorded yet";
+    }
+    empty.append(message, timestamp);
     container.append(empty);
     return;
   }

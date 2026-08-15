@@ -528,9 +528,22 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
-  grid.querySelector(".empty")?.remove();
   const visiblePanes = state.panes.filter((pane) => pane.kind !== "Director");
   const active = new Set(visiblePanes.map((pane) => pane.id));
+  if (visiblePanes.length === 0) {
+    for (const [key, surface] of surfaces) {
+      if (!key.startsWith(`${machineId}:${session}:`)) continue;
+      surface.dispose();
+      surfaces.delete(key);
+    }
+    const empty = document.createElement("div");
+    empty.className = "empty empty-pane-slot";
+    empty.textContent = "No session — pick one from the drawer or drag it here.";
+    grid.classList.remove("pane-layout", "single-pane");
+    grid.replaceChildren(empty);
+    return;
+  }
+  grid.querySelector(".empty")?.remove();
   const selectedPane = selectedPanes.get(selectedKey);
   if (!selectedPane || !active.has(selectedPane)) {
     const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
@@ -639,6 +652,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches
       && pane.id !== layout.primaryPaneId;
     const existingSurface = surfaces.get(key);
+    existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);
     if (existingSurface && (collapsedOnPhone || existingSurface.element !== mount || !existingSurface.element.isConnected)) {
       existingSurface.dispose();
       surfaces.delete(key);
@@ -655,6 +669,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         continue;
       }
       surfaces.set(key, surface);
+      surface.setControlMode(leases.get(selectedKey)?.held_by_me === true);
       const buffered = paneBuffers.get(key);
       if (buffered) surface.write(new Uint8Array(buffered));
     }
@@ -684,11 +699,19 @@ function controlDisabledReason(machine: StoredMachine | undefined, session: stri
   if (!hubSupports(machine.id, "daemon_attach")) return "This hub does not support Commander control. Upgrade the hub, then reconnect this machine.";
   const missingScopes = ["pane-input", "message-send", "pane-interrupt"] as const;
   if (missingScopes.some((scope) => !machine.scopes.includes(scope))) {
-    return `This credential can only observe from ${location.origin}. Pair ${machine.label} again from this Commander origin and approve control access on the machine. Pairings are specific to each Commander origin.`;
+    return `Relay pairing granted read-only scopes for ${location.origin}. Run cas hub pair --origin ${location.origin}, open the new pairing URL here, and approve control access on ${machine.label}. Pairings are specific to each Commander origin.`;
   }
   if (lease?.held_by_me) return undefined;
   if (lease?.controller_label) return `${lease.controller_label} currently controls this session. Wait for it to be released or use an administrator credential to take over.`;
   return "Take control to enable terminal input, messages, and interrupts.";
+}
+
+function takeControlDisabledReason(machine: StoredMachine | undefined, session: string | undefined, lease: LeaseState | undefined): string | undefined {
+  const reason = controlDisabledReason(machine, session, lease);
+  if (!machine || !session || !hubSupports(machine.id, "daemon_attach")) return reason;
+  if (!["pane-input", "message-send", "pane-interrupt"].every((scope) => machine.scopes.includes(scope as Scope))) return reason;
+  if (!lease?.held_by_me && lease?.controller_label && !machine.scopes.includes("hub-admin")) return reason;
+  return undefined;
 }
 
 function sendControl(machineId: string, session: string, message: unknown): void {
@@ -775,6 +798,7 @@ function render(captureDraft = true): void {
   const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot;
   const needsRepair = connectionSnapshot?.stage === "auth" && connectionSnapshot.phase === "failed";
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
+  const takeControlReason = takeControlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const connectionState = connectionClass(connectionSnapshot);
   const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
@@ -811,11 +835,9 @@ function render(captureDraft = true): void {
           <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
           <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
-          <div class="actions"><button id="lease" title="${escapeAttr(controlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
+          <div class="actions"><span class="control-action" title="${escapeAttr(takeControlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}"><button id="lease"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button></span><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
-        ${connectionSnapshot?.degraded ? '<section class="compatibility-warning" role="alert">Connection degraded: two heartbeats missed. Reconnecting after four.</section>' : ""}
-        ${connectionSnapshot && connectionSnapshot.phase !== "live" && selected ? `<section class="connection-detail" role="status"><span>${escapeHtml(connectionText)}</span><button id="retry-connection" type="button">Retry now</button><button id="diagnose-connection" type="button">Diagnose</button>${needsRepair ? '<button id="repair-machine" class="primary" type="button">Re-pair</button>' : ""}<pre id="diagnostic-output" hidden></pre></section>` : ""}
-        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
         <div class="attention-rail">

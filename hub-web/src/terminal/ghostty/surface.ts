@@ -137,15 +137,17 @@ export function terminalFontSize(size?: number): number {
 /**
  * Whether the cursor should keep toggling. An unfocused surface draws a steady
  * hollow cursor instead of blinking, and a reduced-motion reader gets a steady
- * cursor too rather than a permanently animating element.
+ * cursor too rather than a permanently animating element. Observer sessions
+ * also stay steady: only the active lease holder gets a blinking cursor.
  */
 export function shouldBlinkTerminalCursor(state: {
+  readonly controlMode: boolean;
   readonly focused: boolean;
   readonly cursorBlinking: boolean;
   readonly cursorVisible: boolean;
   readonly reducedMotion: boolean;
 }): boolean {
-  return state.focused && state.cursorBlinking && state.cursorVisible && !state.reducedMotion;
+  return state.controlMode && state.focused && state.cursorBlinking && state.cursorVisible && !state.reducedMotion;
 }
 
 /**
@@ -526,6 +528,7 @@ export class GhosttyTerminalSurface {
   private selectionMoved = false;
   private composing = false;
   private focused = false;
+  private controlMode = false;
   private resizeNotified = false;
   private canvasConfigured = false;
   private theme: GhosttyTheme;
@@ -668,6 +671,15 @@ export class GhosttyTerminalSurface {
     this.theme = theme;
     this.core.setTheme(theme);
     this.forceFullRender = true;
+    this.requestRender();
+  }
+
+  setControlMode(enabled: boolean): void {
+    if (this.disposed || this.controlMode === enabled) return;
+    this.controlMode = enabled;
+    // Lease changes are semantic mode changes. Restart from a visible phase so
+    // observer mode cannot inherit the hidden half of a controller's blink.
+    this.cursorOn = true;
     this.requestRender();
   }
 
@@ -1556,6 +1568,7 @@ export class GhosttyTerminalSurface {
     const snapshot = this.snapshot;
     if (!snapshot) return false;
     return shouldBlinkTerminalCursor({
+      controlMode: this.controlMode,
       focused: this.focused,
       cursorBlinking: snapshot.cursorBlinking,
       cursorVisible: snapshot.cursorVisible,

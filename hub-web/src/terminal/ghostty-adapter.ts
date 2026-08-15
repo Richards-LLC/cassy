@@ -53,6 +53,7 @@ export async function createGhosttyTerminalSurface(
     get cols() { return surface.cols; },
     get rows() { return surface.rows; },
     write(data) { surface.write(decoder.decode(data, { stream: true })); },
+    setControlMode(enabled) { surface.setControlMode(enabled); },
     focus() { surface.focus(); },
     dispose() { surface.dispose(); },
   };

@@ -37,9 +37,34 @@ describe("binding Commander browser invariants", () => {
 
   it("names the remedy when an observer-only credential disables control", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
-    expect(source).toContain("This credential can only observe from ${location.origin}");
+    expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
+    expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Commander origin.");
+    expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
+    expect(source).toContain('disabled aria-describedby="control-disabled-reason"');
     expect(source).toContain('class="control-disabled-reason"');
+  });
+
+  it("derives the header mode and terminal cursor from the real session lease", async () => {
+    const [main, terminal] = await Promise.all([
+      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readFile(new URL("terminal/ghostty/surface.ts", import.meta.url), "utf8"),
+    ]);
+    expect(main).toContain('const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER"');
+    expect(main).toContain('class="mode-badge ${mode.toLowerCase()}"');
+    expect(main).toContain("setControlMode(leases.get(selectedKey)?.held_by_me === true)");
+    expect(terminal).toContain("state.controlMode && state.focused");
+  });
+
+  it("renders instructional empty pane and all-clear feed states", async () => {
+    const [main, attentionView] = await Promise.all([
+      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readFile(new URL("attention-view.ts", import.meta.url), "utf8"),
+    ]);
+    expect(main).toContain("No session — pick one from the drawer or drag it here.");
+    expect(main).toContain('empty.className = "empty empty-pane-slot"');
+    expect(attentionView).toContain('message.textContent = "All clear"');
+    expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
   it("binds the browser fetch receiver at every pairing handoff", async () => {

@@ -13,6 +13,7 @@ import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest }
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
@@ -34,6 +35,9 @@ const paneBuffers = new Map<string, number[]>();
 const selectedPanes = new Map<string, string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
+// A live Claude/Ink proof after cas-9a29 decides whether one-row PTYs are safe.
+// Until then collapsed phone rows preserve their last real terminal geometry.
+const mobileCollapsedPaneGeometry = "freeze";
 let attention: AttentionItem[] = [];
 let selectedMachineId: string | undefined;
 let selectedSession: string | undefined;
@@ -47,6 +51,18 @@ let pairingDraft = createPairingDraft(location.origin);
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
+
+function paneLayoutStorage(): PaneLayoutStorage | undefined {
+  try { return window.localStorage; } catch { return undefined; }
+}
+
+function layoutForPanes(key: string, panes: readonly PaneInfo[], fallbackPrimaryPaneId: string | undefined): PaneLayout | undefined {
+  const activePaneIds = panes.filter((pane) => pane.kind !== "Director").map((pane) => pane.id);
+  const storage = paneLayoutStorage();
+  return storage
+    ? loadPaneLayout(storage, key, activePaneIds, fallbackPrimaryPaneId)
+    : normalizePaneLayout(activePaneIds, undefined, fallbackPrimaryPaneId);
+}
 
 async function boot(): Promise<void> {
   const stored = await catalog.recoverPending();
@@ -438,36 +454,84 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
   grid.querySelector(".empty")?.remove();
-  const active = new Set(state.panes.filter((pane) => pane.kind !== "Director").map((pane) => pane.id));
+  const visiblePanes = state.panes.filter((pane) => pane.kind !== "Director");
+  const active = new Set(visiblePanes.map((pane) => pane.id));
   const selectedKey = sessionKey(machineId, session);
   const selectedPane = selectedPanes.get(selectedKey);
   if (!selectedPane || !active.has(selectedPane)) {
-    const fallback = state.panes.find((pane) => pane.kind !== "Director" && pane.focused)
-      ?? state.panes.find((pane) => pane.kind !== "Director");
+    const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
     if (fallback) selectedPanes.set(selectedKey, fallback.id);
+  }
+  const layout = layoutForPanes(selectedKey, visiblePanes, selectedPanes.get(selectedKey));
+  if (!layout) return;
+  grid.classList.add("pane-layout");
+  grid.classList.toggle("single-pane", visiblePanes.length === 1);
+  grid.dataset.secondaryPaneGeometry = mobileCollapsedPaneGeometry;
+  let primarySlot = grid.querySelector<HTMLElement>(".primary-pane-slot");
+  let secondaryStrip = grid.querySelector<HTMLElement>(".secondary-pane-strip");
+  if (!primarySlot || !secondaryStrip) {
+    primarySlot = document.createElement("div"); primarySlot.className = "primary-pane-slot";
+    secondaryStrip = document.createElement("div"); secondaryStrip.className = "secondary-pane-strip";
+    grid.replaceChildren(primarySlot, secondaryStrip);
   }
   for (const [key, surface] of surfaces) {
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) { surface.dispose(); surfaces.delete(key); }
   }
-  for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
+  const panesById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
+  for (const paneId of orderedPaneIds(layout)) {
+    const pane = panesById.get(paneId);
+    if (!pane) continue;
     const key = paneKey(machineId, session, pane.id);
-    let mount = grid.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
-    if (!mount) {
-      const card = document.createElement("section");
+    let card = grid.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"]`);
+    let mount = card?.querySelector<HTMLElement>(".terminal-mount");
+    if (!card || !mount) {
+      card = document.createElement("section");
       card.className = "pane";
       card.dataset.paneId = pane.id;
       if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
       card.onclick = () => {
         selectedPanes.set(selectedKey, pane.id);
         for (const sibling of grid.querySelectorAll(".pane.selected")) sibling.classList.remove("selected");
-        card.classList.add("selected");
+        card?.classList.add("selected");
         surfaces.get(key)?.focus();
       };
-      const title = document.createElement("header");
-      title.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
+      const title = document.createElement("header"); title.className = "pane-header";
+      const label = document.createElement("span"); label.className = "pane-title";
+      label.textContent = `${pane.title || pane.id} · ${pane.kind.toLowerCase()}${pane.exited ? " · exited" : ""}`;
+      const controls = document.createElement("div"); controls.className = "pane-layout-controls";
+      const button = (label: string, className: string, action: () => void) => {
+        const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
+        control.setAttribute("aria-label", label);
+        control.onclick = (event) => { event.stopPropagation(); action(); };
+        return control;
+      };
+      const updateLayout = (change: (current: PaneLayout) => PaneLayout) => {
+        const current = layoutForPanes(selectedKey, visiblePanes, selectedPanes.get(selectedKey));
+        if (!current) return;
+        const next = change(current);
+        const storage = paneLayoutStorage();
+        if (storage) savePaneLayout(storage, selectedKey, next);
+        void renderSessionState(machineId, session, state);
+      };
+      controls.append(
+        button("Make primary", "make-primary", () => updateLayout((current) => promotePane(current, pane.id))),
+        button("Move earlier", "move-earlier", () => updateLayout((current) => movePane(current, pane.id, -1))),
+        button("Move later", "move-later", () => updateLayout((current) => movePane(current, pane.id, 1))),
+      );
+      title.append(label, controls);
       mount = document.createElement("div"); mount.className = "terminal-mount";
-      card.append(title, mount); grid.append(card);
+      card.append(title, mount);
     }
+    if (!card || !mount) continue;
+    const position = orderedPaneIds(layout).indexOf(pane.id);
+    card.classList.toggle("primary", pane.id === layout.primaryPaneId);
+    const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
+    const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
+    const moveLater = card.querySelector<HTMLButtonElement>(".move-later");
+    if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
+    if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
+    if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
+    (pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card);
     const existingSurface = surfaces.get(key);
     if (existingSurface && (existingSurface.element !== mount || !existingSurface.element.isConnected)) {
       existingSurface.dispose();

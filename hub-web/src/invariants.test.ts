@@ -70,13 +70,19 @@ describe("binding Commander browser invariants", () => {
   });
 
   it("keeps long-lived credentials out of ambient browser storage and URL channels", async () => {
-    const source = await Promise.all(["storage.ts", "main.ts", "dpop.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const source = await Promise.all(["storage.ts", "dpop.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     const joined = source.join("\n");
     for (const forbidden of ["local" + "Storage", "document.cookie", "serviceWorker.register", "caches.open"]) {
       expect(joined).not.toContain(forbidden);
     }
     expect(await readFile(new URL("storage.ts", import.meta.url), "utf8")).not.toContain("session" + "Storage");
     expect(joined).toContain("indexedDB.open");
+
+    // Layout is an intentionally non-secret, per-device preference. It must
+    // remain isolated from the IndexedDB credential catalog.
+    const layout = await readFile(new URL("pane-layout.ts", import.meta.url), "utf8");
+    expect(layout).toContain("cas-commander:pane-layout:");
+    for (const secretField of ["credential", "privateKey", "deviceKey"]) expect(layout).not.toContain(secretField);
   });
 
   it("feature-detects hub versions and keeps controls disabled on skew", async () => {

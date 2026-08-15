@@ -171,6 +171,8 @@ describe("binding Commander browser invariants", () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
     expect(source).toContain("replaceWith(preservedGrid)");
+    expect(source).toContain('document.activeElement?.matches(".t3-ghostty-input")');
+    expect(source).toContain("terminalWasFocused) queueMicrotask(() => activePaneContext()?.surface.focus())");
     expect(source).toContain("data-session-key");
   });
 
@@ -188,6 +190,14 @@ describe("binding Commander browser invariants", () => {
     expect(css).toContain("prefers-reduced-motion: reduce");
     expect(css).toContain("@media (max-width: 53rem)");
     expect(css).toContain("max-width: var(--mobile-attention-label-width)");
+  });
+
+  it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('id="mobile-message-toggle"');
+    expect(main).toContain('activeContextTab = "status"; attentionPanelCollapsed = false; render();');
+    expect(css).toContain(".mobile-message-toggle { display: none; }");
+    expect(css).toContain(".mobile-message-toggle {");
   });
 
   it("keeps the section 2 visual system tokenized and machine copy mono", async () => {

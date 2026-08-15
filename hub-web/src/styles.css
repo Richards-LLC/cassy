@@ -841,6 +841,8 @@ main {
   background: var(--bg-raised);
 }
 
+.mobile-message-toggle { display: none; }
+
 .attention-rail-counts {
   display: grid;
   place-items: center;
@@ -1580,6 +1582,16 @@ fieldset {
     width: var(--space-8);
     min-height: var(--machine-rail-width);
     padding: 0;
+  }
+
+  .mobile-message-toggle {
+    display: grid;
+    place-items: center;
+    width: var(--space-8);
+    min-height: var(--machine-rail-width);
+    padding: 0;
+    color: var(--text-hi);
+    background: var(--bg-raised);
   }
 
   .context-panel.collapsed .attention-counts--compact {

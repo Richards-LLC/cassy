@@ -1059,6 +1059,11 @@ function render(captureDraft = true): void {
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
+  // Moving the live grid through app.innerHTML temporarily detaches its hidden
+  // textarea. Remember terminal focus so a heartbeat render cannot dismiss a
+  // phone keyboard mid-command.
+  const terminalWasFocused = preservedGrid?.contains(document.activeElement) === true
+    && document.activeElement?.matches(".t3-ghostty-input") === true;
   if (preservedGrid) {
     preservedGrid.remove();
   } else {
@@ -1094,6 +1099,7 @@ function render(captureDraft = true): void {
         <div class="attention-rail">
           <button id="attention-panel-toggle" class="rail-control" type="button" aria-label="${attentionPanelCollapsed ? "Expand" : "Collapse"} attention panel" aria-expanded="${!attentionPanelCollapsed}">${attentionPanelCollapsed ? "‹" : "›"}</button>
           <button id="attention-rail-counts" class="attention-rail-counts" type="button" data-open-context="attention" aria-label="Open attention"></button>
+          <button id="mobile-message-toggle" class="mobile-message-toggle" type="button" aria-label="Message supervisor">✉</button>
         </div>
         <div class="context-body">
           <div class="context-tabs" role="tablist" aria-label="Operations panel">
@@ -1118,6 +1124,7 @@ function render(captureDraft = true): void {
     </dialog>
     ${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
+  if (terminalWasFocused) queueMicrotask(() => activePaneContext()?.surface.focus());
   const machineRail = document.querySelector("#machine-rail-list")!;
   const machineTree = document.querySelector("#machine-tree")!;
   for (const machine of machines.values()) {
@@ -1387,6 +1394,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
   document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = () => { activeContextTab = "status"; attentionPanelCollapsed = false; render(); };
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
     button.onclick = () => { activeContextTab = "attention"; attentionPanelCollapsed = false; render(); };
   }

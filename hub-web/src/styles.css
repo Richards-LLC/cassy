@@ -280,6 +280,8 @@ pre,
   font-size: var(--fs-lg);
 }
 
+.pair-machine-label { display: none; }
+
 .machine-drawer {
   position: absolute;
   z-index: 1;
@@ -1449,13 +1451,13 @@ fieldset {
   .shell.attention-collapsed,
   .shell.drawer-open {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) var(--machine-rail-width);
+    grid-template-rows: minmax(0, 1fr) calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
     gap: 0;
   }
 
   /* The expanded context panel receives a row, so it never covers a terminal. */
   .shell.attention-expanded {
-    grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) var(--machine-rail-width);
+    grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
   }
 
   .shell main { grid-column: 1; grid-row: 1; }
@@ -1465,7 +1467,9 @@ fieldset {
   .machine-rail {
     flex-direction: row;
     width: 100%;
-    height: var(--machine-rail-width);
+    height: calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
+    box-sizing: border-box;
+    padding-bottom: env(safe-area-inset-bottom);
     padding-right: calc(var(--machine-rail-width) + var(--space-1));
   }
 
@@ -1477,7 +1481,23 @@ fieldset {
     overflow-y: hidden;
   }
 
-  .machine-rail .pair-machine { margin: 0 0 0 auto; }
+  .machine-rail .pair-machine {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 44px;
+    min-height: 44px;
+    margin: 0 var(--space-2) 0 auto;
+    padding: 0 var(--space-3);
+    color: var(--text-hi);
+    background: var(--bg-raised);
+    border: var(--line-width) solid var(--line-strong);
+    border-radius: var(--radius-card);
+    font-size: var(--fs-sm);
+    font-weight: var(--weight-medium);
+  }
+  .machine-rail .pair-machine-label { display: inline; margin-left: var(--space-1); }
 
   .machine-drawer {
     position: fixed;
@@ -1534,7 +1554,7 @@ fieldset {
     position: fixed;
     z-index: 6;
     right: 0;
-    bottom: 0;
+    bottom: env(safe-area-inset-bottom);
     display: grid;
     width: var(--machine-rail-width);
     height: var(--machine-rail-width);

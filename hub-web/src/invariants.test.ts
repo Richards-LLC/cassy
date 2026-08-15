@@ -182,7 +182,8 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("if (reachable)");
     expect(source).toContain("this.desired = false");
     expect(source).toContain("this.eventAbort?.abort()");
-    expect(source).toContain('this.callbacks.onState("auth-blocked", detail)');
+    expect(source).toContain('this.transition("failed", "auth", { reason: detail, authFailure: kind })');
+    expect(source).toContain("this.callbacks.onAuthFailure?.(kind, detail)");
   });
 
   it("bounds a terminal that opens but never sends its initial session state", async () => {
@@ -221,11 +222,11 @@ describe("binding Commander browser invariants", () => {
 
     await supervisor.attach("factory-a");
     FakeWebSocket.instances[0].open();
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(3_000);
 
     expect(callbacks.onSocketError).toHaveBeenCalledWith(
       "factory-a",
-      "Terminal connection opened but sent no session state within 10 seconds. Retrying…",
+      "Terminal attach opened but sent no session state within 3s. Retrying…",
     );
     supervisor.stop();
   });
@@ -233,7 +234,7 @@ describe("binding Commander browser invariants", () => {
   it("turns terminal failures into an explanation and direct retry action", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
-    expect(source).toContain("Opening the terminal connection. This can take up to 10 seconds.");
+    expect(source).toContain("Attaching terminal (3s deadline). Existing pane output stays visible while Commander retries.");
     expect(source).toContain("Terminal unavailable: ${detail}");
     expect(source).toContain('retry.textContent = "Try again"');
     expect(source).toContain("void connections.get(machineId)?.attach(session)");

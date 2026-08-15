@@ -2,6 +2,7 @@ import "./styles.css";
 import { attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
 import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
+import { elapsedSeconds } from "./connection-state";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -95,11 +96,11 @@ async function boot(): Promise<void> {
 
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
   return new HubConnectionSupervisor(machine, {
-    onState: (state, detail) => {
+    onState: (state) => {
       connectionStates.set(machine.id, state);
-      if (state === "reconnecting" || state === "auth-blocked" || state === "offline") invalidateMachineLeases(machine.id);
-      if (state === "auth-blocked") void addAttention(machine, undefined, "auth_loss", detail ?? "Authentication blocked");
-      if (state === "reconnecting") void addAttention(machine, undefined, "hub_disconnected", detail ?? "Hub disconnected");
+      if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
+      if (state.authFailure) void addAttention(machine, undefined, "auth_loss", state.reason ?? "Authentication blocked");
+      if (state.phase === "backoff") void addAttention(machine, undefined, "hub_disconnected", state.reason ?? "Hub disconnected");
       render();
     },
     onLatency: (latencyMs) => {
@@ -107,6 +108,13 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const output = document.querySelector<HTMLElement>(`[data-machine-latency="${CSS.escape(machine.id)}"]`);
       if (output) output.textContent = `${latencyMs}ms`;
     },
+    onAuthFailure: (kind, detail) => {
+      pairingStatus = kind === "expired"
+        ? "Credential refresh failed. Re-pair this machine to continue."
+        : `${detail}. Re-pair in Commander; no browser reset is required.`;
+      render();
+    },
+    onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items) => { sessions.set(machine.id, items); render(); },
     onMachineEvent: (event) => {
@@ -398,7 +406,7 @@ function renderTerminalConnecting(machineId: string, session: string): void {
   const placeholder = grid.querySelector<HTMLElement>(".empty");
   if (placeholder) {
     placeholder.classList.remove("terminal-state");
-    placeholder.textContent = "Opening the terminal connection. This can take up to 10 seconds.";
+    placeholder.textContent = "Attaching terminal (3s deadline). Existing pane output stays visible while Commander retries.";
   }
 }
 
@@ -682,6 +690,16 @@ function toast(message: string): void {
   window.setTimeout(() => output.classList.remove("visible"), 3200);
 }
 
+function connectionLabel(state: ConnectionState | undefined): string {
+  if (!state) return "idle";
+  if (state.phase === "live") return state.degraded ? `degraded · ${state.missedHeartbeats} missed` : `live · ${state.latencyMs ?? 0}ms`;
+  if (state.phase === "backoff") return `retrying ${state.stage} in ${Math.ceil((state.retryInMs ?? 0) / 1000)}s`;
+  if (state.phase === "failed") return state.reason ?? `failed during ${state.stage}`;
+  return `${state.phase} · ${elapsedSeconds(state)}s`;
+}
+
+function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
+
 function pairingDetails(origin: string, scopes: readonly Scope[]): string {
   return `<dl class="pair-details"><div><dt>Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Scopes</dt><dd>${scopes.map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
@@ -716,10 +734,13 @@ function render(captureDraft = true): void {
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
+  const connectionSnapshot = selected ? connectionStates.get(selected.id) : undefined;
+  const needsRepair = connectionSnapshot?.stage === "auth" && connectionSnapshot.phase === "failed";
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
-  const connectionState = connectionStates.get(selected?.id ?? "") ?? "idle";
-  const latency = selected ? connectionLatency.get(selected.id) : undefined;
+  const connectionState = connectionClass(connectionSnapshot);
+  const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
+  const latency = connectionSnapshot?.latencyMs ?? (selected ? connectionLatency.get(selected.id) : undefined);
   const counts = attentionCounts(attention);
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
@@ -751,9 +772,11 @@ function render(captureDraft = true): void {
           <h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
           <span class="machine-chip">${escapeHtml(selected?.label ?? "No machine")}</span>
           <span class="mode-badge ${mode.toLowerCase()}">${mode}</span>
-          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionState)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? connectionState : `${latency}ms`}</span></span>
+          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? escapeHtml(connectionText) : `${latency}ms`}</span></span>
           <div class="actions"><button id="lease" title="${escapeAttr(controlReason ?? (lease?.held_by_me ? "Release control" : "Take control"))}" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
+        ${connectionSnapshot?.degraded ? '<section class="compatibility-warning" role="alert">Connection degraded: two heartbeats missed. Reconnecting after four.</section>' : ""}
+        ${connectionSnapshot && connectionSnapshot.phase !== "live" && selected ? `<section class="connection-detail" role="status"><span>${escapeHtml(connectionText)}</span><button id="retry-connection" type="button">Retry now</button><button id="diagnose-connection" type="button">Diagnose</button>${needsRepair ? '<button id="repair-machine" class="primary" type="button">Re-pair</button>' : ""}<pre id="diagnostic-output" hidden></pre></section>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section>
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
@@ -812,13 +835,14 @@ function selectMachine(machine: StoredMachine): void {
 }
 
 function machineRailButton(machine: StoredMachine): HTMLButtonElement {
-  const state = connectionStates.get(machine.id) ?? "idle";
+  const snapshot = connectionStates.get(machine.id);
+  const state = connectionClass(snapshot);
   const button = document.createElement("button");
   button.className = `machine-icon ${machine.id === selectedMachineId ? "active" : ""}`;
   button.type = "button";
   button.innerHTML = `<span>${escapeHtml(machineInitials(machine.label))}</span><i class="machine-state ${state}"></i>`;
-  button.title = `${machine.label} · ${state}`;
-  button.setAttribute("aria-label", `${machine.label}, ${state}`);
+  button.title = `${machine.label} · ${connectionLabel(snapshot)}`;
+  button.setAttribute("aria-label", `${machine.label}, ${connectionLabel(snapshot)}`);
   button.onclick = () => selectMachine(machine);
   return button;
 }
@@ -829,8 +853,9 @@ function machineTreeGroup(machine: StoredMachine): HTMLElement {
   const machineRow = document.createElement("button");
   machineRow.className = "machine-row";
   machineRow.type = "button";
-  const state = connectionStates.get(machine.id) ?? "idle";
-  machineRow.innerHTML = `<span class="machine-state ${state}"></span><strong>${escapeHtml(machine.label)}</strong><small>${escapeHtml(state)}</small>`;
+  const snapshot = connectionStates.get(machine.id);
+  const state = connectionClass(snapshot);
+  machineRow.innerHTML = `<span class="machine-state ${state}"></span><strong>${escapeHtml(machine.label)}</strong><small>${escapeHtml(connectionLabel(snapshot))}</small>`;
   machineRow.onclick = () => selectMachine(machine);
   group.append(machineRow);
   if (machine.id === selectedMachineId) {
@@ -933,6 +958,15 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     });
   };
   if (pairForm) pairForm.onsubmit = (event) => { event.preventDefault(); void pairMachine(pairForm).then((paired) => { if (paired) document.querySelector<HTMLDialogElement>("#pair-dialog")?.close(); }).catch((error) => toast(error instanceof Error ? error.message : "Pairing failed")); };
+  const retry = document.querySelector<HTMLButtonElement>("#retry-connection");
+  if (retry && selected) retry.onclick = () => connections.get(selected.id)?.retry();
+  const diagnose = document.querySelector<HTMLButtonElement>("#diagnose-connection");
+  if (diagnose && selected) diagnose.onclick = () => void connections.get(selected.id)?.diagnose().then((result) => {
+    const output = document.querySelector<HTMLElement>("#diagnostic-output");
+    if (output) { output.hidden = false; output.textContent = JSON.stringify(result, null, 2); }
+  }).catch((error) => toast(error instanceof Error ? error.message : "Diagnosis failed"));
+  const repair = document.querySelector<HTMLButtonElement>("#repair-machine");
+  if (repair) repair.onclick = () => { pairingStatus = `Re-pair ${selected?.label ?? "this machine"} with a short-lived code.`; document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal(); };
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
   if (remove && selected) remove.onclick = async () => {
     connections.get(selected.id)?.stop();
@@ -947,7 +981,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       await connections.get(selected.id)?.releaseLease(selectedSession);
       invalidateMachineLeases(selected.id);
     } else {
-      await connections.get(selected.id)?.acquireLease(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
+      await connections.get(selected.id)?.requestControl(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
     }
     await loadLease(selected.id, selectedSession);
   };

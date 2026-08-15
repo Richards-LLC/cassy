@@ -1732,6 +1732,97 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     assert!(!audit.contains(&credential.credential));
 }
 
+#[test]
+fn expired_device_credential_refreshes_once_but_revoked_never_does() {
+    use chrono::{Duration, Utc};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let issued = Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            issued,
+        )
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, issued).unwrap();
+
+    // Keep the credential active through its ordinary 30-day idle windows.
+    for day in [29, 58, 87] {
+        let active_at = issued + Duration::days(day);
+        let active_proof = sign_dpop(
+            &signing,
+            &credential.credential,
+            "GET",
+            "/v1/machine",
+            active_at,
+            &format!("active-before-expiry-{day}"),
+        );
+        auth.authenticate_dpop(
+            &format!("DPoP {}", credential.credential),
+            &active_proof,
+            "https://controller.example",
+            "GET",
+            "/v1/machine",
+            active_at,
+        )
+        .unwrap();
+    }
+
+    let expired_at = issued + Duration::days(91);
+    let refresh_proof = sign_dpop(
+        &signing,
+        &credential.credential,
+        "POST",
+        "/v1/auth/refresh",
+        expired_at,
+        "refresh-expired",
+    );
+    let refreshed = auth.refresh_device_credential(
+        &format!("DPoP {}", credential.credential),
+        &refresh_proof,
+        "https://controller.example",
+        "POST",
+        "/v1/auth/refresh",
+        expired_at,
+    )
+    .unwrap();
+    assert_ne!(refreshed.credential, credential.credential);
+    assert_eq!(refreshed.expires_at, expired_at + Duration::days(90));
+
+    auth.revoke_device(&refreshed.device_id, expired_at).unwrap();
+    let revoked_proof = sign_dpop(
+        &signing,
+        &refreshed.credential,
+        "POST",
+        "/v1/auth/refresh",
+        expired_at,
+        "refresh-revoked",
+    );
+    assert!(
+        auth.refresh_device_credential(
+            &format!("DPoP {}", refreshed.credential),
+            &revoked_proof,
+            "https://controller.example",
+            "POST",
+            "/v1/auth/refresh",
+            expired_at,
+        )
+        .is_err()
+    );
+}
+
 fn public_jwk(signing: &p256::ecdsa::SigningKey) -> PublicJwk {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;

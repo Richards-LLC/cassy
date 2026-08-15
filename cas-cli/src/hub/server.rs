@@ -1,5 +1,7 @@
 use std::convert::Infallible;
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Json;
@@ -101,7 +103,15 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/websocket-ticket",
             post(websocket_ticket::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/auth/refresh",
+            post(refresh_credential::<R>).options(preflight::<R>),
+        )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
+        .route(
+            "/v1/diagnostics",
+            get(diagnostics::<R>).options(preflight::<R>),
+        )
         .route("/v1/sessions", get(sessions::<R>).options(preflight::<R>))
         .route("/v1/events", get(events::<R>).options(preflight::<R>))
         .route(
@@ -350,6 +360,61 @@ async fn machine<R: SessionReadModel>(
             transport: state.metadata.transport,
             cloud_devices: state.metadata.cloud_devices,
         })
+        .into_response(),
+        &headers,
+    )
+}
+
+async fn diagnostics<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    if authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/diagnostics",
+    )
+    .is_err()
+    {
+        return unauthorized();
+    }
+    let tailscale = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::task::spawn_blocking(|| {
+            Command::new("tailscale")
+                .args(["status", "--json"])
+                .output()
+        }),
+    )
+    .await;
+    let tailscale = match tailscale {
+        Ok(Ok(Ok(output))) if output.status.success() => {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .unwrap_or_else(|_| serde_json::json!({"error":"tailscale returned invalid JSON"}))
+        }
+        Ok(Ok(Ok(output))) => {
+            serde_json::json!({"error": format!("tailscale status exited {}", output.status)})
+        }
+        Ok(Ok(Err(_))) => serde_json::json!({"error":"tailscale CLI unavailable"}),
+        Ok(Err(_)) => serde_json::json!({"error":"tailscale status worker failed"}),
+        Err(_) => serde_json::json!({"error":"tailscale status timed out after 3s"}),
+    };
+    let session_count = state
+        .catalog
+        .list()
+        .await
+        .map(|items| items.len())
+        .unwrap_or_default();
+    with_cors(
+        Json(serde_json::json!({
+            "target_node": state.machine.id,
+            "tailscale_status": tailscale,
+            "daemon_health": {"status":"ready", "sessions":session_count},
+            "checked_at": chrono::Utc::now(),
+        }))
         .into_response(),
         &headers,
     )
@@ -687,6 +752,38 @@ async fn pairing_exchange<R: SessionReadModel>(
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
         Err(_) if bound_origin => with_cors(unauthorized(), &headers),
         Err(_) => unauthorized(),
+    }
+}
+
+async fn refresh_credential<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return unauthorized();
+    };
+    let Some(request_origin) = origin(&headers) else {
+        return unauthorized();
+    };
+    let Some(authorization) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return unauthorized();
+    };
+    let Some(proof) = headers.get("dpop").and_then(|value| value.to_str().ok()) else {
+        return unauthorized();
+    };
+    match auth.refresh_device_credential(
+        authorization,
+        proof,
+        &request_origin,
+        "POST",
+        "/v1/auth/refresh",
+        chrono::Utc::now(),
+    ) {
+        Ok(credential) => with_cors(Json(credential).into_response(), &headers),
+        Err(_) => with_cors(unauthorized(), &headers),
     }
 }
 

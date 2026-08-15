@@ -1,7 +1,19 @@
 import { dpopHeaders } from "./dpop";
+import {
+  backoffDelay,
+  DEGRADED_AFTER_MISSED_HEARTBEATS,
+  HEARTBEAT_INTERVAL_MS,
+  RECONNECT_AFTER_MISSED_HEARTBEATS,
+  stageFailureDetail,
+  STAGE_TIMEOUT_MS,
+  type ConnectionPhase,
+  type ConnectionSnapshot,
+  type ConnectionStage,
+} from "./connection-state";
 import type { HubSession, LeaseState, PaneInfo, SessionState, StoredMachine } from "./types";
 
-export type ConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "auth-blocked" | "offline";
+export type ConnectionState = ConnectionSnapshot;
+export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch";
 
 export interface HubMachineInfo {
   schema_version: number;
@@ -10,8 +22,10 @@ export interface HubMachineInfo {
 }
 
 export interface HubCallbacks {
-  onState(state: ConnectionState, detail?: string): void;
+  onState(state: ConnectionState): void;
   onLatency?(latencyMs: number): void;
+  onAuthFailure?(kind: AuthFailureKind, detail: string): void;
+  onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
   onSessions(sessions: HubSession[]): void;
   onMachineEvent(event: Record<string, unknown>): void;
@@ -20,17 +34,23 @@ export interface HubCallbacks {
   onSocketError(session: string, detail: string): void;
 }
 
-const RETRY_DELAYS = [1_000, 2_000, 4_000, 8_000, 16_000];
-const ATTACH_OPEN_TIMEOUT_MS = 10_000;
-const ATTACH_READY_TIMEOUT_MS = 10_000;
-
-class AuthenticationError extends Error {}
+class AuthenticationError extends Error {
+  constructor(readonly kind: AuthFailureKind, message: string) { super(message); }
+}
 
 export class HubConnectionSupervisor {
   private desired = false;
   private attempt = 0;
   private eventAbort?: AbortController;
   private retryTimer?: number;
+  private heartbeatTimer?: number;
+  private missedHeartbeats = 0;
+  private lastHeartbeatAt?: number;
+  private expiredRefreshAttempted = false;
+  private resumeStage: ConnectionStage = "resolving";
+  private lifecycle: ConnectionSnapshot = {
+    phase: "idle", stage: "idle", since: Date.now(), attempt: 0, missedHeartbeats: 0, degraded: false,
+  };
   private readonly sockets = new Map<string, WebSocket>();
   private readonly socketAttempts = new Map<string, number>();
   private readonly attachRetryTimers = new Map<string, number>();
@@ -51,33 +71,103 @@ export class HubConnectionSupervisor {
     this.eventAbort?.abort();
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
+    if (this.heartbeatTimer !== undefined) window.clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
     this.clearAttachRetries();
     this.clearAttachTimeouts();
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
-    this.callbacks.onState("idle");
+    this.transition("idle", "idle");
+  }
+
+  snapshot(): ConnectionSnapshot { return this.lifecycle; }
+
+  retry(): void {
+    if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.eventAbort?.abort();
+    this.resumeStage = this.lifecycle.stage === "idle" || this.lifecycle.stage === "live"
+      ? "resolving" : this.lifecycle.stage;
+    this.attempt = 0;
+    this.desired = true;
+    void this.connect();
+  }
+
+  private transition(phase: ConnectionPhase, stage: ConnectionStage, update: Partial<ConnectionSnapshot> = {}): void {
+    this.lifecycle = {
+      phase,
+      stage,
+      since: Date.now(),
+      attempt: this.attempt,
+      missedHeartbeats: this.missedHeartbeats,
+      degraded: this.missedHeartbeats >= DEGRADED_AFTER_MISSED_HEARTBEATS,
+      ...update,
+    };
+    this.callbacks.onState(this.lifecycle);
   }
 
   private async connect(): Promise<void> {
     if (!this.desired) return;
-    this.callbacks.onState(this.attempt === 0 ? "connecting" : "reconnecting");
+    let stage = this.resumeStage;
     try {
-      await this.refreshMachineInfo();
-      await this.refreshSessions();
+      if (stage === "resolving") {
+        this.transition("resolving", "resolving");
+        await this.withStageTimeout("resolving", async () => { new URL(this.machine.baseUrl); });
+        stage = "dialing";
+      }
+      if (stage === "dialing") {
+        this.transition("dialing", "dialing");
+        await this.withStageTimeout("dialing", (signal) => this.probeHealth(signal));
+        stage = "auth";
+      }
+      if (stage === "auth") {
+        this.transition("auth", "auth");
+        await this.withStageTimeout("auth", async (signal) => {
+          await this.refreshMachineInfo(signal);
+          await this.refreshSessions(signal);
+        });
+        stage = "attaching";
+      }
+      this.transition("attaching", "attaching");
+      const response = await this.withStageTimeout("attaching", (signal) => this.openEventStream(signal));
       this.attempt = 0;
-      this.callbacks.onState("connected");
-      await this.streamEvents();
+      this.resumeStage = "resolving";
+      this.missedHeartbeats = 0;
+      this.lastHeartbeatAt = Date.now();
+      this.transition("live", "live", { latencyMs: 0 });
+      this.startHeartbeat();
+      await this.consumeEvents(response);
       if (this.desired) throw new Error("hub event stream closed");
     } catch (error) {
-      if (!this.desired || error instanceof DOMException && error.name === "AbortError") return;
+      if (!this.desired) return;
+      if (error instanceof DOMException && error.name === "AbortError") {
+        if (this.missedHeartbeats < RECONNECT_AFTER_MISSED_HEARTBEATS) return;
+        error = new Error(`${this.missedHeartbeats} consecutive heartbeats missed`);
+        stage = "dialing";
+      }
       if (error instanceof AuthenticationError) {
-        this.blockAuthentication(error.message);
+        let authError = error;
+        if (error.kind === "expired" && !this.expiredRefreshAttempted) {
+          this.expiredRefreshAttempted = true;
+          try {
+            await this.refreshCredential();
+            this.resumeStage = "auth";
+            void this.connect();
+            return;
+          } catch (refreshError) {
+            if (refreshError instanceof AuthenticationError) authError = refreshError;
+          }
+        }
+        this.blockAuthentication(authError.kind, authError.message);
         return;
       }
-      if (!navigator.onLine) this.callbacks.onState("offline", "browser offline");
-      const delay = RETRY_DELAYS[Math.min(this.attempt, RETRY_DELAYS.length - 1)];
-      this.attempt += 1;
-      this.callbacks.onState("reconnecting", `retrying in ${delay / 1000}s`);
+      this.stopHeartbeat();
+      this.resumeStage = stage;
+      const reason = error instanceof Error ? error.message : "unknown connection failure";
+      const target = new URL(this.machine.baseUrl).host;
+      this.transition("failed", stage, { reason: stageFailureDetail(stage, target, reason) });
+      const delay = backoffDelay(this.attempt++);
+      this.transition("backoff", stage, { reason: stageFailureDetail(stage, target, reason), retryInMs: delay });
       this.retryTimer = window.setTimeout(() => {
         this.retryTimer = undefined;
         if (this.desired) void this.connect();
@@ -85,7 +175,22 @@ export class HubConnectionSupervisor {
     }
   }
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async withStageTimeout<T>(stage: Exclude<ConnectionStage, "idle" | "live">, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(new DOMException(`${stage} timed out after ${STAGE_TIMEOUT_MS[stage] / 1000}s`, "TimeoutError")), STAGE_TIMEOUT_MS[stage]);
+    try { return await task(controller.signal); }
+    catch (error) {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      throw error;
+    } finally { window.clearTimeout(timer); }
+  }
+
+  private async probeHealth(signal: AbortSignal): Promise<void> {
+    const response = await fetch(new URL("/v1/health", this.machine.baseUrl), { signal, cache: "no-store", credentials: "omit" });
+    if (!response.ok) throw new Error(`daemon health failed (${response.status})`);
+  }
+
+  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const startedAt = performance.now();
     const headers = await dpopHeaders(this.machine, method, path);
     const response = await fetch(new URL(path, this.machine.baseUrl), {
@@ -94,24 +199,30 @@ export class HubConnectionSupervisor {
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
       credentials: "omit",
+      signal,
     });
-    if (response.status === 401 || response.status === 403) throw new AuthenticationError("pairing expired or was revoked");
+    if (response.status === 401 || response.status === 403) {
+      const kind: AuthFailureKind = Date.parse(this.machine.expiresAt) <= Date.now()
+        ? "expired" : response.status === 403 ? "scope-mismatch" : "revoked";
+      throw new AuthenticationError(kind, kind === "expired" ? "pairing expired" : kind === "revoked" ? "pairing was revoked" : "credential ceiling does not grant this operation");
+    }
     if (!response.ok) throw new Error(`${method} ${path} failed (${response.status})`);
     this.callbacks.onLatency?.(Math.max(0, Math.round(performance.now() - startedAt)));
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
   }
 
-  async refreshSessions(): Promise<HubSession[]> {
-    const response = await this.request<{ sessions: HubSession[] }>("GET", "/v1/sessions");
+  async refreshSessions(signal?: AbortSignal): Promise<HubSession[]> {
+    const response = await this.request<{ sessions: HubSession[] }>("GET", "/v1/sessions", undefined, signal);
     this.callbacks.onSessions(response.sessions);
     return response.sessions;
   }
 
-  private async refreshMachineInfo(): Promise<void> {
+  private async refreshMachineInfo(signal?: AbortSignal): Promise<void> {
     try {
-      this.callbacks.onMachineInfo?.(await this.request<HubMachineInfo>("GET", "/v1/machine"));
-    } catch {
+      this.callbacks.onMachineInfo?.(await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, signal));
+    } catch (error) {
+      if (error instanceof AuthenticationError) throw error;
       // Older hubs can still offer the read-only session surface. The UI shows
       // a visible compatibility warning and leaves capability-gated controls off.
       this.callbacks.onMachineInfo?.(undefined);
@@ -130,21 +241,39 @@ export class HubConnectionSupervisor {
     return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/lease`, { force });
   }
 
+  /** Escalate this observer session up to its paired grant ceiling. */
+  async requestControl(session: string, force = false): Promise<LeaseState> {
+    return this.acquireLease(session, force);
+  }
+
   async releaseLease(session: string): Promise<void> {
     await this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}/lease`);
   }
 
-  private async streamEvents(): Promise<void> {
+  async diagnose(): Promise<Record<string, unknown>> {
+    const report = await this.request<Record<string, unknown>>("GET", "/v1/diagnostics");
+    return { ...report, browser: { online: navigator.onLine, last_successful_heartbeat: this.lastHeartbeatAt ? new Date(this.lastHeartbeatAt).toISOString() : null } };
+  }
+
+  private async openEventStream(signal: AbortSignal): Promise<Response> {
     this.eventAbort = new AbortController();
     const path = "/v1/events";
     const response = await fetch(new URL(path, this.machine.baseUrl), {
       headers: await dpopHeaders(this.machine, "GET", path),
-      signal: this.eventAbort.signal,
+      signal: AbortSignal.any([this.eventAbort.signal, signal]),
       cache: "no-store",
       credentials: "omit",
     });
-    if (response.status === 401 || response.status === 403) throw new AuthenticationError("pairing expired or was revoked");
+    if (response.status === 401 || response.status === 403) {
+      const kind: AuthFailureKind = Date.parse(this.machine.expiresAt) <= Date.now() ? "expired" : response.status === 403 ? "scope-mismatch" : "revoked";
+      throw new AuthenticationError(kind, "event-stream authentication failed");
+    }
     if (!response.ok || !response.body) throw new Error(`event stream failed (${response.status})`);
+    return response;
+  }
+
+  private async consumeEvents(response: Response): Promise<void> {
+    if (!response.body) throw new Error("event stream closed before attach");
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";
     for (;;) {
@@ -164,6 +293,44 @@ export class HubConnectionSupervisor {
         boundary = buffer.indexOf("\n\n");
       }
     }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = window.setInterval(() => void this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== undefined) window.clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
+  }
+
+  private async heartbeat(): Promise<void> {
+    const started = performance.now();
+    try {
+      await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
+      this.missedHeartbeats = 0;
+      this.lastHeartbeatAt = Date.now();
+      this.transition("live", "live", { latencyMs: Math.round(performance.now() - started) });
+    } catch (error) {
+      this.missedHeartbeats += 1;
+      this.transition("live", "live", { reason: error instanceof Error ? error.message : "heartbeat failed" });
+      if (this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS) {
+        this.stopHeartbeat();
+        this.eventAbort?.abort();
+        this.resumeStage = "dialing";
+      }
+    }
+  }
+
+  private async refreshCredential(): Promise<void> {
+    const refreshed = await this.request<{ credential: string; credential_id: string; expires_at: string; scopes: StoredMachine["scopes"] }>("POST", "/v1/auth/refresh");
+    this.machine.credential = refreshed.credential;
+    this.machine.credentialId = refreshed.credential_id;
+    this.machine.expiresAt = refreshed.expires_at;
+    this.machine.scopes = refreshed.scopes;
+    this.expiredRefreshAttempted = false;
+    await this.callbacks.onCredentialRefreshed?.(this.machine);
   }
 
   async attach(session: string): Promise<void> {
@@ -218,7 +385,7 @@ export class HubConnectionSupervisor {
   private async handleAttachFailure(session: string, error: unknown): Promise<void> {
     if (!this.desired) return;
     if (error instanceof AuthenticationError) {
-      this.blockAuthentication(error.message, session);
+      this.blockAuthentication(error.kind, error.message, session);
       return;
     }
     // A revoked origin is rejected at CORS preflight before the authenticated
@@ -227,7 +394,7 @@ export class HubConnectionSupervisor {
     const reachable = await this.hubIsReachable();
     if (!this.desired) return;
     if (reachable) {
-      this.blockAuthentication("pairing expired or was revoked", session);
+      this.blockAuthentication("revoked", "pairing expired or was revoked", session);
       return;
     }
     const detail = error instanceof Error ? error.message : "unknown terminal attach failure";
@@ -250,7 +417,7 @@ export class HubConnectionSupervisor {
     }
   }
 
-  private blockAuthentication(detail: string, session?: string): void {
+  private blockAuthentication(kind: AuthFailureKind, detail: string, session?: string): void {
     this.desired = false;
     this.eventAbort?.abort();
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
@@ -259,14 +426,15 @@ export class HubConnectionSupervisor {
     this.clearAttachTimeouts();
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
-    this.callbacks.onState("auth-blocked", detail);
+    this.transition("failed", "auth", { reason: detail, authFailure: kind });
+    this.callbacks.onAuthFailure?.(kind, detail);
     if (session) this.callbacks.onSocketError(session, "authentication blocked; re-pair to reconnect");
   }
 
   private scheduleAttach(session: string): void {
     if (!this.desired || this.attachRetryTimers.has(session)) return;
     const attempt = this.socketAttempts.get(session) ?? 0;
-    const delay = RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)];
+    const delay = backoffDelay(attempt);
     this.socketAttempts.set(session, attempt + 1);
     const timer = window.setTimeout(() => {
       this.attachRetryTimers.delete(session);
@@ -288,9 +456,9 @@ export class HubConnectionSupervisor {
     timeouts.open = window.setTimeout(() => {
       if (this.sockets.get(session) !== socket || socket.readyState !== WebSocket.CONNECTING) return;
       this.timedOutSockets.add(socket);
-      this.callbacks.onSocketError(session, "Terminal connection timed out after 10 seconds before opening. Retrying…");
+      this.callbacks.onSocketError(session, "Stuck dialing terminal — node may be offline (5s). Retrying…");
       socket.close();
-    }, ATTACH_OPEN_TIMEOUT_MS);
+    }, STAGE_TIMEOUT_MS.dialing);
     this.attachTimeouts.set(session, timeouts);
   }
 
@@ -299,9 +467,9 @@ export class HubConnectionSupervisor {
     timeouts.ready = window.setTimeout(() => {
       if (this.sockets.get(session) !== socket || socket.readyState !== WebSocket.OPEN) return;
       this.timedOutSockets.add(socket);
-      this.callbacks.onSocketError(session, "Terminal connection opened but sent no session state within 10 seconds. Retrying…");
+      this.callbacks.onSocketError(session, "Terminal attach opened but sent no session state within 3s. Retrying…");
       socket.close();
-    }, ATTACH_READY_TIMEOUT_MS);
+    }, STAGE_TIMEOUT_MS.attaching);
     this.attachTimeouts.set(session, timeouts);
   }
 

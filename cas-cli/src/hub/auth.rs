@@ -27,6 +27,7 @@ const PAIRING_TTL_MINUTES: i64 = 10;
 const WS_TICKET_TTL_MINUTES: i64 = 5;
 const CREDENTIAL_ABSOLUTE_DAYS: i64 = 90;
 const CREDENTIAL_IDLE_DAYS: i64 = 30;
+const CREDENTIAL_REFRESH_GRACE_DAYS: i64 = 7;
 const DPOP_SKEW_SECONDS: i64 = 60;
 const DPOP_REPLAY_MINUTES: i64 = 5;
 
@@ -631,6 +632,74 @@ impl AuthStore {
         drop(state);
         self.audit(Some(&context), "allowed", "dpop_auth", None, None, now)?;
         Ok(context)
+    }
+
+    /// Rotate an otherwise-valid device credential without requiring a new
+    /// machine-side pairing. Expiry has a short, bounded recovery grace; a
+    /// revoked credential, changed origin, bad proof, or idle credential can
+    /// never use this path.
+    pub fn refresh_device_credential(
+        &self,
+        authorization: &str,
+        proof: &str,
+        origin: &str,
+        method: &str,
+        target_uri: &str,
+        now: DateTime<Utc>,
+    ) -> Result<DeviceCredential> {
+        validate_origin(origin)?;
+        let credential = authorization
+            .strip_prefix("DPoP ")
+            .context("authentication refused")?;
+        let credential_hash = hash_b64(credential.as_bytes());
+        let mut state = self.lock()?;
+        let device_index = state
+            .devices
+            .iter()
+            .position(|device| constant_time_eq(&device.credential_hash, &credential_hash))
+            .context("authentication refused")?;
+        let device = state.devices[device_index].clone();
+        anyhow::ensure!(
+            device.revoked_at.is_none()
+                && device.controller_origin == origin
+                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
+                && device.expires_at + Duration::days(CREDENTIAL_REFRESH_GRACE_DAYS) >= now,
+            "authentication refused"
+        );
+        let verified = verify_dpop(
+            proof,
+            credential,
+            &device.public_key,
+            &device.public_key_thumbprint,
+            method,
+            target_uri,
+            now,
+        )?;
+        state.dpop_jtis.retain(|entry| entry.expires_at >= now);
+        anyhow::ensure!(
+            !state.dpop_jtis.iter().any(|entry| {
+                entry.credential_id == device.credential_id && entry.jti == verified.jti
+            }),
+            "authentication refused"
+        );
+        state.dpop_jtis.push(ReplayRecord {
+            credential_id: device.credential_id.clone(),
+            jti: verified.jti,
+            expires_at: now + Duration::minutes(DPOP_REPLAY_MINUTES),
+        });
+        let rotated = random_secret();
+        let expires_at = now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS);
+        state.devices[device_index].credential_hash = hash_b64(rotated.as_bytes());
+        state.devices[device_index].last_used_at = now;
+        state.devices[device_index].expires_at = expires_at;
+        self.persist(&state)?;
+        Ok(DeviceCredential {
+            device_id: device.device_id,
+            credential_id: device.credential_id,
+            credential: rotated,
+            expires_at,
+            scopes: device.scopes,
+        })
     }
 
     pub fn issue_ws_ticket(

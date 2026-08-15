@@ -28,7 +28,36 @@ directly to `main`, and do not create the release tag before the PR lands.
 4. After the required checks are green, merge explicitly:
    `gh pr merge "$PR_URL" --merge`. Do not use `--auto` or an admin bypass.
 5. Fetch the landed commit (`git fetch origin main`), tag that exact
-   `origin/main` commit, then run the artifact/release flow and push the tag.
+   `origin/main` commit, then run `./scripts/release.sh`. It pushes the tag;
+   the tag-triggered GitHub workflow is the normal release publisher.
+
+### Published assets before announcement
+
+The release object becoming visible is not publication proof: GitHub can expose
+it while one asset is still uploading. Do not upload a local `dist/local-audit/`
+archive or copy a digest from it into an announcement. A local audit says that
+the tagged source compiled; it says nothing about the bytes users download.
+
+After the workflow finishes, derive the exact announcement fields from the
+published release only:
+
+```bash
+./scripts/release-published-receipt.sh vX.Y.Z
+```
+
+It fails closed until the release is published, both required assets
+(`cas-x86_64-unknown-linux-gnu.tar.gz` and
+`cas-aarch64-apple-darwin.tar.gz`) exist, and fresh local downloads match
+GitHub's SHA-256 metadata. Use the printed fields mechanically in the draft.
+The workflow publishes macOS ARM64 from its macOS runner regardless of the host
+that tagged the release; never describe the release as Linux-only because a
+local audit host cannot build Darwin.
+
+`scripts/release.sh --manual-publish --acknowledge-workflow-conflict` is an
+emergency failover for a disabled or unavailable workflow, not a normal release
+lane. It deliberately competes after its tag push, so disable/cancel the CI
+workflow first when possible; it uses the same receipt command before any
+announcement digest is posted.
 
 If `coordination action=worktree_merge ... allow_trunk=true` encounters the
 ruleset first, it returns `PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` with the
@@ -108,6 +137,9 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] PR URL + required-check status surfaced before the explicit merge (no `--auto` / admin bypass)
 - [ ] After every release-train version bump, regenerate `Cargo.lock` and verify `cargo metadata --locked` before tagging.
 - [ ] Release tag points at the fetched `origin/main` landing and is pushed
+- [ ] Workflow-created release has both Linux x86_64 and macOS ARM64 assets;
+  `release-published-receipt.sh` succeeded from fresh downloads before any
+  digest enters the draft (a local audit archive is not shipped-byte evidence)
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

@@ -192,6 +192,9 @@ else
 fi
 require_text "$ci_text" 'SCCACHE_GHA_ENABLED: "true"' 'CI enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables GitHub cache-v2 backend'
+require_text "$(<"$release")" 'needs: [verify, build, build-macos]' 'release publication waits for both Linux and macOS builds'
+require_text "$(<"$release")" 'cas-aarch64-apple-darwin.tar.gz > SHA256SUMS' 'release emits a two-target checksum manifest'
+require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
 
 # The cache is an optimization, never a CI availability dependency. The shared
 # Linux setup must survive both a failed action download and a failed backend

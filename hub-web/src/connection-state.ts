@@ -14,6 +14,10 @@ export interface ConnectionSnapshot {
   authFailure?: "expired" | "revoked" | "scope-mismatch";
 }
 
+export interface AttachSnapshot extends ConnectionSnapshot {
+  session: string;
+}
+
 export const STAGE_TIMEOUT_MS: Readonly<Record<Exclude<ConnectionStage, "idle" | "live">, number>> = {
   resolving: 3_000,
   dialing: 5_000,

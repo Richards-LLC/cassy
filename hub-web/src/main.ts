@@ -2,7 +2,7 @@ import "./styles.css";
 import { attentionCounts, attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
 import { renderAttentionCounts, renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { elapsedSeconds } from "./connection-state";
+import { elapsedSeconds, type AttachSnapshot } from "./connection-state";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -33,6 +33,7 @@ const machines = new Map<string, StoredMachine>();
 const sessions = new Map<string, HubSession[]>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
+const attachStates = new Map<string, AttachSnapshot>();
 const connectionLatency = new Map<string, number>();
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
@@ -109,6 +110,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.authFailure) void addAttention(machine, undefined, "auth_loss", state.reason ?? "Authentication blocked");
       if (state.phase === "backoff") void addAttention(machine, undefined, "hub_disconnected", state.reason ?? "Hub disconnected");
       render();
+    },
+    onAttachState: (session, state) => {
+      attachStates.set(sessionKey(machine.id, session), state);
+      if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onLatency: (latencyMs) => {
       connectionLatency.set(machine.id, latencyMs);
@@ -764,13 +769,15 @@ function render(captureDraft = true): void {
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
-  const connectionSnapshot = selected ? connectionStates.get(selected.id) : undefined;
+  const machineConnectionSnapshot = selected ? connectionStates.get(selected.id) : undefined;
+  const terminalAttachSnapshot = selected && selectedSession ? attachStates.get(sessionKey(selected.id, selectedSession)) : undefined;
+  const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot;
   const needsRepair = connectionSnapshot?.stage === "auth" && connectionSnapshot.phase === "failed";
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const connectionState = connectionClass(connectionSnapshot);
   const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
-  const latency = connectionSnapshot?.latencyMs ?? (selected ? connectionLatency.get(selected.id) : undefined);
+  const latency = machineConnectionSnapshot?.latencyMs ?? (selected ? connectionLatency.get(selected.id) : undefined);
   const counts = attentionCounts(attention);
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");

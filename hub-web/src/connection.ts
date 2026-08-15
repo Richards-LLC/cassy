@@ -9,6 +9,7 @@ import {
   type ConnectionPhase,
   type ConnectionSnapshot,
   type ConnectionStage,
+  type AttachSnapshot,
 } from "./connection-state";
 import type { HubSession, LeaseState, PaneInfo, SessionState, StoredMachine } from "./types";
 
@@ -23,6 +24,7 @@ export interface HubMachineInfo {
 
 export interface HubCallbacks {
   onState(state: ConnectionState): void;
+  onAttachState?(session: string, state: AttachSnapshot): void;
   onLatency?(latencyMs: number): void;
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
@@ -55,6 +57,7 @@ export class HubConnectionSupervisor {
   };
   private readonly sockets = new Map<string, WebSocket>();
   private readonly keyframeRequests = new Set<string>();
+  private readonly attachLifecycles = new Map<string, AttachSnapshot>();
   private readonly socketAttempts = new Map<string, number>();
   private readonly attachRetryTimers = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
@@ -80,10 +83,18 @@ export class HubConnectionSupervisor {
     this.clearAttachTimeouts();
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
+    for (const session of this.attachLifecycles.keys()) {
+      this.transitionAttach(session, "idle", "idle");
+      this.attachLifecycles.delete(session);
+    }
     this.transition("idle", "idle");
   }
 
   snapshot(): ConnectionSnapshot { return this.lifecycle; }
+
+  attachSnapshot(session: string): AttachSnapshot | undefined { return this.attachLifecycles.get(session); }
+
+  attachSnapshots(): ReadonlyMap<string, AttachSnapshot> { return this.attachLifecycles; }
 
   retry(): void {
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
@@ -107,6 +118,21 @@ export class HubConnectionSupervisor {
       ...update,
     };
     this.callbacks.onState(this.lifecycle);
+  }
+
+  private transitionAttach(session: string, phase: ConnectionPhase, stage: ConnectionStage, update: Partial<AttachSnapshot> = {}): void {
+    const snapshot: AttachSnapshot = {
+      session,
+      phase,
+      stage,
+      since: Date.now(),
+      attempt: this.socketAttempts.get(session) ?? 0,
+      missedHeartbeats: 0,
+      degraded: false,
+      ...update,
+    };
+    this.attachLifecycles.set(session, snapshot);
+    this.callbacks.onAttachState?.(session, snapshot);
   }
 
   private async connect(): Promise<void> {
@@ -353,18 +379,21 @@ export class HubConnectionSupervisor {
     }
     const existing = this.sockets.get(session);
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
+    this.transitionAttach(session, "auth", "auth");
     const ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", { session });
     if (!this.desired) return;
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
     const socket = new WebSocket(endpoint);
+    this.transitionAttach(session, "dialing", "dialing");
     socket.binaryType = "arraybuffer";
     this.sockets.set(session, socket);
     this.startOpenTimeout(session, socket);
     socket.onopen = () => {
       if (this.sockets.get(session) !== socket) return;
       this.clearAttachTimeout(session, "open");
+      this.transitionAttach(session, "attaching", "attaching");
       this.startReadyTimeout(session, socket);
     };
     socket.onmessage = (message) => this.handleDaemonMessage(session, message.data);
@@ -375,19 +404,23 @@ export class HubConnectionSupervisor {
       if (this.sockets.get(session) === socket) this.sockets.delete(session);
       if (!this.desired || event.code === 1000) return;
       if (!timedOut) {
-        this.callbacks.onSocketError(
-          session,
-          becameReady ? "Terminal connection closed. Retrying…" : "Terminal connection closed before it became ready. Retrying…",
-        );
+        const detail = becameReady ? "Terminal connection closed" : "Terminal connection closed before it became ready";
+        this.transitionAttach(session, "failed", becameReady ? "dialing" : (this.attachLifecycles.get(session)?.stage ?? "dialing"), { reason: detail });
+        this.callbacks.onSocketError(session, `${detail}. Retrying…`);
       }
       this.scheduleAttach(session);
     };
-    socket.onerror = () => this.callbacks.onSocketError(session, "terminal transport error");
+    socket.onerror = () => {
+      const stage = this.attachLifecycles.get(session)?.stage ?? "dialing";
+      this.transitionAttach(session, "failed", stage, { reason: "terminal transport error" });
+      this.callbacks.onSocketError(session, "terminal transport error");
+    };
   }
 
   private async handleAttachFailure(session: string, error: unknown): Promise<void> {
     if (!this.desired) return;
     if (error instanceof AuthenticationError) {
+      this.transitionAttach(session, "failed", "auth", { reason: error.message, authFailure: error.kind });
       this.blockAuthentication(error.kind, error.message, session);
       return;
     }
@@ -397,10 +430,13 @@ export class HubConnectionSupervisor {
     const reachable = await this.hubIsReachable();
     if (!this.desired) return;
     if (reachable) {
+      this.transitionAttach(session, "failed", "auth", { reason: "pairing expired or was revoked", authFailure: "revoked" });
       this.blockAuthentication("revoked", "pairing expired or was revoked", session);
       return;
     }
     const detail = error instanceof Error ? error.message : "unknown terminal attach failure";
+    const failedStage = this.attachLifecycles.get(session)?.stage ?? "dialing";
+    this.transitionAttach(session, "failed", failedStage, { reason: stageFailureDetail(failedStage, new URL(this.machine.baseUrl).host, detail) });
     this.callbacks.onSocketError(session, `Terminal attach failed: ${detail}. Retrying…`);
     this.scheduleAttach(session);
   }
@@ -429,6 +465,7 @@ export class HubConnectionSupervisor {
     this.clearAttachTimeouts();
     for (const socket of this.sockets.values()) socket.close(1000, "authentication blocked");
     this.sockets.clear();
+    if (session) this.transitionAttach(session, "failed", "auth", { reason: detail, authFailure: kind });
     this.transition("failed", "auth", { reason: detail, authFailure: kind });
     this.callbacks.onAuthFailure?.(kind, detail);
     if (session) this.callbacks.onSocketError(session, "authentication blocked; re-pair to reconnect");
@@ -439,6 +476,8 @@ export class HubConnectionSupervisor {
     const attempt = this.socketAttempts.get(session) ?? 0;
     const delay = backoffDelay(attempt);
     this.socketAttempts.set(session, attempt + 1);
+    const failed = this.attachLifecycles.get(session);
+    this.transitionAttach(session, "backoff", failed?.stage ?? "dialing", { reason: failed?.reason, retryInMs: delay });
     const timer = window.setTimeout(() => {
       this.attachRetryTimers.delete(session);
       if (!this.desired) return;
@@ -459,6 +498,7 @@ export class HubConnectionSupervisor {
     timeouts.open = window.setTimeout(() => {
       if (this.sockets.get(session) !== socket || socket.readyState !== WebSocket.CONNECTING) return;
       this.timedOutSockets.add(socket);
+      this.transitionAttach(session, "failed", "dialing", { reason: "Stuck dialing terminal — node may be offline (5s)" });
       this.callbacks.onSocketError(session, "Stuck dialing terminal — node may be offline (5s). Retrying…");
       socket.close();
     }, STAGE_TIMEOUT_MS.dialing);
@@ -470,6 +510,7 @@ export class HubConnectionSupervisor {
     timeouts.ready = window.setTimeout(() => {
       if (this.sockets.get(session) !== socket || socket.readyState !== WebSocket.OPEN) return;
       this.timedOutSockets.add(socket);
+      this.transitionAttach(session, "failed", "attaching", { reason: "Terminal opened but sent no session state within 3s" });
       this.callbacks.onSocketError(session, "Terminal attach opened but sent no session state within 3s. Retrying…");
       socket.close();
     }, STAGE_TIMEOUT_MS.attaching);
@@ -535,6 +576,7 @@ export class HubConnectionSupervisor {
         this.readySockets.add(socket);
         this.clearAttachTimeout(session, "ready");
         this.socketAttempts.set(session, 0);
+        this.transitionAttach(session, "live", "live");
       }
       const welcome = message.Welcome;
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3

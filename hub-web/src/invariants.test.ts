@@ -274,7 +274,7 @@ describe("binding Commander browser invariants", () => {
       scopes: ["pane-read"], publicKey, privateKey,
     } satisfies StoredMachine;
     const callbacks = {
-      onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
       onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
@@ -288,6 +288,14 @@ describe("binding Commander browser invariants", () => {
       "factory-a",
       "Terminal attach opened but sent no session state within 3s. Retrying…",
     );
+    expect(callbacks.onAttachState.mock.calls.map(([, state]) => [state.phase, state.stage])).toEqual([
+      ["auth", "auth"],
+      ["dialing", "dialing"],
+      ["attaching", "attaching"],
+      ["failed", "attaching"],
+      ["backoff", "attaching"],
+    ]);
+    expect(supervisor.attachSnapshot("factory-a")?.phase).toBe("backoff");
     supervisor.stop();
   });
 

@@ -69,6 +69,11 @@ export interface AttentionItem {
   session?: string;
   kind: string;
   message: string;
+  headline?: string;
+  detail?: string;
+  cause?: string;
+  severity?: "incident" | "notice";
+  ticketId?: string;
   createdAt: string;
   seenAt?: string;
   acknowledgedAt?: string;

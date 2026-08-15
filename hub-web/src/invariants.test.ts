@@ -109,6 +109,18 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("data-session-key");
   });
 
+  it("keeps the phone ATTENTION hierarchy human-readable and group-actionable", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('machineEventAttention(kind, event.diagnostic)');
+    expect(main).toContain('title.textContent = content.headline');
+    expect(main).toContain('acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`');
+    expect(main).toContain('if (content.severity === "notice")');
+    expect(main).toContain('groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))');
+    expect(css).toContain(".attention-item--incident");
+    expect(css).toContain("@media (max-width: 850px)");
+    expect(css).toContain(".attention-group-label { max-width: 155px; }");
+  });
+
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source.indexOf("if (captureDraft) capturePairingDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));

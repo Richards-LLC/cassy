@@ -733,6 +733,49 @@ mod tests {
     }
 
     #[test]
+    fn pathological_raw_tail_starts_mid_sgr_but_keyframe_is_authoritative() {
+        let styled_cell = b"\x1b[38;2;215;119;87mX";
+        let mut raw = Vec::with_capacity(styled_cell.len() * 30_000);
+        for _ in 0..30_000 {
+            raw.extend_from_slice(styled_cell);
+        }
+        let mut ring = PaneBuffer::default();
+        ring.append(&raw);
+        let tail = ring.as_bytes();
+        let tail_start = raw.len() - tail.len();
+        let preceding_escape = raw[..tail_start]
+            .iter()
+            .rposition(|byte| *byte == b'\x1b')
+            .expect("fixture must have an SGR before the sliced boundary");
+
+        assert_eq!(tail.len(), PANE_BUFFER_CAPACITY);
+        assert_ne!(tail[0], b'\x1b');
+        assert!(
+            !raw[preceding_escape..tail_start].contains(&b'm'),
+            "the bounded raw tail fixture must begin inside an SGR sequence"
+        );
+        assert!(!tail.windows(4).any(|window| window == b"\x1b[2J"));
+        assert!(!tail.windows(3).any(|window| window == b"\x1b[H"));
+
+        let snapshot = TerminalSnapshot {
+            cells: vec![cas_factory_protocol::TerminalCell {
+                codepoint: 'X' as u32,
+                fg: (215, 119, 87),
+                bg: (0, 0, 0),
+                flags: 0,
+                width: 1,
+            }],
+            cursor: cas_factory_protocol::CursorPosition { x: 0, y: 0 },
+            cols: 1,
+            rows: 1,
+        };
+        let keyframe = snapshot_to_ansi(&snapshot, false);
+
+        assert!(keyframe.starts_with(b"\x1bc\x1b[0m\x1b[2J\x1b[H"));
+        assert!(keyframe.len() < 128 * 1024);
+    }
+
+    #[test]
     fn snapshot_replay_reenters_alternate_screen_before_ink_redraws() {
         let snapshot = TerminalSnapshot {
             cells: vec![cas_factory_protocol::TerminalCell {

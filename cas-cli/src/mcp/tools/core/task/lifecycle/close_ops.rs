@@ -532,6 +532,7 @@ mod delivery_audit_text_tests {
     #[test]
     fn negative_result_receipts_name_every_missing_field() {
         let req = crate::mcp::tools::TaskCloseRequest {
+            stranded_branch_override: None,
             id: "cas-negative".to_string(),
             reason: None,
             bypass_code_review: None,
@@ -1693,6 +1694,7 @@ impl CasCore {
             Err(_) => "main".to_string(),
         };
         let req = TaskCloseRequest {
+            stranded_branch_override: None,
             id: task.id.clone(),
             reason: None,
             bypass_code_review: None,
@@ -2114,7 +2116,63 @@ impl CasCore {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
                 EpicCloseGateOutcome::Reject(msg) => {
-                    return Ok(Self::tool_error(msg));
+                    // cas-b192: the gate is legitimately unsatisfiable for an
+                    // epic whose lanes all landed by squash and were then
+                    // refactored. Without a designed door supervisors improvise
+                    // one — a real session reached for execution_note=no-code to
+                    // escape this block and created a second defect that needed
+                    // proof_scope_fix to unwind. The door is explicit,
+                    // supervisor-only, and audited, and it only exists once the
+                    // gate has actually blocked.
+                    let Some(reason) = req.stranded_branch_override.as_deref() else {
+                        return Ok(Self::tool_error(msg));
+                    };
+                    let narrative = match validate_stranded_branch_override_reason(reason) {
+                        Ok(narrative) => narrative,
+                        Err(error) => {
+                            return Ok(Self::tool_error(format!(
+                                "EPIC CLOSE OVERRIDE REJECTED: {error}"
+                            )));
+                        }
+                    };
+                    let caller = match self.resolve_live_supervisor_authority() {
+                        Ok(caller) => caller,
+                        Err(error) => {
+                            return Ok(Self::tool_error(match error {
+                                SupervisorAuthorityError::Identity(error) => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: stranded_branch_override requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
+                                ),
+                                SupervisorAuthorityError::Store(error) => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: supervisor authority could not be checked ({error})."
+                                ),
+                                SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+                                ),
+                                SupervisorAuthorityError::NotLive(caller) => format!(
+                                    "EPIC CLOSE OVERRIDE REJECTED: only a live registered supervisor may use stranded_branch_override. Caller `{}` has role {}.",
+                                    caller.name, caller.role
+                                ),
+                            }));
+                        }
+                    };
+                    // The waived gate output is stored verbatim: it already
+                    // names every branch and the measured verdict behind it, so
+                    // the note records what was actually true at override time
+                    // rather than only what the supervisor asserted.
+                    append_close_decision_note(
+                        task_store.as_ref(),
+                        &mut task,
+                        &format!(
+                            "decision: supervisor `{caller_name}` (role {caller_role}) overrode \
+                             the epic stranded-branch gate for `{epic_id}`.\n\
+                             Inspection narrative: {narrative}\n\
+                             Waived gate output follows verbatim, including every measured \
+                             branch verdict:\n{msg}",
+                            caller_name = caller.name,
+                            caller_role = caller.role,
+                            epic_id = req.id,
+                        ),
+                    );
                 }
             }
         }
@@ -10052,33 +10110,10 @@ pub(crate) fn collect_epic_branch_statuses(
                     .iter()
                     .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
                     .collect();
-                // "Accounted for" has two shapes, and this codebase already
-                // recognises both: content still byte-identical on the target
-                // (ContentPresent), and content the target has since evolved
-                // (DeliveryContentPresence::Superseded, which the ancestry-clean
-                // path already treats as merged rather than stranded). The only
-                // thing that must still block is a delivered path the target has
-                // NEVER touched and which still differs — that is possible
-                // unlanded work, and BehindTarget reports it as candidate_paths.
-                //
-                // Measured on the five real cas-69e7 / Commander lanes: every
-                // differing delivery path had been moved by main afterwards and
-                // candidate_paths was empty for all of them, which is why the
-                // epic was hard-blocked with nothing actually stranded.
-                let accounted_for = |d: &BranchContentDirection| match d {
-                    BranchContentDirection::ContentPresent { .. } => true,
-                    BranchContentDirection::BehindTarget {
-                        candidate_paths, ..
-                    } => candidate_paths.is_empty(),
-                    _ => false,
-                };
                 let delivered: Vec<String> = directions
                     .iter()
                     .flat_map(|d| match d {
                         BranchContentDirection::ContentPresent { paths } => paths.clone(),
-                        BranchContentDirection::BehindTarget { stale_paths, .. } => {
-                            stale_paths.clone()
-                        }
                         _ => Vec::new(),
                     })
                     .collect();
@@ -10090,16 +10125,18 @@ pub(crate) fn collect_epic_branch_statuses(
                 // such a branch is still correct — that is the guidance layer's
                 // job — but clearing the gate needs positive evidence, so this
                 // path requires at least one compared delivery path.
-                if !delivered.is_empty() && directions.iter().all(accounted_for) {
+                if !delivered.is_empty()
+                    && directions
+                        .iter()
+                        .all(|d| matches!(d, BranchContentDirection::ContentPresent { .. }))
+                {
                     unmerged_count = 0;
                     merge_evidence_note = Some(format!(
                         "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
-                         lost): every path they deliver is either byte-identical on \
-                         `{parent_branch}` or has been superseded there by later work, and no \
-                         delivered path is both untouched by `{parent_branch}` and still \
-                         different. Delivered path(s) checked: {}. Requiring a merge here would \
-                         only pollute history — and where the branch is behind, revert shipped \
-                         work.",
+                         lost): every path they deliver is already byte-identical on \
+                         `{parent_branch}`, so there is nothing left to integrate. Delivered \
+                         path(s) checked: {}. Requiring a merge here would only pollute history \
+                         — and where the branch is additionally behind, revert shipped work.",
                         t.id,
                         fallback_branches.join(", "),
                         delivered.join(", "),
@@ -10373,6 +10410,36 @@ pub(crate) enum EpicCloseGateOutcome {
     Proceed,
     ProceedWithNote(String),
     Reject(String),
+}
+
+/// Validate the narrative supplied with a stranded-branch override (cas-b192).
+///
+/// The point of the override is the audit trail, so a contentless value is
+/// rejected: the note must say what was inspected, not merely that someone
+/// waved it through. Anything substantive is accepted verbatim — judging the
+/// QUALITY of a supervisor's reasoning is not this function's job, recording it
+/// faithfully is.
+pub(crate) fn validate_stranded_branch_override_reason(reason: &str) -> Result<String, String> {
+    const CONTENTLESS: &[&str] = &[
+        "ok", "okay", "fine", "yes", "y", "done", "n/a", "na", "-", "override", "force",
+        "looks fine", "lgtm", "trust me",
+    ];
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "stranded_branch_override requires a non-empty narrative describing what you \
+             inspected before waiving the gate."
+                .to_string(),
+        );
+    }
+    if CONTENTLESS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "stranded_branch_override narrative `{trimmed}` records nothing that can be \
+             audited later. State what you checked — for example which branches and paths \
+             you diffed against the target, and what you found."
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Which way does a factory branch's content point relative to the integration
@@ -10764,8 +10831,16 @@ pub(crate) fn run_epic_close_merge_gate(
          Epic {epic_id} cannot close — {n} child task(s) have factory branches \
          whose delivery is not accounted for on {parent}:\n{detail}\n\
          {closing_instruction}\n\
-         This guard cannot be bypassed (use of bypass_code_review=true does not \
-         skip merge-state checks — it is a data-state guard, not a review gate).\n\n\
+         bypass_code_review=true does not skip this check — it is a data-state \
+         guard, not a review gate.\n\n\
+         If you have inspected these lanes and they are genuinely stale — content \
+         shipped by another route and since refactored — a live registered \
+         supervisor may close with \
+         `stranded_branch_override=\"<what you inspected and found>\"`. The \
+         narrative and every measurement above are recorded as a decision note. \
+         Use that rather than improvising a workaround; do NOT reach for \
+         execution_note=no-code, which blocks the honest path and needs \
+         proof_scope_fix to unwind.\n\n\
          Remediation when the worker worktree still exists:\n\
          - `mcp__cas__coordination action=worktree_merge id=<factory-branch> \
            task_id=<child-task-id>`\n\n\
@@ -14946,6 +15021,7 @@ mod code_review_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -16154,6 +16230,7 @@ mod search_manifest_gate_tests {
 
     fn req_with_manifest(id: &str, manifest_json: Option<&str>) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -16492,6 +16569,7 @@ mod merge_state_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -19726,6 +19804,7 @@ mod epic_status_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
             bypass_code_review: None,
@@ -20586,44 +20665,150 @@ mod epic_status_gate_tests {
     }
 
     #[test]
-    fn epic_close_proceeds_when_every_delivered_path_was_superseded() {
-        // cas-69e7's exact shape, reduced: the lane is behind, but every path it
-        // delivered has since been moved on main and none is untouched-and-
-        // different. Nothing is stranded, so the epic must close WITHOUT anyone
-        // merging a stale branch.
-        let dir = init_squash_landed_repo(None);
-        let p = dir.path();
-        std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();
-        git(p, &["add", "feature.rs"]);
-        git(p, &["commit", "-q", "-m", "refactor: evolve feature to v2"]);
+    fn override_narrative_must_record_what_was_inspected() {
+        assert!(validate_stranded_branch_override_reason("   ").is_err());
+        assert!(validate_stranded_branch_override_reason("ok").is_err());
+        assert!(validate_stranded_branch_override_reason("LGTM").is_err());
+        assert!(validate_stranded_branch_override_reason("trust me").is_err());
+        let good = validate_stranded_branch_override_reason(
+            "  diffed all 11 delivered paths against main; content present and later \
+             refactored by PR #406  ",
+        )
+        .expect("a substantive narrative is accepted");
+        assert!(
+            good.starts_with("diffed all 11") && good.ends_with("PR #406"),
+            "narrative is stored trimmed but verbatim: {good}"
+        );
+    }
 
-        let superseded = child("cas-superseded", TaskStatus::Closed, Some("lane"));
-        let task = epic("cas-epic-superseded");
+    #[test]
+    fn refusal_offers_the_designed_door_instead_of_an_improvised_one() {
+        // cas-b192: the old text said the guard "cannot be bypassed", which left
+        // a supervisor at 05:45 with two options — follow the destructive
+        // instruction, or invent a workaround. One real session invented
+        // execution_note=no-code and created a second defect.
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker"));
+        let task = epic("cas-epic-door");
         let req = base_req(&task.id);
+        match run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            dir.path(),
+            std::slice::from_ref(&unmerged),
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("stranded_branch_override"),
+                    "the refusal must name the designed override: {message}"
+                );
+                assert!(
+                    message.contains("bypass_code_review=true does not skip this check"),
+                    "the review-gate bypass must stay powerless here: {message}"
+                );
+                assert!(
+                    !message.contains("cannot be bypassed"),
+                    "must not claim there is no door at all: {message}"
+                );
+                assert!(
+                    message.contains("execution_note=no-code"),
+                    "must warn off the improvised workaround that caused a second defect: {message}"
+                );
+            }
+            other => panic!("expected a rejection to inspect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn behind_target_is_never_treated_as_proof_that_content_landed() {
+        // A hole in an EARLIER VERSION OF THIS FIX, kept as a permanent guard.
+        // I briefly cleared any lane whose every differing delivery path had
+        // since been moved on the target, reasoning that a moved path was
+        // "superseded". It is not: the target touching a file does not mean the
+        // target absorbed this lane's change. Here the lane's function never
+        // reaches main, main rewrites the same file for unrelated reasons, and
+        // that rule would have silently discarded real work — the permissive
+        // twin of the destructive bug this task exists to fix.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["checkout", "-q", "-b", "factory/lane"]);
+        std::fs::write(
+            p.join("feature.rs"),
+            "fn existing() {}\nfn only_on_the_lane() {}\n",
+        )
+        .unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: lane work that never lands"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("feature.rs"), "fn existing() { /* rewritten */ }\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: unrelated rewrite on main"]);
+
+        let child_task = child("cas-lost", TaskStatus::Closed, Some("lane"));
         let statuses =
-            collect_epic_branch_statuses(std::slice::from_ref(&superseded), "main", p);
-        assert_eq!(
-            statuses[0].unmerged_count, 0,
-            "a fully superseded lane strands nothing: {:?}",
+            collect_epic_branch_statuses(std::slice::from_ref(&child_task), "main", p);
+        assert!(
+            statuses[0].unmerged_count > 0,
+            "content that never landed must keep blocking even though the target \
+             moved the same path: {:?}",
             statuses[0].merge_evidence_note
         );
+        assert!(
+            statuses[0].merge_evidence_note.is_none(),
+            "a moved path is not merge evidence: {:?}",
+            statuses[0].merge_evidence_note
+        );
+    }
+
+    #[test]
+    fn respawn_lane_with_no_task_commits_is_never_called_stranded() {
+        // cas-5c10 shape, live: a task delivered by one worker and then
+        // administratively closed by a freshly spawned second worker gets the
+        // second lane named in the remediation too, though it authored nothing.
+        // The false-positive set otherwise grows with every respawn.
+        let dir = init_epic_repo(&[("original", 1)]);
+        let p = dir.path();
+        git(p, &["merge", "--no-ff", "-m", "land original", "factory/original"]);
+        // The respawn lane is just the reconciled base: zero task commits.
+        git(p, &["branch", "factory/respawn", "main"]);
         assert!(matches!(
-            run_epic_close_merge_gate(
-                &task,
-                &req,
-                "main",
-                p,
-                std::slice::from_ref(&superseded),
-            ),
-            EpicCloseGateOutcome::ProceedWithNote(_)
+            branch_content_direction(p, "factory/respawn", "main"),
+            BranchContentDirection::ContentPresent { .. }
         ));
+        let mut respawned = child("cas-respawn", TaskStatus::Closed, Some("respawn"));
+        respawned.deliverables.parked_branch = Some("factory/original".to_string());
+        let statuses =
+            collect_epic_branch_statuses(std::slice::from_ref(&respawned), "main", p);
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "a zero-commit respawn lane over a landed delivery strands nothing"
+        );
+        let task = epic("cas-epic-respawn");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    "main",
+                    p,
+                    std::slice::from_ref(&respawned)
+                ),
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "a respawn must not resurrect a solved epic block"
+        );
     }
 
     #[test]
     fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
-        // Fail-closed where it counts: a behind lane that ALSO carries a path
-        // main has never touched may hold real work, so it keeps blocking. This
-        // is the line between cas-69e7 (nothing stranded) and actual data loss.
+        // Fail-closed: being behind is not proof that nothing was lost. The fix
+        // must stop the destructive ADVICE without weakening the GATE.
         let dir = init_squash_landed_repo(Some(("rescue.rs", "fn rescue() {}\n")));
         let p = dir.path();
         std::fs::write(p.join("feature.rs"), "fn feature() { v2 refactored }\n").unwrap();

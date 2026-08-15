@@ -120,6 +120,7 @@ async fn test_close_on_already_closed_is_non_destructive() {
 
     let first_close = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.clone(),
             reason: Some("First closer wins.".to_string()),
             bypass_code_review: None,
@@ -150,6 +151,7 @@ async fn test_close_on_already_closed_is_non_destructive() {
     // Second close with a different reason — must not claim credit or mutate.
     let second_close = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Second closer races.".to_string()),
             bypass_code_review: None,
@@ -219,6 +221,7 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
 
     let first = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Initial close.".to_string()),
             bypass_code_review: None,

@@ -257,6 +257,17 @@ pub struct TaskRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub bypass_code_review: Option<bool>,
 
+    /// Supervisor override for the epic close stranded-branch gate (cas-b192).
+    ///
+    /// A narrative string, not a boolean: the value IS the audit record of what
+    /// was inspected before waiving the gate, and it is stored next to the
+    /// gate's own measurements. Only honored for a live registered supervisor.
+    #[schemars(
+        description = "Supervisor override for the epic close stranded-branch gate. Pass a narrative describing what you inspected (e.g. 'diffed all 11 delivered paths against main; content present and later refactored by PR #406'). Only honored for a live registered supervisor. The narrative and the gate's own per-branch measurements are logged as a decision note. Use this instead of improvising a workaround when every lane is measurably stale."
+    )]
+    #[serde(default)]
+    pub stranded_branch_override: Option<String>,
+
     /// Supervisor-authorized close for a measured negative result whose
     /// experimental branch is deliberately not merged.
     ///

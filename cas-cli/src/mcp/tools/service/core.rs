@@ -424,6 +424,9 @@ impl CasService {
             }
         });
         let inner_req = TaskCloseRequest {
+            // cas-b192: forwarded, not dropped — this is the only path by which
+            // the unified `task` tool can reach the epic close override.
+            stranded_branch_override: req.stranded_branch_override,
             id: req
                 .id
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for close — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=close id=cas-abc1"))?,

@@ -1719,6 +1719,7 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
     core.set_agent_id_for_testing(agent_id);
     let result = core
         .cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),
             bypass_code_review: None,

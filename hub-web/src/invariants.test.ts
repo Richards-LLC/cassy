@@ -214,6 +214,19 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain("composer?.focus();");
   });
 
+  it("colours connection dots from the phases the supervisor actually emits", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // connectionClass emits lifecycle phases, so styling legacy names such as
+    // "connected" or "offline" leaves every dot stuck on idle grey.
+    expect(main).toContain('function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }');
+    expect(css).toContain(".machine-state.live,");
+    expect(css).toContain(".machine-state.backoff,");
+    expect(css).toContain(".machine-state.failed,");
+    expect(css).not.toContain(".machine-state.connected");
+    expect(css).not.toContain(".machine-state.offline");
+    expect(css).not.toContain(".machine-state.auth-blocked");
+  });
+
   it("renders phone secondary panes as tappable rows instead of empty terminal wells", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     // Only the primary pane mounts a surface on a phone, so every other pane has

@@ -268,20 +268,30 @@ pre,
   bottom: var(--space-1);
 }
 
-.machine-state.connected,
-.connected .connection-dot,
+/* These classes are the lifecycle phases the supervisor actually emits
+   (idle, resolving, dialing, auth, attaching, live, backoff, failed, degraded).
+   Health has to be legible from the dot alone on both surfaces. */
+.machine-state.live,
+.live .connection-dot,
 .pane-status-dot.live { background: var(--state-ok); }
 
-.machine-state.connecting,
-.machine-state.reconnecting,
-.reconnecting .connection-dot { background: var(--state-info); }
+.machine-state.resolving,
+.machine-state.dialing,
+.machine-state.auth,
+.machine-state.attaching,
+.resolving .connection-dot,
+.dialing .connection-dot,
+.auth .connection-dot,
+.attaching .connection-dot { background: var(--state-info); }
 
-.machine-state.auth-blocked,
-.auth-blocked .connection-dot,
+.machine-state.degraded,
+.machine-state.backoff,
+.degraded .connection-dot,
+.backoff .connection-dot { background: var(--state-warn); }
+
+.machine-state.failed,
+.failed .connection-dot,
 .pane-status-dot.exited { background: var(--state-crit); }
-
-.machine-state.offline,
-.offline .connection-dot { background: var(--state-warn); }
 
 .pair-machine {
   margin-top: auto;
@@ -295,9 +305,11 @@ pre,
   position: absolute;
   z-index: 1;
   inset: 0 auto 0 var(--machine-rail-width);
+  display: flex;
+  flex-direction: column;
   width: var(--machine-drawer-width);
   padding: var(--space-3);
-  overflow: auto;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
   transform: translateX(calc(-1 * var(--space-2)));
@@ -328,8 +340,11 @@ pre,
 
 .machine-drawer nav {
   display: grid;
+  flex: 1;
+  align-content: start;
   gap: var(--space-2);
   margin-top: var(--space-2);
+  overflow: auto;
 }
 
 .machine-group { display: grid; gap: var(--space-1); }
@@ -377,9 +392,12 @@ pre,
   font-size: var(--fs-sm);
 }
 
+/* The one destructive action in the drawer sits away from the session list it
+   would otherwise share a thumb-width with. */
 .remove-machine {
   width: 100%;
   min-height: var(--space-8);
+  flex: none;
   margin-top: var(--space-4);
   color: var(--state-crit);
   font-size: var(--fs-xs);
@@ -1491,16 +1509,24 @@ fieldset {
 }
 
 @media (max-width: 53rem) {
+  /* Every drawer/attention combination must be listed: the desktop
+     .shell.drawer-open.attention-collapsed rule is more specific than a bare
+     .shell here, and a media query adds no specificity of its own. Losing that
+     match rebuilt the phone as a three-column desktop grid the moment the
+     drawer opened, squeezing the terminal into a 14px column. */
   .shell,
   .shell.attention-collapsed,
-  .shell.drawer-open {
+  .shell.drawer-open,
+  .shell.drawer-open.attention-collapsed,
+  .shell.drawer-open.attention-expanded {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
     gap: 0;
   }
 
   /* The expanded context panel receives a row, so it never covers a terminal. */
-  .shell.attention-expanded {
+  .shell.attention-expanded,
+  .shell.drawer-open.attention-expanded {
     grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) calc(var(--machine-rail-width) + env(safe-area-inset-bottom));
   }
 

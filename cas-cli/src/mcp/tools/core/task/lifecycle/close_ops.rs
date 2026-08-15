@@ -12836,9 +12836,10 @@ pub(crate) fn git_commit_is_ancestor(
 /// history. A later merge conflict resolution can remove its hunks while leaving that
 /// ancestry permanently true. This check materializes `target_ref` into an
 /// isolated temporary Git index and asks whether the delivery commit's
-/// first-parent patch can be reverse-applied there. Reverse application is
-/// positive evidence that the delivered effect is still byte-identical in
-/// the target tree. A failure is then classified at the first target
+/// first-parent patch can be reverse-applied there. When nearby sibling work
+/// makes that context-sensitive proof fail, zero-context added hunks provide
+/// a second positive proof that the delivery's own lines survive. A failure
+/// is then classified at the first target
 /// first-parent commit where that proof stopped holding. An ordinary commit,
 /// or a merge whose contributing side already descends from and evolves the
 /// delivery, is explicit supersession. A merge whose changed side has no such
@@ -12945,6 +12946,100 @@ fn reverse_delivery_path_applies_to_tree(
         .wait()
         .map(|status| status.success())
         .map_err(|error| format!("failed to verify delivery patch for `{path}`: {error}"))
+}
+
+/// Checks whether every added zero-context hunk from a delivery still occurs
+/// verbatim in the target file. Reverse-applying a normal-context patch is a
+/// stronger proof, but it spuriously fails when sibling lanes edit nearby
+/// context while leaving the delivery's own lines intact.
+fn delivery_added_hunks_survive_on_tree(
+    repo_path: &std::path::Path,
+    delivery_parent: &str,
+    delivery_commit: &str,
+    target_tree: &str,
+    path: &str,
+) -> Result<bool, String> {
+    use std::process::Command;
+
+    let patch = Command::new("git")
+        .args([
+            "diff",
+            "--unified=0",
+            "--no-renames",
+            delivery_parent,
+            delivery_commit,
+            "--",
+            path,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to render zero-context delivery patch for `{path}`: {error}"))?;
+    if !patch.status.success() {
+        return Err(format!(
+            "Git could not render the zero-context delivery patch for `{path}` (exit {})",
+            patch.status
+        ));
+    }
+    let patch = String::from_utf8_lossy(&patch.stdout);
+    let mut hunks = Vec::<Vec<&str>>::new();
+    let mut current = None;
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            hunks.push(Vec::new());
+            current = Some(hunks.len() - 1);
+        } else if let Some(index) = current {
+            if let Some(line) = line.strip_prefix('+') {
+                if !line.starts_with("+++") {
+                    hunks[index].push(line);
+                }
+            }
+        }
+    }
+    hunks.retain(|hunk| !hunk.is_empty());
+    if hunks.is_empty() {
+        return Ok(false);
+    }
+
+    let target = Command::new("git")
+        .args(["show", &format!("{target_tree}:{path}")])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to read `{path}` from target `{target_tree}`: {error}"))?;
+    if !target.status.success() {
+        return Ok(false);
+    }
+    let target = String::from_utf8_lossy(&target.stdout);
+    let target_lines = target.lines().collect::<Vec<_>>();
+    Ok(hunks.iter().all(|hunk| {
+        target_lines
+            .windows(hunk.len())
+            .any(|candidate| candidate == hunk.as_slice())
+    }))
+}
+
+fn delivery_path_effect_survives_on_tree(
+    repo_path: &std::path::Path,
+    delivery_parent: &str,
+    delivery_commit: &str,
+    target_tree: &str,
+    path: &str,
+) -> Result<bool, String> {
+    if reverse_delivery_path_applies_to_tree(
+        repo_path,
+        delivery_parent,
+        delivery_commit,
+        target_tree,
+        path,
+    )? {
+        return Ok(true);
+    }
+    delivery_added_hunks_survive_on_tree(
+        repo_path,
+        delivery_parent,
+        delivery_commit,
+        target_tree,
+        path,
+    )
 }
 
 fn first_parent_delivery_lineage(
@@ -13180,7 +13275,7 @@ pub(crate) fn delivery_content_presence_on_target(
 
     let mut dropped = Vec::new();
     for path in &paths {
-        match reverse_delivery_path_applies_to_tree(
+        match delivery_path_effect_survives_on_tree(
             repo_path,
             &delivery_parent,
             delivery_commit,
@@ -13206,7 +13301,7 @@ pub(crate) fn delivery_content_presence_on_target(
     let mut superseded = Vec::new();
     let mut superseding_commits = Vec::new();
     for path in dropped {
-        let integration_present = match reverse_delivery_path_applies_to_tree(
+        let integration_present = match delivery_path_effect_survives_on_tree(
             repo_path,
             &delivery_parent,
             delivery_commit,
@@ -13228,7 +13323,7 @@ pub(crate) fn delivery_content_presence_on_target(
                 Ok(true) => {}
                 Err(reason) => return DeliveryContentPresence::Unknown { reason },
             }
-            match reverse_delivery_path_applies_to_tree(
+            match delivery_path_effect_survives_on_tree(
                 repo_path,
                 &delivery_parent,
                 delivery_commit,
@@ -17939,6 +18034,52 @@ mod merge_state_gate_tests {
              regardless of task B's later unmerged work on the same branch, \
              got {out:?}"
         );
+    }
+
+    /// cas-fe81: sequential batch merges may edit adjacent context in one
+    /// file without removing any earlier lane's added hunk. Every lane must
+    /// remain provably delivered after the last merge.
+    #[test]
+    fn adjacent_same_file_batch_lanes_preserve_each_delivery_hunk_cas_fe81() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("shared.rs"), "alpha\nbeta\ngamma\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: seed shared file"]);
+        git(p, &["branch", "-f", "main", "HEAD"]);
+        let base = rev_parse_local(p, "main");
+
+        std::fs::write(p.join("shared.rs"), "alpha\nworker\nbeta\ngamma\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: worker lane"]);
+        let worker = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "-b", "factory/second", &base]);
+        std::fs::write(p.join("shared.rs"), "alpha\nbeta\nsecond\ngamma\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: second lane"]);
+        let second = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "-b", "factory/third", &base]);
+        std::fs::write(p.join("shared.rs"), "alpha\nbeta\ngamma\nthird\n").unwrap();
+        git(p, &["add", "shared.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: third lane"]);
+        let third = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        for lane in ["factory/worker", "factory/second", "factory/third"] {
+            git(p, &["merge", "-q", "--no-ff", lane]);
+        }
+
+        for delivery in [&worker, &second, &third] {
+            assert_eq!(
+                delivery_content_presence_on_target(p, delivery, "main"),
+                DeliveryContentPresence::Present {
+                    paths: vec!["shared.rs".to_string()]
+                },
+                "adjacent sibling context must not erase delivery proof for {delivery}"
+            );
+        }
     }
 
     /// cas-b278 / GH #324: ancestry survives a later conflicting merge even

@@ -1026,8 +1026,12 @@ function render(captureDraft = true): void {
   const machineLabel = selected?.label ?? "No machine";
   const compactMachineLabel = machineLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "—";
   const controlActionDisabled = takeControlReason !== undefined;
-  const sessionCommands = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).map((session) => `
-    <button type="button" class="palette-command" data-palette-machine="${escapeAttr(machine.id)}" data-palette-session="${escapeAttr(session.name)}"><span>Jump to ${escapeHtml(session.name)}</span><small>${escapeHtml(machine.label)}</small></button>`)).join("");
+  const sessionCommands = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).map((session) => {
+    const summary = sessionSummaries.get(sessionKey(machine.id, session.name));
+    const searchMetadata = summary ? `${summary.title} ${summary.description} ${summary.phase}` : "";
+    const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label;
+    return `<button type="button" class="palette-command" data-palette-machine="${escapeAttr(machine.id)}" data-palette-session="${escapeAttr(session.name)}" data-search-text="${escapeAttr(searchMetadata)}"><span>Jump to ${escapeHtml(session.name)}</span><small${summary ? ` title="${escapeAttr(summary.description)}"` : ""}>${escapeHtml(secondary)}</small></button>`;
+  })).join("");
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
@@ -1321,7 +1325,8 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   paletteQuery.oninput = () => {
     const query = paletteQuery.value.trim().toLocaleLowerCase();
     for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
-      command.hidden = query.length > 0 && !command.textContent?.toLocaleLowerCase().includes(query);
+      const searchable = `${command.textContent ?? ""} ${command.dataset.searchText ?? ""}`.toLocaleLowerCase();
+      command.hidden = query.length > 0 && !searchable.includes(query);
     }
   };
   paletteQuery.onkeydown = (event) => {

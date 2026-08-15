@@ -56,6 +56,15 @@ describe("binding Commander browser invariants", () => {
     expect(terminal).toContain("state.controlMode && state.focused");
   });
 
+  it("keeps palette codenames primary while indexing optional session summaries", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
+    expect(source).toContain("summary ? `${summary.title} ${summary.description} ${summary.phase}` : \"\"");
+    expect(source).toContain('data-search-text="${escapeAttr(searchMetadata)}"');
+    expect(source).toContain('const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label');
+    expect(source).toContain('command.dataset.searchText ?? ""');
+  });
+
   it("renders instructional empty pane and all-clear feed states", async () => {
     const [main, attentionView] = await Promise.all([
       readFile(new URL("main.ts", import.meta.url), "utf8"),

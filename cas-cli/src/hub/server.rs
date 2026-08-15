@@ -98,7 +98,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             get(commander_ghostty_write_wasm),
         )
         .route("/commander/symbols.woff2", get(commander_symbols_font))
-        .route("/v1/health", get(health))
+        .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route(
             "/v1/auth/pairing/exchange",
             post(pairing_exchange::<R>).options(preflight::<R>),
@@ -320,8 +320,24 @@ fn valid_pairing_origin(origin: &str) -> bool {
     }
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse::ready())
+async fn health<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    let response = Json(HealthResponse::ready()).into_response();
+    // Health remains available to curl and local readiness checks. A browser
+    // may read it cross-origin only after that origin has been paired.
+    let paired_origin = origin(&headers).is_some_and(|origin| {
+        state.auth.as_ref().is_some_and(|auth| {
+            auth.is_paired_origin(&origin, chrono::Utc::now())
+                .unwrap_or(false)
+        })
+    });
+    if paired_origin {
+        with_cors(response, &headers)
+    } else {
+        response
+    }
 }
 
 #[derive(Serialize)]

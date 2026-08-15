@@ -448,6 +448,7 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
+    assert!(!health.headers().contains_key("access-control-allow-origin"));
     let health: serde_json::Value =
         serde_json::from_slice(&to_bytes(health.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(
@@ -522,6 +523,36 @@ async fn h4_real_browser_safe_reads_derive_only_a_trusted_same_origin() {
         .with_effective_origin("http://127.0.0.1:4173"),
     );
     let authorization = format!("DPoP {}", credential.credential);
+    let health = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/health")
+                .header("origin", "http://127.0.0.1:4173")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        health.headers()["access-control-allow-origin"],
+        "http://127.0.0.1:4173"
+    );
+    assert_eq!(health.headers()["vary"], "Origin");
+    let unpaired_health = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/health")
+                .header("origin", "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !unpaired_health
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
     let proof = |method: &str, uri: &str| {
         sign_dpop(
             &signing,

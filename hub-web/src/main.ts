@@ -1,4 +1,5 @@
 import "./styles.css";
+import { attentionContent, groupAttention, machineEventAttention, type AttentionContent } from "./attention";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -74,7 +75,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
       if (["daemon_disconnected", "pane_exited", "session_removed"].includes(kind)) {
-        void addAttention(machine, event.session as string | undefined, kind, event.diagnostic ? `Daemon ended: ${JSON.stringify(event.diagnostic)}` : kind.replaceAll("_", " "));
+        void addAttention(machine, event.session as string | undefined, kind, machineEventAttention(kind, event.diagnostic));
       }
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
@@ -86,7 +87,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       paneBuffers.set(key, buffered.slice(-2_000_000));
       surfaces.get(key)?.write(data);
     },
-    onSocketError: (session, detail) => void addAttention(machine, session, "session_transport", detail),
+    onSocketError: (session, detail) => void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "incident" }),
   });
 }
 
@@ -94,10 +95,11 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
 }
 
-async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, message: string): Promise<void> {
-  const id = `${machine.id}:${session ?? "machine"}:${kind}:${message}`;
+async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, content: string | AttentionContent): Promise<void> {
+  const normalized = typeof content === "string" ? { headline: content, severity: "notice" as const } : content;
+  const id = `${machine.id}:${session ?? "machine"}:${kind}:${normalized.headline}:${normalized.detail ?? ""}`;
   if (attention.some((item) => item.id === id && !item.acknowledgedAt)) return;
-  const item: AttentionItem = { id, machineId: machine.id, machineLabel: machine.label, session, kind, message, createdAt: new Date().toISOString() };
+  const item: AttentionItem = { id, machineId: machine.id, machineLabel: machine.label, session, kind, message: normalized.headline, ...normalized, createdAt: new Date().toISOString() };
   attention = [item, ...attention];
   await attentionStore.put(item);
   render();
@@ -108,6 +110,14 @@ async function acknowledgeAttention(id: string): Promise<void> {
   if (!item) return;
   item.acknowledgedAt = new Date().toISOString();
   await attentionStore.put(item);
+  render();
+}
+
+async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
+  const acknowledgedAt = new Date().toISOString();
+  const pending = items.filter((item) => !item.acknowledgedAt);
+  for (const item of pending) item.acknowledgedAt = acknowledgedAt;
+  await Promise.all(pending.map((item) => attentionStore.put(item)));
   render();
 }
 
@@ -345,7 +355,7 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
     for (const task of tasks) {
       if (["blocked", "awaiting_merge", "awaitingmerge"].includes(String(task.status))) {
-        await addAttention(machine, session, String(task.status), `${task.id}: ${task.title}`);
+        await addAttention(machine, session, String(task.status), { headline: String(task.title), severity: "notice", ticketId: String(task.id) });
       }
     }
     render();
@@ -578,12 +588,33 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
 
 function renderAttention(): void {
   const container = document.querySelector("#attention-list")!;
-  for (const item of attention.filter((candidate) => !candidate.acknowledgedAt).slice(0, 8)) {
-    const card = document.createElement("article"); card.className = "attention-item";
-    const text = document.createElement("button"); text.className = "attention-open"; text.textContent = `${item.machineLabel}${item.session ? ` / ${item.session}` : ""}: ${item.message}`;
-    text.onclick = () => { selectedMachineId = item.machineId; if (item.session) void openSession(item.machineId, item.session); };
-    const ack = document.createElement("button"); ack.className = "ack"; ack.textContent = "Acknowledge"; ack.onclick = () => void acknowledgeAttention(item.id);
-    card.append(text, ack); container.append(card);
+  for (const group of groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))) {
+    const section = document.createElement("section"); section.className = "attention-group";
+    const header = document.createElement("header"); header.className = "attention-group-header";
+    const label = document.createElement("span"); label.className = "attention-group-label"; label.textContent = `${group.machineLabel}${group.session ? ` / ${group.session}` : ""}`;
+    header.append(label);
+    const routineItems = group.items.filter((item) => attentionContent(item).severity === "notice");
+    if (routineItems.length > 0) {
+      const acknowledgeAll = document.createElement("button"); acknowledgeAll.className = "attention-group-ack"; acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`; acknowledgeAll.onclick = () => void acknowledgeAttentionGroup(routineItems);
+      header.append(acknowledgeAll);
+    }
+    section.append(header);
+    for (const item of group.items) {
+      const content = attentionContent(item);
+      const card = document.createElement("article"); card.className = `attention-item attention-item--${content.severity}`;
+      const text = document.createElement("button"); text.className = "attention-open";
+      const title = document.createElement("span"); title.className = "attention-title"; title.textContent = content.headline;
+      text.append(title);
+      if (content.severity === "incident") { const severity = document.createElement("span"); severity.className = "attention-severity"; severity.textContent = "Action required · open session"; text.append(severity); }
+      if (content.ticketId) { const ticket = document.createElement("small"); ticket.className = "attention-ticket"; ticket.title = `Task ${content.ticketId}`; ticket.textContent = content.ticketId; text.append(ticket); }
+      if (content.cause) { const cause = document.createElement("span"); cause.className = "attention-cause"; cause.textContent = `Cause: ${content.cause}`; text.append(cause); }
+      if (content.detail) { const detail = document.createElement("span"); detail.className = "attention-detail"; detail.textContent = content.detail; text.append(detail); }
+      text.onclick = () => { selectedMachineId = item.machineId; if (item.session) void openSession(item.machineId, item.session); };
+      card.append(text);
+      if (content.severity === "notice") { const ack = document.createElement("button"); ack.className = "ack"; ack.textContent = "Acknowledge"; ack.onclick = () => void acknowledgeAttention(item.id); card.append(ack); }
+      section.append(card);
+    }
+    container.append(section);
   }
 }
 

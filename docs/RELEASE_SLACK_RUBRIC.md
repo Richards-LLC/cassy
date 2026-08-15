@@ -64,6 +64,42 @@ lane. It deliberately competes after its tag push, so disable/cancel the CI
 workflow first when possible; it uses the same receipt command before any
 announcement digest is posted.
 
+### Recovering a failed or partial release
+
+1. Inspect, then run the receipt command. A complete release has both named
+   assets and succeeds; a partial release is one that exists but makes the
+   receipt command fail.
+
+   ```bash
+   gh release view vX.Y.Z --repo pippenz/cas --json isDraft,publishedAt,assets
+   ./scripts/release-published-receipt.sh vX.Y.Z
+   ```
+
+2. If the receipt succeeds, do not rerun or change the release: fill the draft
+   with `--write-draft` and continue to the announcement. Do **not** attach a
+   missing asset by hand; the workflow must remain the normal single publisher.
+3. If the release is partial and nothing has been announced from it, preserve
+   the existing tag, delete only the incomplete release, then rerun the same
+   failed workflow run. The release workflow will create fresh CI assets; it
+   refuses an existing object precisely to prevent replacement-by-rerun.
+
+   ```bash
+   gh release delete vX.Y.Z --repo pippenz/cas --yes
+   gh run rerun <failed-run-id> --repo pippenz/cas
+   ```
+
+   Do not use `--cleanup-tag`, force-push, or retag: the annotated tag remains
+   the source identity for both the retry and its receipt.
+4. If CI cannot publish after that recovery, use the explicitly acknowledged
+   `--manual-publish --acknowledge-workflow-conflict` failover only after the
+   incomplete release is deleted. In every case, run
+   `release-published-receipt.sh --write-draft` after publication and before an
+   announcement.
+5. If any announcement might already name the release, do not delete or replace
+   its assets. Stop and escalate to the release owner; publish a corrective new
+   version instead of making existing verification evidence change underneath
+   users.
+
 If `coordination action=worktree_merge ... allow_trunk=true` encounters the
 ruleset first, it returns `PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` with the
 source/target-specific form of these commands. Follow that handoff and retry

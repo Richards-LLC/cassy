@@ -195,6 +195,8 @@ require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables Git
 require_text "$(<"$release")" 'needs: [verify, build, build-macos]' 'release publication waits for both Linux and macOS builds'
 require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
 require_text "$(<"$release")" 'refusing to replace its assets' 'release rerun with an existing release fails loudly'
+require_text "$(<"$release")" 'RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release' 'release rerun names its recovery procedure'
+require_text "$(<"$repo_root/docs/RELEASE_SLACK_RUBRIC.md")" '### Recovering a failed or partial release' 'release rubric documents partial-release recovery'
 
 # Exercise the actual Create Release shell body with a fake gh client. A
 # release run that failed after creating its release object must not silently

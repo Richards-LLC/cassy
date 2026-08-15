@@ -252,7 +252,7 @@ jobs:
           # after a partial creation must fail loudly for deliberate recovery,
           # never silently attach or replace assets.
           if gh release view "$VERSION" --repo ${{ github.repository }} >/dev/null 2>&1; then
-            echo "::error::Release $VERSION already exists; refusing to replace its assets. Inspect the published release and perform documented recovery before rerunning."
+            echo "::error::Release $VERSION already exists; refusing to replace its assets. See docs/RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release before rerunning."
             exit 1
           fi
 

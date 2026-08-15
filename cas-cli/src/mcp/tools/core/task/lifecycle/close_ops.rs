@@ -9884,6 +9884,82 @@ fn live_branch_merge_evidence(
     Some((state, summaries))
 }
 
+/// A target-history commit which proves that a non-ancestral child anchor was
+/// accepted by an earlier squash/integration, plus the child-close content
+/// verdict for that accepted commit at the current target tip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReanchoredDeliveryContent {
+    Present {
+        integration: String,
+    },
+    Superseded {
+        integration: String,
+        paths: Vec<String>,
+        commits: Vec<String>,
+    },
+}
+
+/// Reconcile a child anchor that GitHub rewrote in a squash and whose original
+/// patch has since been evolved by later first-parent work.
+///
+/// The first proof is deliberately task-specific: an anchor's own effect must
+/// survive at some commit on the target's first-parent history. That commit is
+/// the accepted re-anchor. We then run the existing child-close delivery
+/// checker from that immutable point to the live target, preserving its
+/// cas-fe81 hunk-survival and fail-closed dropped-content distinctions.
+///
+/// A scan failure or no affirmative re-anchor is intentionally `None`; this
+/// helper must never turn missing Git evidence into an all-clear.
+fn reanchored_delivery_content_in_parent(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+) -> Option<ReanchoredDeliveryContent> {
+    let target = preferred_diff_target_ref(repo_path, parent_branch);
+    if !git_ref_exists(repo_path, anchor) || !git_ref_exists(repo_path, &target) {
+        return None;
+    }
+    let merge_base = git_stdout_lines(repo_path, &["merge-base", anchor, &target])
+        .ok()?
+        .into_iter()
+        .next()?;
+    let range = format!("{merge_base}..{target}");
+    let candidates = git_stdout_lines(
+        repo_path,
+        &["rev-list", "--first-parent", "--reverse", &range],
+    )
+    .ok()?;
+
+    for integration in candidates {
+        // The source anchor need not be an ancestor of its squash commit, so
+        // only a direct present-effect verdict is valid at this first step.
+        if !matches!(
+            delivery_content_presence_on_target(repo_path, anchor, &integration),
+            DeliveryContentPresence::Present { .. }
+        ) {
+            continue;
+        }
+        match delivery_content_presence_on_target(repo_path, &integration, &target) {
+            DeliveryContentPresence::Present { .. } => {
+                return Some(ReanchoredDeliveryContent::Present { integration });
+            }
+            DeliveryContentPresence::Superseded { paths, commits } => {
+                return Some(ReanchoredDeliveryContent::Superseded {
+                    integration,
+                    paths,
+                    commits,
+                });
+            }
+            DeliveryContentPresence::Dropped { .. } | DeliveryContentPresence::Unknown { .. } => {
+                // This particular integration cannot authorize the child at
+                // the current tip. Keep scanning only for a later first-parent
+                // integration whose full effect still survives.
+            }
+        }
+    }
+    None
+}
+
 /// Walk an epic's children and report whether each child task's own recorded
 /// work is merged into `parent_branch`.
 ///
@@ -9970,8 +10046,14 @@ pub(crate) fn collect_epic_branch_statuses(
                 .chain(additional_factory_branches.iter())
                 .cloned()
                 .collect::<Vec<_>>();
-            let checked_refs = if let Some(anchor) = resolved_anchor {
-                vec![anchor]
+            // The table's stranded count is a live Git measurement of the
+            // current lane tip, never a historical count from the task's
+            // recorded anchor. An anchor is delivery evidence below; it is
+            // not a substitute for the branch state the operator needs to
+            // act on now. Fall back to an anchor only when there is no live
+            // branch receipt at all.
+            let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
+                resolved_anchor.into_iter().collect()
             } else {
                 fallback_branches.iter().map(String::as_str).collect()
             };
@@ -10006,6 +10088,7 @@ pub(crate) fn collect_epic_branch_statuses(
             let mut content_check_error = None;
             if let Some(anchor) = resolved_anchor
                 && unmerged_count == 0
+                && commit_is_merged_into_parent(repo_path, anchor, parent_branch)
             {
                 match delivery_content_presence_in_parent(repo_path, anchor, parent_branch) {
                     DeliveryContentPresence::Present { .. } => {}
@@ -10083,6 +10166,53 @@ pub(crate) fn collect_epic_branch_statuses(
                             live_summaries.join("; ")
                         },
                     ));
+                }
+            }
+            // A GitHub squash loses the original anchor's ancestry. If a
+            // later first-parent commit then evolves the same files, neither
+            // an exact anchor tree nor cherry patch remains on the current
+            // target. Re-anchor the child at the earliest target commit where
+            // its own effect is proven, then reuse the child-close content
+            // checker from that accepted integration point. That checker
+            // includes cas-fe81's zero-context hunk-survival proof and its
+            // fail-closed distinction between ordinary evolution and a merge
+            // resolution that dropped delivery content.
+            if let Some(anchor) = resolved_anchor
+                && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+                && dropped_paths.is_empty()
+                && content_check_error.is_none()
+                && merge_evidence_note.is_none()
+            {
+                match reanchored_delivery_content_in_parent(repo_path, anchor, parent_branch) {
+                    Some(ReanchoredDeliveryContent::Present { integration }) => {
+                        unmerged_count = 0;
+                        merge_evidence_note = Some(format!(
+                            "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+                             is integrated through accepted squash re-anchor `{integration}`. Its \
+                             task-specific effect survives on `{parent_branch}` under the same \
+                             hunk-survival proof used by child close.",
+                            t.id,
+                        ));
+                    }
+                    Some(ReanchoredDeliveryContent::Superseded {
+                        integration,
+                        paths,
+                        commits,
+                    }) => {
+                        unmerged_count = 0;
+                        content_evolution_note = Some(format!(
+                            "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+                             is integrated through accepted squash re-anchor `{integration}` and \
+                             its delivered path(s) {} were intentionally evolved by later \
+                             first-parent commit(s) {}. The child close content proof (including \
+                             hunk survival) accepts this as post-integration evolution, not \
+                             stranded work.",
+                            t.id,
+                            paths.join(", "),
+                            commits.join(", "),
+                        ));
+                    }
+                    None => {}
                 }
             }
             // cas-b192: the reconciliation above proves content only through
@@ -21514,6 +21644,115 @@ mod epic_status_gate_tests {
         );
         assert!(report.contains(&recorded_anchor), "{report}");
         assert!(report.contains(&live_tip), "{report}");
+    }
+
+    /// GH #404 / cas-32ee: an epic integration squash can carry a child's
+    /// patch, followed by a routine bundle rebuild that changes the same file.
+    /// The original factory anchor is no longer an ancestor, so epic close
+    /// must re-anchor at the accepted squash and reuse child-close evolution
+    /// proof instead of reporting the old anchor as stranded.
+    #[test]
+    fn epic_close_accepts_squash_then_evolved_child_and_uses_live_lane_count_cas_32ee() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(p.join("hub-web/dist")).unwrap();
+        std::fs::write(p.join("hub-web/dist/app.js"), "const version = 'base';\n").unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(p, &["commit", "-q", "-m", "build: seed Commander bundle"]);
+        git(p, &["branch", "-f", "factory/worker", "main"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        std::fs::write(
+            p.join("hub-web/dist/app.js"),
+            "const version = 'delivered-child';\n",
+        )
+        .unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-child): ship Commander change"]);
+        let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--squash", "factory/worker"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "integrate: Commander child batch (cas-child)",
+            ],
+        );
+        let integration = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+
+        std::fs::write(
+            p.join("hub-web/dist/app.js"),
+            "const version = 'rebuilt-after-integration';\n",
+        )
+        .unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "build: rebuild Commander bundle after integration",
+            ],
+        );
+        let rebuild = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+
+        // A factory lane can be realigned after delivery. Its current tip is
+        // the only valid stranded-count source; the preserved anchor remains
+        // delivery evidence and must not contribute a stale count.
+        git(p, &["branch", "-f", "factory/worker", "main"]);
+        assert_eq!(
+            count_unmerged_factory_commits(p, "factory/worker", "main"),
+            0,
+            "precondition: the live lane is fully integrated"
+        );
+        assert!(
+            count_unmerged_factory_commits(p, &anchor, "main") > 0,
+            "precondition: the historical squash anchor remains non-ancestral"
+        );
+
+        assert_eq!(
+            reanchored_delivery_content_in_parent(p, &anchor, "main"),
+            Some(ReanchoredDeliveryContent::Superseded {
+                integration: integration.clone(),
+                paths: vec!["hub-web/dist/app.js".to_string()],
+                commits: vec![rebuild.clone()],
+            })
+        );
+
+        let mut child = child("cas-child", TaskStatus::Closed, Some("worker"));
+        child.deliverables.factory_branch_anchor = Some(anchor.clone());
+        child.deliverables.parked_branch = Some("factory/worker".to_string());
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&child), "main", p);
+        let row = &statuses[0];
+        assert_eq!(row.unmerged_count, 0, "{row:?}");
+        assert_eq!(row.checked_refs_label(), "factory/worker");
+        let evolution = row
+            .content_evolution_note
+            .as_deref()
+            .expect("the squash re-anchor and rebuild must be named");
+        assert!(evolution.contains(&integration), "{evolution}");
+        assert!(evolution.contains(&rebuild), "{evolution}");
+
+        match run_epic_close_merge_gate(
+            &epic("cas-epic-evolved-squash"),
+            &base_req("cas-epic-evolved-squash"),
+            "main",
+            p,
+            &[child],
+        ) {
+            EpicCloseGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains(&integration), "{note}");
+                assert!(note.contains(&rebuild), "{note}");
+            }
+            other => panic!("evolved squash child must not strand the epic: {other:?}"),
+        }
     }
 
     #[test]

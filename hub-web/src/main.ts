@@ -1,5 +1,6 @@
 import "./styles.css";
-import { attentionContent, groupAttention, machineEventAttention, type AttentionContent } from "./attention";
+import { attentionUrl, createAttentionItem, machineEventAttention, type AttentionAction, type AttentionContent } from "./attention";
+import { renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -39,6 +40,7 @@ const leaseExpiryTimers = new Map<string, number>();
 // Until then collapsed phone rows preserve their last real terminal geometry.
 const mobileCollapsedPaneGeometry = "freeze";
 let attention: AttentionItem[] = [];
+const newCriticalAttentionIds = new Set<string>();
 let selectedMachineId: string | undefined;
 let selectedSession: string | undefined;
 let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : "";
@@ -91,7 +93,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
       if (["daemon_disconnected", "pane_exited", "session_removed"].includes(kind)) {
-        void addAttention(machine, event.session as string | undefined, kind, machineEventAttention(kind, event.diagnostic));
+        const content = machineEventAttention(kind, event.diagnostic);
+        void addAttention(machine, event.session as string | undefined, kind, { ...content, payload: event });
       }
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
@@ -107,7 +110,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
-      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "incident" });
+      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "critical", action: "view_pane", payload: detail });
     },
   });
 }
@@ -117,21 +120,20 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
 }
 
 async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, content: string | AttentionContent): Promise<void> {
-  const normalized = typeof content === "string" ? { headline: content, severity: "notice" as const } : content;
-  const id = `${machine.id}:${session ?? "machine"}:${kind}:${normalized.headline}:${normalized.detail ?? ""}`;
-  if (attention.some((item) => item.id === id && !item.acknowledgedAt)) return;
-  const item: AttentionItem = { id, machineId: machine.id, machineLabel: machine.label, session, kind, message: normalized.headline, ...normalized, createdAt: new Date().toISOString() };
+  const createdAt = new Date().toISOString();
+  const item = createAttentionItem({
+    id: `${machine.id}:${session ?? "machine"}:${kind}:${createdAt}:${crypto.randomUUID()}`,
+    machineId: machine.id,
+    machineLabel: machine.label,
+    session,
+    kind,
+    createdAt,
+  }, content);
+  if (item.severity === "critical") newCriticalAttentionIds.add(item.id);
   attention = [item, ...attention];
   await attentionStore.put(item);
   render();
-}
-
-async function acknowledgeAttention(id: string): Promise<void> {
-  const item = attention.find((candidate) => candidate.id === id);
-  if (!item) return;
-  item.acknowledgedAt = new Date().toISOString();
-  await attentionStore.put(item);
-  render();
+  newCriticalAttentionIds.delete(item.id);
 }
 
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
@@ -407,7 +409,16 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
     const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])];
     for (const task of tasks) {
       if (["blocked", "awaiting_merge", "awaitingmerge"].includes(String(task.status))) {
-        await addAttention(machine, session, String(task.status), { headline: String(task.title), severity: "notice", ticketId: String(task.id) });
+        const awaitingMerge = ["awaiting_merge", "awaitingmerge"].includes(String(task.status).toLowerCase());
+        const alreadyQueued = attention.some((item) => !item.acknowledgedAt && item.ticketId === String(task.id) && item.kind === String(task.status));
+        if (alreadyQueued) continue;
+        await addAttention(machine, session, String(task.status), {
+          headline: String(task.title),
+          severity: awaitingMerge ? "warning" : "info",
+          action: awaitingMerge ? "open_pr" : "none",
+          ticketId: String(task.id),
+          payload: task,
+        });
       }
     }
     render();
@@ -670,7 +681,7 @@ function render(captureDraft = true): void {
       <aside class="machines"><div class="brand"><span class="pulse"></span><strong>Commander</strong></div><button id="pair-toggle" class="primary">Pair this machine</button><nav id="machine-list"></nav></aside>
       <aside class="sessions"><h2>${escapeHtml(selected?.label ?? "Machines")}</h2><div class="connection ${connectionStates.get(selected?.id ?? "") ?? "idle"}">${connectionStates.get(selected?.id ?? "") ?? "select a machine"}</div>${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}${selected ? '<button id="remove-machine" class="remove-machine">Remove</button>' : ""}<nav id="session-list"></nav></aside>
       <main><header class="toolbar"><div><h1>${escapeHtml(selectedSession ?? "Fleet overview")}</h1><p>${lease?.held_by_me ? "You control this session" : lease?.controller_label ? `Observed · controlled by ${escapeHtml(lease.controller_label)}` : "Observer mode"}</p></div><div class="actions"><button id="lease" ${!selected || !selectedSession || !hubSupports(selected.id, "daemon_attach") || (!lease?.held_by_me && !selected.scopes.includes("pane-input") && !selected.scopes.includes("hub-admin")) ? "disabled" : ""}>${lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control"}</button><button id="interrupt" class="danger" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}</header><section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty">${selectedSession ? "Connecting to terminal…" : "Choose a live session to open its panes."}</div></section></main>
-      <aside class="context"><section><h2>Attention <span class="badge">${attention.filter((item) => !item.acknowledgedAt).length}</span></h2><div id="attention-list"></div></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
+      <aside class="context"><section id="attention-panel"></section><section><h2>Workers & tasks</h2><div id="status-view"></div></section><section class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></section></aside>
     </div>${pairDialogMarkup()}<div id="toast" role="status"></div>`;
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
   const machineList = document.querySelector("#machine-list")!;
@@ -712,35 +723,33 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
 }
 
 function renderAttention(): void {
-  const container = document.querySelector("#attention-list")!;
-  for (const group of groupAttention(attention.filter((candidate) => !candidate.acknowledgedAt))) {
-    const section = document.createElement("section"); section.className = "attention-group";
-    const header = document.createElement("header"); header.className = "attention-group-header";
-    const label = document.createElement("span"); label.className = "attention-group-label"; label.textContent = `${group.machineLabel}${group.session ? ` / ${group.session}` : ""}`;
-    header.append(label);
-    const routineItems = group.items.filter((item) => attentionContent(item).severity === "notice");
-    if (routineItems.length > 0) {
-      const acknowledgeAll = document.createElement("button"); acknowledgeAll.className = "attention-group-ack"; acknowledgeAll.textContent = `Acknowledge ${routineItems.length} routine${routineItems.length === 1 ? "" : "s"}`; acknowledgeAll.onclick = () => void acknowledgeAttentionGroup(routineItems);
-      header.append(acknowledgeAll);
-    }
-    section.append(header);
-    for (const item of group.items) {
-      const content = attentionContent(item);
-      const card = document.createElement("article"); card.className = `attention-item attention-item--${content.severity}`;
-      const text = document.createElement("button"); text.className = "attention-open";
-      const title = document.createElement("span"); title.className = "attention-title"; title.textContent = content.headline;
-      text.append(title);
-      if (content.severity === "incident") { const severity = document.createElement("span"); severity.className = "attention-severity"; severity.textContent = "Action required · open session"; text.append(severity); }
-      if (content.ticketId) { const ticket = document.createElement("small"); ticket.className = "attention-ticket"; ticket.title = `Task ${content.ticketId}`; ticket.textContent = content.ticketId; text.append(ticket); }
-      if (content.cause) { const cause = document.createElement("span"); cause.className = "attention-cause"; cause.textContent = `Cause: ${content.cause}`; text.append(cause); }
-      if (content.detail) { const detail = document.createElement("span"); detail.className = "attention-detail"; detail.textContent = content.detail; text.append(detail); }
-      text.onclick = () => { selectedMachineId = item.machineId; if (item.session) void openSession(item.machineId, item.session); };
-      card.append(text);
-      if (content.severity === "notice") { const ack = document.createElement("button"); ack.className = "ack"; ack.textContent = "Acknowledge"; ack.onclick = () => void acknowledgeAttention(item.id); card.append(ack); }
-      section.append(card);
-    }
-    container.append(section);
+  const container = document.querySelector<HTMLElement>("#attention-panel");
+  if (!container) return;
+  renderAttentionPanel(container, attention, {
+    dismiss: acknowledgeAttentionGroup,
+    act: performAttentionAction,
+    copy: async (payload) => {
+      await navigator.clipboard.writeText(payload);
+      toast("Event payload copied");
+    },
+  }, { animateIds: newCriticalAttentionIds });
+}
+
+async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {
+  if (action === "repair") {
+    document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+    return;
   }
+  if (action === "open_pr") {
+    const url = attentionUrl(item);
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+  }
+  selectedMachineId = item.machineId;
+  if (item.session) await openSession(item.machineId, item.session);
+  else render();
 }
 
 function renderStatus(status?: Record<string, unknown>): void {

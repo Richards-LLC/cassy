@@ -72,8 +72,11 @@ export interface AttentionItem {
   headline?: string;
   detail?: string;
   cause?: string;
-  severity?: "incident" | "notice";
+  severity?: "critical" | "warning" | "info" | "incident" | "notice";
+  action?: "repair" | "view_pane" | "retry" | "open_pr" | "none";
   ticketId?: string;
+  payload?: unknown;
+  fingerprint?: string;
   createdAt: string;
   seenAt?: string;
   acknowledgedAt?: string;

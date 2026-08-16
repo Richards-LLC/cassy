@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.71.0] - 2026-08-16
+
+### Added
+- **External expertise is now a governed capability, not a loose key.** The Viktor delegation gateway attributes every external MCP call to a registered caller, passes it through a pre-dispatch policy check with a redacted audit trail, and admits tools only by exactly-parsed (server, tool) pairs — lookalike or foreign routes are refused before anything leaves the machine. Every delegation gets a durable receipt with duplicate-call protection, budget reservations that deny over-cap requests locally, and resumption of timed-out runs; a verifier that could not answer — timeout, malformed output, insufficient scope, transport failure, or any other enumerated non-answer — records a durable non-pass and never reads as approval.
+
+### Changed
+- **Message status tells the truth.** Activity that merely suggests a recipient saw a message shows as its own weaker state instead of "confirmed", a message repeatedly blocked by a busy recipient is flagged undelivered instead of silently waiting, and only an explicit acknowledgment of the exact message discharges an urgent halt.
+- **One authority decides which branch work belongs on.** Worker spawn bases, merge destinations, and newly created or newly linked epic children all resolve through the same declared-work-target precedence chain; an epic branch that has cleanly fallen behind its parent is fast-forwarded before any worker is cut from it.
+- **Finished work is recognized as finished.** Epic close reconciles deliveries that were squash-merged and later improved, measures against live branch state instead of stored counts, and keeps unproven anchors fail-closed.
+- **Memory keeps instructions, not chatter.** Machine-to-machine relay turns are no longer captured as durable context, while genuine operator instructions are captured again — discriminated by typed delivery provenance instead of text parsing.
+
+### Fixed
+- **Commander is finished work on both surfaces.** A polish pass and a UX pass fixed the unreachable phone message button, empty worker panes, the drawer crushing the terminal, dead connection colours, the keyboard closing mid-word, drafts destroyed by the live refresh, sends without feedback, vanishing confirmations, unexplained disabled controls, duplicate alert cards, stale data posing as live, a dead-end first run, and alert cards missing their ticket.
+- **Sharp edges removed.** Ending a session no longer risks a nested-runtime panic; requesting an isolated worktree no longer gets a false refusal with invalid TOML instructions; the supervisor checklist no longer instructs an action that severs its own tools; a leak test no longer scatters orphan processes through CI cleanup; and memory list filters (tags, tier, scope) actually filter, with counts that match the rows.
+
 ## [2.70.0] - 2026-08-15
 
 ### Added

@@ -72,6 +72,19 @@ describe("Commander attention triage queue", () => {
     expect(otherContext.ticketId).toBeUndefined();
   });
 
+  it("keeps a hub event stream ticket on the derived card content", () => {
+    const [card] = coalesceAttention([item({
+      kind: "task_summary",
+      message: "cas-87e7: Epic branch advanced",
+      ticketId: undefined,
+    })]);
+
+    // Hub event-stream records derive the ticket while the stored event itself
+    // stays unchanged. Rendering must therefore use card.content.ticketId.
+    expect(card.latest.ticketId).toBeUndefined();
+    expect(card.content.ticketId).toBe("cas-87e7");
+  });
+
   it("never promotes arbitrary JSON into the summary line", () => {
     const content = attentionContent(item({
       kind: "config_drift",

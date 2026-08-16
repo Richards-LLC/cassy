@@ -42,6 +42,7 @@ mod code_store;
 mod code_vector_store;
 mod commit_link_store;
 mod delivery_store;
+mod delegation_receipt_store;
 mod entity_store;
 pub mod error;
 mod event_store;
@@ -102,6 +103,11 @@ pub use delivery_store::{
     get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
     transition_worker_delivery, transition_worker_delivery_verification_with_conn,
     worker_delivery_transaction_id,
+};
+pub use delegation_receipt_store::{
+    DELEGATION_RECEIPT_SCHEMA, DelegationBudget, DelegationReceipt, DelegationReceiptState,
+    DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
+    SqliteDelegationReceiptStore,
 };
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 

@@ -5965,6 +5965,55 @@ This is the body content."#;
         );
     }
 
+    /// cas-a326: the binary-freshness check runs through the very MCP server
+    /// it may find stale. It must hand the restart to the harness owner, not
+    /// strand the supervisor by teaching it to kill its own stdio server.
+    #[test]
+    fn test_supervisor_checklists_delegate_stale_serve_recovery_to_operator() {
+        for (label, set, path) in [
+            (
+                "claude",
+                BUILTIN_SKILLS,
+                "skills/cas-supervisor-checklist/SKILL.md",
+            ),
+            (
+                "codex",
+                CODEX_BUILTIN_SKILLS,
+                "skills/cas-codex-supervisor-checklist/SKILL.md",
+            ),
+            (
+                "grok",
+                GROK_BUILTIN_SKILLS,
+                "skills/cas-supervisor-checklist/SKILL.md",
+            ),
+        ] {
+            let checklist = set
+                .iter()
+                .find(|builtin| builtin.path == path)
+                .unwrap_or_else(|| panic!("{label} missing {path}"));
+
+            for required in [
+                "do not kill or restart `cas serve` from this active MCP session",
+                "ask the operator",
+                "MCP reconnect/restart control",
+                "Do not use `pkill`",
+                "CAS tool list is restored",
+                "rerun this checklist from step 0",
+            ] {
+                assert!(
+                    checklist.content.contains(required),
+                    "{label} stale-binary recovery is missing {required:?}"
+                );
+            }
+            assert!(
+                !checklist
+                    .content
+                    .contains("restart any live `cas serve` processes before continuing"),
+                "{label} checklist must not teach active-session self-restart"
+            );
+        }
+    }
+
     // ----------------------------------------------------------------------
     // cas-cc8c: cross-harness required-capability parity (semantic).
     //

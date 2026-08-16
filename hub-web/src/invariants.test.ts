@@ -50,8 +50,56 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Commander origin.");
     expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
-    expect(source).toContain('disabled aria-describedby="control-disabled-reason"');
     expect(source).toContain('class="control-disabled-reason"');
+    // A phone cannot hover, so an unavailable control keeps its reason in the DOM
+    // and says it out loud when tapped instead of hiding it in a title attribute.
+    expect(source).toContain('aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}"');
+    expect(source).toContain('aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"');
+    expect(source).toContain("const reason = button.dataset.disabledReason;");
+    expect(source).toContain("toast(reason);");
+    expect(source).not.toContain('disabled aria-describedby="control-disabled-reason"');
+  });
+
+  it("keeps a half-typed supervisor message across background renders", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // render() replaces app.innerHTML on every heartbeat, which destroyed the
+    // composer's contents mid-sentence — fatal on a phone, where typing is slow.
+    expect(source).toContain("function captureMessageDraft(): void {");
+    expect(source).toContain("function restoreMessageDraft(): void {");
+    expect(source.indexOf("captureMessageDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
+    expect(source.indexOf("app.innerHTML =")).toBeLessThan(source.indexOf("restoreMessageDraft();"));
+    expect(source).toContain('const composerWasFocused = document.activeElement?.id === "message-text";');
+  });
+
+  it("reports the outcome of sending a supervisor message", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // A send with no outcome is indistinguishable from a lost one, and invites a
+    // duplicate message to the supervisor.
+    expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
+    expect(source).toContain("const sent = sendControl(selected.id, selectedSession, { SendMessage:");
+    expect(source).toContain("toast(`Message sent to ${supervisor}`);");
+    expect(source).toContain('toast("Type a message first");');
+  });
+
+  it("collapses one outage into one attention card per machine and session", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // Without a stable fingerprint each retry coalesces to its own card, so a
+    // single unreachable hub buries the feed under near-identical criticals.
+    expect(source).toContain("fingerprint: `${machine.id}:auth_loss`");
+    expect(source).toContain("fingerprint: `${machine.id}:hub_disconnected`");
+    expect(source).toContain("fingerprint: `${machine.id}:${session}:session_transport`");
+  });
+
+  it("marks operations data as stale while the hub connection is not live", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain("const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined");
+    expect(main).toContain('class="status-stale" role="status"');
+    expect(main).toContain("Not live — reconnecting.");
+    expect(main).toContain("Showing the last state received ");
+    // Retry transitions rewrite snapshot.since, so staleness is anchored to the
+    // last live moment instead of reporting a long outage as "just now".
+    expect(main).toContain('if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());');
+    expect(css).toContain(".status-stale {");
   });
 
   it("derives the header mode and terminal cursor from the real session lease", async () => {
@@ -95,8 +143,31 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("let machineCatalogLoaded = false;");
     expect(source).toContain("machineCatalogLoaded = true;");
     expect(source).toContain('"Loading paired machines…"');
-    expect(source).toContain('"No machines paired yet — press + to pair this machine."');
+    // An unpaired Commander offers pairing instead of naming a glyph, and the
+    // machine being paired is the one running the sessions, not this device.
+    expect(source).toContain('"No machines paired yet. Pair the machine your sessions run on."');
+    expect(source).toContain('pair.textContent = "Pair a machine";');
+    expect(source).toContain('<p class="empty-title">No machine paired yet</p>');
+    expect(source).toContain('<button id="empty-pair" class="primary" type="button">Pair a machine</button>');
+    expect(source).not.toContain("press + to pair this machine");
     expect(source).toContain("render(false);");
+  });
+
+  it("names the ticket on attention raised from a task", async () => {
+    const view = await readFile(new URL("attention-view.ts", import.meta.url), "utf8");
+    // .attention-ticket was styled and documented but never rendered, so a
+    // blocked-task card never said which task it meant.
+    expect(view).toContain('ticket.className = "attention-ticket"');
+    expect(view).toContain("ticket.textContent = card.latest.ticketId;");
+  });
+
+  it("makes the pairing code reachable without retyping it from a phone screen", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}"');
+    expect(source).toContain("navigator.clipboard.writeText(pairCopy.dataset.pairCommand");
+    expect(source).toContain('toast("Command copied")');
+    // Pairing used to end by silently closing its dialog.
+    expect(source).toContain("paired`);");
   });
 
   it("binds the browser fetch receiver at every pairing handoff", async () => {

@@ -130,6 +130,14 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
     repeated.textContent = `×${card.count}`;
     identity.append(repeated);
   }
+  // A card raised from a task carries its ticket; naming it saves the operator
+  // from opening the card to find out which task it is about.
+  if (card.latest.ticketId) {
+    const ticket = document.createElement("span");
+    ticket.className = "attention-ticket";
+    ticket.textContent = card.latest.ticketId;
+    identity.append(ticket);
+  }
   const time = document.createElement("time");
   time.dateTime = card.latest.createdAt;
   time.textContent = relativeTime(card.latest.createdAt, options.now);

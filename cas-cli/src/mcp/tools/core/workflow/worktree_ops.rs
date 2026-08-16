@@ -1236,9 +1236,7 @@ impl CasCore {
         let wt_config = config.worktrees();
 
         if !wt_config.enabled {
-            return Ok(Self::success(
-                "Worktrees are not enabled. Enable in .cas/config.toml:\n  worktrees:\n    enabled: true",
-            ));
+            return Ok(Self::success(super::SYSTEM_A_WORKTREES_DISABLED_MESSAGE));
         }
 
         // Verify epic exists

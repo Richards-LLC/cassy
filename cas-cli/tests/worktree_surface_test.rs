@@ -5100,14 +5100,21 @@ async fn test_worktree_cleanup_refuses_live_assignee_even_with_force() {
     );
 }
 
-/// AC3: the 'disabled' refusal survives for genuine System-A CRUD with the flag
-/// off. Lifting the gate for cleanup must not lift it for create/show.
+/// GH #378 / cas-c2a1: System-A CRUD remains opt-in when its flag is off, but
+/// the refusal names that real gate rather than claiming factory worktrees are
+/// disabled too. Its exact config snippet must parse as the TOML file it names.
 #[tokio::test]
-async fn test_system_a_crud_still_reports_disabled_with_flag_off() {
+async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
     let repo = GitRepo::new();
     let mut env = test_env();
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
+
+    // The reported incident had a live factory already using CAS-managed
+    // worktrees. That is System B, which is deliberately separate from this
+    // System-A command's configuration gate.
+    let factory_worktree = cas_root.join("worktrees").join("already-isolated");
+    repo.add_worktree(&factory_worktree, "factory/already-isolated");
 
     let svc = make_service(cas_root.clone());
     for action in ["worktree_create", "worktree_show"] {
@@ -5116,8 +5123,35 @@ async fn test_system_a_crud_still_reports_disabled_with_flag_off() {
         req.task_id = Some("anything".to_string());
         let text = get_text(&svc.coordination(Parameters(req)).await.expect(action));
         assert!(
-            text.contains("experimental and disabled"),
-            "{action} is System-A-only CRUD and must still be gated: {text}"
+            text.contains("System A worktrees are disabled by `[worktrees].enabled`")
+                && text.contains(
+                    "Factory isolation worktrees use a separate factory `--worktrees` switch"
+                )
+                && text.contains("coordination action=spawn_workers isolate=true"),
+            "{action} must name the System-A gate and the followable factory alternative: {text}"
+        );
+        assert!(
+            !text.contains("experimental and disabled"),
+            "{action} must not misdiagnose active factory isolation as experimental-disabled: {text}"
+        );
+
+        let snippet_start = text
+            .find("[worktrees]\nenabled = true")
+            .expect("refusal must print the TOML snippet");
+        let snippet_end = text[snippet_start..]
+            .find("\n\nFactory isolation")
+            .expect("TOML snippet must end before the factory guidance");
+        let snippet = &text[snippet_start..snippet_start + snippet_end];
+        let parsed: toml::Value = toml::from_str(snippet)
+            .expect("the snippet printed for .cas/config.toml must be valid TOML");
+        assert_eq!(
+            parsed
+                .get("worktrees")
+                .and_then(toml::Value::as_table)
+                .and_then(|worktrees| worktrees.get("enabled"))
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "the valid TOML snippet must enable the actual System-A gate"
         );
     }
 }

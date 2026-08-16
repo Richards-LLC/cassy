@@ -135,8 +135,9 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
-button:hover:not(:disabled) { background: var(--bg-hover); }
-button:disabled { opacity: .42; cursor: not-allowed; }
+button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--bg-hover); }
+button:disabled,
+button[aria-disabled="true"] { opacity: .42; cursor: not-allowed; }
 
 .machine-row,
 .nav-item,
@@ -781,6 +782,7 @@ main {
   justify-items: center;
   gap: var(--space-2);
   margin: var(--space-2);
+  padding: var(--space-4);
   color: var(--text-mid);
   border: var(--line-width) dashed var(--line-strong);
   border-radius: var(--radius-pane);
@@ -1284,6 +1286,20 @@ main {
 
 .status-identifier { color: var(--text-hi); }
 
+/* Stale operations data is still useful, but it must never read as live. */
+.status-stale {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--state-warn);
+  background: var(--tint-warn);
+  border-radius: var(--radius-card);
+  font-size: var(--fs-sm);
+}
+
+.status-context:has(.status-stale) #status-view { opacity: .62; }
+
+.drawer-pair { margin-top: var(--space-3); }
+
 .session-summary-status {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1458,6 +1474,17 @@ fieldset {
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-label);
   text-align: center;
+}
+
+.pair-code-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.pair-code-actions button {
+  min-height: var(--space-8);
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
 }
 
 .pair-details {

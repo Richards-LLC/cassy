@@ -5653,11 +5653,11 @@ mod tests {
         );
     }
 
-    /// cas-45c4 (GH #102): an ack inferred from a later reply must never be
-    /// reported the same way as the recipient's own acknowledgement. The
-    /// inference proves the recipient took a turn; it does not prove this
-    /// message's content was ever surfaced to it — and reporting both as
-    /// "confirmed" is what let status claim a confirmation nobody made.
+    /// cas-45c4 (GH #102): later recipient activity must never be reported
+    /// the same way as the recipient's own acknowledgement. It proves the
+    /// recipient took a turn; it does not prove this message's content entered
+    /// that later turn, so cas-dcf2 records only `AssumedSeen` rather than a
+    /// confirmation.
     #[test]
     fn confirmation_source_separates_an_explicit_ack_from_a_reply_inference() {
         let (_temp, store) = create_test_store();
@@ -5706,14 +5706,18 @@ mod tests {
             "the recipient acknowledged this message itself"
         );
 
-        assert_eq!(b.confirmation_source, ConfirmationSource::InferredFromReply);
+        // Preserve the original distinction: a reply after a surfacing receipt
+        // is useful evidence, but it is still not the recipient's claim about
+        // this particular message.
+        assert_eq!(b.stage, DeliveryStage::AssumedSeen);
+        assert_eq!(b.confirmation_source, ConfirmationSource::Unconfirmed);
+        assert_eq!(b.confirmed_at, None);
+        assert!(b.assumed_seen_at.is_some());
         assert!(
             !b.confirmation_source.is_recipient_claim(),
-            "a reply-inferred ack must not be presented as the recipient's claim about \
-             THIS message — it may never have been surfaced"
+            "later activity must not be presented as the recipient's claim about THIS message"
         );
-        // Both still read as legacy-confirmed, so older clients are unaffected.
-        assert!(a.confirmed_at.is_some() && b.confirmed_at.is_some());
+        assert!(a.confirmed_at.is_some());
     }
 
     /// cas-45c4: rows acked before provenance tracking existed must report
@@ -5918,7 +5922,7 @@ mod tests {
     }
 
     #[test]
-    fn recipient_response_confirms_only_delivered_counterparty_messages() {
+    fn recipient_response_marks_only_delivered_counterparty_messages_as_assumed_seen() {
         let (_temp, store) = create_test_store();
         let consumed = store
             .enqueue_with_session(
@@ -5948,7 +5952,7 @@ mod tests {
         // cas-99d2: reply-inference also needs a surfacing receipt for the row.
         record_seen(&store, consumed, "worker-1", Utc::now());
 
-        let confirmed = store
+        let assumed_seen = store
             .ack_delivered_for_recipient(
                 &["worker-1"],
                 &["supervisor", "display-supervisor"],
@@ -5956,14 +5960,23 @@ mod tests {
                 Utc::now(),
             )
             .unwrap();
-        assert_eq!(confirmed, 1);
+        assert_eq!(assumed_seen, 1);
+        // Preserve the original filter intent: only delivered messages to the
+        // responding counterparty advance. cas-dcf2 makes that advance the
+        // non-confirming `AssumedSeen` step.
         assert_eq!(
             store
                 .message_delivery_report(consumed)
                 .unwrap()
                 .unwrap()
                 .stage,
-            DeliveryStage::Confirmed
+            DeliveryStage::AssumedSeen
+        );
+        let consumed_report = store.message_delivery_report(consumed).unwrap().unwrap();
+        assert_eq!(consumed_report.confirmed_at, None);
+        assert_eq!(
+            consumed_report.confirmation_source,
+            ConfirmationSource::Unconfirmed
         );
         assert_eq!(
             store

@@ -2,7 +2,40 @@ use crate::harness::SupervisorCli;
 use crate::mux::*;
 use crate::pane::UserInputKind;
 use crate::spec::{Effort, WorkerSpec};
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+// cas-mux tests mutate these process-wide launch probes to make assertions
+// independent of the host's installed harness binaries.
+static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct RestoreEnv {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl RestoreEnv {
+    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: callers hold `TEST_ENV_LOCK` for the lifetime of the guard,
+        // serializing process-wide test environment mutation in this binary.
+        unsafe { std::env::set_var(key, value.into()) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        // SAFETY: this guard is only constructed while `TEST_ENV_LOCK` is held.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str> {
     config
@@ -27,6 +60,8 @@ fn codex_factory_session_arg(config: &crate::pty::PtyConfig) -> Option<&str> {
 
 #[test]
 fn factory_pane_configs_supervisor_effort_reaches_pty_args() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _effort_support = RestoreEnv::set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 1,
@@ -60,6 +95,8 @@ fn factory_pane_configs_supervisor_effort_reaches_pty_args() {
 
 #[test]
 fn factory_pane_configs_worker_effort_reaches_pty_args() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _effort_support = RestoreEnv::set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 1,
@@ -165,7 +202,7 @@ fn factory_pane_configs_propagates_supervisor_name_to_codex_worker_mcp_env() {
 
 #[test]
 fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
-    let mut mux = Mux::factory(MuxConfig {
+    let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 0,
         worker_names: vec![],
@@ -174,8 +211,8 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
         supervisor_cli: SupervisorCli::Claude,
         worker_cli: SupervisorCli::Codex,
         ..MuxConfig::default()
-    })
-    .expect("factory config should build");
+    };
+    let mut mux = Mux::factory_state_for_test(&config);
 
     mux.set_default_worker_spec(WorkerSpec::codex_default("dynamic-worker"));
     let pty_config = mux.build_add_worker_config(
@@ -515,8 +552,35 @@ fn effective_worker_spec_uses_worker_specs_map() {
 /// worker added to a Claude-default factory (the exact bug scenario) resolved back
 /// to the Claude default — and the entire routing fix would be inert, silently
 /// inboxing messages the codex process can never read.
+#[cfg(unix)]
 #[test]
 fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let bin_dir =
+        std::env::temp_dir().join(format!("cas-mux-add-worker-test-{}", std::process::id()));
+    std::fs::create_dir_all(&bin_dir).expect("fake-bin directory must be creatable");
+    for binary in ["cas", "codex"] {
+        let path = bin_dir.join(binary);
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("fake worker binary must be writable");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake worker binary metadata must be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions)
+            .expect("fake worker binary must be executable");
+    }
+    // Keep system utilities such as the optional `nice` wrapper available;
+    // the fake directory remains first so the test never launches a real Codex.
+    let mut path_entries = vec![bin_dir.clone()];
+    if let Some(current_path) = std::env::var_os("PATH") {
+        path_entries.extend(std::env::split_paths(&current_path));
+    }
+    let test_path = std::env::join_paths(path_entries)
+        .expect("test PATH entries must be representable on this platform");
+    let _path = RestoreEnv::set("PATH", test_path);
+
     let mut mux = Mux::new(24, 80);
     // Session default is Claude — the explicit per-spawn spec must persist and win.
     mux.set_default_worker_spec(WorkerSpec {
@@ -550,6 +614,9 @@ fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
         "after add_worker, a later harness lookup must resolve the persisted Codex \
          spec — not fall back to the Claude default (cas-b68a)"
     );
+
+    drop(mux);
+    std::fs::remove_dir_all(bin_dir).expect("fake-bin directory must be removable");
 }
 
 // ── cas-35fe: custom worker_names branch ─────────────────────────────────────
@@ -600,6 +667,8 @@ fn add_worker_effort_propagates_to_pty_args() {
     // Uses the config-only build_add_worker_config helper (no PTY spawn).
     use crate::spec::Effort;
 
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _effort_support = RestoreEnv::set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
     let mut mux = Mux::new(24, 80);
     mux.set_default_worker_spec(crate::spec::WorkerSpec {
         name: None,

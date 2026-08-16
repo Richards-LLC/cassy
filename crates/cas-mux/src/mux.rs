@@ -358,8 +358,9 @@ impl Mux {
         result
     }
 
-    /// Create a multiplexer with factory configuration
-    pub fn factory(config: MuxConfig) -> Result<Self> {
+    /// Initialize the non-PTY state shared by factory construction and
+    /// dynamic-worker configuration previews.
+    fn configured_factory(config: &MuxConfig) -> Self {
         let mut mux = Self::new(config.rows, config.cols);
         mux.factory_session = config.factory_session.clone();
 
@@ -387,6 +388,23 @@ impl Mux {
                 mux.worker_specs.insert(name.clone(), spec.clone());
             }
         }
+
+        mux
+    }
+
+    /// Build factory configuration state without spawning panes.
+    ///
+    /// This is intentionally test-only: production callers must use
+    /// [`Self::factory`] so they cannot accidentally create a factory whose
+    /// supervisor and initial workers were never launched.
+    #[cfg(test)]
+    pub(crate) fn factory_state_for_test(config: &MuxConfig) -> Self {
+        Self::configured_factory(config)
+    }
+
+    /// Create a multiplexer with factory configuration
+    pub fn factory(config: MuxConfig) -> Result<Self> {
+        let mut mux = Self::configured_factory(&config);
 
         // Calculate pane sizes based on layout
         // Layout: [Workers] [Supervisor] [Director]

@@ -153,12 +153,13 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("render(false);");
   });
 
-  it("names the ticket on attention raised from a task", async () => {
+  it("names the ticket from the card's derived attention content", async () => {
     const view = await readFile(new URL("attention-view.ts", import.meta.url), "utf8");
-    // .attention-ticket was styled and documented but never rendered, so a
-    // blocked-task card never said which task it meant.
+    // Hub event-stream cards derive their CAS ticket during coalescing, so the
+    // renderer must not look only at the raw latest event.
     expect(view).toContain('ticket.className = "attention-ticket"');
-    expect(view).toContain("ticket.textContent = card.latest.ticketId;");
+    expect(view).toContain("ticket.textContent = card.content.ticketId;");
+    expect(view).not.toContain("ticket.textContent = card.latest.ticketId;");
   });
 
   it("makes the pairing code reachable without retyping it from a phone screen", async () => {

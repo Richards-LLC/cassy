@@ -122,6 +122,7 @@ impl CasCore {
                         tool_use_id: None,
                         tool_input_truncated: None,
                         user_prompt: None,
+                        machine_prompt_provenance: None,
                         source: None,
                         reason: None,
                         subagent_type: None,

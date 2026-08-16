@@ -131,6 +131,7 @@ impl CasCore {
             tool_use_id: None,
             tool_input_truncated: None,
             user_prompt: None,
+            machine_prompt_provenance: None,
             source: Some("codex".to_string()),
             reason: None,
             subagent_type: None,
@@ -311,6 +312,7 @@ impl CasCore {
             tool_use_id: None,
             tool_input_truncated: None,
             user_prompt: None,
+            machine_prompt_provenance: None,
             source: Some("codex".to_string()),
             reason: req.reason,
             subagent_type: None,
@@ -324,11 +326,25 @@ impl CasCore {
             stop_hook_active: None,
         };
 
-        handle_session_end(&input, Some(&self.cas_root)).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to end session: {e}")),
-            data: None,
-        })?;
+        // Session-end hooks predate MCP dispatch and include synchronous AI
+        // helpers such as `generate_session_title_sync`, which own a Tokio
+        // runtime and call `block_on`. Calling that synchronous hook directly
+        // from this async MCP handler therefore panics once there are session
+        // observations to title. Keep the hook-compatible implementation, but
+        // run it outside the dispatcher runtime.
+        let hook_root = self.cas_root.clone();
+        tokio::task::spawn_blocking(move || handle_session_end(&input, Some(&hook_root)))
+            .await
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Session-end hook worker failed: {e}")),
+                data: None,
+            })?
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to end session: {e}")),
+                data: None,
+            })?;
 
         let _ = std::fs::remove_file(self.cas_root.join("current_session"));
 

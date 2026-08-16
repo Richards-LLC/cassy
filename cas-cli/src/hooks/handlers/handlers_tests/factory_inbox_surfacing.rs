@@ -10,7 +10,8 @@
 //! because the failure was never in one component: delivery worked, the queue
 //! worked, and there was simply no code path from the queue back to a turn.
 
-use cas_core::hooks::types::{HookInput, HookSpecificOutput};
+use cas_core::hooks::types::{HookInput, HookSpecificOutput, MachinePromptOrigin};
+use cas_mux::SupervisorCli;
 use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
 use tempfile::TempDir;
 
@@ -346,44 +347,104 @@ fn supervisor_turn_surfaces_matching_same_day_learnings() {
     assert!(ci_context.contains("2026-08-14-3"), "{ci_context}");
 }
 
-/// cas-2880 (GH #375): native factory delivery supplies workers bare relay
-/// prose as UserPromptSubmit input. The hook has no sender/origin provenance,
-/// so automatic Context is deliberately disabled for factory workers rather
-/// than pretending content can distinguish a relay from an operator request.
-/// Prompt attribution remains complete; an unmarked decision relay is the
-/// explicit accepted loss until cas-b657 adds typed provenance to HookInput.
+/// cas-b657 (GH #375): the real UserPromptSubmit handler must preserve useful
+/// operator context in a factory worker session while rejecting every known
+/// machine origin. The test parses the actual hook wire shape and delivers it
+/// through the factory authority: hook dispatch enriches the raw prompt from
+/// typed sidecar metadata, never a marker parsed out of rendered display text.
 #[test]
-fn factory_worker_turns_keep_attribution_but_never_auto_capture_context() {
+fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
     let _lock = super::env_lock();
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
 
-    let mut worker = input("worker");
-    worker.cwd = project.path().to_string_lossy().into_owned();
     {
-        let _env = worker_env();
-        worker.user_prompt = Some(
-            "PR #392 merged; Scoped Validation remains in progress. Hold the branch clean and wait for the re-close instruction.".into(),
-        );
-        handle_user_prompt_submit(&worker, Some(&cas_root)).unwrap();
+        let _env = EnvGuard::set(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some(WORKER)),
+            ("CAS_FACTORY_SESSION", Some(SESSION)),
+            ("CAS_ROOT", cas_root.to_str()),
+        ]);
+        for (source, origin) in [
+            ("supervisor", MachinePromptOrigin::AgentAuthored),
+            (
+                "lifecycle-wake:worker-idle",
+                MachinePromptOrigin::LifecycleRelay,
+            ),
+            ("director", MachinePromptOrigin::DirectorGenerated),
+        ] {
+            assert_eq!(
+                crate::hooks::delivery_provenance::origin_for_source(source),
+                origin
+            );
+            let rendered = format!(
+                "CAS provenance: notification_id=123 origin={} queued_at=2026-08-15T20:45:40Z delivery=first-delivery\n\nGitHub check-run updatedAt changes only on state transitions; use status/conclusion and a known wall-clock bound before declaring CI stalled.",
+                match origin {
+                    MachinePromptOrigin::AgentAuthored => "agent-authored",
+                    MachinePromptOrigin::LifecycleRelay => "lifecycle-relay",
+                    MachinePromptOrigin::DirectorGenerated => "director-generated",
+                }
+            );
+            let payload = crate::ui::factory::daemon::runtime::delivery::prepare_pty_machine_delivery(
+                &cas_root,
+                WORKER,
+                SupervisorCli::Codex,
+                source,
+                &rendered,
+                Some(123),
+            );
+            let input: HookInput = serde_json::from_value(serde_json::json!({
+                "session_id": "hook-test-session",
+                "cwd": project.path(),
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": payload,
+                "agent_role": "worker"
+            }))
+            .expect("factory machine delivery hook payload must deserialize");
+            crate::hooks::handle_hook("UserPromptSubmit", input).unwrap();
+        }
 
-        worker.user_prompt = Some(
-            "GitHub check-run updatedAt changes only on state transitions; use status/conclusion and a known wall-clock bound before declaring CI stalled.".into(),
+        let operator: HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": "hook-test-session",
+            "cwd": project.path(),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Please investigate why factory relay provenance vanishes before prompt capture and preserve the operator instruction as durable context.",
+            "agent_role": "worker"
+        }))
+        .expect("operator hook payload must deserialize without provenance");
+        assert!(
+            operator.machine_prompt_provenance.is_none(),
+            "absence is the deliberate operator signal"
         );
-        handle_user_prompt_submit(&worker, Some(&cas_root)).unwrap();
+        crate::hooks::handle_hook("UserPromptSubmit", operator).unwrap();
     }
 
     let prompt_store = crate::store::open_prompt_store(&cas_root).unwrap();
     assert_eq!(
-        prompt_store.list_by_session(&worker.session_id, 10).unwrap().len(),
-        2,
-        "factory-worker relay turns remain available for attribution"
+        prompt_store
+            .list_by_session("hook-test-session", 10)
+            .unwrap()
+            .len(),
+        4,
+        "machine relays and operator turns remain complete for attribution"
     );
 
-    let entries = crate::store::open_store_local(&cas_root).unwrap().list().unwrap();
+    let entries = crate::store::open_store_local(&cas_root)
+        .unwrap()
+        .list()
+        .unwrap();
     assert!(
-        entries.iter().all(|entry| entry.entry_type != EntryType::Context),
-        "routine and decision-bearing relay prose are an explicit accepted loss from auto Context: {entries:#?}"
+        entries.iter().any(|entry| {
+            entry.entry_type == EntryType::Context
+                && entry.content.contains("preserve the operator instruction")
+        }),
+        "an absent typed provenance field is the explicit operator case: {entries:#?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !entry.content.contains("updatedAt changes only")),
+        "all three typed machine origins must be excluded without parsing their text: {entries:#?}"
     );
 }
 

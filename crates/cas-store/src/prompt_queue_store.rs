@@ -121,8 +121,8 @@ const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
                       OR q.acked_via IS NULL
                       OR q.acked_via <> 'explicit_ack')";
 
-/// cas-99d2 (GH #126): may a reply be taken as confirmation that a delivered
-/// message was consumed?
+/// cas-dcf2 (GH #390): may later activity be recorded as a weak, visibly
+/// non-confirming indication that a delivered message might have been seen?
 ///
 /// Reply-inference (cas-6ad2) is the only confirmation path factory prompts
 /// actually exercise, and it was unconditional: ANY later message from the
@@ -142,10 +142,10 @@ const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
 ///    written by the recipient's own inbox drain. Transport handoff is a write
 ///    to a file or a pane; it is not evidence anyone read it.
 ///
-/// Weak evidence is not "probably fine": without both gates the row must stay
-/// `delivered` / `awaiting_ack` so its undelivered clock keeps counting. An
-/// explicit `message_ack` remains the strong path and does not come through
-/// here at all.
+/// Weak evidence is not "probably fine": even with both gates, this only
+/// earns `assumed_seen`; it never produces `confirmed`, clears the
+/// undelivered clock, or stops escalation. An explicit `message_ack` or the
+/// per-message turn artifact is the strong path and does not come through here.
 pub fn reply_confirms_delivered_message(
     transport_delivered_at: Option<DateTime<Utc>>,
     recipient_seen_at: Option<DateTime<Utc>>,
@@ -454,7 +454,7 @@ impl std::fmt::Display for MessageStatus {
 ///
 /// Rank order:
 /// Enqueued < Selected < Gated <
-///   {Dropped|Suppressed|Abandoned|PartiallyDelivered|Delivered} < Confirmed
+///   {Dropped|Suppressed|Abandoned|PartiallyDelivered|Delivered} < AssumedSeen < Confirmed
 ///
 /// **Delivered** requires successful handoff to *all* intended recipients and
 /// `transport_delivered_at`. Partial `all_workers` success is
@@ -482,6 +482,10 @@ pub enum DeliveryStage {
     PartiallyDelivered,
     /// Authoritative full transport handoff (all intended recipients Ok).
     Delivered,
+    /// CAS observed later recipient activity after a per-message receipt, but
+    /// has no transcript-level evidence that THIS message entered that turn.
+    /// This is useful context, never an acknowledgement.
+    AssumedSeen,
     /// Target acknowledged (`acked_at` set).
     Confirmed,
 }
@@ -497,7 +501,8 @@ impl DeliveryStage {
             | Self::Abandoned
             | Self::PartiallyDelivered
             | Self::Delivered => 3,
-            Self::Confirmed => 4,
+            Self::AssumedSeen => 4,
+            Self::Confirmed => 5,
         }
     }
 
@@ -511,6 +516,7 @@ impl DeliveryStage {
             Self::Abandoned => "abandoned",
             Self::PartiallyDelivered => "partially_delivered",
             Self::Delivered => "delivered",
+            Self::AssumedSeen => "assumed_seen",
             Self::Confirmed => "confirmed",
         }
     }
@@ -525,6 +531,7 @@ impl DeliveryStage {
             "abandoned" => Some(Self::Abandoned),
             "partially_delivered" => Some(Self::PartiallyDelivered),
             "delivered" => Some(Self::Delivered),
+            "assumed_seen" => Some(Self::AssumedSeen),
             "confirmed" => Some(Self::Confirmed),
             _ => None,
         }
@@ -572,6 +579,10 @@ pub enum PendingReason {
     AwaitingDelivery,
     /// Authoritative transport delivered; waiting for target `message_ack`.
     AwaitingAck,
+    /// The wake gate repeatedly declined while the recipient remained busy.
+    /// The row was surfaced as undelivered rather than waiting for silence
+    /// forever.
+    UndeliveredAfterWakeDeclines,
     /// Terminal non-delivery: dead worker source dropped.
     DroppedDeadSource,
     /// Terminal non-delivery: duplicate idle suppression.
@@ -620,6 +631,7 @@ impl PendingReason {
             Self::AdapterRetryable => "adapter_retryable",
             Self::AwaitingDelivery => "awaiting_delivery",
             Self::AwaitingAck => "awaiting_ack",
+            Self::UndeliveredAfterWakeDeclines => "undelivered_after_wake_declines",
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
             Self::SupersededStale => "superseded_stale",
@@ -638,6 +650,7 @@ impl PendingReason {
             "adapter_retryable" => Some(Self::AdapterRetryable),
             "awaiting_delivery" => Some(Self::AwaitingDelivery),
             "awaiting_ack" => Some(Self::AwaitingAck),
+            "undelivered_after_wake_declines" => Some(Self::UndeliveredAfterWakeDeclines),
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
             "superseded_stale" => Some(Self::SupersededStale),
@@ -655,7 +668,9 @@ impl PendingReason {
             Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
             Self::DroppedDeadSource => DeliveryStage::Dropped,
             Self::SuppressedIdle | Self::SupersededStale => DeliveryStage::Suppressed,
-            Self::AbandonedUnknownTarget | Self::UndeliveredLifecycleRelay => {
+            Self::AbandonedUnknownTarget
+            | Self::UndeliveredLifecycleRelay
+            | Self::UndeliveredAfterWakeDeclines => {
                 DeliveryStage::Abandoned
             }
             Self::PartialBroadcast => DeliveryStage::PartiallyDelivered,
@@ -707,6 +722,7 @@ impl PendingReason {
             | Self::SupersededStale
             | Self::AbandonedUnknownTarget
             | Self::UndeliveredLifecycleRelay
+            | Self::UndeliveredAfterWakeDeclines
             | Self::PartialBroadcast => false,
         }
     }
@@ -871,9 +887,9 @@ pub enum ConfirmationSource {
     /// The recipient called `message_ack` for this message id — its own claim
     /// about this specific message.
     ExplicitAck,
-    /// CAS inferred consumption because the recipient later sent a message to
-    /// the same counterparty (cas-6ad2). Evidence that the recipient took a
-    /// turn, NOT that this message's content was surfaced to it.
+    /// Legacy provenance for a historical reply-inferred acknowledgement.
+    /// New writes are demoted to [`DeliveryStage::AssumedSeen`] instead, so
+    /// this value is retained only to decode pre-upgrade rows safely.
     InferredFromReply,
     /// cas-7a01 (GH #155): the `UserPromptSubmit` hook injected this message's
     /// content into the recipient's turn and recorded the receipt
@@ -964,6 +980,10 @@ pub struct MessageDeliveryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recipient_transport_at: Option<DateTime<Utc>>,
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// Later recipient activity inferred from a reply. Unlike `confirmed_at`,
+    /// this is not evidence that this specific message reached that turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assumed_seen_at: Option<DateTime<Utc>>,
     /// cas-45c4 (GH #102): how `confirmed_at` was obtained. `Unconfirmed` when
     /// there is no ack at all. Without this, a reply-inferred ack and an
     /// explicit recipient acknowledgement are indistinguishable — and only one
@@ -988,6 +1008,10 @@ pub struct MessageDeliveryReport {
     /// failure) or `nudge_not_attempted` + `observed` (no nudge was warranted,
     /// the recipient's next turn surfaced it through the hook anyway).
     pub wake_attempt: WakeAttempt,
+    /// Consecutive times the wake gate declined this row while its recipient
+    /// remained busy. Durable across daemon restarts so a busy pane cannot
+    /// reset its starvation budget by reconnecting.
+    pub wake_gate_declines: u32,
     /// When the wake attempt recorded in `wake_attempt` was made.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_attempt_at: Option<DateTime<Utc>>,
@@ -1054,6 +1078,12 @@ const PROMPT_QUEUE_ACKED_VIA_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN acked_via TEXT;
 "#;
 
+/// cas-dcf2 (GH #390): store activity inference separately from acknowledgement
+/// so unrelated outbound traffic can never clear the delivery clock.
+const PROMPT_QUEUE_ASSUMED_SEEN_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN assumed_seen_at TEXT;
+"#;
+
 /// cas-7a01 (GH #155): persist the wake outcome the daemon already computes.
 ///
 /// Before this, `pty_nudge`'s three arms all returned `Delivered` and nothing
@@ -1070,6 +1100,9 @@ ALTER TABLE prompt_queue ADD COLUMN wake_attempt_at TEXT;
 "#;
 const PROMPT_QUEUE_WAKE_ATTEMPT_DETAIL_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN wake_attempt_detail TEXT;
+"#;
+const PROMPT_QUEUE_WAKE_GATE_DECLINES_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN wake_gate_declines INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Sender-side delivery-stalled bounces are one-shot across daemon restarts.
@@ -1359,10 +1392,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// view that would reveal it, which is the failure mode cas-ac7e
     /// (GH #130) exists to prevent.
     ///
-    /// Deliberately does NOT set `acked_at`. Delivery is not acknowledgment,
-    /// and the ack ladder (`explicit_ack` > `hook_surfaced` >
-    /// `inferred_from_reply`) stays exactly as cas-45c4 left it. This closes
-    /// the redelivery hole without inventing a new, weaker ack class.
+    /// Deliberately does NOT set `acked_at`. Delivery is not acknowledgement;
+    /// any later outbound activity is separately recorded as `assumed_seen`,
+    /// never as a weaker acknowledgement. This closes the redelivery hole
+    /// without letting unrelated activity clear confirmation.
     ///
     /// Idempotent (`INSERT OR IGNORE`): a re-observed delivery never moves an
     /// existing receipt's timestamp, so reply-inference ordering
@@ -1386,6 +1419,10 @@ pub trait PromptQueueStore: Send + Sync {
         attempt: WakeAttempt,
         detail: Option<&str>,
     ) -> Result<()>;
+
+    /// Persist one declined wake-gate pass and return its consecutive count.
+    /// The count is per message, not per daemon process.
+    fn record_wake_gate_decline(&self, prompt_id: i64, detail: &str) -> Result<u32>;
 
     /// Count the messages `recipient` has NOT yet seen, without consuming them.
     ///
@@ -1523,10 +1560,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// Only transport-delivered, still-unacked rows in the observing factory
     /// session are advanced.
     ///
-    /// cas-99d2 (GH #126): a reply confirms a message only when it could
-    /// actually have been a response to it — see
-    /// [`reply_confirms_delivered_message`] for the two required gates.
-    /// `reply_enqueued_at` is when the confirming reply was enqueued.
+    /// cas-dcf2 (GH #390): record only the weaker fact that later recipient
+    /// activity followed a per-message receipt. This MUST NOT confirm the
+    /// message: confirmation requires explicit acknowledgement or a
+    /// message-specific turn artifact.
     fn ack_delivered_for_recipient(
         &self,
         recipient_aliases: &[&str],
@@ -1620,6 +1657,16 @@ pub trait PromptQueueStore: Send + Sync {
     /// suppression, so [`PromptQueueStore::list_undelivered_lifecycle_relays`]
     /// can surface it and the factory stops mistaking silence for success.
     fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
+
+    /// Terminate an ordinary direct message after the bounded wake gate has
+    /// declined every re-offer. This is visibly distinct from a lifecycle
+    /// relay, so `message_status` does not turn worker starvation into an
+    /// unrelated supervisor-lifecycle diagnosis.
+    fn mark_undelivered_after_wake_declines(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+    ) -> Result<()>;
 
     /// Pending rows that have burned at least `min_attempts` transport
     /// attempts, worst first (cas-94a1, GH #169).
@@ -2273,6 +2320,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("next_attempt_at", PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION),
                 ("first_attempt_at", PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION),
                 ("acked_via", PROMPT_QUEUE_ACKED_VIA_MIGRATION),
+                ("assumed_seen_at", PROMPT_QUEUE_ASSUMED_SEEN_AT_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
                 ("wake_attempt", PROMPT_QUEUE_WAKE_ATTEMPT_MIGRATION),
                 ("wake_attempt_at", PROMPT_QUEUE_WAKE_ATTEMPT_AT_MIGRATION),
@@ -2281,12 +2329,32 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     PROMPT_QUEUE_WAKE_ATTEMPT_DETAIL_MIGRATION,
                 ),
                 (
+                    "wake_gate_declines",
+                    PROMPT_QUEUE_WAKE_GATE_DECLINES_MIGRATION,
+                ),
+                (
                     "delivery_stalled_notified_at",
                     PROMPT_QUEUE_DELIVERY_STALLED_NOTIFIED_AT_MIGRATION,
                 ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
+
+            // cas-dcf2 (GH #390): historical reply inference was stored as a
+            // full acknowledgement. Preserve the activity timestamp but
+            // demote it on upgrade: no historical row has transcript evidence
+            // solely because a later outbound message happened.
+            conn.execute(
+                "UPDATE prompt_queue
+                 SET assumed_seen_at = COALESCE(assumed_seen_at, acked_at),
+                     acked_at = NULL,
+                     acked_via = NULL,
+                     highest_stage = 'assumed_seen',
+                     last_pending_reason = 'awaiting_ack',
+                     last_pending_detail = 'historical reply activity; awaiting message-specific confirmation'
+                 WHERE acked_via = 'inferred_from_reply'",
+                [],
+            )?;
 
             // cas-7a01 (GH #155): the receipt table predates the surfacing
             // path, so existing databases need the provenance column added.
@@ -2315,6 +2383,30 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
             conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
             Ok(())
+        })
+    }
+
+    fn record_wake_gate_decline(&self, prompt_id: i64, detail: &str) -> Result<u32> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "UPDATE prompt_queue
+                 SET wake_gate_declines = COALESCE(wake_gate_declines, 0) + 1,
+                     wake_attempt = 'nudge_not_attempted',
+                     wake_attempt_at = ?,
+                     wake_attempt_detail = ?
+                 WHERE id = ? AND acked_at IS NULL AND processed_at IS NULL",
+                params![Utc::now().to_rfc3339(), detail, prompt_id],
+            )?;
+            let declines: Option<i64> = conn
+                .query_row(
+                    "SELECT wake_gate_declines FROM prompt_queue WHERE id = ?",
+                    params![prompt_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            Ok(declines.unwrap_or(0).try_into().unwrap_or(u32::MAX))
         })
     }
 
@@ -3352,12 +3444,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             let mut stmt = conn.prepare_cached(
                 "UPDATE prompt_queue
-                 SET acked_at = ?,
-                     acked_via = 'inferred_from_reply',
-                     highest_stage = 'confirmed',
-                     last_pending_reason = NULL,
-                     last_pending_detail = NULL
-                 WHERE id = ? AND acked_at IS NULL",
+                 SET assumed_seen_at = COALESCE(assumed_seen_at, ?),
+                     highest_stage = 'assumed_seen',
+                     last_pending_reason = 'awaiting_ack',
+                     last_pending_detail = 'later recipient activity observed; not confirmation of this message'
+                 WHERE id = ?
+                   AND acked_at IS NULL
+                   AND assumed_seen_at IS NULL",
             )?;
             let mut updated = 0usize;
             for id in confirmable {
@@ -3418,7 +3511,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     priority, acked_at, urgent, selected_at, last_pending_reason,
                     last_pending_detail, transport_delivered_at, highest_stage,
                     broadcast_attempted, broadcast_succeeded, broadcast_failed,
-                    acked_via, wake_attempt, wake_attempt_at, wake_attempt_detail
+                    acked_via, assumed_seen_at, wake_attempt, wake_attempt_at, wake_attempt_detail,
+                    wake_gate_declines
              FROM prompt_queue WHERE id = ?",
             params![prompt_id],
             |row| {
@@ -3445,6 +3539,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     row.get::<_, Option<String>>(19).unwrap_or(None),
                     row.get::<_, Option<String>>(20).unwrap_or(None),
                     row.get::<_, Option<String>>(21).unwrap_or(None),
+                    row.get::<_, Option<String>>(22).unwrap_or(None),
+                    row.get::<_, i64>(23).unwrap_or(0),
                 ))
             },
         );
@@ -3469,9 +3565,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             bc_succeeded,
             bc_failed,
             acked_via_s,
+            assumed_seen_at_s,
             wake_attempt_s,
             wake_attempt_at_s,
             wake_attempt_detail,
+            wake_gate_declines,
         ) = match row {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
@@ -3534,6 +3632,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             id,
         )?;
         let confirmed_at = Self::optional_datetime(acked_at_s.as_deref(), "acked_at", id)?;
+        let assumed_seen_at = Self::optional_datetime(
+            assumed_seen_at_s.as_deref(),
+            "assumed_seen_at",
+            id,
+        )?;
         let legacy_processed = processed_at_s.is_some();
 
         let legacy_status = if confirmed_at.is_some() {
@@ -3553,7 +3656,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             })?,
         };
 
-        if stage == DeliveryStage::Delivered && delivered_at.is_none() {
+        if matches!(stage, DeliveryStage::Delivered | DeliveryStage::AssumedSeen)
+            && delivered_at.is_none()
+        {
             return Err(crate::error::StoreError::Parse(format!(
                 "prompt_queue id={id}: invariant violated: stage=delivered without transport_delivered_at"
             )));
@@ -3572,6 +3677,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let stored_pending = stored_reason.as_deref().and_then(PendingReason::parse);
         let (pending_reason, pending_detail) = match stage {
             DeliveryStage::Confirmed => (None, None),
+            DeliveryStage::AssumedSeen => (
+                Some(PendingReason::AwaitingAck),
+                Some("later recipient activity observed; still awaiting message-specific confirmation".into()),
+            ),
             DeliveryStage::Delivered => (
                 Some(PendingReason::AwaitingAck),
                 Some("transport delivered; waiting for message_ack".into()),
@@ -3623,6 +3732,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             delivered_at,
             recipient_transport_at,
             confirmed_at,
+            assumed_seen_at,
             confirmation_source: ConfirmationSource::from_column(
                 acked_via_s.as_deref(),
                 confirmed_at.is_some(),
@@ -3638,6 +3748,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ObservationStatus::Unobserved
             },
             wake_attempt: WakeAttempt::from_column(wake_attempt_s.as_deref()),
+            wake_gate_declines: wake_gate_declines.try_into().unwrap_or(u32::MAX),
             wake_attempt_at: Self::optional_datetime(
                 wake_attempt_at_s.as_deref(),
                 "wake_attempt_at",
@@ -3887,6 +3998,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 DeliveryStage::Abandoned,
                 AtomicStampOpts {
                     reason: Some(PendingReason::UndeliveredLifecycleRelay),
+                    detail,
+                    set_processed: true,
+                    broadcast_attempted: None,
+                    broadcast_succeeded: None,
+                    broadcast_failed: None,
+                },
+            )
+        })
+    }
+
+    fn mark_undelivered_after_wake_declines(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            Self::atomic_stage_stamp(
+                &conn,
+                prompt_id,
+                DeliveryStage::Abandoned,
+                AtomicStampOpts {
+                    reason: Some(PendingReason::UndeliveredAfterWakeDeclines),
                     detail,
                     set_processed: true,
                     broadcast_attempted: None,
@@ -5281,11 +5415,12 @@ mod tests {
         );
     }
 
-    /// cas-99d2: the positive control — notification 7112's shape, which DID
-    /// have a drain receipt (19:10:42) before its ack (19:11:01). Adding
-    /// evidence gates must not break the case reply-inference exists for.
+    /// cas-dcf2 (GH #390): an inbox receipt plus later activity is valuable
+    /// context, but not transcript-level evidence this row entered the later
+    /// turn. Keep the distinction durable and let explicit acknowledgement
+    /// advance the final step separately.
     #[test]
-    fn cas99d2_reply_after_a_surfacing_receipt_still_confirms() {
+    fn cas_dcf2_reply_after_a_surfacing_receipt_is_assumed_seen_not_confirmed() {
         let (_temp, store) = create_test_store();
         let delivered_at = Utc::now() - chrono::Duration::seconds(900);
         let seen_at = Utc::now() - chrono::Duration::seconds(19);
@@ -5310,11 +5445,80 @@ mod tests {
             .unwrap();
         assert_eq!(confirmed, 1);
         let report = store.message_delivery_report(message).unwrap().unwrap();
-        assert_eq!(report.stage, DeliveryStage::Confirmed);
+        assert_eq!(report.stage, DeliveryStage::AssumedSeen);
+        assert_eq!(report.confirmed_at, None);
+        assert!(report.assumed_seen_at.is_some());
         assert_eq!(
-            report.confirmation_source,
-            ConfirmationSource::InferredFromReply
+            report.pending_reason,
+            Some(PendingReason::AwaitingAck),
+            "later outbound activity must leave the row escalation-eligible"
         );
+    }
+
+    #[test]
+    fn cas_dcf2_init_demotes_historical_reply_inference() {
+        let (_temp, store) = create_test_store();
+        let message = store.enqueue("supervisor", "worker-1", "ruling").unwrap();
+        store.mark_transport_delivered(message).unwrap();
+        let inferred_at = Utc::now().to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue
+                 SET acked_at = ?, acked_via = 'inferred_from_reply', highest_stage = 'confirmed'
+                 WHERE id = ?",
+                params![inferred_at, message],
+            )
+            .unwrap();
+        }
+
+        store.init().unwrap();
+        let report = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::AssumedSeen);
+        assert!(report.confirmed_at.is_none());
+        assert!(report.assumed_seen_at.is_some());
+        assert_eq!(report.confirmation_source, ConfirmationSource::Unconfirmed);
+    }
+
+    #[test]
+    fn cas_dcf2_wake_starved_direct_message_is_visible_not_a_lifecycle_relay() {
+        let (_temp, store) = create_test_store();
+        let message = store
+            .enqueue("supervisor", "busy-worker", "blocking DDL ruling")
+            .unwrap();
+
+        for expected in 1..=3 {
+            assert_eq!(
+                store
+                    .record_wake_gate_decline(
+                        message,
+                        "pane has not been silent long enough",
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
+        store
+            .mark_undelivered_after_wake_declines(
+                message,
+                Some("wake gate declined 3 consecutive re-offers while worker stayed busy"),
+            )
+            .unwrap();
+
+        let report = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        assert_eq!(
+            report.pending_reason,
+            Some(PendingReason::UndeliveredAfterWakeDeclines),
+            "a direct message must be explicitly wake-starved, not mislabeled as a lifecycle relay"
+        );
+        assert!(
+            report
+                .pending_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("3 consecutive"))
+        );
+        assert_eq!(report.wake_gate_declines, 3);
     }
 
     /// cas-99d2 (GH #126, AC2): a reply enqueued BEFORE the message was
@@ -9690,6 +9894,7 @@ mod cas_94a1_delivery_attempts_tests {
             PendingReason::SuppressedIdle,
             PendingReason::AbandonedUnknownTarget,
             PendingReason::UndeliveredLifecycleRelay,
+            PendingReason::UndeliveredAfterWakeDeclines,
             PendingReason::PartialBroadcast,
         ] {
             assert!(

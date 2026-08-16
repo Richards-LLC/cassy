@@ -815,8 +815,8 @@ fn collect_untracked_git_worktrees(
 ///
 /// Resolution order (cas-0b32 + cas-bd5f + cas-b86e):
 /// 1. Explicit `task_id` → **authorize worker ownership** (assignee/lease), then
-///    parent epic branch or declared WorkTarget. Only a missing target falls
-///    back to trunk and requires `allow_trunk`.
+///    task WorkTarget → recorded parent-epic branch → parent-epic WorkTarget.
+///    Only a missing target falls back to trunk and requires `allow_trunk`.
 /// 2. Else resolve the assignee's non-closed tasks. A unique epic target wins;
 ///    a unique standalone task may use trunk only with `allow_trunk`; mixed or
 ///    multiple task targets reject as ambiguous.
@@ -831,6 +831,65 @@ struct ResolvedSystemBMergeTarget {
     branch: String,
     reason: String,
     trunk_fallback: bool,
+}
+
+/// Resolve the declared delivery authority shared by worker spawn and
+/// System-B merge. `epic.branch` is a live coordination lane only when it is
+/// actually recorded; callers must not synthesize a title slug here because
+/// MCP maintains WorkTargets, not that legacy field.
+///
+/// Precedence is deliberately identical to the spawn path:
+/// task WorkTarget → recorded parent-epic branch → parent-epic WorkTarget.
+fn declared_system_b_merge_target(
+    task: &cas_types::Task,
+    epic: Option<&cas_types::Task>,
+    task_id: &str,
+) -> Option<ResolvedSystemBMergeTarget> {
+    let target = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .filter(|target| !target.target_branch.trim().is_empty());
+    if let Some(target) = target {
+        return Some(ResolvedSystemBMergeTarget {
+            branch: target.target_branch.clone(),
+            reason: format!(
+                "task WorkTarget {} branch {} (task {task_id}; declared delivery authority)",
+                target.repo_selector, target.target_branch
+            ),
+            trunk_fallback: false,
+        });
+    }
+
+    let epic = epic?;
+    if let Some(branch) = epic
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+    {
+        return Some(ResolvedSystemBMergeTarget {
+            branch: branch.to_string(),
+            reason: format!(
+                "epic branch {branch} (task {task_id}'s parent epic {}; authorized delivery lane)",
+                epic.id
+            ),
+            trunk_fallback: false,
+        });
+    }
+    let target = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .filter(|target| !target.target_branch.trim().is_empty())?;
+    Some(ResolvedSystemBMergeTarget {
+        branch: target.target_branch.clone(),
+        reason: format!(
+            "parent epic {} WorkTarget {} branch {} (task {task_id}; legacy epic.branch absent)",
+            epic.id, target.repo_selector, target.target_branch
+        ),
+        trunk_fallback: false,
+    })
 }
 
 fn resolve_system_b_merge_target(
@@ -851,14 +910,18 @@ fn resolve_system_b_merge_target(
         })?;
         // cas-bd5f: bind explicit task context to the worker identity.
         authorize_explicit_task_for_system_b_worker(&task, assignee, agent_store)?;
-        let epic = task_store.get_parent_epic(task_id).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!(
-                "Failed to resolve parent epic for task {task_id}: {e}"
-            )),
-            data: None,
-        })?;
-        if let Some(epic) = epic {
+        let epic = if task.task_type == cas_types::TaskType::Epic {
+            Some(task.clone())
+        } else {
+            task_store.get_parent_epic(task_id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to resolve parent epic for task {task_id}: {e}"
+                )),
+                data: None,
+            })?
+        };
+        if let Some(epic) = epic.as_ref() {
             if epic.is_terminal() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -871,53 +934,29 @@ fn resolve_system_b_merge_target(
                     data: None,
                 });
             }
-            if let Some(branch) = epic.branch.clone() {
-                return Ok(ResolvedSystemBMergeTarget {
-                    branch: branch.clone(),
-                    reason: format!(
-                        "epic branch {branch} (task {task_id}'s parent epic {}; \
-                         authorized for worker {assignee})",
-                        epic.id
-                    ),
-                    trunk_fallback: false,
-                });
-            }
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
-                    "task {task_id}'s parent epic {} has no branch field — set the epic \
-                     branch before worktree_merge.\n\n{}",
-                    epic.id,
-                    merge_target_remediation(assignee)
-                )),
-                data: None,
-            });
+        }
+        if let Some(mut target) = declared_system_b_merge_target(&task, epic.as_ref(), task_id) {
+            // The resolver has already performed the cas-bd5f ownership
+            // check above. Preserve that fact in the successful receipt even
+            // when cas-0f97 selects a task WorkTarget instead of the legacy
+            // epic branch: supervisors need an auditable authorization trail.
+            target
+                .reason
+                .push_str(&format!("; authorized for worker {assignee}"));
+            return Ok(target);
         }
 
-        // A declared WorkTarget is already explicit merge authority. In
-        // particular, a standalone task targeting staging must not consume
-        // the trunk escape hatch merely because it has no parent epic.
-        if let Some(target) = task.deliverables.work_target.as_ref() {
-            return Ok(ResolvedSystemBMergeTarget {
-                branch: target.target_branch.clone(),
-                reason: format!(
-                    "task WorkTarget {} branch {} (task {task_id} has no parent epic; \
-                     allow_trunk is not required)",
-                    target.repo_selector, target.target_branch
-                ),
-                trunk_fallback: false,
-            });
-        }
-
-        // No WorkTarget and no parent epic: this is the genuine trunk
-        // fallback, so resolve and disclose the destination before requiring
-        // the dedicated authorization flag.
+        // No declared target survived the full precedence chain: this is the
+        // genuine trunk fallback, whether the task is standalone or belongs
+        // to a legacy branchless epic.
+        // Resolve and disclose the destination before requiring the dedicated
+        // authorization flag.
         let trunk = trunk();
         if allow_trunk {
             return Ok(ResolvedSystemBMergeTarget {
                 branch: trunk.clone(),
                 reason: format!(
-                    "trunk {trunk} (explicit allow_trunk=true; task {task_id} has no parent epic; \
+                    "trunk {trunk} (explicit allow_trunk=true; task {task_id} has no declared target; \
                      authorized for worker {assignee})"
                 ),
                 trunk_fallback: true,
@@ -926,7 +965,7 @@ fn resolve_system_b_merge_target(
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!(
-                "task {task_id} has no parent epic or WorkTarget — refusing trunk \
+                "task {task_id} has no declared merge target — refusing trunk \
                  fallback (would merge to: {trunk}). Pass allow_trunk=true only if \
                  that exact destination is intended.\n\n{}",
                 merge_target_remediation(assignee)
@@ -954,21 +993,35 @@ fn resolve_system_b_merge_target(
         if !assignee_task_is_merge_relevant(task.status) {
             continue;
         }
+        // A task-level WorkTarget outranks every parent-epic signal. This is
+        // the same explicit contract the task_id path and spawn base use.
+        if let Some(target) = declared_system_b_merge_target(task, None, &task.id) {
+            assignee_epic_branches.push((
+                "task WorkTarget".to_string(),
+                target.branch,
+                task.id.clone(),
+            ));
+            continue;
+        }
+
         // P2: surface get_parent_epic errors; reject branchless parents —
         // never silently fall through to trunk/focus (cas-0b32 review).
-        match task_store.get_parent_epic(&task.id) {
+        let parent = if task.task_type == cas_types::TaskType::Epic {
+            Ok(Some(task.clone()))
+        } else {
+            task_store.get_parent_epic(&task.id)
+        };
+        match parent {
             Ok(Some(epic)) => {
                 if epic.is_terminal() {
                     closed_parent_epics.push((task.id.clone(), epic.id.clone()));
                     continue;
                 }
-                if let Some(branch) = epic.branch.clone() {
-                    if !assignee_epic_branches
-                        .iter()
-                        .any(|(id, b, task_id)| {
-                            id == &epic.id && b == &branch && task_id == &task.id
-                        })
-                    {
+                if let Some(target) = declared_system_b_merge_target(task, Some(&epic), &task.id) {
+                    let branch = target.branch;
+                    if !assignee_epic_branches.iter().any(|(id, b, task_id)| {
+                        id == &epic.id && b == &branch && task_id == &task.id
+                    }) {
                         assignee_epic_branches.push((epic.id.clone(), branch, task.id.clone()));
                     }
                 } else if !branchless_parent_epics.contains(&epic.id) {
@@ -1190,9 +1243,7 @@ impl CasCore {
         let wt_config = config.worktrees();
 
         if !wt_config.enabled {
-            return Ok(Self::success(
-                "Worktrees are not enabled. Enable in .cas/config.toml:\n  worktrees:\n    enabled: true",
-            ));
+            return Ok(Self::success(super::SYSTEM_A_WORKTREES_DISABLED_MESSAGE));
         }
 
         // Verify epic exists
@@ -2928,10 +2979,10 @@ impl CasCore {
 mod tests {
     use super::{
         BranchCiState, DeliveryMergePreflight, authorize_explicit_task_for_system_b_worker,
-        classify_delivery_merge_preflight, derive_delivery_supervisor_authority,
-        describe_branch_ci_state, describe_target_push_state, is_cas_pattern_worktree,
-        is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with, path_is_under,
-        protected_default_branch_pr_error, resolve_worktree_merge_cleanup,
+        classify_delivery_merge_preflight, declared_system_b_merge_target,
+        derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
+        is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with,
+        path_is_under, protected_default_branch_pr_error, resolve_worktree_merge_cleanup,
         worktree_merge_mcp_error,
     };
     use crate::worktree::git::TargetPushOutcome;
@@ -3423,5 +3474,45 @@ mod tests {
             "refusal must name the mismatch: {}",
             error.message
         );
+    }
+
+    /// GH #421: the MCP task surface writes WorkTarget, not the old
+    /// `epic.branch` field. A branchless parent must therefore merge through
+    /// its declared target instead of demanding an unwriteable legacy field.
+    #[test]
+    fn declared_merge_target_uses_work_targets_before_legacy_branch_cas_0f97() {
+        let mut task = cas_types::Task::new("cas-child".into(), "child".into());
+        let mut epic = cas_types::Task::new("cas-epic".into(), "epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/live-lane".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "epic/declared-lane".into(),
+        });
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "release/task-lane".into(),
+        });
+
+        assert_eq!(
+            declared_system_b_merge_target(&task, Some(&epic), "cas-child")
+                .expect("task WorkTarget is merge authority")
+                .branch,
+            "release/task-lane"
+        );
+
+        task.deliverables.work_target = None;
+        assert_eq!(
+            declared_system_b_merge_target(&task, Some(&epic), "cas-child")
+                .expect("recorded epic branch outranks epic WorkTarget")
+                .branch,
+            "epic/live-lane"
+        );
+
+        epic.branch = None;
+        let resolved = declared_system_b_merge_target(&task, Some(&epic), "cas-child")
+            .expect("branchless epic WorkTarget must replace the legacy field");
+        assert_eq!(resolved.branch, "epic/declared-lane");
+        assert!(resolved.reason.contains("legacy epic.branch absent"));
     }
 }

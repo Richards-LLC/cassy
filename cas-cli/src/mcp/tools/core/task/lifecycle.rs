@@ -371,13 +371,42 @@ impl CasCore {
                 data: None,
             })?
             .unwrap_or_default();
-        let work_target =
+        let declared_work_target =
             super::repo_context::declare_work_target(&self.cas_root, target_repo, target_branch)
                 .map_err(|message| McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(message),
                     data: None,
                 })?;
+        // A child created under an epic follows that epic's live delivery lane
+        // unless the caller explicitly selected a branch.  The stored target
+        // is what close reads later, so persisting the inheritance here keeps
+        // create, worktree merge, and close in agreement.
+        let work_target = if target_branch.is_none() {
+            epic_id
+                .as_deref()
+                .map(|epic_id| {
+                    task_store.get(epic_id).map_err(|error| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!("Epic not found: {error}")),
+                        data: None,
+                    })
+                })
+                .transpose()?
+                .filter(|epic| epic.task_type == TaskType::Epic)
+                .and_then(|epic| {
+                    let inherited = super::repo_context::inherited_work_target_from_epic(&epic)?;
+                    // An explicitly different repository binding is task-owned
+                    // authority even if its branch was omitted.
+                    declared_work_target
+                        .as_ref()
+                        .is_none_or(|target| target.repo_selector == inherited.repo_selector)
+                        .then_some(inherited)
+                })
+                .or(declared_work_target)
+        } else {
+            declared_work_target
+        };
 
         let now = chrono::Utc::now();
         // cas-9fff: in factory mode, stamp the creating agent as
@@ -1596,6 +1625,44 @@ mod related_recall_response_tests {
             .expect("open search index")
             .index_entry(&entry)
             .expect("index memory");
+    }
+
+    #[tokio::test]
+    async fn child_create_inherits_the_live_epic_delivery_lane_cas_edba() {
+        use cas_types::WorkTarget;
+
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+
+        let mut epic = Task::new("cas-edba-epic".into(), "target epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live-target".into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-edba".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).expect("add epic");
+
+        core.cas_task_create(Parameters(child_request("new child", epic.id.clone())))
+            .await
+            .expect("create child under epic");
+        let child = store
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "new child")
+            .expect("created child");
+        assert_eq!(
+            child
+                .deliverables
+                .work_target
+                .expect("child target")
+                .target_branch,
+            "epic/live-target",
+            "a later close must check the branch the child will merge into"
+        );
     }
 
     /// cas-3afc (GH #298): an epic's branch must start at the explicitly

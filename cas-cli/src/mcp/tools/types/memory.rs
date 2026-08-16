@@ -5,6 +5,50 @@ use crate::mcp::tools::types::defaults::{
     default_entry_type, default_importance, default_recent, default_scope_project,
 };
 
+/// Filters and presentation options for `memory action=list`.
+///
+/// Tags are compared as case-insensitive exact values. When callers supply
+/// multiple comma-separated tags, an entry must carry every requested tag.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemoryListRequest {
+    /// Maximum number of items
+    #[schemars(description = "Maximum items to return")]
+    #[serde(default)]
+    pub limit: Option<usize>,
+
+    /// Scope filter
+    #[schemars(description = "Filter by scope: 'global', 'project', or 'all' (default)")]
+    #[serde(default = "crate::mcp::tools::types::defaults::default_scope_all")]
+    pub scope: String,
+
+    /// Tags filter
+    #[schemars(
+        description = "Comma-separated tags; entries must contain every requested tag (case-insensitive AND)"
+    )]
+    #[serde(default)]
+    pub tags: Option<String>,
+
+    /// Memory tier filter
+    #[schemars(description = "Filter by memory tier: 'working', 'cold', or 'archive'")]
+    #[serde(default)]
+    pub tier: Option<String>,
+
+    /// Sort field
+    #[schemars(description = "Sort by: 'created', 'updated', 'importance', 'title'")]
+    #[serde(default)]
+    pub sort: Option<String>,
+
+    /// Sort order
+    #[schemars(description = "Sort order: 'asc' or 'desc' (default: desc)")]
+    #[serde(default)]
+    pub sort_order: Option<String>,
+
+    /// Team ID filter
+    #[schemars(description = "Filter to entries shared with a specific team")]
+    #[serde(default)]
+    pub team_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RememberRequest {
     /// The content to remember

@@ -50,8 +50,56 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Commander origin.");
     expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
-    expect(source).toContain('disabled aria-describedby="control-disabled-reason"');
     expect(source).toContain('class="control-disabled-reason"');
+    // A phone cannot hover, so an unavailable control keeps its reason in the DOM
+    // and says it out loud when tapped instead of hiding it in a title attribute.
+    expect(source).toContain('aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}"');
+    expect(source).toContain('aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"');
+    expect(source).toContain("const reason = button.dataset.disabledReason;");
+    expect(source).toContain("toast(reason);");
+    expect(source).not.toContain('disabled aria-describedby="control-disabled-reason"');
+  });
+
+  it("keeps a half-typed supervisor message across background renders", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // render() replaces app.innerHTML on every heartbeat, which destroyed the
+    // composer's contents mid-sentence — fatal on a phone, where typing is slow.
+    expect(source).toContain("function captureMessageDraft(): void {");
+    expect(source).toContain("function restoreMessageDraft(): void {");
+    expect(source.indexOf("captureMessageDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
+    expect(source.indexOf("app.innerHTML =")).toBeLessThan(source.indexOf("restoreMessageDraft();"));
+    expect(source).toContain('const composerWasFocused = document.activeElement?.id === "message-text";');
+  });
+
+  it("reports the outcome of sending a supervisor message", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // A send with no outcome is indistinguishable from a lost one, and invites a
+    // duplicate message to the supervisor.
+    expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
+    expect(source).toContain("const sent = sendControl(selected.id, selectedSession, { SendMessage:");
+    expect(source).toContain("toast(`Message sent to ${supervisor}`);");
+    expect(source).toContain('toast("Type a message first");');
+  });
+
+  it("collapses one outage into one attention card per machine and session", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // Without a stable fingerprint each retry coalesces to its own card, so a
+    // single unreachable hub buries the feed under near-identical criticals.
+    expect(source).toContain("fingerprint: `${machine.id}:auth_loss`");
+    expect(source).toContain("fingerprint: `${machine.id}:hub_disconnected`");
+    expect(source).toContain("fingerprint: `${machine.id}:${session}:session_transport`");
+  });
+
+  it("marks operations data as stale while the hub connection is not live", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain("const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined");
+    expect(main).toContain('class="status-stale" role="status"');
+    expect(main).toContain("Not live — reconnecting.");
+    expect(main).toContain("Showing the last state received ");
+    // Retry transitions rewrite snapshot.since, so staleness is anchored to the
+    // last live moment instead of reporting a long outage as "just now".
+    expect(main).toContain('if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());');
+    expect(css).toContain(".status-stale {");
   });
 
   it("derives the header mode and terminal cursor from the real session lease", async () => {
@@ -79,8 +127,13 @@ describe("binding Commander browser invariants", () => {
       readFile(new URL("main.ts", import.meta.url), "utf8"),
       readFile(new URL("attention-view.ts", import.meta.url), "utf8"),
     ]);
-    expect(main).toContain("No session — pick one from the drawer or drag it here.");
+    expect(main).toContain('<p class="empty-title">No session open</p>');
+    expect(main).toContain('<button id="open-machines" class="primary" type="button">Open machines</button>');
+    expect(main).toContain('openMachines.onclick = () => { machineDrawerOpen = true; render(); }');
+    expect(main).toContain('emptyTitle.textContent = "No panes in this session yet"');
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
+    // Commander has no pane drag-and-drop, so the empty slot must not promise one.
+    expect(main).not.toContain("drag it here");
     expect(attentionView).toContain('message.textContent = "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
@@ -90,8 +143,31 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("let machineCatalogLoaded = false;");
     expect(source).toContain("machineCatalogLoaded = true;");
     expect(source).toContain('"Loading paired machines…"');
-    expect(source).toContain('"No machines paired yet — press + to pair this machine."');
+    // An unpaired Commander offers pairing instead of naming a glyph, and the
+    // machine being paired is the one running the sessions, not this device.
+    expect(source).toContain('"No machines paired yet. Pair the machine your sessions run on."');
+    expect(source).toContain('pair.textContent = "Pair a machine";');
+    expect(source).toContain('<p class="empty-title">No machine paired yet</p>');
+    expect(source).toContain('<button id="empty-pair" class="primary" type="button">Pair a machine</button>');
+    expect(source).not.toContain("press + to pair this machine");
     expect(source).toContain("render(false);");
+  });
+
+  it("names the ticket on attention raised from a task", async () => {
+    const view = await readFile(new URL("attention-view.ts", import.meta.url), "utf8");
+    // .attention-ticket was styled and documented but never rendered, so a
+    // blocked-task card never said which task it meant.
+    expect(view).toContain('ticket.className = "attention-ticket"');
+    expect(view).toContain("ticket.textContent = card.latest.ticketId;");
+  });
+
+  it("makes the pairing code reachable without retyping it from a phone screen", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain('data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}"');
+    expect(source).toContain("navigator.clipboard.writeText(pairCopy.dataset.pairCommand");
+    expect(source).toContain('toast("Command copied")');
+    // Pairing used to end by silently closing its dialog.
+    expect(source).toContain("paired`);");
   });
 
   it("binds the browser fetch receiver at every pairing handoff", async () => {
@@ -198,6 +274,53 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain('activeContextTab = "status"; attentionPanelCollapsed = false; render();');
     expect(css).toContain(".mobile-message-toggle { display: none; }");
     expect(css).toContain(".mobile-message-toggle {");
+    // The collapsed pill holds two 48px cells on one row. A rail sized for fewer
+    // cells than it renders pushes the envelope off the bottom of the viewport.
+    expect(css).toContain("--mobile-context-pill-width: 96px");
+    expect(css).toContain("grid-template-columns: repeat(2, var(--machine-rail-width))");
+    expect(css).toContain(".context-panel.collapsed .attention-rail .rail-control { display: none; }");
+    expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
+    // Tapping the envelope must land on the composer it advertises.
+    expect(main).toContain('document.querySelector<HTMLTextAreaElement>("#message-text")');
+    expect(main).toContain("composer?.focus();");
+  });
+
+  it("keeps a focused terminal focused across steady-state renders", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // Re-inserting a pane card blurs its hidden textarea, which closes a phone
+    // keyboard on every five-second heartbeat render. Panes move only when their
+    // slot or position genuinely changed.
+    expect(source).toContain("const placePane = (slot: HTMLElement, card: HTMLElement): void => {");
+    expect(source).toContain("if (slot.children[index] === card) return;");
+    expect(source).toContain("placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);");
+    expect(source).not.toContain("(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card)");
+  });
+
+  it("colours connection dots from the phases the supervisor actually emits", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // connectionClass emits lifecycle phases, so styling legacy names such as
+    // "connected" or "offline" leaves every dot stuck on idle grey.
+    expect(main).toContain('function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }');
+    expect(css).toContain(".machine-state.live,");
+    expect(css).toContain(".machine-state.backoff,");
+    expect(css).toContain(".machine-state.failed,");
+    expect(css).not.toContain(".machine-state.connected");
+    expect(css).not.toContain(".machine-state.offline");
+    expect(css).not.toContain(".machine-state.auth-blocked");
+  });
+
+  it("renders phone secondary panes as tappable rows instead of empty terminal wells", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // Only the primary pane mounts a surface on a phone, so every other pane has
+    // to read as a compact row and open on tap rather than reserve empty space.
+    expect(main).toContain("const secondaryOnPhone = phone && pane.id !== layout.primaryPaneId;");
+    expect(main).toContain('card.classList.toggle("collapsed", secondaryOnPhone || (pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key)));');
+    expect(main).toContain("if (phoneLayout() && !card?.classList.contains(\"primary\")) {");
+    expect(main).toContain("updateLayout((current) => promotePane(current, pane.id));");
+    expect(main).toContain('const hint = secondaryOnPhone\n        ? "Tap to open this pane"');
+    expect(css).toContain("grid-template-rows: minmax(0, 1fr) auto;");
+    expect(css).toContain('.pane-grid.pane-layout .pane-search::after { content: "⌕"');
+    expect(css).toContain("min-width: var(--space-8);\n    min-height: var(--space-8);");
   });
 
   it("keeps the section 2 visual system tokenized and machine copy mono", async () => {

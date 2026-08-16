@@ -213,14 +213,17 @@ mod tests {
             .open(path)
             .unwrap();
 
-        let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 5"])
+        // Spawn the exec'd program directly. Killing the shell used here
+        // previously left its `sleep` grandchild for CI's post-job reaper,
+        // obscuring real leaked-process failures with known test noise.
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
             .spawn()
             .expect("spawn a child that stays alive after exec");
         drop(held);
         let reacquire = contender.try_lock_exclusive();
         let _ = child.kill();
-        let _ = child.wait();
+        child.wait().expect("reap the spawned child");
 
         reacquire.expect("an exec'd child must not inherit the delivery-target lock");
     }

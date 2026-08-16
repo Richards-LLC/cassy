@@ -1,6 +1,124 @@
 use crate::support::*;
 use cas::mcp::tools::*;
+use cas::store::open_store;
+use cas::types::{MemoryTier, Scope};
 use rmcp::handler::server::wrapper::Parameters;
+
+/// Invoke the public consolidated `memory` tool so field threading is covered,
+/// rather than testing the inner list handler in isolation.
+async fn memory_list(
+    service: &CasService,
+    tags: Option<&str>,
+    tier: Option<&str>,
+    scope: &str,
+    team_id: Option<&str>,
+) -> String {
+    let result = service
+        .memory(Parameters(cas_mcp::MemoryRequest {
+            action: "list".to_string(),
+            id: None,
+            content: None,
+            entry_type: None,
+            tags: tags.map(str::to_string),
+            title: None,
+            importance: None,
+            tier: tier.map(str::to_string),
+            limit: Some(10),
+            scope: Some(scope.to_string()),
+            team_id: team_id.map(str::to_string),
+            bypass_overlap: None,
+            mode: None,
+            expected_updated_at: None,
+            sort: Some("title".to_string()),
+            sort_order: Some("asc".to_string()),
+            valid_from: None,
+            valid_until: None,
+            personal: None,
+        }))
+        .await
+        .expect("memory list should succeed");
+    extract_text(result)
+}
+
+#[tokio::test]
+async fn cas_1aa3_memory_list_applies_tags_and_reports_the_filtered_total() {
+    let (_temp, core) = setup_cas();
+    let cas_dir = core.project_path().to_path_buf();
+    let service = CasService::new(core, None);
+
+    for (content, tags, team_id) in [
+        ("alpha and beta", "alpha,beta", None),
+        ("alpha only", "alpha", Some("team-a")),
+        ("gamma only", "gamma", None),
+    ] {
+        service
+            .memory(Parameters(cas_mcp::MemoryRequest {
+                action: "remember".to_string(),
+                id: None,
+                content: Some(content.to_string()),
+                entry_type: Some("learning".to_string()),
+                tags: Some(tags.to_string()),
+                title: Some(content.to_string()),
+                importance: Some(0.5),
+                tier: None,
+                limit: None,
+                scope: Some("project".to_string()),
+                team_id: team_id.map(str::to_string),
+                bypass_overlap: Some(true),
+                mode: None,
+                expected_updated_at: None,
+                sort: None,
+                sort_order: None,
+                valid_from: None,
+                valid_until: None,
+                personal: Some(true),
+            }))
+            .await
+            .expect("remember should succeed");
+    }
+
+    let multi_tag = memory_list(&service, Some(" ALPHA, beta "), None, "all", None).await;
+    assert!(
+        multi_tag.contains("Entries (1 total, showing 1):"),
+        "{multi_tag}"
+    );
+    assert!(multi_tag.contains("alpha and beta"), "{multi_tag}");
+    assert!(!multi_tag.contains("alpha only"), "{multi_tag}");
+
+    let no_match = memory_list(&service, Some("does-not-exist"), None, "all", None).await;
+    assert_eq!(no_match, "No entries found");
+
+    // `team_id` was already wired, and this guards that the adjacent filter
+    // keeps narrowing the same list as tags/tier/scope.
+    let team = memory_list(&service, None, None, "all", Some("team-a")).await;
+    assert!(team.contains("Entries (1 total, showing 1):"), "{team}");
+    assert!(team.contains("alpha only"), "{team}");
+
+    // The list filter must not only affect the header; the returned rows use
+    // the identical filtered collection.
+    assert!(!multi_tag.contains("gamma only"), "{multi_tag}");
+
+    // Populate the adjacent filters through the store to keep this focused on
+    // list semantics (remember currently creates project/working entries).
+    let store = open_store(&cas_dir).expect("open store");
+    let mut alpha = store
+        .list()
+        .expect("list entries")
+        .into_iter()
+        .find(|entry| entry.content == "alpha only")
+        .expect("alpha entry");
+    alpha.memory_tier = MemoryTier::Cold;
+    alpha.scope = Scope::Global;
+    store.update(&alpha).expect("update fixture");
+
+    let cold = memory_list(&service, None, Some("cold"), "all", None).await;
+    assert!(cold.contains("Entries (1 total, showing 1):"), "{cold}");
+    assert!(cold.contains("alpha only"), "{cold}");
+
+    let global = memory_list(&service, None, None, "global", None).await;
+    assert!(global.contains("Entries (1 total, showing 1):"), "{global}");
+    assert!(global.contains("alpha only"), "{global}");
+}
 
 #[tokio::test]
 async fn test_remember_basic() {
@@ -338,9 +456,11 @@ async fn test_list_entries() {
     }
 
     // List entries
-    let list_req = LimitRequest {
+    let list_req = MemoryListRequest {
         scope: "all".to_string(),
         limit: Some(10),
+        tags: None,
+        tier: None,
         sort: None,
         sort_order: None,
         team_id: None,

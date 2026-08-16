@@ -54,11 +54,20 @@ export function renderAttentionCounts(counts: AttentionCounts, compact = false):
   const container = document.createElement("span");
   container.className = `attention-counts${compact ? " attention-counts--compact" : ""}`;
   container.setAttribute("aria-label", `${counts.critical} critical, ${counts.warning} warning, ${counts.info} info`);
+  // Zeroes are not news. Only outstanding severities get a badge, so the rail
+  // reads as a count instead of a row of noughts.
   for (const severity of ["critical", "warning", "info"] as const) {
+    if (counts[severity] === 0) continue;
     const badge = document.createElement("span");
     badge.className = `attention-count attention-count--${severity}`;
     badge.textContent = String(counts[severity]);
     container.append(badge);
+  }
+  if (!container.hasChildNodes()) {
+    const clear = document.createElement("span");
+    clear.className = "attention-count attention-count--clear";
+    clear.textContent = "0";
+    container.append(clear);
   }
   return container;
 }
@@ -120,6 +129,14 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
     repeated.className = "attention-repeat";
     repeated.textContent = `×${card.count}`;
     identity.append(repeated);
+  }
+  // A card raised from a task carries its ticket; naming it saves the operator
+  // from opening the card to find out which task it is about.
+  if (card.latest.ticketId) {
+    const ticket = document.createElement("span");
+    ticket.className = "attention-ticket";
+    ticket.textContent = card.latest.ticketId;
+    identity.append(ticket);
   }
   const time = document.createElement("time");
   time.dateTime = card.latest.createdAt;

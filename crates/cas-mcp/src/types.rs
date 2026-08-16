@@ -38,8 +38,11 @@ pub struct MemoryRequest {
     #[serde(default)]
     pub entry_type: Option<String>,
 
-    /// Tags (comma-separated)
-    #[schemars(description = "Comma-separated tags")]
+    /// Tags (comma-separated). For `list`, entries must contain every
+    /// requested tag (case-insensitive AND).
+    #[schemars(
+        description = "Comma-separated tags; for list, entries must contain every requested tag (case-insensitive AND)"
+    )]
     #[serde(default)]
     pub tags: Option<String>,
 
@@ -53,8 +56,8 @@ pub struct MemoryRequest {
     #[serde(default)]
     pub importance: Option<f32>,
 
-    /// Memory tier (for set_tier): working, cold, archive
-    #[schemars(description = "Memory tier: 'working', 'cold', 'archive'")]
+    /// Memory tier (for set_tier/list): working, cold, archive
+    #[schemars(description = "Memory tier for set_tier or list: 'working', 'cold', 'archive'")]
     #[serde(default)]
     pub tier: Option<String>,
 

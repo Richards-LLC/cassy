@@ -47,3 +47,7 @@ Was → Now: event-stream-derived attention cards carried their ticket on card.c
 - Message 6: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786887579021429?thread_ts=1786887572.299709&cid=C0B44GUKDK2
 - Message 7: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786887583481139
 - Message 8: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786887587662399?thread_ts=1786887583.481139&cid=C0B44GUKDK2
+
+## CORRECTION (2026-08-16, GH #447)
+
+The user/dev threads above overstate the landing: the gateway shipped as CONTRACT-ONLY library surface — the proxy default policy is still allow-all and no production path installs the allowlist policy or writes receipts. The supervisor-only key remains the operative control. A correction reply was posted in the user thread; the v2.71.0 CHANGELOG entry was reworded to "Groundwork" before tagging. Production wiring tracked as a follow-up task.

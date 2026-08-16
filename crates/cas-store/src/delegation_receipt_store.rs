@@ -81,6 +81,11 @@ pub enum DelegationVerdict {
     Pass,
     Fail,
     Inconclusive,
+    WaitTimedOut,
+    RequiresAction,
+    ThreadBusy,
+    InsufficientScope,
+    RateLimited,
     Cancelled,
     TransportFailure,
     Malformed,
@@ -92,6 +97,11 @@ impl std::fmt::Display for DelegationVerdict {
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::Inconclusive => "inconclusive",
+            Self::WaitTimedOut => "wait_timed_out",
+            Self::RequiresAction => "requires_action",
+            Self::ThreadBusy => "thread_busy",
+            Self::InsufficientScope => "insufficient_scope",
+            Self::RateLimited => "rate_limited",
             Self::Cancelled => "cancelled",
             Self::TransportFailure => "transport_failure",
             Self::Malformed => "malformed",
@@ -105,6 +115,11 @@ impl FromStr for DelegationVerdict {
             "pass" => Ok(Self::Pass),
             "fail" => Ok(Self::Fail),
             "inconclusive" => Ok(Self::Inconclusive),
+            "wait_timed_out" => Ok(Self::WaitTimedOut),
+            "requires_action" => Ok(Self::RequiresAction),
+            "thread_busy" => Ok(Self::ThreadBusy),
+            "insufficient_scope" => Ok(Self::InsufficientScope),
+            "rate_limited" => Ok(Self::RateLimited),
             "cancelled" => Ok(Self::Cancelled),
             "transport_failure" => Ok(Self::TransportFailure),
             "malformed" => Ok(Self::Malformed),
@@ -324,7 +339,7 @@ impl SqliteDelegationReceiptStore {
     pub fn record_timeout(&self, id: &str, run_id: &str) -> Result<DelegationReceipt> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let now = Utc::now().to_rfc3339();
-        let changed = conn.execute("UPDATE delegation_receipts SET state='timed_out', run_id=?2, updated_at=?3 WHERE id=?1 AND state != 'completed'", params![id, run_id, now])?;
+        let changed = conn.execute("UPDATE delegation_receipts SET state='timed_out', run_id=?2, terminal_verdict='wait_timed_out', updated_at=?3 WHERE id=?1 AND state != 'completed'", params![id, run_id, now])?;
         if changed == 0 {
             return Err(StoreError::Parse(
                 "cannot time out a completed or missing delegation receipt".to_string(),

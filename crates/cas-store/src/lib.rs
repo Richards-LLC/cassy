@@ -41,12 +41,13 @@ mod agent_store;
 mod code_store;
 mod code_vector_store;
 mod commit_link_store;
-mod delivery_store;
 mod delegation_receipt_store;
+mod delivery_store;
 mod entity_store;
 pub mod error;
 mod event_store;
 mod external_task_dependency_store;
+mod external_verification_gate;
 mod file_change_store;
 mod fts_query;
 mod history_provenance;
@@ -97,6 +98,11 @@ pub use code_vector_store::{
     CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorStats,
     CodeVectorWork, SqliteCodeVectorStore,
 };
+pub use delegation_receipt_store::{
+    DELEGATION_RECEIPT_SCHEMA, DelegationBudget, DelegationReceipt, DelegationReceiptState,
+    DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
+    SqliteDelegationReceiptStore,
+};
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
@@ -104,10 +110,10 @@ pub use delivery_store::{
     transition_worker_delivery, transition_worker_delivery_verification_with_conn,
     worker_delivery_transaction_id,
 };
-pub use delegation_receipt_store::{
-    DELEGATION_RECEIPT_SCHEMA, DelegationBudget, DelegationReceipt, DelegationReceiptState,
-    DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
-    SqliteDelegationReceiptStore,
+pub use external_verification_gate::{
+    EXTERNAL_PRODUCTION_VERIFICATION_GATE, ExternalVerificationOutcome,
+    ExternalVerificationRequest, GateAssessment, RequiredCheck, assess_response,
+    assessment_for_outcome, authorize_request, record_assessment,
 };
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 

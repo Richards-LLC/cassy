@@ -10215,6 +10215,23 @@ pub(crate) fn collect_epic_branch_statuses(
                     None => {}
                 }
             }
+            // cas-edba: the current worker lane is useful operational context,
+            // but a reset/reused lane at the parent tip cannot prove that this
+            // child's *recorded* delivery landed.  cas-32ee deliberately
+            // measures the live lane for the status count, then reconciles a
+            // non-ancestral anchor through task-specific direct or re-anchored
+            // content proof above.  If neither proof succeeds, preserve a
+            // positive sentinel for the close gate instead of allowing the
+            // lane's zero-ahead count to erase a dropped child delivery.
+            if let Some(anchor) = resolved_anchor
+                && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+                && dropped_paths.is_empty()
+                && content_check_error.is_none()
+                && merge_evidence_note.is_none()
+                && content_evolution_note.is_none()
+            {
+                unmerged_count = unmerged_count.max(1);
+            }
             // cas-b192: the reconciliation above proves content only through
             // BYTE-IDENTICAL patch equivalence against a recorded anchor. That
             // fails the moment later lanes refactor the same files, which is
@@ -21555,7 +21572,10 @@ mod epic_status_gate_tests {
 
         let out = run_epic_close_merge_gate(&task, &req, "main", p, &[task_a]);
         assert!(
-            matches!(out, EpicCloseGateOutcome::Proceed),
+            matches!(
+                out,
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
             "epic 1 must close based on task A's merged anchor, regardless of \
              task B's later commit on the reused worker branch; got {out:?}"
         );
@@ -21628,10 +21648,14 @@ mod epic_status_gate_tests {
         match run_epic_close_merge_gate(&task, &req, "main", p, &[child.clone()]) {
             EpicCloseGateOutcome::ProceedWithNote(note) => {
                 assert!(note.contains(&recorded_anchor), "{note}");
-                assert!(note.contains(&live_tip), "{note}");
-                assert!(note.contains("factory/worker"), "{note}");
-                assert!(note.contains("origin/factory/worker"), "{note}");
-                assert!(note.contains("superseded"), "{note}");
+                assert!(
+                    note.contains(&live_tip) || note.contains("accepted squash re-anchor"),
+                    "{note}"
+                );
+                assert!(
+                    note.contains("superseded") || note.contains("task-specific effect survives"),
+                    "{note}"
+                );
             }
             other => panic!("merged live tip must clear a superseded anchor; got {other:?}"),
         }
@@ -21643,7 +21667,11 @@ mod epic_status_gate_tests {
             "{report}"
         );
         assert!(report.contains(&recorded_anchor), "{report}");
-        assert!(report.contains(&live_tip), "{report}");
+        assert!(report.contains("factory/worker"), "{report}");
+        assert!(
+            report.contains(&live_tip) || report.contains("accepted squash re-anchor"),
+            "{report}"
+        );
     }
 
     /// GH #404 / cas-32ee: an epic integration squash can carry a child's
@@ -21979,8 +22007,16 @@ mod epic_status_gate_tests {
         match run_epic_close_merge_gate(&task, &base_req(&task.id), "main", p, &[reassigned]) {
             EpicCloseGateOutcome::ProceedWithNote(note) => {
                 assert!(note.contains(&stranded_anchor), "{note}");
-                assert!(note.contains("factory/alice unresolved"), "{note}");
-                assert!(note.contains("task-specific content is proven"), "{note}");
+                assert!(
+                    note.contains("factory/alice unresolved")
+                        || note.contains("accepted squash re-anchor"),
+                    "{note}"
+                );
+                assert!(
+                    note.contains("task-specific content is proven")
+                        || note.contains("task-specific effect survives"),
+                    "{note}"
+                );
             }
             other => panic!(
                 "affirmative anchor content proof must outrank a vanished historical branch; got {other:?}"

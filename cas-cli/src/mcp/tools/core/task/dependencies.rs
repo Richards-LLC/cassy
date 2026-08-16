@@ -289,7 +289,6 @@ mod describe_dependency_tests {
 
     #[tokio::test]
     async fn parent_link_persists_live_epic_target_without_overwriting_explicit_lane_cas_edba() {
-        use cas_store::TaskStore;
         use cas_types::WorkTarget;
         use tempfile::TempDir;
 

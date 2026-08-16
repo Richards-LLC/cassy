@@ -5269,14 +5269,14 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     );
 }
 
-/// cas-6ad2: a worker's response proves it consumed the supervisor message
-/// that prompted the work. Factory prompts never issued explicit message_ack,
-/// so the response path must advance the prior delivered row to Confirmed.
+/// cas-6ad2: a worker response after the supervisor message that prompted the
+/// work is meaningful activity evidence. Keep the original test intent — the
+/// reply is correlated with the prior delivered row — without overstating that
+/// correlation as an explicit acknowledgement.
 ///
-/// cas-99d2 (GH #126) narrowed "proves": the reply must post-date the transport
-/// handoff AND a surfacing receipt must exist for the row, so this fixture now
-/// drains the worker's inbox — the receipt CAS actually records — before
-/// replying. The no-receipt variant is asserted NOT to confirm in
+/// cas-dcf2 (GH #390) deliberately stages even a post-handoff reply with a
+/// surfacing receipt as `AssumedSeen`: only `message_ack` may confirm receipt.
+/// The no-receipt variant remains covered by
 /// `cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh126`.
 #[tokio::test]
 async fn test_worker_response_confirms_consumed_supervisor_message() {
@@ -5324,8 +5324,16 @@ async fn test_worker_response_confirms_consumed_supervisor_message() {
         .expect("instruction exists");
     assert_eq!(
         report.stage,
-        cas_store::DeliveryStage::Confirmed,
-        "the recipient's response must confirm its consumed instruction"
+        cas_store::DeliveryStage::AssumedSeen,
+        "a correlated reply is useful activity evidence, not an acknowledgement"
+    );
+    assert!(
+        report.confirmed_at.is_none(),
+        "only explicit message_ack may mark a message confirmed"
+    );
+    assert!(
+        report.assumed_seen_at.is_some(),
+        "the reply should still record the weaker assumed-seen stage"
     );
 }
 
@@ -5401,8 +5409,28 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
         .expect("urgent exists");
     assert_eq!(
         urgent_report.stage,
+        cas_store::DeliveryStage::AssumedSeen,
+        "the reply alone must remain weaker than confirmation: {urgent_report:?}"
+    );
+
+    // cas-dcf2: keep cas-85fd's important no-collateral-halt contract, but
+    // discharge only after the worker explicitly acknowledges this exact
+    // urgent. The old reply-only assertion would weaken honest staging.
+    let mut acknowledge = coord_msg("message_ack", "unused", "unused", None);
+    acknowledge.notification_id = Some(urgent_id);
+    worker_service
+        .coordination(Parameters(acknowledge))
+        .await
+        .expect("worker explicitly acknowledges the urgent");
+    let urgent_report = env
+        .prompt_queue()
+        .message_delivery_report(urgent_id)
+        .expect("urgent report after explicit acknowledgement")
+        .expect("urgent exists");
+    assert_eq!(
+        urgent_report.stage,
         cas_store::DeliveryStage::Confirmed,
-        "the reply must confirm the exact urgent before it can discharge the halt: {urgent_report:?}"
+        "the exact explicit acknowledgement must confirm the urgent before it can discharge the halt: {urgent_report:?}"
     );
     assert!(
         !env.worker_halted("swift-fox"),

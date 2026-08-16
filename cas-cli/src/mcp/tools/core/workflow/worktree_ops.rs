@@ -935,7 +935,14 @@ fn resolve_system_b_merge_target(
                 });
             }
         }
-        if let Some(target) = declared_system_b_merge_target(&task, epic.as_ref(), task_id) {
+        if let Some(mut target) = declared_system_b_merge_target(&task, epic.as_ref(), task_id) {
+            // The resolver has already performed the cas-bd5f ownership
+            // check above. Preserve that fact in the successful receipt even
+            // when cas-0f97 selects a task WorkTarget instead of the legacy
+            // epic branch: supervisors need an auditable authorization trail.
+            target
+                .reason
+                .push_str(&format!("; authorized for worker {assignee}"));
             return Ok(target);
         }
 

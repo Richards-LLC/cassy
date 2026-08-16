@@ -895,40 +895,38 @@ fn fast_forward_epic_base_from_parent(
         ));
     }
 
-    // A local-only refresh merely defers the same stale-base incident to the
-    // next supervisor. Publish the exact ref update before allowing the spawn
-    // to proceed. If publishing fails, restore the old local tip so the
-    // caller can warn-and-cut from the unchanged (but explicitly diagnosed)
-    // base rather than silently leaving local and remote coordination lanes
-    // split.
+    // Publishing is best-effort. The local fast-forward is already the safe
+    // spawn base, so a remote-less checkout or rejected publication must not
+    // roll it back and reintroduce the stale-base worker cut this refresh just
+    // prevented.
+    let origin_configured = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !origin_configured {
+        return Ok(Some(format!(
+            "EPIC BASE FAST-FORWARDED (LOCAL-ONLY): epic base '{epic_branch}' ({}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({}); no origin remote is configured, so the refreshed local ref is unpublished and will be used to cut the worker worktree.",
+            &epic_sha[..epic_sha.len().min(8)],
+            &parent_sha[..parent_sha.len().min(8)],
+        )));
+    }
+
     let push = std::process::Command::new("git")
         .args(["push", "origin", &format!("{refname}:{refname}")])
         .current_dir(repo_root)
-        .output()
-        .map_err(|error| {
-            let _ = std::process::Command::new("git")
-                .args(["update-ref", &refname, &epic_sha, &parent_sha])
-                .current_dir(repo_root)
-                .output();
-            format!("could not push refreshed epic base '{epic_branch}' to origin: {error}")
-        })?;
-    if !push.status.success() {
-        let rollback = std::process::Command::new("git")
-            .args(["update-ref", &refname, &epic_sha, &parent_sha])
-            .current_dir(repo_root)
-            .output();
-        let rollback_detail = match rollback {
-            Ok(output) if output.status.success() => "local ref restored".to_string(),
-            Ok(output) => format!(
-                "local rollback failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Err(error) => format!("local rollback could not run: {error}"),
+        .output();
+    if !matches!(&push, Ok(output) if output.status.success()) {
+        let push_error = match push {
+            Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            Err(error) => error.to_string(),
         };
-        return Err(format!(
-            "could not push refreshed epic base '{epic_branch}' to origin: {}; {rollback_detail}",
-            String::from_utf8_lossy(&push.stderr).trim()
-        ));
+        return Ok(Some(format!(
+            "EPIC BASE FAST-FORWARDED (UNPUBLISHED): epic base '{epic_branch}' ({}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({}), but push to origin failed: {push_error}. The refreshed local ref remains in effect and is unpublished; the worker worktree will be cut from the refreshed tip.",
+            &epic_sha[..epic_sha.len().min(8)],
+            &parent_sha[..parent_sha.len().min(8)],
+        )));
     }
 
     Ok(Some(format!(
@@ -3745,6 +3743,141 @@ mod spawn_base_tests {
         assert!(
             worker_path.join("parent-advance.txt").exists(),
             "the spawned worktree must include the parent branch advance"
+        );
+    }
+
+    #[test]
+    fn epic_base_refresh_without_origin_keeps_local_tip_and_cuts_worker_from_it() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        Command::new("git")
+            .args(["branch", "epic/behind", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        commit(&repo, "parent-advance.txt", "parent advanced locally");
+        let parent_tip = head_sha(&repo, "main");
+
+        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .expect("a remote-less checkout can still refresh its local epic base")
+            .expect("the local refresh must be reported");
+        assert!(notice.contains("LOCAL-ONLY"), "{notice}");
+        assert!(notice.contains("epic/behind"), "{notice}");
+        assert!(notice.contains("main"), "{notice}");
+        assert!(notice.contains("unpublished"), "{notice}");
+        assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
+
+        let worker_path = repo.join(".cas/worktrees/local-only-refreshed-worker");
+        WorkerSpawnPrep {
+            worker_name: "local-only-refreshed-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/local-only-refreshed-worker".to_string(),
+                parent_branch: "epic/behind".to_string(),
+                base_ref: None,
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+        .run()
+        .expect("worker provisioning must use the retained local refresh");
+        assert!(
+            worker_path.join("parent-advance.txt").exists(),
+            "the worker must be cut from the refreshed local tip, not the stale base"
+        );
+    }
+
+    #[test]
+    fn epic_base_refresh_push_rejection_keeps_local_tip_and_cuts_worker_from_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        Command::new("git")
+            .args(["branch", "epic/behind", "main"])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+        let reject_hook = origin.join(".git/hooks/pre-receive");
+        std::fs::write(
+            &reject_hook,
+            "#!/bin/sh\necho push rejected by test hook >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&reject_hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&reject_hook, permissions).unwrap();
+
+        let repo = tmp.path().join("repo");
+        Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ])
+            .output()
+            .expect("git clone");
+        Command::new("git")
+            .args(["config", "user.email", "test@cas.test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "CAS Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "epic/behind", "origin/epic/behind"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let remote_epic_tip = head_sha(&origin, "epic/behind");
+        commit(&origin, "parent-advance.txt", "parent advanced upstream");
+        let parent_tip = head_sha(&origin, "main");
+
+        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .expect("a rejected publish must retain the safe local refresh")
+            .expect("the unpublished refresh must be reported");
+        assert!(notice.contains("UNPUBLISHED"), "{notice}");
+        assert!(notice.contains("epic/behind"), "{notice}");
+        assert!(notice.contains("main"), "{notice}");
+        assert!(notice.contains("push rejected by test hook"), "{notice}");
+        assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
+        assert_eq!(
+            head_sha(&origin, "epic/behind"),
+            remote_epic_tip,
+            "a rejected publication must leave only the remote ref stale"
+        );
+
+        let worker_path = repo.join(".cas/worktrees/push-rejected-refreshed-worker");
+        WorkerSpawnPrep {
+            worker_name: "push-rejected-refreshed-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/push-rejected-refreshed-worker".to_string(),
+                parent_branch: "epic/behind".to_string(),
+                base_ref: None,
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+        .run()
+        .expect("worker provisioning must use the retained local refresh");
+        assert!(
+            worker_path.join("parent-advance.txt").exists(),
+            "the worker must be cut from the refreshed local tip after a push rejection"
         );
     }
 

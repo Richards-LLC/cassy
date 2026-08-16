@@ -4290,6 +4290,28 @@ mod tests {
     // cas-0263: canonical role-contract parity across all six launch shapes.
     // -----------------------------------------------------------------------
 
+    #[test]
+    fn parity_normalization_preserves_external_mcp_tool_names() {
+        let parity_text = "Claude mcp__cas__task; Codex mcp__cs__task; Grok cas__task; \
+            external mcp__viktor__ask_viktor mcp__viktor-shadow__ask_viktor \
+            mcp__foreign__read_file";
+        let normalized = normalize_tool_prefix(parity_text);
+
+        assert!(normalized.contains("tool__task"));
+        assert!(
+            normalized.contains("mcp__viktor__ask_viktor"),
+            "the explicit Viktor tool must not be normalized as CAS"
+        );
+        assert!(
+            normalized.contains("mcp__viktor-shadow__ask_viktor"),
+            "a lookalike external server must not be normalized as CAS"
+        );
+        assert!(
+            normalized.contains("mcp__foreign__read_file"),
+            "a foreign external tool must not be normalized as CAS"
+        );
+    }
+
     /// AC-1/AC-2: every one of the six launch shapes (Claude/Codex/Grok ×
     /// supervisor/worker) carries the full canonical role contract — coordinate-
     /// only / one-task, async message handling, task lifecycle, merge/re-close,

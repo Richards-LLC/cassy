@@ -1,6 +1,6 @@
 use crate::hooks::context::{
     BasicContextScorer, ContextQuery, ContextScorer, RuleMatchCache, estimate_tokens,
-    is_factory_participant, rule_matches_path, token_display, truncate,
+    is_factory_participant, remap_tool_prefix, rule_matches_path, token_display, truncate,
 };
 use cas_types::{AgentRole, Entry, EntryType, Rule};
 
@@ -28,6 +28,34 @@ fn test_truncate() {
 fn test_truncate_handles_unicode_boundary() {
     let input = format!("{}✅ done", "a".repeat(99));
     assert_eq!(truncate(&input, 103), format!("{}...", "a".repeat(99)));
+}
+
+#[test]
+fn external_mcp_tool_names_are_preserved_on_every_prompt_surface() {
+    let prompt = "external: mcp__viktor__ask_viktor mcp__viktor-shadow__ask_viktor mcp__foreign__read_file; CAS: mcp__cas__task";
+    for (surface, cas_prefix) in [
+        ("Claude", "mcp__cas__"),
+        ("Codex", "mcp__cs__"),
+        ("Grok", "cas__"),
+    ] {
+        let rendered = remap_tool_prefix(prompt, cas_prefix);
+        assert!(
+            rendered.contains("mcp__viktor__ask_viktor"),
+            "{surface} prompt must preserve the explicit Viktor tool"
+        );
+        assert!(
+            rendered.contains("mcp__viktor-shadow__ask_viktor"),
+            "{surface} prompt must preserve a lookalike external server"
+        );
+        assert!(
+            rendered.contains("mcp__foreign__read_file"),
+            "{surface} prompt must preserve a foreign external tool"
+        );
+        assert!(
+            rendered.contains(&format!("{cas_prefix}task")),
+            "{surface} prompt must still remap only the CAS tool"
+        );
+    }
 }
 
 #[test]

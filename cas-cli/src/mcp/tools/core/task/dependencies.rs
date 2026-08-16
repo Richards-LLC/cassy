@@ -13,7 +13,7 @@ impl CasCore {
             message: Cow::from(format!("From task not found: {e}")),
             data: None,
         })?;
-        task_store.get(&req.to_id).map_err(|e| McpError {
+        let to_task = task_store.get(&req.to_id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("To task not found: {e}")),
             data: None,
@@ -34,11 +34,43 @@ impl CasCore {
             created_by: Some("mcp".to_string()),
         };
 
+        // Parent-linking an existing task must establish the same durable
+        // target that worktree_merge will use.  Otherwise merge lands on the
+        // epic branch while close still checks the child's stale trunk target.
+        let inherited_target = (dep_type == DependencyType::ParentChild
+            && to_task.task_type == TaskType::Epic)
+            .then(|| super::repo_context::default_child_work_target_from_epic(&from_task, &to_task))
+            .flatten();
+        if inherited_target.is_some() {
+            super::lifecycle::proof_scope::guard_task_proof_scope(
+                &self.cas_root,
+                &from_task,
+                super::lifecycle::proof_scope::ProofScopeOperation::ParentLink,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(error.to_string()),
+                data: None,
+            })?;
+        }
+
         task_store.add_dependency(&dep).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to add dependency: {e}")),
             data: None,
         })?;
+
+        if let Some(target) = inherited_target {
+            from_task.deliverables.work_target = Some(target);
+            from_task.updated_at = chrono::Utc::now();
+            task_store.update(&from_task).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Parent dependency was added, but failed to inherit the epic work target: {e}"
+                )),
+                data: None,
+            })?;
+        }
 
         // A late blocking edge must re-arm an open (including reopened) task.
         // Non-blocking dependency types never project lifecycle status.
@@ -253,5 +285,77 @@ mod describe_dependency_tests {
                 "{dep_type:?}: must not contain arrow: {msg}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn parent_link_persists_live_epic_target_without_overwriting_explicit_lane_cas_edba() {
+        use cas_store::TaskStore;
+        use cas_types::WorkTarget;
+        use tempfile::TempDir;
+
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+
+        let mut epic = Task::new("cas-edba-epic".into(), "target epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live-target".into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-edba".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let mut inherited = Task::new("cas-edba-inherit".into(), "trunk child".into());
+        inherited.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-edba".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&inherited).unwrap();
+
+        core.cas_task_dep_add(Parameters(DependencyRequest {
+            from_id: inherited.id.clone(),
+            to_id: epic.id.clone(),
+            dep_type: "parent".into(),
+        }))
+        .await
+        .expect("link trunk child to epic");
+        assert_eq!(
+            store
+                .get(&inherited.id)
+                .unwrap()
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            "epic/live-target",
+            "the persisted close target must equal the branch merge selected"
+        );
+
+        let mut explicit = Task::new("cas-edba-explicit".into(), "release child".into());
+        explicit.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-edba".into(),
+            target_branch: "release/operator-selected".into(),
+        });
+        store.add(&explicit).unwrap();
+        core.cas_task_dep_add(Parameters(DependencyRequest {
+            from_id: explicit.id.clone(),
+            to_id: epic.id,
+            dep_type: "parent".into(),
+        }))
+        .await
+        .expect("link explicit child to epic");
+        assert_eq!(
+            store
+                .get(&explicit.id)
+                .unwrap()
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            "release/operator-selected",
+            "an explicit non-default target remains task authority"
+        );
     }
 }

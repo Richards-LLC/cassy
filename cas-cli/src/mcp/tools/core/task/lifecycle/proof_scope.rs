@@ -18,6 +18,7 @@ use crate::mcp::tools::TaskUpdateRequest;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ProofScopeOperation<'a> {
     CompletionReceipt,
+    ParentLink,
     TaskUpdate {
         request: &'a TaskUpdateRequest,
         target_repo_supplied: bool,
@@ -27,6 +28,9 @@ pub(crate) enum ProofScopeOperation<'a> {
 
 impl ProofScopeOperation<'_> {
     fn locked_fields(self) -> Vec<&'static str> {
+        if matches!(self, Self::ParentLink) {
+            return vec!["parent epic/work target"];
+        }
         let Self::TaskUpdate {
             request,
             target_repo_supplied,
@@ -255,12 +259,19 @@ pub(crate) fn guard_task_proof_scope(
     match exact_proof_locks_scope(cas_root, task) {
         Ok(false) => Ok(()),
         Ok(true) => {
-            let remediation = match close_authoritative_task_proof_dispatch(cas_root, &task.id) {
+            let remediation = if matches!(operation, ProofScopeOperation::ParentLink) {
+                format!(
+                    "Ask a registered supervisor to run `task action=request_changes id={} reason=\"re-link task to epic after proof scope changed\"`, then retry `task action=dep_add ... dep_type=parent`.",
+                    task.id
+                )
+            } else {
+                match close_authoritative_task_proof_dispatch(cas_root, &task.id) {
                 Ok(Some(_)) => format!(
                     "To start a fresh reviewed scope without closing, ask a registered supervisor to run `task action=reopen id={} reason=\"invalidate approved proof before rework\"`; then start the task and retry the update.",
                     task.id
                 ),
                 _ => "Complete or explicitly recover the active exact proof cycle before changing task scope.".to_string(),
+                }
             };
             Err(reject(format!(
                 "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}",
@@ -416,6 +427,19 @@ mod tests {
                 "target_branch",
             ]
         );
+    }
+
+    #[test]
+    fn parent_link_scope_lock_names_the_supervisor_recovery_path_cas_edba() {
+        let root = TempDir::new().unwrap();
+        let mut task = Task::new("cas-edba-fixture".into(), "parked delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+
+        let error = guard_task_proof_scope(root.path(), &task, ProofScopeOperation::ParentLink)
+            .expect_err("a parent link that would retarget a parked delivery must be locked");
+        assert!(error.contains("parent epic/work target"), "{error}");
+        assert!(error.contains("task action=request_changes"), "{error}");
+        assert!(error.contains("task action=dep_add"), "{error}");
     }
 
     fn receipt_input(task_id: &str) -> WorkerCompletionReceiptInput {

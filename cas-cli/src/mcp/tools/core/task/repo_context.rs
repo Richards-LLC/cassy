@@ -472,6 +472,50 @@ pub(crate) fn declare_work_target(
     }))
 }
 
+/// Select the durable WorkTarget a child should inherit from an epic.
+///
+/// The live epic branch is the delivery lane whenever it is recorded.  Its
+/// repository binding still comes from the epic's WorkTarget; when the live
+/// lane is absent, that WorkTarget is itself the delivery target.  This is the
+/// same live-epic-before-epic-target precedence used by worker spawn and
+/// worktree merge, expressed as a portable child WorkTarget for close gates.
+pub(crate) fn inherited_work_target_from_epic(epic: &cas_types::Task) -> Option<WorkTarget> {
+    let epic_target = epic.deliverables.work_target.as_ref()?;
+    let target_branch = epic
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or(&epic_target.target_branch)
+        .to_string();
+    Some(WorkTarget {
+        repo_selector: epic_target.repo_selector.clone(),
+        target_branch,
+    })
+}
+
+/// Return the inherited target only when the child has no target, or is still
+/// on the epic's own base target.  A distinct child target is an operator
+/// choice and must remain authoritative.
+pub(crate) fn default_child_work_target_from_epic(
+    child: &cas_types::Task,
+    epic: &cas_types::Task,
+) -> Option<WorkTarget> {
+    let inherited = inherited_work_target_from_epic(epic)?;
+    let child_target = child.deliverables.work_target.as_ref();
+    let epic_target = epic.deliverables.work_target.as_ref()?;
+    match child_target {
+        None => Some(inherited),
+        Some(target)
+            if target.repo_selector == epic_target.repo_selector
+                && target.target_branch == epic_target.target_branch =>
+        {
+            Some(inherited)
+        }
+        Some(_) => None,
+    }
+}
+
 /// Local evidence about whether a task is anchored in the current project.
 ///
 /// cas-156b (GH #135). `declare_work_target` returns `Ok(None)` whenever a task
@@ -2016,6 +2060,45 @@ mod task_anchor_tests {
         assert!(
             !warning.contains("cloud project"),
             "must not invent a cloud project name it does not have: {warning}"
+        );
+    }
+
+    #[test]
+    fn child_inherits_live_epic_lane_but_keeps_nondefault_target_cas_edba() {
+        let mut epic = cas_types::Task::new("cas-epic".into(), "Epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/live-delivery".into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+
+        let child = cas_types::Task::new("cas-child".into(), "Child".into());
+        let inherited = default_child_work_target_from_epic(&child, &epic)
+            .expect("an untargeted child inherits its epic lane");
+        assert_eq!(inherited.target_branch, "epic/live-delivery");
+        assert_eq!(inherited.repo_selector, "project:fixture");
+
+        let mut trunk_child = child.clone();
+        trunk_child.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        assert_eq!(
+            default_child_work_target_from_epic(&trunk_child, &epic)
+                .expect("the inherited trunk default must move to the live lane")
+                .target_branch,
+            "epic/live-delivery"
+        );
+
+        let mut explicit_child = child;
+        explicit_child.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "release/operator-selected".into(),
+        });
+        assert!(
+            default_child_work_target_from_epic(&explicit_child, &epic).is_none(),
+            "a non-default child target is explicit operator authority"
         );
     }
 }

@@ -12,11 +12,21 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
 use cmcp_core::config::{Config, Scope, ServerConfig};
-use cmcp_core::{CatalogEntry, ProxyEngine, UpstreamState};
+use cmcp_core::{CatalogEntry, ProxyCaller, ProxyEngine, UpstreamState};
 use serde_json::{Value, json};
 
 mod support;
 use support::CasSandbox;
+
+fn test_proxy_caller() -> ProxyCaller {
+    ProxyCaller {
+        agent_id: "proxy-integration-test".to_string(),
+        role: cas::types::AgentRole::Standard,
+        session_id: "proxy-integration-test".to_string(),
+        factory_session: None,
+        active_task_ids: Vec::new(),
+    }
+}
 
 struct McpClient {
     child: Child,
@@ -814,6 +824,7 @@ async fn live_catalog_search_cache_and_restart_never_expose_unsafe_server_name()
 
     let routed = engine
         .call_tool(
+            &test_proxy_caller(),
             &public_name,
             "task",
             Some(serde_json::Map::from_iter([
@@ -835,6 +846,7 @@ async fn live_catalog_search_cache_and_restart_never_expose_unsafe_server_name()
     );
     let batch = engine
         .execute(
+            &test_proxy_caller(),
             &serde_json::json!([
                 {"server": raw_name, "tool": "missing_tool_one"},
                 {"server": raw_name, "tool": "missing_tool_two"}
@@ -938,6 +950,7 @@ exec env \
 
     let protocol_error = engine
         .call_tool(
+            &test_proxy_caller(),
             "optional-live",
             "task",
             Some(serde_json::Map::from_iter([
@@ -961,6 +974,7 @@ exec env \
 
     let created = engine
         .call_tool(
+            &test_proxy_caller(),
             "optional-live",
             "task",
             Some(serde_json::Map::from_iter([
@@ -983,6 +997,7 @@ exec env \
         .expect("created task response contains task id");
     let tool_error = engine
         .call_tool(
+            &test_proxy_caller(),
             "optional-live",
             "task",
             Some(serde_json::Map::from_iter([
@@ -1033,10 +1048,11 @@ exec env \
     );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+    let caller = test_proxy_caller();
     let failed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         tokio::join!(
-            engine.call_tool("optional-live", "task", None),
-            engine.call_tool("optional-live", "task", None)
+            engine.call_tool(&caller, "optional-live", "task", None),
+            engine.call_tool(&caller, "optional-live", "task", None)
         )
     })
     .await

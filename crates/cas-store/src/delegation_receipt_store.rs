@@ -1,0 +1,482 @@
+//! Durable, local accounting for paid external delegations.
+//!
+//! A receipt and its reservation are committed before a caller may start an
+//! upstream run. Reconnecting after a timeout therefore returns the same
+//! receipt/key and, once a run ID exists, can only resume that run.
+
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+
+use crate::Result;
+use crate::error::StoreError;
+
+pub const DELEGATION_RECEIPT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS delegation_receipts (
+    id TEXT PRIMARY KEY,
+    factory_session_id TEXT NOT NULL,
+    epic_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    gate_kind TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    reserved_amount INTEGER NOT NULL,
+    settled_amount INTEGER,
+    state TEXT NOT NULL,
+    run_id TEXT,
+    terminal_verdict TEXT,
+    evidence_reference TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(factory_session_id, task_id, gate_kind, request_digest)
+);
+CREATE INDEX IF NOT EXISTS idx_delegation_receipts_session_active
+    ON delegation_receipts(factory_session_id, state);
+CREATE INDEX IF NOT EXISTS idx_delegation_receipts_epic_active
+    ON delegation_receipts(epic_id, state);
+CREATE INDEX IF NOT EXISTS idx_delegation_receipts_task
+    ON delegation_receipts(task_id, created_at DESC);
+"#;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationReceiptState {
+    Reserved,
+    TimedOut,
+    Completed,
+}
+
+impl std::fmt::Display for DelegationReceiptState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Reserved => "reserved",
+            Self::TimedOut => "timed_out",
+            Self::Completed => "completed",
+        })
+    }
+}
+impl FromStr for DelegationReceiptState {
+    type Err = StoreError;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "reserved" => Ok(Self::Reserved),
+            "timed_out" => Ok(Self::TimedOut),
+            "completed" => Ok(Self::Completed),
+            _ => Err(StoreError::Parse(format!(
+                "unknown delegation receipt state: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationVerdict {
+    Pass,
+    Fail,
+    Inconclusive,
+    WaitTimedOut,
+    RequiresAction,
+    ThreadBusy,
+    InsufficientScope,
+    RateLimited,
+    Cancelled,
+    TransportFailure,
+    Malformed,
+}
+
+impl std::fmt::Display for DelegationVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Inconclusive => "inconclusive",
+            Self::WaitTimedOut => "wait_timed_out",
+            Self::RequiresAction => "requires_action",
+            Self::ThreadBusy => "thread_busy",
+            Self::InsufficientScope => "insufficient_scope",
+            Self::RateLimited => "rate_limited",
+            Self::Cancelled => "cancelled",
+            Self::TransportFailure => "transport_failure",
+            Self::Malformed => "malformed",
+        })
+    }
+}
+impl FromStr for DelegationVerdict {
+    type Err = StoreError;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "pass" => Ok(Self::Pass),
+            "fail" => Ok(Self::Fail),
+            "inconclusive" => Ok(Self::Inconclusive),
+            "wait_timed_out" => Ok(Self::WaitTimedOut),
+            "requires_action" => Ok(Self::RequiresAction),
+            "thread_busy" => Ok(Self::ThreadBusy),
+            "insufficient_scope" => Ok(Self::InsufficientScope),
+            "rate_limited" => Ok(Self::RateLimited),
+            "cancelled" => Ok(Self::Cancelled),
+            "transport_failure" => Ok(Self::TransportFailure),
+            "malformed" => Ok(Self::Malformed),
+            _ => Err(StoreError::Parse(format!(
+                "unknown delegation verdict: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationBudget {
+    pub max_per_run: u64,
+    pub max_active_per_factory_session: u64,
+    pub max_active_per_epic: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationReserveRequest {
+    pub factory_session_id: String,
+    pub epic_id: String,
+    pub task_id: String,
+    pub gate_kind: String,
+    /// Hash of canonical, non-secret request material, generated by CAS.
+    pub request_digest: String,
+    pub reserved_amount: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationReceipt {
+    pub id: String,
+    pub factory_session_id: String,
+    pub epic_id: String,
+    pub task_id: String,
+    pub gate_kind: String,
+    pub request_digest: String,
+    pub attempt: u32,
+    pub idempotency_key: String,
+    pub reserved_amount: u64,
+    pub settled_amount: Option<u64>,
+    pub state: DelegationReceiptState,
+    pub run_id: Option<String>,
+    pub terminal_verdict: Option<DelegationVerdict>,
+    /// A non-secret locator only; caller content belongs outside this store.
+    pub evidence_reference: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationReserveOutcome {
+    Created(DelegationReceipt),
+    Existing(DelegationReceipt),
+    Resume(DelegationReceipt),
+}
+
+pub struct SqliteDelegationReceiptStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
+    StoreError::Parse("delegation receipt store lock poisoned".to_string())
+}
+fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|v| v.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+}
+fn hash(parts: &[&str]) -> String {
+    let mut h = Sha256::new();
+    for part in parts {
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
+impl SqliteDelegationReceiptStore {
+    pub fn open(cas_dir: &Path) -> Result<Self> {
+        let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
+        {
+            let conn = conn.lock().map_err(lock_err)?;
+            conn.execute_batch(DELEGATION_RECEIPT_SCHEMA)?;
+        }
+        Ok(Self { conn })
+    }
+
+    fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DelegationReceipt> {
+        let state: String = row.get(10)?;
+        let verdict: Option<String> = row.get(12)?;
+        Ok(DelegationReceipt {
+            id: row.get(0)?,
+            factory_session_id: row.get(1)?,
+            epic_id: row.get(2)?,
+            task_id: row.get(3)?,
+            gate_kind: row.get(4)?,
+            request_digest: row.get(5)?,
+            attempt: row.get::<_, i64>(6)? as u32,
+            idempotency_key: row.get(7)?,
+            reserved_amount: row.get::<_, i64>(8)? as u64,
+            settled_amount: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            state: DelegationReceiptState::from_str(&state).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            run_id: row.get(11)?,
+            terminal_verdict: verdict
+                .map(|v| DelegationVerdict::from_str(&v))
+                .transpose()
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+            evidence_reference: row.get(13)?,
+            created_at: parse_time(row.get(14)?)?,
+            updated_at: parse_time(row.get(15)?)?,
+            completed_at: row
+                .get::<_, Option<String>>(16)?
+                .map(parse_time)
+                .transpose()?,
+        })
+    }
+
+    fn get_with_conn(conn: &Connection, id: &str) -> Result<DelegationReceipt> {
+        conn.query_row("SELECT id,factory_session_id,epic_id,task_id,gate_kind,request_digest,attempt,idempotency_key,reserved_amount,settled_amount,state,run_id,terminal_verdict,evidence_reference,created_at,updated_at,completed_at FROM delegation_receipts WHERE id=?1", [id], Self::row).map_err(Into::into)
+    }
+
+    /// Atomically persist a reservation before the upstream start call. Same
+    /// canonical request always returns its existing key; it never queues debt.
+    pub fn reserve_or_resume(
+        &self,
+        request: &DelegationReserveRequest,
+        budget: &DelegationBudget,
+    ) -> Result<DelegationReserveOutcome> {
+        if request.reserved_amount == 0 || request.reserved_amount > budget.max_per_run {
+            return Err(StoreError::Parse(
+                "delegation reservation exceeds configured per-run cap".to_string(),
+            ));
+        }
+        if [
+            request.factory_session_id.as_str(),
+            request.epic_id.as_str(),
+            request.task_id.as_str(),
+            request.gate_kind.as_str(),
+            request.request_digest.as_str(),
+        ]
+        .iter()
+        .any(|v| v.trim().is_empty())
+        {
+            return Err(StoreError::Parse(
+                "delegation receipt scope and digest must be non-empty".to_string(),
+            ));
+        }
+        let mut conn = self.conn.lock().map_err(lock_err)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<DelegationReceipt> = tx.query_row("SELECT id,factory_session_id,epic_id,task_id,gate_kind,request_digest,attempt,idempotency_key,reserved_amount,settled_amount,state,run_id,terminal_verdict,evidence_reference,created_at,updated_at,completed_at FROM delegation_receipts WHERE factory_session_id=?1 AND task_id=?2 AND gate_kind=?3 AND request_digest=?4", params![request.factory_session_id, request.task_id, request.gate_kind, request.request_digest], Self::row).optional()?;
+        if let Some(receipt) = existing {
+            tx.commit()?;
+            return Ok(
+                if receipt.state == DelegationReceiptState::TimedOut && receipt.run_id.is_some() {
+                    DelegationReserveOutcome::Resume(receipt)
+                } else {
+                    DelegationReserveOutcome::Existing(receipt)
+                },
+            );
+        }
+        let session_active: i64 = tx.query_row("SELECT COALESCE(SUM(reserved_amount),0) FROM delegation_receipts WHERE factory_session_id=?1 AND state != 'completed'", [&request.factory_session_id], |r| r.get(0))?;
+        let epic_active: i64 = tx.query_row("SELECT COALESCE(SUM(reserved_amount),0) FROM delegation_receipts WHERE epic_id=?1 AND state != 'completed'", [&request.epic_id], |r| r.get(0))?;
+        if session_active as u64 + request.reserved_amount > budget.max_active_per_factory_session
+            || epic_active as u64 + request.reserved_amount > budget.max_active_per_epic
+        {
+            return Err(StoreError::Parse(
+                "delegation budget exhausted; request denied rather than queued".to_string(),
+            ));
+        }
+        let attempt: i64 = tx.query_row("SELECT COALESCE(MAX(attempt),0)+1 FROM delegation_receipts WHERE factory_session_id=?1 AND task_id=?2 AND gate_kind=?3", params![request.factory_session_id, request.task_id, request.gate_kind], |r| r.get(0))?;
+        let idempotency_key = format!(
+            "v1:{}:{}:{}:{}:{}",
+            request.factory_session_id,
+            request.task_id,
+            request.gate_kind,
+            request.request_digest,
+            attempt
+        );
+        let id = format!("dr-{}", &hash(&[&idempotency_key])[..24]);
+        let now = Utc::now();
+        tx.execute("INSERT INTO delegation_receipts (id,factory_session_id,epic_id,task_id,gate_kind,request_digest,attempt,idempotency_key,reserved_amount,state,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',?10,?10)", params![id, request.factory_session_id, request.epic_id, request.task_id, request.gate_kind, request.request_digest, attempt, idempotency_key, request.reserved_amount as i64, now.to_rfc3339()])?;
+        let receipt = Self::get_with_conn(&tx, &id)?;
+        tx.commit()?;
+        Ok(DelegationReserveOutcome::Created(receipt))
+    }
+
+    pub fn get(&self, id: &str) -> Result<DelegationReceipt> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        Self::get_with_conn(&conn, id)
+    }
+    pub fn record_run_id(&self, id: &str, run_id: &str) -> Result<DelegationReceipt> {
+        if run_id.trim().is_empty() {
+            return Err(StoreError::Parse(
+                "delegation run_id must be non-empty".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute("UPDATE delegation_receipts SET run_id=?2, updated_at=?3 WHERE id=?1 AND state != 'completed'", params![id, run_id, now])?;
+        Self::get_with_conn(&conn, id)
+    }
+    pub fn record_timeout(&self, id: &str, run_id: &str) -> Result<DelegationReceipt> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let now = Utc::now().to_rfc3339();
+        let changed = conn.execute("UPDATE delegation_receipts SET state='timed_out', run_id=?2, terminal_verdict='wait_timed_out', updated_at=?3 WHERE id=?1 AND state != 'completed'", params![id, run_id, now])?;
+        if changed == 0 {
+            return Err(StoreError::Parse(
+                "cannot time out a completed or missing delegation receipt".to_string(),
+            ));
+        }
+        Self::get_with_conn(&conn, id)
+    }
+    /// Return the exact prior run to wait on. It deliberately has no path that
+    /// could create another upstream run after a timeout.
+    pub fn resume_run(&self, id: &str) -> Result<String> {
+        let receipt = self.get(id)?;
+        if receipt.state != DelegationReceiptState::TimedOut {
+            return Err(StoreError::Parse(
+                "delegation receipt is not awaiting run resumption".to_string(),
+            ));
+        }
+        receipt.run_id.ok_or_else(|| {
+            StoreError::Parse("timed-out delegation receipt has no run_id; fail closed".to_string())
+        })
+    }
+    pub fn record_terminal(
+        &self,
+        id: &str,
+        verdict: DelegationVerdict,
+        settled_amount: u64,
+        evidence_reference: &str,
+    ) -> Result<DelegationReceipt> {
+        if evidence_reference.trim().is_empty() {
+            return Err(StoreError::Parse(
+                "terminal delegation receipt requires a non-secret evidence reference".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let current = Self::get_with_conn(&conn, id)?;
+        if settled_amount > current.reserved_amount {
+            return Err(StoreError::Parse(
+                "delegation settlement exceeds reservation".to_string(),
+            ));
+        }
+        if current.state == DelegationReceiptState::Completed {
+            return Ok(current);
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute("UPDATE delegation_receipts SET state='completed', terminal_verdict=?2, settled_amount=?3, evidence_reference=?4, updated_at=?5, completed_at=?5 WHERE id=?1", params![id, verdict.to_string(), settled_amount as i64, evidence_reference, now])?;
+        Self::get_with_conn(&conn, id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    fn request(digest: &str, amount: u64) -> DelegationReserveRequest {
+        DelegationReserveRequest {
+            factory_session_id: "factory-1".into(),
+            epic_id: "cas-b389".into(),
+            task_id: "cas-c596".into(),
+            gate_kind: "external_production_verification".into(),
+            request_digest: digest.into(),
+            reserved_amount: amount,
+        }
+    }
+    fn budget() -> DelegationBudget {
+        DelegationBudget {
+            max_per_run: 10,
+            max_active_per_factory_session: 10,
+            max_active_per_epic: 10,
+        }
+    }
+    #[test]
+    fn reconnect_after_timeout_resumes_the_same_paid_run() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteDelegationReceiptStore::open(dir.path()).unwrap();
+        let first = match store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap()
+        {
+            DelegationReserveOutcome::Created(v) => v,
+            other => panic!("expected created, got {other:?}"),
+        };
+        assert_eq!(
+            first.idempotency_key,
+            "v1:factory-1:cas-c596:external_production_verification:digest-a:1"
+        );
+        let timed_out = store.record_timeout(&first.id, "run-42").unwrap();
+        let reconnected = store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap();
+        let resumed = match reconnected {
+            DelegationReserveOutcome::Resume(v) => v,
+            other => panic!("expected resume, got {other:?}"),
+        };
+        assert_eq!(resumed.id, first.id);
+        assert_eq!(resumed.idempotency_key, first.idempotency_key);
+        assert_eq!(store.resume_run(&resumed.id).unwrap(), "run-42");
+        assert_eq!(timed_out.run_id.as_deref(), Some("run-42"));
+    }
+    #[test]
+    fn exhausted_reservation_is_denied_and_never_queued() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteDelegationReceiptStore::open(dir.path()).unwrap();
+        store
+            .reserve_or_resume(&request("digest-a", 7), &budget())
+            .unwrap();
+        let error = store
+            .reserve_or_resume(&request("digest-b", 4), &budget())
+            .unwrap_err();
+        assert!(error.to_string().contains("denied rather than queued"));
+    }
+    #[test]
+    fn terminal_receipt_persists_verdict_and_non_secret_evidence_reference() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteDelegationReceiptStore::open(dir.path()).unwrap();
+        let receipt = match store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap()
+        {
+            DelegationReserveOutcome::Created(v) => v,
+            _ => unreachable!(),
+        };
+        let completed = store
+            .record_terminal(
+                &receipt.id,
+                DelegationVerdict::Inconclusive,
+                3,
+                "delegation-evidence://run-42",
+            )
+            .unwrap();
+        assert_eq!(completed.state, DelegationReceiptState::Completed);
+        assert_eq!(
+            completed.terminal_verdict,
+            Some(DelegationVerdict::Inconclusive)
+        );
+        assert_eq!(completed.settled_amount, Some(3));
+        assert_eq!(
+            completed.evidence_reference.as_deref(),
+            Some("delegation-evidence://run-42")
+        );
+    }
+}

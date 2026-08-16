@@ -7540,11 +7540,12 @@ async fn cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh
     );
 }
 
-/// cas-99d2 (GH #126): the complementary positive case — a worker that DID
-/// drain its inbox before replying still gets its messages confirmed, so the
-/// evidence gates do not simply disable reply-inference.
+/// cas-dcf2 (GH #390): even an inbox drain plus later activity is not a
+/// transcript artifact proving THIS row entered the recipient's next turn.
+/// The user-facing status must show the weaker state at its top line and keep
+/// the undelivered clock running.
 #[tokio::test]
-async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
+async fn cas_dcf2_reply_after_an_inbox_drain_is_assumed_seen_not_confirmed_gh390() {
     // Same deterministic supervisor pinning as the negative case above: the
     // reply at the end of this test resolves `target="supervisor"`, which
     // otherwise depends on an ambient CAS_SUPERVISOR_NAME (GH #136).
@@ -7588,10 +7589,76 @@ async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
         .message_delivery_report(message_id)
         .expect("delivery report")
         .expect("message exists");
-    assert_eq!(
-        report.confirmation_source,
-        cas_store::ConfirmationSource::InferredFromReply,
-        "a reply that post-dates a real drain receipt still confirms: {report:?}"
+    assert_eq!(report.stage, cas_store::DeliveryStage::AssumedSeen);
+    assert!(report.confirmed_at.is_none());
+    assert!(report.assumed_seen_at.is_some());
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        text.contains("stage: assumed_seen"),
+        "the top-line stage must expose activity inference as weaker than confirmation: {text}"
+    );
+    assert!(
+        text.contains("undelivered_after:") && !text.contains("undelivered_after: n/a"),
+        "activity inference must not clear the escalation clock: {text}"
+    );
+}
+
+#[tokio::test]
+async fn cas_dcf2_wake_starvation_is_top_line_status_not_a_lifecycle_relay_gh390() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
+
+    let message_id = env
+        .prompt_queue()
+        .enqueue("supervisor", "watchful-koala-20", "blocking DDL ruling")
+        .expect("enqueue");
+    for _ in 0..3 {
+        env.prompt_queue()
+            .record_wake_gate_decline(
+                message_id,
+                "pane has not been silent long enough",
+            )
+            .expect("record busy wake decline");
+    }
+    env.prompt_queue()
+        .mark_undelivered_after_wake_declines(
+            message_id,
+            Some("wake gate declined 3 consecutive re-offers while recipient stayed busy"),
+        )
+        .expect("record terminal wake starvation");
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        text.contains("stage: abandoned  pending_reason: undelivered_after_wake_declines"),
+        "the terminal state must be visible at the status top line: {text}"
+    );
+    assert!(
+        text.contains("undelivered_after:"),
+        "a wake-starved row must retain an observable undelivered clock: {text}"
+    );
+    assert!(
+        text.contains("wake_gate_declines: 3"),
+        "the top line must expose the bounded consecutive-decline count: {text}"
     );
 }
 

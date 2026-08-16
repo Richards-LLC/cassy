@@ -288,7 +288,9 @@ impl SqliteDelegationReceiptStore {
         if let Some(receipt) = existing {
             tx.commit()?;
             return Ok(
-                if receipt.state == DelegationReceiptState::TimedOut && receipt.run_id.is_some() {
+                if receipt.state == DelegationReceiptState::TimedOut
+                    && receipt.run_id.as_deref().is_some_and(|run_id| !run_id.trim().is_empty())
+                {
                     DelegationReserveOutcome::Resume(receipt)
                 } else {
                     DelegationReserveOutcome::Existing(receipt)
@@ -337,7 +339,34 @@ impl SqliteDelegationReceiptStore {
         Self::get_with_conn(&conn, id)
     }
     pub fn record_timeout(&self, id: &str, run_id: &str) -> Result<DelegationReceipt> {
+        if run_id.trim().is_empty() {
+            return Err(StoreError::Parse(
+                "delegation run_id must be non-empty".to_string(),
+            ));
+        }
         let conn = self.conn.lock().map_err(lock_err)?;
+        let current = Self::get_with_conn(&conn, id)?;
+        if current.state == DelegationReceiptState::Completed {
+            return Err(StoreError::Parse(
+                "cannot time out a completed or missing delegation receipt".to_string(),
+            ));
+        }
+        if let Some(existing_run_id) = current
+            .run_id
+            .as_deref()
+            .filter(|existing_run_id| !existing_run_id.trim().is_empty())
+        {
+            if existing_run_id != run_id {
+                return Err(StoreError::Parse(
+                    "cannot replace an existing delegation run_id".to_string(),
+                ));
+            }
+            if current.state == DelegationReceiptState::TimedOut {
+                // Re-observing the same timed-out run is idempotent: it must
+                // never create or adopt a second upstream run.
+                return Ok(current);
+            }
+        }
         let now = Utc::now().to_rfc3339();
         let changed = conn.execute("UPDATE delegation_receipts SET state='timed_out', run_id=?2, terminal_verdict='wait_timed_out', updated_at=?3 WHERE id=?1 AND state != 'completed'", params![id, run_id, now])?;
         if changed == 0 {
@@ -356,7 +385,7 @@ impl SqliteDelegationReceiptStore {
                 "delegation receipt is not awaiting run resumption".to_string(),
             ));
         }
-        receipt.run_id.ok_or_else(|| {
+        receipt.run_id.filter(|run_id| !run_id.trim().is_empty()).ok_or_else(|| {
             StoreError::Parse("timed-out delegation receipt has no run_id; fail closed".to_string())
         })
     }
@@ -437,6 +466,90 @@ mod tests {
         assert_eq!(store.resume_run(&resumed.id).unwrap(), "run-42");
         assert_eq!(timed_out.run_id.as_deref(), Some("run-42"));
     }
+
+    #[test]
+    fn record_timeout_rejects_empty_run_ids_without_changing_the_receipt() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteDelegationReceiptStore::open(dir.path()).unwrap();
+        let receipt = match store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap()
+        {
+            DelegationReserveOutcome::Created(v) => v,
+            other => panic!("expected created, got {other:?}"),
+        };
+
+        for run_id in ["", " \t\n "] {
+            let error = store.record_timeout(&receipt.id, run_id).unwrap_err();
+            assert!(error.to_string().contains("run_id must be non-empty"));
+            assert_eq!(
+                store.get(&receipt.id).unwrap(),
+                receipt,
+                "invalid timeout input must leave the receipt unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_stored_run_id_fails_closed_for_resume_and_reconnect() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteDelegationReceiptStore::open(dir.path()).unwrap();
+        let receipt = match store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap()
+        {
+            DelegationReserveOutcome::Created(v) => v,
+            other => panic!("expected created, got {other:?}"),
+        };
+
+        // Simulate a legacy corrupt row written before record_timeout rejected
+        // empty IDs: both consumers must still fail closed on read.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE delegation_receipts SET state='timed_out', run_id='' WHERE id=?1",
+                [&receipt.id],
+            )
+            .unwrap();
+
+        let error = store.resume_run(&receipt.id).unwrap_err();
+        assert!(error.to_string().contains("has no run_id; fail closed"));
+        let reconnected = store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap();
+        match reconnected {
+            DelegationReserveOutcome::Existing(receipt) => {
+                assert_eq!(receipt.run_id.as_deref(), Some(""));
+            }
+            other => panic!("empty run_id must not resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_timeout_rejects_a_different_run_without_replacing_the_original() {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteDelegationReceiptStore::open(dir.path()).unwrap();
+        let receipt = match store
+            .reserve_or_resume(&request("digest-a", 4), &budget())
+            .unwrap()
+        {
+            DelegationReserveOutcome::Created(v) => v,
+            other => panic!("expected created, got {other:?}"),
+        };
+        let timed_out = store.record_timeout(&receipt.id, "run-1").unwrap();
+
+        let error = store.record_timeout(&receipt.id, "run-2").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot replace an existing delegation run_id"));
+        assert_eq!(store.get(&receipt.id).unwrap(), timed_out);
+
+        // Re-observing the same timeout is explicitly idempotent.
+        assert_eq!(store.record_timeout(&receipt.id, "run-1").unwrap(), timed_out);
+    }
+
     #[test]
     fn exhausted_reservation_is_denied_and_never_queued() {
         let dir = TempDir::new().unwrap();

@@ -8,6 +8,7 @@ release="$repo_root/.github/workflows/release.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
 fallback="$repo_root/scripts/sccache-unavailable.sh"
 ruleset="$repo_root/docs/branch-protection/main-ruleset.json"
+makefile="$repo_root/cas-cli/Makefile"
 
 pass=0
 fail=0
@@ -157,8 +158,9 @@ preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
-require_text "$suite" 'cargo nextest run -p cas --no-fail-fast' 'suite retains full nextest coverage'
+require_text "$suite" 'cargo nextest run --workspace --no-fail-fast' 'suite executes every workspace nextest binary'
 require_absent "$suite" '--partition' 'suite avoids duplicate test-graph compilation across runners'
+require_text "$(<"$makefile")" '$(CARGO) nextest run --workspace --no-fail-fast' 'local make test matches CI workspace nextest scope'
 require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
 require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'
 require_text "$fan_in" 'fast-validation-suite' 'required Fast Validation waits for the full suite'

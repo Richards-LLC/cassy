@@ -73,7 +73,6 @@
   --machine-drawer-width: 280px;
   --context-panel-width: 320px;
   --session-header-height: 44px;
-  --pane-min-width: 340px;
   --pane-secondary-min-width: 280px;
   --pane-header-height: 32px;
   --worker-collapsed-width: 240px;
@@ -159,8 +158,7 @@ textarea:focus-visible {
 }
 
 code,
-pre,
-.machine-copy { font-family: var(--font-mono); }
+pre { font-family: var(--font-mono); }
 
 .shell {
   display: grid;
@@ -483,7 +481,6 @@ pre,
 .pane-title,
 .attention-group-label,
 .attention-ticket,
-.attention-cause,
 .status-identifier,
 .pair-code,
 .pair-details dd {
@@ -1722,20 +1719,11 @@ fieldset {
   /* Phone composition keeps the supervisor readable and workers horizontally reachable.
      Workers cannot mount a terminal here, so the strip is sized by its collapsed
      rows instead of reserving a third of the screen for empty terminal wells. */
-  main .pane-grid.pane-layout {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) auto;
-    overflow: hidden;
-  }
-
-  main .pane-grid.pane-layout.single-pane { grid-template-rows: minmax(0, 1fr); }
+  main .pane-grid.pane-layout { grid-template-rows: minmax(0, 1fr) auto; }
 
   .pane-grid.pane-layout .secondary-pane-strip {
-    display: flex;
     max-height: 40dvh;
     gap: var(--space-1);
-    overflow-x: auto;
-    overflow-y: hidden;
   }
 
   .pane-grid.pane-layout .secondary-pane-strip .pane {

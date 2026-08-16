@@ -1704,6 +1704,33 @@ impl CasService {
             )
         })?;
 
+        // cas-85fd/cas-dcf2: a reply after an inbox drain is intentionally
+        // only `assumed_seen`, so it cannot release an urgent-stop halt. An
+        // explicit acknowledgement of the *bound* urgent is the authoritative
+        // receipt instead. Release no other (including newer) halt.
+        use crate::mcp::tools::core::task::lifecycle::stale_close_guard::{
+            clear_halt_metadata, halt_prompt_id,
+        };
+        if let Ok(agent_id) = self.inner.get_agent_id()
+            && let Ok(agent_store) = self.inner.open_agent_store()
+            && let Ok(mut agent) = agent_store.get(&agent_id)
+            && halt_prompt_id(&agent.metadata) == Some(notification_id)
+            && matches!(
+                queue.message_status(notification_id),
+                Ok(Some(cas_store::MessageStatus::Confirmed))
+            )
+        {
+            clear_halt_metadata(&mut agent.metadata);
+            if let Err(error) = agent_store.update(&agent) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    prompt_id = notification_id,
+                    error = %error,
+                    "could not release explicitly acknowledged urgent halt"
+                );
+            }
+        }
+
         // cas-45c4 (GH #102): say what an ack actually proves. It is the
         // caller's claim that it received this message — not evidence CAS
         // observed the content being surfaced, and not a guarantee for anyone

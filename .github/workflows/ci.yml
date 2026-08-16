@@ -166,12 +166,13 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       # Keep --no-fail-fast so failures never mask later binaries. This runs
-      # every test binary; the doctest lane below covers what nextest cannot.
+      # every workspace test binary; the doctest lane below covers what
+      # nextest cannot.
       - name: Test full suite
         if: steps.classify-diff.outputs.fast-pass != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo nextest run -p cas --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast
 
   fast-validation-docs:
     name: Fast Validation — doctests

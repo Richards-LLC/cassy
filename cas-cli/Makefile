@@ -31,7 +31,7 @@ CARGO ?= cargo
 
 # Run all tests
 test:
-	$(CARGO) nextest run -p cas --no-fail-fast
+	$(CARGO) nextest run --workspace --no-fail-fast
 	$(CARGO) test -p cas --doc
 
 # Run full test matrix

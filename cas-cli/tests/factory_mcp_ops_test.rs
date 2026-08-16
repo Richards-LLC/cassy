@@ -20,11 +20,11 @@ use cas::mcp::{CasCore, CasService};
 use cas::store::{
     AgentStore, EventStore, PromptQueueStore, SpawnQueueStore, TaskStore, init_cas_dir,
     open_agent_store, open_event_store, open_prompt_queue_store, open_reminder_store,
-    open_spawn_queue_store, open_task_store,
+    open_spawn_queue_store, open_store, open_task_store,
 };
 use cas::types::{
-    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskDepth, TaskStatus, TaskType,
-    WorkTarget,
+    Agent, AgentStatus, Entry, Event, EventEntityType, EventType, Task, TaskDepth, TaskStatus,
+    TaskType, WorkTarget,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
@@ -538,6 +538,41 @@ fn coord_req(action: &str) -> CoordinationRequest {
         port: None,
         shared: None,
     }
+}
+
+/// cas-e0ab: `session_end` is dispatched on the MCP Tokio runtime, while the
+/// hook path retains synchronous title generation that owns another runtime.
+/// A session observation exercises that title path; this must return a normal
+/// receipt instead of panicking with nested `block_on`.
+#[tokio::test]
+async fn coordination_session_end_runs_hook_path_off_dispatch_runtime_cas_e0ab() {
+    let env = FactoryTestEnv::new();
+    let session_id = "session-end-runtime-shape";
+    env.register_worker_with_id(session_id, "ending-worker", None);
+
+    let entries = open_store(&env.cas_root).expect("open entry store");
+    let entry_id = entries.generate_id().expect("generate entry id");
+    let mut entry = Entry::new(entry_id, "session observation".to_string());
+    entry.session_id = Some(session_id.to_string());
+    entries.add(&entry).expect("add session observation");
+
+    let mut request = coord_req("session_end");
+    request.session_id = Some(session_id.to_string());
+    let result = env
+        .service
+        .coordination(Parameters(request))
+        .await
+        .expect("session_end must return a receipt from MCP dispatch");
+
+    assert!(
+        get_text(&result).contains("Session ended: session-end-runtime-shape"),
+        "unexpected session_end receipt: {}",
+        get_text(&result)
+    );
+    assert!(
+        env.agent_store().get(session_id).is_err(),
+        "session_end must unregister the ending agent"
+    );
 }
 
 /// GH #276: existing callers did not supply task_id. With exactly one active

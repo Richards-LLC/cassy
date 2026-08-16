@@ -153,6 +153,14 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("render(false);");
   });
 
+  it("names the ticket on attention raised from a task", async () => {
+    const view = await readFile(new URL("attention-view.ts", import.meta.url), "utf8");
+    // .attention-ticket was styled and documented but never rendered, so a
+    // blocked-task card never said which task it meant.
+    expect(view).toContain('ticket.className = "attention-ticket"');
+    expect(view).toContain("ticket.textContent = card.latest.ticketId;");
+  });
+
   it("makes the pairing code reachable without retyping it from a phone screen", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain('data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}"');

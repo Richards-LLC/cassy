@@ -1839,7 +1839,7 @@ impl CasService {
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
-                     stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  \
+                     stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
                      {transport_line}\
@@ -1850,6 +1850,7 @@ impl CasService {
                     reason,
                     r.wake,
                     r.wake_attempt,
+                    r.wake_gate_declines,
                     r.reaction,
                     r.confirmation_source
                 )))

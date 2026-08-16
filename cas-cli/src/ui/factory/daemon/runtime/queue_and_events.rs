@@ -846,6 +846,13 @@ const SILENCE_FOR_IDLE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration
 /// poll interval.
 const LIFECYCLE_RENUDGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// cas-dcf2 (GH #390): a normal message must not wait indefinitely for a
+/// continuously-busy recipient to produce a silent pane. Three independently
+/// observed gate declines are enough to surface the failure; this is separate
+/// from the longer lifecycle re-nudge budget, which protects supervisor
+/// lifecycle traffic from transient absence.
+const MAX_CONSECUTIVE_WAKE_GATE_DECLINES: u32 = 3;
+
 /// cas-d732: what to do with a lifecycle row that is up for (re)delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LifecycleRedelivery {
@@ -3202,25 +3209,37 @@ impl FactoryDaemon {
                         // cas-3dcb: a death relay has no task_id, and reporting
                         // one as "(unknown task)" would bury the one fact the
                         // supervisor needs — which worker is gone.
-                        let notice = match crate::prompt_revalidation::parse_worker_died_envelope(
-                            &queued.prompt,
-                        ) {
-                            Some(envelope) => {
-                                crate::prompt_revalidation::undelivered_worker_died_notice(
-                                    &envelope.worker_name,
-                                )
-                            }
-                            None => crate::prompt_revalidation::undelivered_relay_notice(
-                                &crate::prompt_revalidation::parse_lifecycle_envelope(
-                                    &queued.prompt,
-                                )
-                                .map(|envelope| envelope.task_id)
-                                .unwrap_or_else(|| "(unknown task)".to_string()),
-                                queued.summary.as_deref(),
-                            ),
-                        };
-                        let _ = queue
-                            .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                        if Self::row_is_supervisor_wake(&queued.source, &queued.prompt) {
+                            let notice = match crate::prompt_revalidation::parse_worker_died_envelope(
+                                &queued.prompt,
+                            ) {
+                                Some(envelope) => {
+                                    crate::prompt_revalidation::undelivered_worker_died_notice(
+                                        &envelope.worker_name,
+                                    )
+                                }
+                                None => crate::prompt_revalidation::undelivered_relay_notice(
+                                    &crate::prompt_revalidation::parse_lifecycle_envelope(
+                                        &queued.prompt,
+                                    )
+                                    .map(|envelope| envelope.task_id)
+                                    .unwrap_or_else(|| "(unknown task)".to_string()),
+                                    queued.summary.as_deref(),
+                                ),
+                            };
+                            let _ = queue
+                                .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                        } else {
+                            let detail = format!(
+                                "wake gate declined {} consecutive re-offers while the recipient remained busy; \
+                                 flagged undelivered_after instead of waiting indefinitely for pane silence",
+                                LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+                            );
+                            let _ = queue.mark_undelivered_after_wake_declines(
+                                queued.id,
+                                Some(detail.as_str()),
+                            );
+                        }
                         self.forget_row_delivery_state(queued.id);
                         tracing::error!(
                             target: "cas::coordination",
@@ -3230,9 +3249,8 @@ impl FactoryDaemon {
                             source = %queued.source,
                             target_agent = %queued.target,
                             attempts = LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
-                            "cas-7787 (GH #160): a supervisor lifecycle relay exhausted its retry \
-                             budget without ever being transported — the supervisor was never \
-                             told this lane was waiting on them"
+                            "bounded wake retries exhausted without a recipient turn; row was \
+                             terminally flagged instead of waiting forever for pane silence"
                         );
                         continue;
                     }
@@ -3715,6 +3733,39 @@ impl FactoryDaemon {
                         ) == super::delivery::DeliveryChannel::TeamsInbox
                     };
                     wake_deferred = wake_was_required && !worker_is_idle;
+                    if wake_deferred
+                        && !Self::row_is_supervisor_wake(&queued.source, &queued.prompt)
+                    {
+                        match queue.record_wake_gate_decline(queued.id, wake_decision.reason) {
+                            Ok(declines) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
+                                let detail = format!(
+                                    "wake gate declined {declines} consecutive re-offers while the recipient remained busy; \
+                                     flagged undelivered_after instead of waiting indefinitely for pane silence"
+                                );
+                                let _ = queue.mark_undelivered_after_wake_declines(
+                                    queued.id,
+                                    Some(detail.as_str()),
+                                );
+                                self.forget_row_delivery_state(queued.id);
+                                tracing::warn!(
+                                    target: "cas::coordination",
+                                    stage = "wake_starved_undelivered",
+                                    message_id = queued.id,
+                                    target_agent = %pane_target,
+                                    declines,
+                                    "cas-dcf2: normal message exhausted consecutive busy wake declines"
+                                );
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(
+                                target: "cas::coordination",
+                                message_id = queued.id,
+                                %error,
+                                "cas-dcf2: could not persist wake-gate decline; row remains pending"
+                            ),
+                        }
+                    }
                     if worker_is_idle && is_supervisor_target {
                         supervisor_wake_sent = true;
                     }

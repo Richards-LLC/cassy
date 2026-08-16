@@ -54,11 +54,20 @@ export function renderAttentionCounts(counts: AttentionCounts, compact = false):
   const container = document.createElement("span");
   container.className = `attention-counts${compact ? " attention-counts--compact" : ""}`;
   container.setAttribute("aria-label", `${counts.critical} critical, ${counts.warning} warning, ${counts.info} info`);
+  // Zeroes are not news. Only outstanding severities get a badge, so the rail
+  // reads as a count instead of a row of noughts.
   for (const severity of ["critical", "warning", "info"] as const) {
+    if (counts[severity] === 0) continue;
     const badge = document.createElement("span");
     badge.className = `attention-count attention-count--${severity}`;
     badge.textContent = String(counts[severity]);
     container.append(badge);
+  }
+  if (!container.hasChildNodes()) {
+    const clear = document.createElement("span");
+    clear.className = "attention-count attention-count--clear";
+    clear.textContent = "0";
+    container.append(clear);
   }
   return container;
 }

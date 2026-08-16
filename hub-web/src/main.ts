@@ -73,6 +73,9 @@ let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
 let activeContextTab: "attention" | "status" = "attention";
 let commandPaletteOpen = false;
 
+// One phone breakpoint shared by layout state, pane mounting, and pane tapping.
+function phoneLayout(): boolean { return window.matchMedia("(max-width: 850px)").matches; }
+
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
@@ -92,10 +95,13 @@ function focusPane(machineId: string, session: string, paneId: string): void {
   selectedPanes.set(selectedKey, paneId);
   collapsedWorkerPanes.delete(key);
   const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const phone = phoneLayout();
   for (const pane of grid?.querySelectorAll<HTMLElement>(".pane") ?? []) {
     const selected = pane.dataset.paneId === paneId;
     pane.classList.toggle("selected", selected);
-    if (selected) pane.classList.remove("collapsed");
+    // A phone worker has no mounted terminal until it is promoted, so expanding
+    // it here would only open an empty well.
+    if (selected && !(phone && !pane.classList.contains("primary"))) pane.classList.remove("collapsed");
   }
   surfaces.get(key)?.focus();
 }
@@ -776,7 +782,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     }
     const empty = document.createElement("div");
     empty.className = "empty empty-pane-slot";
-    empty.textContent = "No session — pick one from the drawer or drag it here.";
+    const emptyTitle = document.createElement("p");
+    emptyTitle.className = "empty-title";
+    emptyTitle.textContent = "No panes in this session yet";
+    const emptyHint = document.createElement("p");
+    emptyHint.className = "empty-hint";
+    emptyHint.textContent = "Terminals appear here as soon as the session starts one.";
+    empty.replaceChildren(emptyTitle, emptyHint);
     grid.classList.remove("pane-layout", "single-pane");
     grid.replaceChildren(empty);
     return;
@@ -806,6 +818,16 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) { surface.dispose(); surfaces.delete(key); }
   }
   const panesById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
+  // Re-inserting a card blurs whatever it contains, so panes are only moved when
+  // their slot or their position actually changed. A five-second heartbeat render
+  // must not close a phone keyboard mid-command.
+  const slotPositions = new Map<HTMLElement, number>();
+  const placePane = (slot: HTMLElement, card: HTMLElement): void => {
+    const index = slotPositions.get(slot) ?? 0;
+    slotPositions.set(slot, index + 1);
+    if (slot.children[index] === card) return;
+    slot.insertBefore(card, slot.children[index] ?? null);
+  };
   for (const paneId of orderedPaneIds(layout)) {
     const pane = panesById.get(paneId);
     if (!pane) continue;
@@ -849,36 +871,57 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       );
       title.append(statusDot, label, role, activity, controls);
       title.title = sessionSummaries.get(selectedKey)?.title ?? "";
-      if (pane.kind !== "Supervisor") {
-        title.title = [sessionSummaries.get(selectedKey)?.title, "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
-        title.tabIndex = 0;
-        title.setAttribute("role", "button");
-        title.onclick = (event) => {
-          event.stopPropagation();
-          const wasCollapsed = collapsedWorkerPanes.has(key);
+      title.onclick = (event) => {
+        event.stopPropagation();
+        // On a phone only the primary pane mounts a terminal, so a tap opens the
+        // tapped pane as primary rather than toggling an empty well.
+        if (phoneLayout() && !card?.classList.contains("primary")) {
           focusPane(machineId, session, pane.id);
-          if (!wasCollapsed) collapsedWorkerPanes.add(key);
-          card?.classList.toggle("collapsed", collapsedWorkerPanes.has(key));
-          if (!collapsedWorkerPanes.has(key)) queueMicrotask(() => surfaces.get(key)?.focus());
-        };
-        title.onkeydown = (event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          title.click();
-        };
-      }
+          updateLayout((current) => promotePane(current, pane.id));
+          return;
+        }
+        if (pane.kind === "Supervisor") return;
+        const wasCollapsed = collapsedWorkerPanes.has(key);
+        focusPane(machineId, session, pane.id);
+        if (!wasCollapsed) collapsedWorkerPanes.add(key);
+        card?.classList.toggle("collapsed", collapsedWorkerPanes.has(key));
+        if (!collapsedWorkerPanes.has(key)) queueMicrotask(() => surfaces.get(key)?.focus());
+      };
+      title.onkeydown = (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        title.click();
+      };
       mount = document.createElement("div"); mount.className = "terminal-mount";
       card.append(title, mount);
     }
     if (!card || !mount) continue;
     const position = orderedPaneIds(layout).indexOf(pane.id);
+    const phone = phoneLayout();
+    const secondaryOnPhone = phone && pane.id !== layout.primaryPaneId;
     card.classList.toggle("primary", pane.id === layout.primaryPaneId);
     card.classList.toggle("selected", selectedPanes.get(selectedKey) === pane.id);
-    card.classList.toggle("collapsed", pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key));
+    // A secondary phone pane carries no terminal, so it reads as one compact row
+    // instead of an empty well the size of a third of the screen.
+    card.classList.toggle("collapsed", secondaryOnPhone || (pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key)));
     card.querySelector<HTMLElement>(".pane-status-dot")!.className = `pane-status-dot ${pane.exited ? "exited" : "live"}`;
     card.querySelector<HTMLElement>(".pane-title")!.textContent = pane.title || pane.id;
     const paneHeader = card.querySelector<HTMLElement>(".pane-header");
-    if (paneHeader) paneHeader.title = [sessionSummaries.get(selectedKey)?.title, pane.kind === "Supervisor" ? undefined : "Click to collapse or expand this worker"].filter(Boolean).join(" · ");
+    if (paneHeader) {
+      const hint = secondaryOnPhone
+        ? "Tap to open this pane"
+        : pane.kind === "Supervisor" ? undefined : "Click to collapse or expand this worker";
+      paneHeader.title = [sessionSummaries.get(selectedKey)?.title, hint].filter(Boolean).join(" · ");
+      if (hint) {
+        paneHeader.tabIndex = 0;
+        paneHeader.setAttribute("role", "button");
+        paneHeader.setAttribute("aria-label", `${pane.title || pane.id}: ${hint}`);
+      } else {
+        paneHeader.removeAttribute("tabindex");
+        paneHeader.removeAttribute("role");
+        paneHeader.removeAttribute("aria-label");
+      }
+    }
     updatePaneActivity(card.querySelector<HTMLElement>(".pane-last-activity")!, paneLastActivity.get(key));
     const makePrimary = card.querySelector<HTMLButtonElement>(".make-primary");
     const moveEarlier = card.querySelector<HTMLButtonElement>(".move-earlier");
@@ -886,9 +929,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     if (makePrimary) makePrimary.disabled = pane.id === layout.primaryPaneId;
     if (moveEarlier) moveEarlier.disabled = pane.id === layout.primaryPaneId || position <= 1;
     if (moveLater) moveLater.disabled = pane.id === layout.primaryPaneId || position === layout.paneIds.length - 1;
-    (pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card);
-    const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches
-      && pane.id !== layout.primaryPaneId;
+    placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);
+    const collapsedOnPhone = window.matchMedia("(max-width: 850px)").matches && secondaryOnPhone;
     const existingSurface = surfaces.get(key);
     existingSurface?.setControlMode(leases.get(selectedKey)?.held_by_me === true);
     if (existingSurface && (collapsedOnPhone || existingSurface.element !== mount || !existingSurface.element.isConnected)) {
@@ -1093,7 +1135,7 @@ function render(captureDraft = true): void {
           <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? "—" : `${latency}ms`}</span></span>
           <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` disabled aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(controlReason ?? "Interrupt selected pane")}" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt") ? "disabled" : ""}>Interrupt</button></div>
         </header>
-        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : "No session — pick one from the drawer or drag it here."}</div></section>
+        <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : '<p class="empty-title">No session open</p><p class="empty-hint">Pick a session to attach its supervisor and workers.</p><button id="open-machines" class="primary" type="button">Open machines</button>'}</div></section>
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
         <div class="attention-rail">
@@ -1221,7 +1263,7 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
   const stale = summary && summary.phase !== "idle" && Date.now() - Date.parse(summary.generated_at) > 10 * 60 * 1000;
   button.innerHTML = summary
     ? `<small class="session-name session-eyebrow">${escapeHtml(session.name)}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
-    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} workers · ${session.liveness}</small>`;
+    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${session.workers.length} ${session.workers.length === 1 ? "worker" : "workers"} · ${escapeHtml(session.liveness.replaceAll("_", " "))}</small>`;
   button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
@@ -1393,8 +1435,19 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
   document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
   document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); };
+  const openMachines = document.querySelector<HTMLButtonElement>("#open-machines");
+  if (openMachines) openMachines.onclick = () => { machineDrawerOpen = true; render(); };
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
-  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = () => { activeContextTab = "status"; attentionPanelCollapsed = false; render(); };
+  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = () => {
+    activeContextTab = "status"; attentionPanelCollapsed = false; render();
+    // The envelope promises a composer, so land on it instead of the top of a
+    // status list the operator then has to scroll past.
+    queueMicrotask(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+      composer?.scrollIntoView({ block: "nearest" });
+      composer?.focus();
+    });
+  };
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
     button.onclick = () => { activeContextTab = "attention"; attentionPanelCollapsed = false; render(); };
   }

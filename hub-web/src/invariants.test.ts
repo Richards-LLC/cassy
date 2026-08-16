@@ -79,8 +79,13 @@ describe("binding Commander browser invariants", () => {
       readFile(new URL("main.ts", import.meta.url), "utf8"),
       readFile(new URL("attention-view.ts", import.meta.url), "utf8"),
     ]);
-    expect(main).toContain("No session — pick one from the drawer or drag it here.");
+    expect(main).toContain('<p class="empty-title">No session open</p>');
+    expect(main).toContain('<button id="open-machines" class="primary" type="button">Open machines</button>');
+    expect(main).toContain('openMachines.onclick = () => { machineDrawerOpen = true; render(); }');
+    expect(main).toContain('emptyTitle.textContent = "No panes in this session yet"');
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
+    // Commander has no pane drag-and-drop, so the empty slot must not promise one.
+    expect(main).not.toContain("drag it here");
     expect(attentionView).toContain('message.textContent = "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
@@ -198,6 +203,53 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain('activeContextTab = "status"; attentionPanelCollapsed = false; render();');
     expect(css).toContain(".mobile-message-toggle { display: none; }");
     expect(css).toContain(".mobile-message-toggle {");
+    // The collapsed pill holds two 48px cells on one row. A rail sized for fewer
+    // cells than it renders pushes the envelope off the bottom of the viewport.
+    expect(css).toContain("--mobile-context-pill-width: 96px");
+    expect(css).toContain("grid-template-columns: repeat(2, var(--machine-rail-width))");
+    expect(css).toContain(".context-panel.collapsed .attention-rail .rail-control { display: none; }");
+    expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
+    // Tapping the envelope must land on the composer it advertises.
+    expect(main).toContain('document.querySelector<HTMLTextAreaElement>("#message-text")');
+    expect(main).toContain("composer?.focus();");
+  });
+
+  it("keeps a focused terminal focused across steady-state renders", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // Re-inserting a pane card blurs its hidden textarea, which closes a phone
+    // keyboard on every five-second heartbeat render. Panes move only when their
+    // slot or position genuinely changed.
+    expect(source).toContain("const placePane = (slot: HTMLElement, card: HTMLElement): void => {");
+    expect(source).toContain("if (slot.children[index] === card) return;");
+    expect(source).toContain("placePane(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip, card);");
+    expect(source).not.toContain("(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card)");
+  });
+
+  it("colours connection dots from the phases the supervisor actually emits", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // connectionClass emits lifecycle phases, so styling legacy names such as
+    // "connected" or "offline" leaves every dot stuck on idle grey.
+    expect(main).toContain('function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }');
+    expect(css).toContain(".machine-state.live,");
+    expect(css).toContain(".machine-state.backoff,");
+    expect(css).toContain(".machine-state.failed,");
+    expect(css).not.toContain(".machine-state.connected");
+    expect(css).not.toContain(".machine-state.offline");
+    expect(css).not.toContain(".machine-state.auth-blocked");
+  });
+
+  it("renders phone secondary panes as tappable rows instead of empty terminal wells", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    // Only the primary pane mounts a surface on a phone, so every other pane has
+    // to read as a compact row and open on tap rather than reserve empty space.
+    expect(main).toContain("const secondaryOnPhone = phone && pane.id !== layout.primaryPaneId;");
+    expect(main).toContain('card.classList.toggle("collapsed", secondaryOnPhone || (pane.kind !== "Supervisor" && collapsedWorkerPanes.has(key)));');
+    expect(main).toContain("if (phoneLayout() && !card?.classList.contains(\"primary\")) {");
+    expect(main).toContain("updateLayout((current) => promotePane(current, pane.id));");
+    expect(main).toContain('const hint = secondaryOnPhone\n        ? "Tap to open this pane"');
+    expect(css).toContain("grid-template-rows: minmax(0, 1fr) auto;");
+    expect(css).toContain('.pane-grid.pane-layout .pane-search::after { content: "⌕"');
+    expect(css).toContain("min-width: var(--space-8);\n    min-height: var(--space-8);");
   });
 
   it("keeps the section 2 visual system tokenized and machine copy mono", async () => {

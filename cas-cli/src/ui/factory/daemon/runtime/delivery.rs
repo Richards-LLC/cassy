@@ -317,6 +317,49 @@ pub(crate) fn frame_pty_payload(harness: SupervisorCli, source: &str, text: &str
     }
 }
 
+/// Prepare the exact machine turn for PTY injection.
+///
+/// This is the single delivery authority for the raw harness path. Every
+/// regular, urgent, interrupt, director, and lifecycle PTY injection passes
+/// here, so hook capture may trust an absent envelope to mean an operator
+/// supplied the turn. The sidecar is keyed to the final bytes the harness will
+/// submit, never to the rendered provenance line inside those bytes.
+pub(crate) fn prepare_pty_machine_delivery(
+    cas_dir: &std::path::Path,
+    recipient: &str,
+    harness: SupervisorCli,
+    source: &str,
+    text: &str,
+    notification_id: Option<i64>,
+) -> String {
+    let payload = frame_pty_payload(harness, source, text);
+    register_pty_machine_payload(cas_dir, recipient, &payload, source, notification_id);
+    payload
+}
+
+/// Register raw machine input that must not receive sender framing, such as a
+/// harness-native reset command. Kept beside [`prepare_pty_machine_delivery`]
+/// so this cannot become a second provenance authority.
+pub(crate) fn register_pty_machine_payload(
+    cas_dir: &std::path::Path,
+    recipient: &str,
+    payload: &str,
+    source: &str,
+    notification_id: Option<i64>,
+) {
+    if let Err(error) = crate::hooks::delivery_provenance::register(
+        cas_dir,
+        recipient,
+        payload,
+        crate::hooks::delivery_provenance::origin_for_source(source),
+        notification_id,
+    ) {
+        // Do not make the durable queue unavailable because its supplemental
+        // hook metadata failed; retries will submit a freshly registered turn.
+        tracing::error!(%error, source, "failed to register machine prompt provenance");
+    }
+}
+
 /// Commander controls that both daemon client transports route through the
 /// same execution seam. Keeping this owned makes the GUI and WebSocket
 /// dispatchers thin adapters: neither transport can grow a second interrupt or
@@ -708,7 +751,14 @@ impl FactoryDaemon {
                 // its prompt keys on (even codex-only, teams=None); a Claude
                 // recipient reached via the PTY fallback stays byte-for-byte bare.
                 // Shared helper also used by urgent interrupt-and-inject (cas-ab80).
-                let payload = frame_pty_payload(harness, source, text);
+                let payload = prepare_pty_machine_delivery(
+                    self.app.cas_dir(),
+                    pane_target,
+                    harness,
+                    source,
+                    text,
+                    None,
+                );
                 self.app
                     .mux
                     .inject(pane_target, &payload)
@@ -860,6 +910,13 @@ impl FactoryDaemon {
             settle_ms = settle.as_millis() as u64,
             "cas-dffe: typing the harness's own context-reset command into the pane"
         );
+        register_pty_machine_payload(
+            self.app.cas_dir(),
+            &pane_target,
+            command,
+            "lifecycle-wake:context-reset",
+            None,
+        );
         match self
             .app
             .mux
@@ -906,7 +963,14 @@ impl FactoryDaemon {
             ));
         }
 
-        let payload = frame_pty_payload(harness, source, text);
+        let payload = prepare_pty_machine_delivery(
+            self.app.cas_dir(),
+            pane_target,
+            harness,
+            source,
+            text,
+            None,
+        );
         let report = match self.app.mux.inject(pane_target, &payload).await {
             Ok(InjectOutcome::Delivered) => {
                 tracing::info!(

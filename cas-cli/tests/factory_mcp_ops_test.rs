@@ -20,11 +20,11 @@ use cas::mcp::{CasCore, CasService};
 use cas::store::{
     AgentStore, EventStore, PromptQueueStore, SpawnQueueStore, TaskStore, init_cas_dir,
     open_agent_store, open_event_store, open_prompt_queue_store, open_reminder_store,
-    open_spawn_queue_store, open_task_store,
+    open_spawn_queue_store, open_store, open_task_store,
 };
 use cas::types::{
-    Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskDepth, TaskStatus, TaskType,
-    WorkTarget,
+    Agent, AgentStatus, Entry, Event, EventEntityType, EventType, Task, TaskDepth, TaskStatus,
+    TaskType, WorkTarget,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
@@ -538,6 +538,41 @@ fn coord_req(action: &str) -> CoordinationRequest {
         port: None,
         shared: None,
     }
+}
+
+/// cas-e0ab: `session_end` is dispatched on the MCP Tokio runtime, while the
+/// hook path retains synchronous title generation that owns another runtime.
+/// A session observation exercises that title path; this must return a normal
+/// receipt instead of panicking with nested `block_on`.
+#[tokio::test]
+async fn coordination_session_end_runs_hook_path_off_dispatch_runtime_cas_e0ab() {
+    let env = FactoryTestEnv::new();
+    let session_id = "session-end-runtime-shape";
+    env.register_worker_with_id(session_id, "ending-worker", None);
+
+    let entries = open_store(&env.cas_root).expect("open entry store");
+    let entry_id = entries.generate_id().expect("generate entry id");
+    let mut entry = Entry::new(entry_id, "session observation".to_string());
+    entry.session_id = Some(session_id.to_string());
+    entries.add(&entry).expect("add session observation");
+
+    let mut request = coord_req("session_end");
+    request.session_id = Some(session_id.to_string());
+    let result = env
+        .service
+        .coordination(Parameters(request))
+        .await
+        .expect("session_end must return a receipt from MCP dispatch");
+
+    assert!(
+        get_text(&result).contains("Session ended: session-end-runtime-shape"),
+        "unexpected session_end receipt: {}",
+        get_text(&result)
+    );
+    assert!(
+        env.agent_store().get(session_id).is_err(),
+        "session_end must unregister the ending agent"
+    );
 }
 
 /// GH #276: existing callers did not supply task_id. With exactly one active
@@ -5234,14 +5269,14 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     );
 }
 
-/// cas-6ad2: a worker's response proves it consumed the supervisor message
-/// that prompted the work. Factory prompts never issued explicit message_ack,
-/// so the response path must advance the prior delivered row to Confirmed.
+/// cas-6ad2: a worker response after the supervisor message that prompted the
+/// work is meaningful activity evidence. Keep the original test intent — the
+/// reply is correlated with the prior delivered row — without overstating that
+/// correlation as an explicit acknowledgement.
 ///
-/// cas-99d2 (GH #126) narrowed "proves": the reply must post-date the transport
-/// handoff AND a surfacing receipt must exist for the row, so this fixture now
-/// drains the worker's inbox — the receipt CAS actually records — before
-/// replying. The no-receipt variant is asserted NOT to confirm in
+/// cas-dcf2 (GH #390) deliberately stages even a post-handoff reply with a
+/// surfacing receipt as `AssumedSeen`: only `message_ack` may confirm receipt.
+/// The no-receipt variant remains covered by
 /// `cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh126`.
 #[tokio::test]
 async fn test_worker_response_confirms_consumed_supervisor_message() {
@@ -5289,8 +5324,16 @@ async fn test_worker_response_confirms_consumed_supervisor_message() {
         .expect("instruction exists");
     assert_eq!(
         report.stage,
-        cas_store::DeliveryStage::Confirmed,
-        "the recipient's response must confirm its consumed instruction"
+        cas_store::DeliveryStage::AssumedSeen,
+        "a correlated reply is useful activity evidence, not an acknowledgement"
+    );
+    assert!(
+        report.confirmed_at.is_none(),
+        "only explicit message_ack may mark a message confirmed"
+    );
+    assert!(
+        report.assumed_seen_at.is_some(),
+        "the reply should still record the weaker assumed-seen stage"
     );
 }
 
@@ -5366,8 +5409,28 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
         .expect("urgent exists");
     assert_eq!(
         urgent_report.stage,
+        cas_store::DeliveryStage::AssumedSeen,
+        "the reply alone must remain weaker than confirmation: {urgent_report:?}"
+    );
+
+    // cas-dcf2: keep cas-85fd's important no-collateral-halt contract, but
+    // discharge only after the worker explicitly acknowledges this exact
+    // urgent. The old reply-only assertion would weaken honest staging.
+    let mut acknowledge = coord_msg("message_ack", "unused", "unused", None);
+    acknowledge.notification_id = Some(urgent_id);
+    worker_service
+        .coordination(Parameters(acknowledge))
+        .await
+        .expect("worker explicitly acknowledges the urgent");
+    let urgent_report = env
+        .prompt_queue()
+        .message_delivery_report(urgent_id)
+        .expect("urgent report after explicit acknowledgement")
+        .expect("urgent exists");
+    assert_eq!(
+        urgent_report.stage,
         cas_store::DeliveryStage::Confirmed,
-        "the reply must confirm the exact urgent before it can discharge the halt: {urgent_report:?}"
+        "the exact explicit acknowledgement must confirm the urgent before it can discharge the halt: {urgent_report:?}"
     );
     assert!(
         !env.worker_halted("swift-fox"),
@@ -7540,11 +7603,12 @@ async fn cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh
     );
 }
 
-/// cas-99d2 (GH #126): the complementary positive case — a worker that DID
-/// drain its inbox before replying still gets its messages confirmed, so the
-/// evidence gates do not simply disable reply-inference.
+/// cas-dcf2 (GH #390): even an inbox drain plus later activity is not a
+/// transcript artifact proving THIS row entered the recipient's next turn.
+/// The user-facing status must show the weaker state at its top line and keep
+/// the undelivered clock running.
 #[tokio::test]
-async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
+async fn cas_dcf2_reply_after_an_inbox_drain_is_assumed_seen_not_confirmed_gh390() {
     // Same deterministic supervisor pinning as the negative case above: the
     // reply at the end of this test resolves `target="supervisor"`, which
     // otherwise depends on an ambient CAS_SUPERVISOR_NAME (GH #136).
@@ -7588,10 +7652,76 @@ async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
         .message_delivery_report(message_id)
         .expect("delivery report")
         .expect("message exists");
-    assert_eq!(
-        report.confirmation_source,
-        cas_store::ConfirmationSource::InferredFromReply,
-        "a reply that post-dates a real drain receipt still confirms: {report:?}"
+    assert_eq!(report.stage, cas_store::DeliveryStage::AssumedSeen);
+    assert!(report.confirmed_at.is_none());
+    assert!(report.assumed_seen_at.is_some());
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        text.contains("stage: assumed_seen"),
+        "the top-line stage must expose activity inference as weaker than confirmation: {text}"
+    );
+    assert!(
+        text.contains("undelivered_after:") && !text.contains("undelivered_after: n/a"),
+        "activity inference must not clear the escalation clock: {text}"
+    );
+}
+
+#[tokio::test]
+async fn cas_dcf2_wake_starvation_is_top_line_status_not_a_lifecycle_relay_gh390() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
+
+    let message_id = env
+        .prompt_queue()
+        .enqueue("supervisor", "watchful-koala-20", "blocking DDL ruling")
+        .expect("enqueue");
+    for _ in 0..3 {
+        env.prompt_queue()
+            .record_wake_gate_decline(
+                message_id,
+                "pane has not been silent long enough",
+            )
+            .expect("record busy wake decline");
+    }
+    env.prompt_queue()
+        .mark_undelivered_after_wake_declines(
+            message_id,
+            Some("wake gate declined 3 consecutive re-offers while recipient stayed busy"),
+        )
+        .expect("record terminal wake starvation");
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        text.contains("stage: abandoned  pending_reason: undelivered_after_wake_declines"),
+        "the terminal state must be visible at the status top line: {text}"
+    );
+    assert!(
+        text.contains("undelivered_after:"),
+        "a wake-starved row must retain an observable undelivered clock: {text}"
+    );
+    assert!(
+        text.contains("wake_gate_declines: 3"),
+        "the top line must expose the bounded consecutive-decline count: {text}"
     );
 }
 

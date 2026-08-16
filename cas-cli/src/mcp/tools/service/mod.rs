@@ -698,11 +698,7 @@ impl CasService {
                             })?;
                         if !config.worktrees_enabled() {
                             return Ok(Self::success(
-                                "Worktrees are experimental and disabled by default.\n\n\
-                                To enable, add to .cas/config.toml:\n\n\
-                                  worktrees:\n\
-                                    enabled: true\n\n\
-                                Use `coordination action=worktree_status` to see current configuration.",
+                                crate::mcp::tools::core::workflow::SYSTEM_A_WORKTREES_DISABLED_MESSAGE,
                             ));
                         }
                     }

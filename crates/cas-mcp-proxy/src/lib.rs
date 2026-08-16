@@ -1,6 +1,6 @@
 pub mod config;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -83,6 +83,51 @@ pub struct ProxyPolicyRequest<'a> {
     pub arguments: &'a Option<serde_json::Map<String, Value>>,
 }
 
+/// A single external MCP tool, identified by its parsed server and tool names.
+///
+/// The `mcp__<server>__<tool>` spelling is only an MCP client-facing encoding.
+/// Routing and authorization retain the decoded components so a lookalike server
+/// or tool cannot match an allowlist entry by sharing a textual prefix.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExternalToolRoute {
+    server: String,
+    tool: String,
+}
+
+impl ExternalToolRoute {
+    /// Construct a route from the components provided to the proxy dispatch
+    /// boundary.
+    pub fn new(server: impl Into<String>, tool: impl Into<String>) -> Self {
+        Self {
+            server: server.into(),
+            tool: tool.into(),
+        }
+    }
+
+    /// Parse the client-facing MCP spelling into an exact route.
+    ///
+    /// This accepts one server separator and preserves any later `__` in the
+    /// tool name, which is valid for upstream tool names.
+    pub fn parse_mcp_tool_name(name: &str) -> Option<Self> {
+        let encoded = name.strip_prefix("mcp__")?;
+        let (server, tool) = encoded.split_once("__")?;
+        if server.is_empty() || tool.is_empty() {
+            return None;
+        }
+        Some(Self::new(server, tool))
+    }
+
+    /// Upstream server component.
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    /// Upstream tool component.
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+}
+
 /// Authorization seam for upstream MCP calls.
 ///
 /// Policies must return a decision synchronously and must not perform an
@@ -99,6 +144,44 @@ pub struct AllowAllProxyPolicy;
 impl ProxyPolicy for AllowAllProxyPolicy {
     fn decide(&self, _request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
         ProxyPolicyDecision::Allow
+    }
+}
+
+/// Fail-closed allowlist for external MCP routes.
+///
+/// This policy is deliberately applied to the parsed `server` and `tool`
+/// fields in [`ProxyPolicyRequest`]. It does not inspect an MCP tool-name
+/// string, so `mcp__viktor_shadow__ask_viktor` cannot inherit permission for
+/// `mcp__viktor__ask_viktor` through prefix or substring matching.
+#[derive(Debug, Default)]
+pub struct ExternalToolAllowlistPolicy {
+    allowed_routes: BTreeSet<ExternalToolRoute>,
+}
+
+impl ExternalToolAllowlistPolicy {
+    /// Create a policy allowing exactly the supplied external routes.
+    pub fn new(routes: impl IntoIterator<Item = ExternalToolRoute>) -> Self {
+        Self {
+            allowed_routes: routes.into_iter().collect(),
+        }
+    }
+
+    /// Whether an upstream route is in this exact allowlist.
+    pub fn allows(&self, server: &str, tool: &str) -> bool {
+        self.allowed_routes
+            .contains(&ExternalToolRoute::new(server, tool))
+    }
+}
+
+impl ProxyPolicy for ExternalToolAllowlistPolicy {
+    fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
+        if self.allows(request.server, request.tool) {
+            ProxyPolicyDecision::Allow
+        } else {
+            ProxyPolicyDecision::Deny {
+                reason: "external tool is not explicitly allowlisted".to_string(),
+            }
+        }
     }
 }
 
@@ -1367,6 +1450,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_external_mcp_tool_names_into_server_and_tool_components() {
+        let viktor = ExternalToolRoute::parse_mcp_tool_name("mcp__viktor__ask_viktor")
+            .expect("Viktor tool name should parse");
+        assert_eq!(viktor.server(), "viktor");
+        assert_eq!(viktor.tool(), "ask_viktor");
+
+        let tool_with_separator =
+            ExternalToolRoute::parse_mcp_tool_name("mcp__foreign__read__metadata")
+                .expect("tool names may contain a later separator");
+        assert_eq!(tool_with_separator.server(), "foreign");
+        assert_eq!(tool_with_separator.tool(), "read__metadata");
+
+        assert!(ExternalToolRoute::parse_mcp_tool_name("mcp__viktor__").is_none());
+        assert!(ExternalToolRoute::parse_mcp_tool_name("viktor__ask_viktor").is_none());
+    }
+
+    #[test]
+    fn external_tool_allowlist_requires_exact_parsed_server_and_tool() {
+        let policy =
+            ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("viktor", "ask_viktor")]);
+        let caller = registered_worker_caller();
+        let arguments = None;
+
+        let decision = |server, tool| {
+            policy.decide(&ProxyPolicyRequest {
+                caller: &caller,
+                server,
+                tool,
+                arguments: &arguments,
+            })
+        };
+
+        assert_eq!(decision("viktor", "ask_viktor"), ProxyPolicyDecision::Allow);
+        for (server, tool) in [
+            // Shares the trusted server name as a substring but is not it.
+            ("viktor-shadow", "ask_viktor"),
+            // Shares the trusted tool name as a prefix but is not it.
+            ("viktor", "ask_viktor_with_full_context"),
+            // A wholly foreign external tool is not implicitly permitted.
+            ("foreign", "read_file"),
+        ] {
+            assert_eq!(
+                decision(server, tool),
+                ProxyPolicyDecision::Deny {
+                    reason: "external tool is not explicitly allowlisted".to_string()
+                },
+                "allowlist must compare parsed components exactly for {server}.{tool}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn policy_denial_is_audited_before_any_upstream_routing() {
         let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
@@ -1398,6 +1533,38 @@ mod tests {
             audit[0].reason.as_deref(),
             Some("resource lease is held by another worker")
         );
+    }
+
+    #[tokio::test]
+    async fn external_allowlist_denies_lookalike_server_before_upstream_routing() {
+        let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
+        engine
+            .set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
+                ExternalToolRoute::new("viktor", "ask_viktor"),
+            ])))
+            .await;
+
+        let result = engine
+            .execute(
+                &registered_worker_caller(),
+                r#"{"server":"viktor-shadow","tool":"ask_viktor"}"#,
+                None,
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("lookalike server must be denied before routing"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "proxy policy denied tool 'ask_viktor' on 'viktor-shadow': external tool is not explicitly allowlisted"
+        );
+        let audit = engine.policy_audit();
+        assert_eq!(audit.len(), 1);
+        assert!(!audit[0].allowed);
+        assert_eq!(audit[0].server, "viktor-shadow");
+        assert_eq!(audit[0].tool, "ask_viktor");
     }
 
     fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {

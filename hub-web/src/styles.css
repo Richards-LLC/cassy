@@ -1137,14 +1137,18 @@ main {
   .attention-item--enriching .attention-title::after { animation: none; }
 }
 
+/* The cause line is the part worth reading, so it wraps to two lines instead of
+   ending in an ellipsis after four words in a 320px column. */
 .attention-detail {
+  display: -webkit-box;
   margin: 0;
   overflow: hidden;
   color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
 }
 
 .attention-dismiss {
@@ -1713,6 +1717,7 @@ fieldset {
   .context-body { min-height: 0; }
   .context-tabs { flex-basis: var(--space-10); }
   .attention-group-label { max-width: var(--mobile-attention-label-width); }
+
 
   /* Phone composition keeps the supervisor readable and workers horizontally reachable.
      Workers cannot mount a terminal here, so the strip is sized by its collapsed

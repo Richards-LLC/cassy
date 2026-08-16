@@ -3322,9 +3322,12 @@ mod tests {
                 None,
                 None,
             );
-            let before = env_value(&config.env, "CARGO_BUILD_JOBS")
-                .expect("worker config must carry CARGO_BUILD_JOBS")
-                .to_string();
+            // Simulate a stale duplicate from an older builder. On small CI
+            // hosts the constructor's default can already be "2", so proving
+            // replacement by comparing numeric values is not portable.
+            config
+                .env
+                .push(("CARGO_BUILD_JOBS".to_string(), "99".to_string()));
 
             config.apply_worker_build_concurrency(Some(64));
 
@@ -3341,10 +3344,6 @@ mod tests {
             );
             let after = entries[0].1.clone();
             assert_eq!(after, "2", "a 64-worker fleet floors at 2 jobs");
-            assert_ne!(
-                after, before,
-                "the fleet-aware value must actually replace the default"
-            );
         }
 
         #[test]

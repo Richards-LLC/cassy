@@ -183,8 +183,11 @@ mod tests {
     fn uncomments_fully_commented_codex_only_blocks() {
         let generated =
             transform_agents_md("<!-- codex-only:start\ncodex guidance\ncodex-only:end -->\n");
-        assert!(generated.contains("codex guidance\n"));
-        assert!(!generated.contains("<!--"));
+        assert_eq!(
+            generated,
+            format!("{GENERATED_HEADER}codex guidance\n"),
+            "the codex-only wrapper must be removed while the generated-file header remains"
+        );
     }
 
     #[test]

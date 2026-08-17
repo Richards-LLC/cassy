@@ -22,15 +22,15 @@ mod config;
 mod coordinator;
 pub mod device;
 // T5: capability-gated cloud embeddings for distilled knowledge pages.
-pub mod embeddings;
 pub mod code_embeddings;
+pub mod embeddings;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;
 pub(crate) mod me;
-pub mod task_proposals;
 mod sync_queue;
 mod syncer;
+pub mod task_proposals;
 
 // T6: first-run backfill — `pub` so integration tests can call the inner seam.
 pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_backfill_inner};
@@ -38,26 +38,29 @@ pub use config::{
     CanonicalIdCollision, CanonicalIdSource, CloudConfig, LocalRootIdentity, PersonalScopeNotice,
     TeamInfo, canonical_id_from_cas_root, canonical_id_from_config_toml,
     derive_canonical_id_from_git_remote, detect_canonical_id_collisions, get_project_canonical_id,
-    invalidate_cached_project_id, maybe_mark_personal_scope_notice,
-    normalized_git_remote_for_push,
-    personal_scope_notice_for_configs, resolve_canonical_id, resolve_canonical_id_with_source,
-    set_canonical_id_in_config_toml, should_adopt_canonical_id,
+    invalidate_cached_project_id, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
+    normalized_git_remote_for_push, personal_scope_notice_for_configs, resolve_canonical_id,
+    resolve_canonical_id_with_source, set_canonical_id_in_config_toml, should_adopt_canonical_id,
 };
-pub(crate) use config::{default_endpoint, is_acceptable_endpoint, normalize_git_remote_url, user_level_cloud_json_path};
+pub(crate) use config::{
+    default_endpoint, is_acceptable_endpoint, normalize_git_remote_url, user_level_cloud_json_path,
+};
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
-pub use me::{FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner,
-    teams_cache_stale};
 pub use coordinator::CloudCoordinator;
+pub use device::DeviceConfig;
 pub use embed_drain::{DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history};
 pub use embeddings::{
     EmbedReport, EmbedUnit, EmbeddingMeta, KnowledgeEmbedder, KnowledgeVectorCache, RateLimiter,
     VectorNamespace, drain_units, embed_pending_pages, history_commit_key, history_doc_key,
 };
-pub use device::DeviceConfig;
+pub use me::{
+    FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
+};
 pub use sync_queue::{EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue};
+pub(crate) use syncer::entity_matches_project;
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
     KnowledgePageRecord, KnowledgePullReport, PushPlan, PushScope, SyncConflict, SyncResult,
+    TaskStatusTransition,
     TeamMemoriesResponse, TeamProject, TeamProjectsResponse, knowledge_share_scope,
 };
-pub(crate) use syncer::entity_matches_project;

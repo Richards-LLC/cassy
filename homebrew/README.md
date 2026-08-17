@@ -4,11 +4,7 @@ This directory contains the Homebrew formula for CAS.
 
 ## Setup Instructions
 
-### 1. Tap Repository
-
-The canonical tap repository is `codingagentsystem/homebrew-cas` on GitHub.
-
-### 2. Add the Formula
+### 1. Add the Formula
 
 Copy `cas.rb` to the tap repository:
 
@@ -18,7 +14,7 @@ homebrew-cas/
     └── cas.rb
 ```
 
-### 3. Update SHA256 Hashes
+### 2. Update SHA256 Hashes
 
 After a release, update the formula with the correct hashes:
 
@@ -30,17 +26,10 @@ Then commit and push to the tap repository.
 
 ## User Installation
 
-Once the tap is set up, users can install CAS via:
+Install the checked-out formula directly:
 
 ```bash
-# Add the tap (one-time)
-brew tap codingagentsystem/cas
-
-# Install CAS
-brew install cas
-
-# Or in one command
-brew install codingagentsystem/cas/cas
+brew install --formula ./homebrew/cas.rb
 ```
 
 ## Updating the Formula

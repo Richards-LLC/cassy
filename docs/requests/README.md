@@ -1,7 +1,7 @@
 # Request Intake and Archive
 
 > **Deprecated for new outbound actionable requests.** File CAS defects in
-> [`pippenz/cas`](https://github.com/pippenz/cas/issues) and file requests for
+> [`Richards-LLC/cassy`](https://github.com/Richards-LLC/cassy/issues) and file requests for
 > a Richards-LLC-controlled team directly on that team's GitHub issue board
 > (for example, [`Richards-LLC/petra-stella-cloud`](https://github.com/Richards-LLC/petra-stella-cloud/issues)). Never write, commit, or push in another team's checkout. Save a CAS memory receipt with the issue URL, one-line ask, and date. Examples: cloud-to-CAS GH #215; CAS-to-cloud [#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44).
 

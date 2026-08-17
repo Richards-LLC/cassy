@@ -3,8 +3,8 @@ use std::time::Instant;
 use serde::de::DeserializeOwned;
 
 use crate::cloud::syncer::{
-    CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult, TeamPullResponse,
-    UpsertResult,
+    CloudSyncer, ConflictAction, ConflictResolution, PullResponse, SyncResult,
+    TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
 use crate::cloud::{EntityType, get_project_canonical_id};
 use crate::error::CasError;
@@ -277,7 +277,12 @@ fn is_web_close_tombstone(raw: &serde_json::Value) -> bool {
 /// is inert.
 ///
 /// Idempotent: a task already locally `Closed` is a no-op.
-fn reconcile_web_close(store: &dyn TaskStore, task: Task) -> Result<UpsertResult, CasError> {
+fn reconcile_web_close(
+    store: &dyn TaskStore,
+    task: Task,
+    sync_id: &str,
+    source: &str,
+) -> Result<UpsertResult, CasError> {
     match store.get(&task.id) {
         Ok(local) => {
             if local.status == TaskStatus::Closed {
@@ -297,12 +302,13 @@ fn reconcile_web_close(store: &dyn TaskStore, task: Task) -> Result<UpsertResult
             // with the remote tombstone would clobber locally-authored,
             // not-yet-pushed content (notes / description / acceptance_criteria):
             // the web close is authoritative about the CLOSE, not the body.
-            let mut merged = local;
+            let mut merged = local.clone();
             merged.status = TaskStatus::Closed;
             merged.close_reason = task.close_reason;
             merged.closed_at = task.closed_at.or(merged.closed_at);
             merged.updated_at = task.updated_at;
             merged.assignee = None;
+            append_sync_status_provenance(&mut merged, &local, sync_id, source);
             store.update(&merged)?;
             tracing::info!(
                 task_id = %task.id,
@@ -350,7 +356,101 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
         .join("\n\n")
 }
 
+/// A terminal row is a durable outcome, not merely the latest version of a
+/// mutable task body. An incoming active row may replace it only when the
+/// remote task carries the audit event written by CAS's authorised `reopen`
+/// action after the local terminal timestamp.
+fn rejects_terminal_regression(local: &Task, remote: &Task) -> bool {
+    if !local.is_terminal() || remote.is_terminal() {
+        return false;
+    }
+
+    !has_explicit_remote_reopen(remote, local.closed_at)
+}
+
+/// CAS's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened: <reason>`
+/// into the task's replicated note timeline. Treat that timestamped record as
+/// the reopening event; a bare active task row, even one with a newer
+/// `updated_at`, is not authorization to undo a close/cancellation.
+fn has_explicit_remote_reopen(
+    remote: &Task,
+    local_closed_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    let Some(local_closed_at) = local_closed_at else {
+        return false;
+    };
+    remote.notes.split("\n\n").any(|note| {
+        let Some((timestamp, event)) = note.strip_prefix('[').and_then(|note| note.split_once(']'))
+        else {
+            return false;
+        };
+        if !event.trim_start().starts_with("Reopened:") {
+            return false;
+        }
+        let Ok(timestamp) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
+        else {
+            return false;
+        };
+        let timestamp = timestamp.and_utc();
+        timestamp >= local_closed_at - chrono::Duration::minutes(1)
+    })
+}
+
+fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str, source: &str) {
+    if local.status == merged.status {
+        return;
+    }
+
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    let prior_close_reason = local
+        .close_reason
+        .as_deref()
+        .unwrap_or("<none>")
+        .replace(['\n', '\r'], " ");
+    let note = format!(
+        "[{timestamp}] [CAS_SYNC_STATUS] sync_id={sync_id} source={source} prior_status={} prior_close_reason={prior_close_reason} applied_status={}",
+        local.status, merged.status,
+    );
+    if merged.notes.is_empty() {
+        merged.notes = note;
+    } else {
+        merged.notes.push_str("\n\n");
+        merged.notes.push_str(&note);
+    }
+}
+
 impl CloudSyncer {
+    fn record_terminal_regression_conflict(
+        &self,
+        local: &Task,
+        remote: &Task,
+    ) -> Result<(), CasError> {
+        let discarded_row_json = serde_json::to_string(&serde_json::json!({
+            "local": local,
+            "rejected_remote": remote,
+            "reason": "terminal_status_guard",
+        }))
+        .map_err(|error| {
+            CasError::Other(format!(
+                "Could not serialize terminal sync conflict: {error}"
+            ))
+        })?;
+        self.queue.record_conflict(
+            EntityType::Task.as_str(),
+            &local.id,
+            &discarded_row_json,
+            "local",
+            "terminal_status_guard",
+        )?;
+        tracing::warn!(
+            task_id = %local.id,
+            local_status = %local.status,
+            remote_status = %remote.status,
+            "cloud pull rejected an unproven terminal task regression"
+        );
+        Ok(())
+    }
+
     fn journal_local_overwrite<T: serde::Serialize>(
         &self,
         entity_type: EntityType,
@@ -462,6 +562,7 @@ impl CloudSyncer {
         }
 
         // Process tasks
+        let task_sync_id = uuid::Uuid::new_v4().to_string();
         for mut raw_task in body.tasks.unwrap_or_default() {
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
                 continue;
@@ -479,14 +580,34 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             let task_outcome = if web_close {
-                reconcile_web_close(task_store, remote_task)
+                reconcile_web_close(
+                    task_store,
+                    remote_task.clone(),
+                    &task_sync_id,
+                    "personal_pull",
+                )
             } else {
-                self.upsert_task(task_store, remote_task)
+                self.upsert_task(
+                    task_store,
+                    remote_task.clone(),
+                    &task_sync_id,
+                    "personal_pull",
+                )
             };
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
+                        result.task_status_transitions.push(TaskStatusTransition {
+                            task_id: remote_task.id,
+                            project_id: current_project_id.to_string(),
+                            source: "personal_pull".to_string(),
+                            from,
+                            to: remote_task.status,
+                        });
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.conflicts_resolved += 1;
@@ -722,9 +843,19 @@ impl CloudSyncer {
         }
     }
 
-    fn upsert_task(&self, store: &dyn TaskStore, task: Task) -> Result<UpsertResult, CasError> {
+    fn upsert_task(
+        &self,
+        store: &dyn TaskStore,
+        task: Task,
+        sync_id: &str,
+        source: &str,
+    ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
+                if rejects_terminal_regression(&local, &task) {
+                    self.record_terminal_regression_conflict(&local, &task)?;
+                    return Ok(UpsertResult::Skipped);
+                }
                 if task.updated_at > local.updated_at {
                     let notes_differ = local.notes != task.notes;
                     self.journal_local_overwrite(
@@ -742,6 +873,7 @@ impl CloudSyncer {
                     if notes_differ {
                         merged.notes = merge_task_notes(&local.notes, &merged.notes);
                     }
+                    append_sync_status_provenance(&mut merged, &local, sync_id, source);
                     store.update(&merged)?;
                     Ok(UpsertResult::Updated)
                 } else {
@@ -878,9 +1010,15 @@ impl CloudSyncer {
         store: &dyn TaskStore,
         task: Task,
         strategy: ConflictResolution,
+        sync_id: &str,
+        source: &str,
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
+                if rejects_terminal_regression(&local, &task) {
+                    self.record_terminal_regression_conflict(&local, &task)?;
+                    return Ok(UpsertResult::Skipped);
+                }
                 let action = self.resolve_conflict(
                     "task",
                     &task.id,
@@ -907,6 +1045,7 @@ impl CloudSyncer {
                         if notes_differ {
                             merged.notes = merge_task_notes(&local.notes, &merged.notes);
                         }
+                        append_sync_status_provenance(&mut merged, &local, sync_id, source);
                         store.update(&merged)?;
                         Ok(UpsertResult::Updated)
                     }
@@ -1110,6 +1249,7 @@ impl CloudSyncer {
             pulled_prompts: pull_result.pulled_prompts,
             pulled_file_changes: pull_result.pulled_file_changes,
             pulled_commit_links: pull_result.pulled_commit_links,
+            task_status_transitions: pull_result.task_status_transitions,
             conflicts_resolved: pull_result.conflicts_resolved,
             errors: [
                 push_result.errors,
@@ -1239,6 +1379,7 @@ impl CloudSyncer {
         }
 
         // Process tasks
+        let task_sync_id = uuid::Uuid::new_v4().to_string();
         for mut raw_task in body.tasks.unwrap_or_default() {
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
                 continue;
@@ -1251,9 +1392,25 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            match self.upsert_task_with_strategy(task_store, remote_task, strategy) {
+            let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
+            match self.upsert_task_with_strategy(
+                task_store,
+                remote_task.clone(),
+                strategy,
+                &task_sync_id,
+                "team_pull",
+            ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_tasks += 1;
+                    if let Some(from) = previous_status.filter(|from| *from != remote_task.status) {
+                        result.task_status_transitions.push(TaskStatusTransition {
+                            task_id: remote_task.id,
+                            project_id: current_project_id.to_string(),
+                            source: "team_pull".to_string(),
+                            from,
+                            to: remote_task.status,
+                        });
+                    }
                 }
                 Ok(UpsertResult::Skipped) => {
                     result.conflicts_resolved += 1;
@@ -1698,7 +1855,9 @@ mod web_close_tests {
         local.updated_at = chrono::Utc::now() + chrono::Duration::hours(1);
         store.add(&local).unwrap();
 
-        let outcome = reconcile_web_close(&*store, closed_tombstone("t-web")).unwrap();
+        let outcome =
+            reconcile_web_close(&*store, closed_tombstone("t-web"), "sync-web", "personal_pull")
+                .unwrap();
         assert!(matches!(outcome, UpsertResult::Updated));
 
         let got = store.get("t-web").unwrap();
@@ -1729,7 +1888,13 @@ mod web_close_tests {
         store.add(&local).unwrap();
 
         // Tombstone carries empty body fields (server snapshot) + the close.
-        let outcome = reconcile_web_close(&*store, closed_tombstone("t-content")).unwrap();
+        let outcome = reconcile_web_close(
+            &*store,
+            closed_tombstone("t-content"),
+            "sync-web",
+            "personal_pull",
+        )
+        .unwrap();
         assert!(matches!(outcome, UpsertResult::Updated));
 
         let got = store.get("t-content").unwrap();
@@ -1740,7 +1905,8 @@ mod web_close_tests {
         );
         // Local-authored content survives the close.
         assert_eq!(got.description, "local description not yet pushed");
-        assert_eq!(got.notes, "local working notes");
+        assert!(got.notes.starts_with("local working notes"));
+        assert!(got.notes.contains("[CAS_SYNC_STATUS]"));
         assert!(got.assignee.is_none());
     }
 
@@ -1755,7 +1921,9 @@ mod web_close_tests {
         local.close_reason = Some("already closed locally".to_string());
         store.add(&local).unwrap();
 
-        let outcome = reconcile_web_close(&*store, closed_tombstone("t-done")).unwrap();
+        let outcome =
+            reconcile_web_close(&*store, closed_tombstone("t-done"), "sync-web", "personal_pull")
+                .unwrap();
         assert!(matches!(outcome, UpsertResult::Skipped));
         // The no-op must not clobber the pre-existing local close_reason.
         let got = store.get("t-done").unwrap();
@@ -1768,7 +1936,9 @@ mod web_close_tests {
         let cas_dir = init_cas_dir(temp.path()).unwrap();
         let store = open_task_store(&cas_dir).unwrap();
 
-        let outcome = reconcile_web_close(&*store, closed_tombstone("t-new")).unwrap();
+        let outcome =
+            reconcile_web_close(&*store, closed_tombstone("t-new"), "sync-web", "personal_pull")
+                .unwrap();
         assert!(matches!(outcome, UpsertResult::Created));
         assert_eq!(store.get("t-new").unwrap().status, TaskStatus::Closed);
     }
@@ -1803,7 +1973,10 @@ mod web_close_tests {
         remote.title = "remote title".to_string();
         remote.notes = "[2026-08-09 09:30] 📝 PROGRESS remote note".to_string();
         remote.updated_at += chrono::Duration::minutes(1);
-        assert!(matches!(syncer.upsert_task(&*store, remote), Ok(UpsertResult::Updated)));
+        assert!(matches!(
+            syncer.upsert_task(&*store, remote, "sync-test", "personal_pull"),
+            Ok(UpsertResult::Updated)
+        ));
 
         let merged = store.get("cas-conflict").unwrap();
         assert_eq!(merged.title, "remote title");
@@ -1812,5 +1985,121 @@ mod web_close_tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].winner_side, "merged");
         assert!(conflicts[0].discarded_row_json.contains("local note"));
+    }
+
+    #[test]
+    fn stale_active_remote_row_cannot_resurrect_closed_task_and_is_retained_as_conflict() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new(
+            queue.clone(),
+            CloudConfig::default(),
+            CloudSyncerConfig::default(),
+        );
+
+        let mut local = Task::new("cas-gh451".to_string(), "closed incident".to_string());
+        local.status = TaskStatus::Closed;
+        local.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+        local.close_reason = Some("production incident remediated".to_string());
+        store.add(&local).unwrap();
+
+        // Mirrors GH #451: a cloud row is stamped newer, but contains only an
+        // active status and no authorised reopen record.
+        let mut stale_remote = local.clone();
+        stale_remote.status = TaskStatus::Open;
+        stale_remote.closed_at = None;
+        stale_remote.close_reason = None;
+        stale_remote.updated_at = chrono::Utc::now();
+        assert!(matches!(
+            syncer.upsert_task(&*store, stale_remote, "sync-gh451", "personal_pull"),
+            Ok(UpsertResult::Skipped)
+        ));
+
+        let retained = store.get("cas-gh451").unwrap();
+        assert_eq!(retained.status, TaskStatus::Closed);
+        assert_eq!(
+            retained.close_reason.as_deref(),
+            Some("production incident remediated")
+        );
+        let conflicts = queue.list_conflicts(1).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].winner_side, "local");
+        assert_eq!(conflicts[0].strategy, "terminal_status_guard");
+        assert!(conflicts[0].discarded_row_json.contains("rejected_remote"));
+    }
+
+    #[test]
+    fn team_remote_wins_cannot_bypass_terminal_status_guard() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new(queue, CloudConfig::default(), CloudSyncerConfig::default());
+
+        let mut local = Task::new("cas-team-terminal".to_string(), "closed task".to_string());
+        local.status = TaskStatus::Cancelled;
+        local.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        store.add(&local).unwrap();
+
+        let mut remote = local.clone();
+        remote.status = TaskStatus::InProgress;
+        remote.updated_at = chrono::Utc::now();
+        assert!(matches!(
+            syncer.upsert_task_with_strategy(
+                &*store,
+                remote,
+                crate::cloud::syncer::ConflictResolution::RemoteWins,
+                "sync-team",
+                "team_pull",
+            ),
+            Ok(UpsertResult::Skipped)
+        ));
+        assert_eq!(store.get("cas-team-terminal").unwrap().status, TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn explicit_remote_reopen_applies_and_has_machine_provenance() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new(queue, CloudConfig::default(), CloudSyncerConfig::default());
+
+        let mut local = Task::new("cas-reopen".to_string(), "closed task".to_string());
+        local.status = TaskStatus::Closed;
+        local.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        local.close_reason = Some("original delivery merged".to_string());
+        store.add(&local).unwrap();
+
+        let mut remote = local.clone();
+        remote.status = TaskStatus::Open;
+        remote.closed_at = None;
+        remote.close_reason = None;
+        remote.updated_at = chrono::Utc::now() + chrono::Duration::minutes(1);
+        remote.notes = format!(
+            "[{}] Reopened: regression found after deployment",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M")
+        );
+        assert!(matches!(
+            syncer.upsert_task(&*store, remote, "sync-reopen", "personal_pull"),
+            Ok(UpsertResult::Updated)
+        ));
+
+        let reopened = store.get("cas-reopen").unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert!(reopened.notes.contains("[CAS_SYNC_STATUS]"));
+        assert!(reopened.notes.contains("sync_id=sync-reopen"));
+        assert!(reopened.notes.contains("source=personal_pull"));
+        assert!(reopened.notes.contains("prior_status=closed"));
+        assert!(
+            reopened
+                .notes
+                .contains("prior_close_reason=original delivery merged")
+        );
     }
 }

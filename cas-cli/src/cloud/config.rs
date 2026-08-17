@@ -121,12 +121,27 @@ pub fn resolve_canonical_id(cas_root: &Path) -> Option<String> {
 /// [`resolve_canonical_id`] plus the step that produced the value.
 pub fn resolve_canonical_id_with_source(cas_root: &Path) -> Option<(String, CanonicalIdSource)> {
     if let Some(id) = canonical_id_from_config_toml(cas_root) {
+        // Reconcile the legacy folder-name value used by older clients with
+        // the current remote-derived identity. This is deliberately narrow:
+        // an intentional server-assigned pin such as `team-alpha` remains a
+        // pin unless it is exactly this repository's final remote segment.
+        if let Some(remote) = derive_canonical_id_from_git_remote(cas_root)
+            .and_then(|remote| normalize_project_canonical_id(&remote))
+        {
+            if legacy_slug_matches_remote(&id, &remote) {
+                return Some((remote, CanonicalIdSource::ConfigToml));
+            }
+        }
         return Some((id, CanonicalIdSource::ConfigToml));
     }
-    if let Some(id) = derive_canonical_id_from_git_remote(cas_root) {
+    if let Some(id) = derive_canonical_id_from_git_remote(cas_root)
+        .and_then(|id| normalize_project_canonical_id(&id))
+    {
         return Some((id, CanonicalIdSource::GitRemote));
     }
-    if let Some(id) = canonical_id_from_cas_root(cas_root) {
+    if let Some(id) =
+        canonical_id_from_cas_root(cas_root).and_then(|id| normalize_project_canonical_id(&id))
+    {
         return Some((id, CanonicalIdSource::FolderName));
     }
     fallback_project_id_from_path(cas_root).map(|id| (id, CanonicalIdSource::PathHash))
@@ -144,7 +159,32 @@ pub fn canonical_id_from_config_toml(cas_root: &Path) -> Option<String> {
         .get("project")?
         .get("canonical_id")?
         .as_str()
-        .map(|s| s.to_string())
+        .and_then(normalize_project_canonical_id)
+}
+
+/// Normalize a project identity to the single wire form used by push and
+/// pull. Older releases preserved remote URL case in one path, lowercased it
+/// in another, and sometimes retained whitespace in a config pin. That made
+/// the same repository appear to be several cloud projects.
+///
+/// Bare server-assigned slugs remain valid pins; only their spelling is
+/// normalized. Remote-shaped values are first reduced to host/owner/repo.
+pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = normalize_git_remote_url(trimmed)
+        .or_else(|| normalize_git_remote_url(&trimmed.to_ascii_lowercase()))
+        .unwrap_or_else(|| trimmed.to_string());
+    Some(normalized.trim_matches('/').to_ascii_lowercase())
+}
+
+fn legacy_slug_matches_remote(legacy: &str, remote: &str) -> bool {
+    let Some(last_segment) = remote.rsplit('/').next() else {
+        return false;
+    };
+    legacy == last_segment && !legacy.contains('/')
 }
 
 /// Write `[project] canonical_id = "<value>"` to `<cas_root>/config.toml`,
@@ -157,6 +197,8 @@ pub fn set_canonical_id_in_config_toml(
     cas_root: &Path,
     canonical_id: &str,
 ) -> Result<(), CasError> {
+    let canonical_id = normalize_project_canonical_id(canonical_id)
+        .ok_or_else(|| CasError::Other("canonical project id must not be empty".to_string()))?;
     let toml_path = cas_root.join("config.toml");
 
     // Read-modify-write: parse existing content (or start with empty table
@@ -181,7 +223,7 @@ pub fn set_canonical_id_in_config_toml(
         .ok_or_else(|| CasError::Other("config.toml [project] is not a table".to_string()))?;
     project.insert(
         "canonical_id".to_string(),
-        toml::Value::String(canonical_id.to_string()),
+        toml::Value::String(canonical_id),
     );
 
     let serialized = toml::to_string_pretty(&doc)
@@ -235,7 +277,8 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
 /// case for response comparison, while the cloud resolver treats remotes
 /// case-insensitively on the wire.
 pub fn normalized_git_remote_for_push(cas_root: &Path) -> Option<String> {
-    derive_canonical_id_from_git_remote(cas_root).map(|remote| remote.to_lowercase())
+    derive_canonical_id_from_git_remote(cas_root)
+        .and_then(|remote| normalize_project_canonical_id(&remote))
 }
 
 /// Normalize a git remote URL to `<host>/<owner>/<repo>` form.
@@ -317,10 +360,14 @@ pub fn should_adopt_canonical_id(
     if !local.eq_ignore_ascii_case(resp_remote) {
         return None;
     }
-    if current_pin.is_some_and(|p| p == canonical) {
+    let canonical = normalize_project_canonical_id(canonical)?;
+    if current_pin
+        .and_then(normalize_project_canonical_id)
+        .is_some_and(|pin| pin == canonical)
+    {
         return None; // already pinned correctly — no-op
     }
-    Some(canonical.to_string())
+    Some(canonical)
 }
 
 /// Derive the canonical project ID from a `.cas` directory path.
@@ -2037,6 +2084,36 @@ mod tests {
         assert_eq!(
             normalize_git_remote_url("https://gitlab.com/group/subgroup/project.git").as_deref(),
             Some("gitlab.com/group/subgroup/project"),
+        );
+    }
+
+    #[test]
+    fn canonical_project_id_normalizes_case_and_remote_spelling() {
+        assert_eq!(
+            normalize_project_canonical_id(" Git@GitHub.com:Richards-LLC/gabber-studio.git ")
+                .as_deref(),
+            Some("github.com/richards-llc/gabber-studio"),
+        );
+        assert_eq!(
+            normalize_project_canonical_id("github.com/Richards-LLC/gabber-studio").as_deref(),
+            Some("github.com/richards-llc/gabber-studio"),
+        );
+    }
+
+    #[test]
+    fn legacy_folder_slug_reconciles_to_this_repositories_remote_identity() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = git_project_with_remote(
+            temp.path(),
+            "gabber-studio",
+            "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        );
+        set_canonical_id_in_config_toml(&cas_dir, "gabber-studio").unwrap();
+
+        assert_eq!(
+            resolve_canonical_id(&cas_dir).as_deref(),
+            Some("github.com/richards-llc/gabber-studio"),
+            "the old bare folder slug and both remote spellings must share one identity",
         );
     }
 

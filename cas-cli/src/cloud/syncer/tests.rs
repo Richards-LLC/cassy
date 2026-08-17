@@ -43,6 +43,24 @@ fn test_sync_result_has_errors() {
 }
 
 #[test]
+fn concise_errors_groups_parked_rejections_without_server_json() {
+    let result = SyncResult {
+        errors: vec![
+            "permanent cloud rejection: reason=project_mismatch; entity=tasks; id=cas-1; existing_project=other".to_string(),
+            "permanent cloud rejection: reason=project_mismatch; entity=tasks; id=cas-2; existing_project=other".to_string(),
+            "cloud skipped 1 row; server response: {\"tasks\":{\"skipped\":1}}".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let summary = result.concise_errors().join("\n");
+    assert!(summary.contains("project_mismatch: 2 item(s) parked"));
+    assert!(summary.contains("cas-1, cas-2"));
+    assert!(summary.contains("cas cloud queue --verbose"));
+    assert!(!summary.contains("{\"tasks\""));
+}
+
+#[test]
 fn test_config_defaults() {
     let config = CloudSyncerConfig::default();
     assert_eq!(config.timeout, Duration::from_secs(30));

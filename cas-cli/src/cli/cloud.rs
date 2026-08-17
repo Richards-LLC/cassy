@@ -3,6 +3,7 @@
 //! Enables syncing CAS data with CAS Cloud service.
 
 use clap::{Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,9 +18,9 @@ use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
 use crate::store::{
-    AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
-    open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
-    open_task_store_local,
+    AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store,
+    open_prompt_store, open_rule_store_local, open_skill_store_local, open_spec_store,
+    open_store_local, open_task_store_local,
 };
 
 #[derive(Subcommand)]
@@ -1187,11 +1188,7 @@ fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn execute_conflicts(
-    args: &CloudConflictsArgs,
-    cli: &Cli,
-    cas_root: &Path,
-) -> anyhow::Result<()> {
+fn execute_conflicts(args: &CloudConflictsArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
     if let Some(days) = args.prune {
@@ -1207,7 +1204,10 @@ fn execute_conflicts(
     let conflicts = queue.list_conflicts(args.limit)?;
     let count = queue.unreviewed_conflict_count()?;
     if cli.json {
-        println!("{}", serde_json::json!({"count": count, "conflicts": conflicts}));
+        println!(
+            "{}",
+            serde_json::json!({"count": count, "conflicts": conflicts})
+        );
     } else if conflicts.is_empty() {
         println!("No retained cloud sync conflicts.");
     } else {
@@ -1353,8 +1353,7 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
             Err(e) => embed_problems.push(format!("could not open knowledge vector cache: {e}")),
         }
     } else if awaiting > 0 {
-        embed_problems
-            .push("no cloud embedding capability configured (not logged in)".to_string());
+        embed_problems.push("no cloud embedding capability configured (not logged in)".to_string());
     }
 
     if cli.json {
@@ -1519,7 +1518,11 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                         .and_then(|store| store.is_daemon_active(60).ok())
                         .unwrap_or(false);
                     fmt.write_muted("  Embedded daemon/cas serve: ")?;
-                    fmt.write_raw(if daemon_live { "running" } else { "not running" })?;
+                    fmt.write_raw(if daemon_live {
+                        "running"
+                    } else {
+                        "not running"
+                    })?;
                     fmt.newline()?;
 
                     if let Some(state) = body.get("sync_state") {
@@ -1563,10 +1566,17 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                         if queue.init().is_ok() {
                             if let Ok(stats) = queue.stats(5) {
                                 fmt.write_muted("  Queue:  ")?;
-                                fmt.write_raw(&format!("{} pending, {} failed", stats.pending, stats.failed))?;
+                                fmt.write_raw(&format!(
+                                    "{} pending, {} failed",
+                                    stats.pending, stats.failed
+                                ))?;
                                 fmt.newline()?;
                                 fmt.write_muted("  Last successful pull: ")?;
-                                fmt.write_raw(&queue.get_metadata("last_pull_at")?.unwrap_or_else(|| "never".to_string()))?;
+                                fmt.write_raw(
+                                    &queue
+                                        .get_metadata("last_pull_at")?
+                                        .unwrap_or_else(|| "never".to_string()),
+                                )?;
                                 fmt.newline()?;
                                 if stats.total > 0 {
                                     fmt.newline()?;
@@ -1817,7 +1827,12 @@ pub fn check_canonical_id_rehome(
     let stored = queue.get_metadata("last_push_canonical_id").unwrap_or(None);
     match stored {
         None => Ok(()), // First push — no prior slug on record
-        Some(ref stored_id) if stored_id == project_id => Ok(()), // Unchanged, safe
+        Some(ref stored_id)
+            if crate::cloud::normalize_project_canonical_id(stored_id)
+                == crate::cloud::normalize_project_canonical_id(project_id) =>
+        {
+            Ok(()) // Case/protocol drift only — unchanged, safe.
+        }
         Some(stored_id) => {
             if rehome {
                 Ok(()) // User explicitly confirmed the re-home with --rehome
@@ -1967,7 +1982,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                 "project_canonical_id": project_id,
                 "scope": scope,
                 "pushed": counts,
-                "errors": result.errors,
+                "errors": result.concise_errors(),
             })
         );
     } else {
@@ -1985,7 +2000,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             fmt.write_raw(&format!("    {key}: {count} pushed"))?;
             fmt.newline()?;
         }
-        for error in &result.errors {
+        for error in result.concise_errors() {
             fmt.write_raw(&format!("    error: {error}"))?;
             fmt.newline()?;
         }
@@ -2007,6 +2022,38 @@ fn personal_pull_summary(total: usize, team_configured: bool) -> String {
         "Personal pull: up to date (nothing newer); no team configured — personal scope only"
             .to_string()
     }
+}
+
+/// Render the lifecycle portion of a pull receipt. Kept separate from row
+/// counts because operators need to spot a status mutation immediately, while
+/// ordinary body/note updates are expected background sync traffic.
+fn task_transition_summary(result: &crate::cloud::SyncResult) -> Option<String> {
+    if result.task_status_transitions.is_empty() {
+        return None;
+    }
+
+    let mut groups = BTreeMap::<(String, String, String, String), usize>::new();
+    for transition in &result.task_status_transitions {
+        *groups
+            .entry((
+                transition.project_id.clone(),
+                transition.source.clone(),
+                transition.from.to_string(),
+                transition.to.to_string(),
+            ))
+            .or_default() += 1;
+    }
+    let details = groups
+        .into_iter()
+        .map(|((project, source, from, to), count)| {
+            format!("project={project} source={source} {from}→{to} ({count})")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "Task status transitions: {} task(s) — {details}",
+        result.task_status_transitions.len()
+    ))
 }
 
 fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
@@ -2122,9 +2169,7 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         }
 
         if cli.json {
-            println!(
-                "{}",
-                serde_json::json!({
+            let mut output = serde_json::json!({
                     "status": "ok",
                     "entries": entries_count,
                     "tasks": tasks_count,
@@ -2135,16 +2180,30 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                     "prompts": prompts_count,
                     "file_changes": file_changes_count,
                     "commit_links": commit_links_count,
-                    "errors": pull_result.errors,
-                })
-            );
+                    "errors": &pull_result.errors,
+            });
+            if !pull_result.task_status_transitions.is_empty() {
+                output["task_status_transitions"] =
+                    serde_json::to_value(&pull_result.task_status_transitions)?;
+            }
+            println!("{output}");
         } else {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
             fmt.success("Pull complete")?;
-            let total = entries_count + tasks_count + rules_count + skills_count + specs_count
-                + events_count + prompts_count + file_changes_count + commit_links_count;
-            fmt.write_raw(&personal_pull_summary(total, config.active_team_id().is_some()))?;
+            let total = entries_count
+                + tasks_count
+                + rules_count
+                + skills_count
+                + specs_count
+                + events_count
+                + prompts_count
+                + file_changes_count
+                + commit_links_count;
+            fmt.write_raw(&personal_pull_summary(
+                total,
+                config.active_team_id().is_some(),
+            ))?;
             fmt.newline()?;
             fmt.write_raw(&format!("    {entries_count} entries synced"))?;
             fmt.newline()?;
@@ -2164,6 +2223,10 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
             fmt.newline()?;
             fmt.write_raw(&format!("    {commit_links_count} commit links synced"))?;
             fmt.newline()?;
+            if let Some(summary) = task_transition_summary(&pull_result) {
+                fmt.write_raw(&summary)?;
+                fmt.newline()?;
+            }
             if !pull_result.errors.is_empty() {
                 let warning_color = fmt.theme().palette.status_warning;
                 fmt.write_colored("  \u{26A0} ", warning_color)?;
@@ -2467,7 +2530,7 @@ fn team_push_json(
     result: &crate::cloud::SyncResult,
     extra_errors: &[String],
 ) -> serde_json::Value {
-    let mut errors = result.errors.clone();
+    let mut errors = result.concise_errors();
     errors.extend(extra_errors.iter().cloned());
     serde_json::json!({
         "team_push": {
@@ -2507,13 +2570,13 @@ fn report_team_push_partial(
         let warning_color = fmt.theme().palette.status_warning;
         fmt.write_colored("  \u{26A0} ", warning_color)?;
         fmt.write_raw(&format!(
-            "Team push encountered {} error(s); items re-queued for next sync",
-            result.errors.len()
+            "Team push needs attention: {} issue(s); permanent rejections are parked",
+            result.concise_errors().len()
         ))?;
         fmt.newline()?;
-        for err in &result.errors {
+        for err in result.concise_errors() {
             fmt.write_muted("    - ")?;
-            fmt.write_raw(err)?;
+            fmt.write_raw(&err)?;
             fmt.newline()?;
         }
     }
@@ -2682,7 +2745,7 @@ fn team_pull_json(
 ) -> serde_json::Value {
     let mut errors = result.errors.clone();
     errors.extend(extra_errors.iter().cloned());
-    serde_json::json!({
+    let mut output = serde_json::json!({
         "team_pull": {
             "team_id": team_id,
             "pulled_entries": result.pulled_entries,
@@ -2693,7 +2756,12 @@ fn team_pull_json(
             "duration_ms": result.duration_ms,
             "errors": errors,
         }
-    })
+    });
+    if !result.task_status_transitions.is_empty() {
+        output["team_pull"]["task_status_transitions"] =
+            serde_json::to_value(&result.task_status_transitions).unwrap_or_default();
+    }
+    output
 }
 
 fn report_team_pull_result(
@@ -2725,6 +2793,13 @@ fn report_team_pull_result(
                 result.pulled_skills,
                 total,
             ))?;
+            fmt.newline()?;
+        }
+        if let Some(summary) = task_transition_summary(result) {
+            let theme = ActiveTheme::default();
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, theme);
+            fmt.write_raw(&summary)?;
             fmt.newline()?;
         }
     }
@@ -3822,12 +3897,38 @@ mod team_cmd_tests {
 
     #[test]
     fn personal_pull_summary_names_personal_only_without_team() {
-        assert!(personal_pull_summary(0, false).contains("no team configured — personal scope only"));
+        assert!(
+            personal_pull_summary(0, false).contains("no team configured — personal scope only")
+        );
     }
 
     #[test]
     fn personal_pull_summary_names_pulled_total() {
         assert_eq!(personal_pull_summary(3, false), "Personal pull: pulled 3");
+    }
+
+    #[test]
+    fn task_transition_receipt_groups_status_changes_by_project_and_source() {
+        let result = crate::cloud::SyncResult {
+            task_status_transitions: vec![crate::cloud::TaskStatusTransition {
+                task_id: "cas-gh451".to_string(),
+                project_id: "gabber-studio".to_string(),
+                source: "personal_pull".to_string(),
+                from: crate::types::TaskStatus::Closed,
+                to: crate::types::TaskStatus::Open,
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            task_transition_summary(&result).as_deref(),
+            Some("Task status transitions: 1 task(s) — project=gabber-studio source=personal_pull closed→open (1)")
+        );
+    }
+
+    #[test]
+    fn task_transition_receipt_is_quiet_without_status_changes() {
+        assert_eq!(task_transition_summary(&crate::cloud::SyncResult::default()), None);
     }
 
     #[test]

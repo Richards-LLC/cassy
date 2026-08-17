@@ -76,7 +76,8 @@ describe("binding Commander browser invariants", () => {
     // A send with no outcome is indistinguishable from a lost one, and invites a
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
-    expect(source).toContain("const sent = sendControl(selected.id, selectedSession, { SendMessage:");
+    expect(source).toContain("const sent = sendControl(selected.id, selectedSession, supervisorMessage(supervisor, text));");
+    expect(source).toContain("messageDelivery = { session: selectedSession, target: supervisor };");
     expect(source).toContain("toast(`Message sent to ${supervisor}`);");
     expect(source).toContain('toast("Type a message first");');
   });
@@ -289,7 +290,9 @@ describe("binding Commander browser invariants", () => {
   it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     expect(main).toContain('id="mobile-message-toggle"');
-    expect(main).toContain('activeContextTab = "status"; attentionPanelCollapsed = false; render();');
+    expect(main).toContain("function openSupervisorComposer(): void {");
+    expect(main).toContain('activeContextTab = "status";');
+    expect(main).toContain("attentionPanelCollapsed = false;");
     expect(css).toContain(".mobile-message-toggle { display: none; }");
     expect(css).toContain(".mobile-message-toggle {");
     // The collapsed pill holds two 48px cells on one row. A rail sized for fewer
@@ -300,7 +303,20 @@ describe("binding Commander browser invariants", () => {
     expect(css).toContain("padding-right: calc(var(--mobile-context-pill-width) + var(--space-1))");
     // Tapping the envelope must land on the composer it advertises.
     expect(main).toContain('document.querySelector<HTMLTextAreaElement>("#message-text")');
-    expect(main).toContain("composer?.focus();");
+    expect(main).toContain("else composer?.focus();");
+  });
+
+  it("keeps a dedicated one-handed supervisor action and voice-first phone composer", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain('id="talk-supervisor"');
+    expect(main).toContain("Talk to supervisor");
+    expect(main).toContain('id="message-mic"');
+    expect(main).toContain('id="message-keyboard"');
+    expect(main).toContain("if (phoneLayout() && mic && !mic.hidden) mic.focus();");
+    expect(css).toContain(".talk-supervisor {");
+    expect(css).toContain("#message-mic {");
+    expect(css).toContain("grid-column: 1 / -1;");
+    expect(css).toContain("min-height: 48px;");
   });
 
   it("keeps a focused terminal focused across steady-state renders", async () => {

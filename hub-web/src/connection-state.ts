@@ -11,7 +11,7 @@ export interface ConnectionSnapshot {
   latencyMs?: number;
   missedHeartbeats: number;
   degraded: boolean;
-  authFailure?: "expired" | "revoked" | "scope-mismatch";
+  authFailure?: "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
 }
 
 export interface AttachSnapshot extends ConnectionSnapshot {

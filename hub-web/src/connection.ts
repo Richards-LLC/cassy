@@ -14,7 +14,7 @@ import {
 import type { HubSession, LeaseState, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 export type ConnectionState = ConnectionSnapshot;
-export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch";
+export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
 
 export interface HubMachineInfo {
   schema_version: number;
@@ -216,6 +216,17 @@ export class HubConnectionSupervisor {
           }
         }
         this.blockAuthentication(authError.kind, authError.message);
+        return;
+      }
+      // The health probe succeeded immediately before this stage. An opaque
+      // browser failure on an authenticated route is how an unpaired origin
+      // appears when CORS preflight withholds the response; do not present it
+      // as an offline hub or keep retrying an action that needs re-pairing.
+      if (stage === "auth") {
+        this.blockAuthentication(
+          "needs-pairing",
+          "Hub is reachable but this Commander is no longer paired. Re-pair to continue.",
+        );
         return;
       }
       this.stopHeartbeat();

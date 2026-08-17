@@ -125,14 +125,18 @@ pub fn resolve_canonical_id_with_source(cas_root: &Path) -> Option<(String, Cano
         // the current remote-derived identity. This is deliberately narrow:
         // an intentional server-assigned pin such as `team-alpha` remains a
         // pin unless it is exactly this repository's final remote segment.
-        if let Some(remote) = derive_canonical_id_from_git_remote(cas_root) {
+        if let Some(remote) = derive_canonical_id_from_git_remote(cas_root)
+            .and_then(|remote| normalize_project_canonical_id(&remote))
+        {
             if legacy_slug_matches_remote(&id, &remote) {
                 return Some((remote, CanonicalIdSource::ConfigToml));
             }
         }
         return Some((id, CanonicalIdSource::ConfigToml));
     }
-    if let Some(id) = derive_canonical_id_from_git_remote(cas_root) {
+    if let Some(id) = derive_canonical_id_from_git_remote(cas_root)
+        .and_then(|id| normalize_project_canonical_id(&id))
+    {
         return Some((id, CanonicalIdSource::GitRemote));
     }
     if let Some(id) =
@@ -265,7 +269,7 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
         return None;
     }
     let raw = String::from_utf8(output.stdout).ok()?;
-    normalize_git_remote_url(raw.trim()).map(|remote| remote.to_ascii_lowercase())
+    normalize_git_remote_url(raw.trim())
 }
 
 /// Resolve `origin` to the normalized, lowercased wire identity used by both
@@ -274,6 +278,7 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
 /// case-insensitively on the wire.
 pub fn normalized_git_remote_for_push(cas_root: &Path) -> Option<String> {
     derive_canonical_id_from_git_remote(cas_root)
+        .and_then(|remote| normalize_project_canonical_id(&remote))
 }
 
 /// Normalize a git remote URL to `<host>/<owner>/<repo>` form.

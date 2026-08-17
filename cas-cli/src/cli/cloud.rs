@@ -3,6 +3,7 @@
 //! Enables syncing CAS data with CAS Cloud service.
 
 use clap::{Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -2009,6 +2010,38 @@ fn personal_pull_summary(total: usize, team_configured: bool) -> String {
     }
 }
 
+/// Render the lifecycle portion of a pull receipt. Kept separate from row
+/// counts because operators need to spot a status mutation immediately, while
+/// ordinary body/note updates are expected background sync traffic.
+fn task_transition_summary(result: &crate::cloud::SyncResult) -> Option<String> {
+    if result.task_status_transitions.is_empty() {
+        return None;
+    }
+
+    let mut groups = BTreeMap::<(String, String, String, String), usize>::new();
+    for transition in &result.task_status_transitions {
+        *groups
+            .entry((
+                transition.project_id.clone(),
+                transition.source.clone(),
+                transition.from.to_string(),
+                transition.to.to_string(),
+            ))
+            .or_default() += 1;
+    }
+    let details = groups
+        .into_iter()
+        .map(|((project, source, from, to), count)| {
+            format!("project={project} source={source} {from}→{to} ({count})")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "Task status transitions: {} task(s) — {details}",
+        result.task_status_transitions.len()
+    ))
+}
+
 fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use std::sync::Arc;
 
@@ -2122,9 +2155,7 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         }
 
         if cli.json {
-            println!(
-                "{}",
-                serde_json::json!({
+            let mut output = serde_json::json!({
                     "status": "ok",
                     "entries": entries_count,
                     "tasks": tasks_count,
@@ -2135,16 +2166,30 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                     "prompts": prompts_count,
                     "file_changes": file_changes_count,
                     "commit_links": commit_links_count,
-                    "errors": pull_result.errors,
-                })
-            );
+                    "errors": &pull_result.errors,
+            });
+            if !pull_result.task_status_transitions.is_empty() {
+                output["task_status_transitions"] =
+                    serde_json::to_value(&pull_result.task_status_transitions)?;
+            }
+            println!("{output}");
         } else {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
             fmt.success("Pull complete")?;
-            let total = entries_count + tasks_count + rules_count + skills_count + specs_count
-                + events_count + prompts_count + file_changes_count + commit_links_count;
-            fmt.write_raw(&personal_pull_summary(total, config.active_team_id().is_some()))?;
+            let total = entries_count
+                + tasks_count
+                + rules_count
+                + skills_count
+                + specs_count
+                + events_count
+                + prompts_count
+                + file_changes_count
+                + commit_links_count;
+            fmt.write_raw(&personal_pull_summary(
+                total,
+                config.active_team_id().is_some(),
+            ))?;
             fmt.newline()?;
             fmt.write_raw(&format!("    {entries_count} entries synced"))?;
             fmt.newline()?;
@@ -2164,6 +2209,10 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
             fmt.newline()?;
             fmt.write_raw(&format!("    {commit_links_count} commit links synced"))?;
             fmt.newline()?;
+            if let Some(summary) = task_transition_summary(&pull_result) {
+                fmt.write_raw(&summary)?;
+                fmt.newline()?;
+            }
             if !pull_result.errors.is_empty() {
                 let warning_color = fmt.theme().palette.status_warning;
                 fmt.write_colored("  \u{26A0} ", warning_color)?;
@@ -2682,7 +2731,7 @@ fn team_pull_json(
 ) -> serde_json::Value {
     let mut errors = result.errors.clone();
     errors.extend(extra_errors.iter().cloned());
-    serde_json::json!({
+    let mut output = serde_json::json!({
         "team_pull": {
             "team_id": team_id,
             "pulled_entries": result.pulled_entries,
@@ -2693,7 +2742,12 @@ fn team_pull_json(
             "duration_ms": result.duration_ms,
             "errors": errors,
         }
-    })
+    });
+    if !result.task_status_transitions.is_empty() {
+        output["team_pull"]["task_status_transitions"] =
+            serde_json::to_value(&result.task_status_transitions).unwrap_or_default();
+    }
+    output
 }
 
 fn report_team_pull_result(
@@ -2725,6 +2779,13 @@ fn report_team_pull_result(
                 result.pulled_skills,
                 total,
             ))?;
+            fmt.newline()?;
+        }
+        if let Some(summary) = task_transition_summary(result) {
+            let theme = ActiveTheme::default();
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, theme);
+            fmt.write_raw(&summary)?;
             fmt.newline()?;
         }
     }
@@ -3828,6 +3889,30 @@ mod team_cmd_tests {
     #[test]
     fn personal_pull_summary_names_pulled_total() {
         assert_eq!(personal_pull_summary(3, false), "Personal pull: pulled 3");
+    }
+
+    #[test]
+    fn task_transition_receipt_groups_status_changes_by_project_and_source() {
+        let result = crate::cloud::SyncResult {
+            task_status_transitions: vec![crate::cloud::TaskStatusTransition {
+                task_id: "cas-gh451".to_string(),
+                project_id: "gabber-studio".to_string(),
+                source: "personal_pull".to_string(),
+                from: crate::types::TaskStatus::Closed,
+                to: crate::types::TaskStatus::Open,
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            task_transition_summary(&result).as_deref(),
+            Some("Task status transitions: 1 task(s) — project=gabber-studio source=personal_pull closed→open (1)")
+        );
+    }
+
+    #[test]
+    fn task_transition_receipt_is_quiet_without_status_changes() {
+        assert_eq!(task_transition_summary(&crate::cloud::SyncResult::default()), None);
     }
 
     #[test]

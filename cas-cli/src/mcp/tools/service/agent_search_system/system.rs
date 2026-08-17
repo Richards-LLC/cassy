@@ -214,7 +214,7 @@ impl CasService {
                 "issue",
                 "create",
                 "--repo",
-                "pippenz/cas",
+                "Richards-LLC/cassy",
                 "--title",
                 &title,
                 "--body",

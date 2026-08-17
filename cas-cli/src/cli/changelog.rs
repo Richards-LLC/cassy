@@ -12,9 +12,9 @@ use crate::cli::Cli;
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
-const REPO_OWNER: &str = "pippenz";
-const REPO_NAME: &str = "cas";
-const RELEASES_URL: &str = "https://api.github.com/repos/pippenz/cas/releases";
+const REPO_OWNER: &str = "Richards-LLC";
+const REPO_NAME: &str = "cassy";
+const RELEASES_URL: &str = "https://api.github.com/repos/Richards-LLC/cassy/releases";
 const RELEASES_PAGE_SIZE: u8 = 50;
 const API_TIMEOUT_MS: u64 = 8_000;
 const MAX_LIMIT: u8 = 20;

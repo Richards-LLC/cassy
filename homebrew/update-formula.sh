@@ -7,7 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORMULA_PATH="$SCRIPT_DIR/cas.rb"
-REPO="codingagentsystem/cas"
+REPO="Richards-LLC/cassy"
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <version>"

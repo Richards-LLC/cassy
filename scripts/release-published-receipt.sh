@@ -28,7 +28,7 @@ if [[ "$#" -eq 3 ]]; then
 fi
 
 gh_bin="${GH_BIN:-gh}"
-repo="${RELEASE_REPO:-pippenz/cas}"
+repo="${RELEASE_REPO:-Richards-LLC/cassy}"
 linux_asset="cas-x86_64-unknown-linux-gnu.tar.gz"
 macos_asset="cas-aarch64-apple-darwin.tar.gz"
 workdir="$(mktemp -d)"

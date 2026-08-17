@@ -48,7 +48,7 @@ Open the focused file in `cas-supervisor/references/`: preflight, intake, planni
 
 ## Cross-team routing
 
-File CAS defects in `pippenz/cas`, even when a downstream project exposed them. File actionable Richards-LLC team requests directly on that team's issue board, never in its checkout, and save a CAS memory receipt (URL, ask, date). `docs/requests/` is legacy-only for outbound actionable work; see `filing-cas-bugs` for the full policy.
+File CAS defects in `Richards-LLC/cassy`, even when a downstream project exposed them. File actionable Richards-LLC team requests directly on that team's issue board, never in its checkout, and save a CAS memory receipt (URL, ask, date). `docs/requests/` is legacy-only for outbound actionable work; see `filing-cas-bugs` for the full policy.
 
 ## Context budgeting
 

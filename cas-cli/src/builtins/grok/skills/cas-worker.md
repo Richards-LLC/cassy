@@ -54,7 +54,7 @@ Null means use judgment; other values are invalid.
 
 Your scope is locked at assignment:
 
-- **Cross-team routing.** Report CAS defects to `pippenz/cas`; file Richards-LLC team requests on its issue board, not its checkout. Save a memory receipt (URL, ask, date); `docs/requests` is legacy-only.
+- **Cross-team routing.** Report CAS defects to `Richards-LLC/cassy`; file Richards-LLC team requests on its issue board, not its checkout. Save a memory receipt (URL, ask, date); `docs/requests` is legacy-only.
 
 - **Never self-dispatch.** Start only a task assigned by `action=mine` or named explicitly by the supervisor. `ready`/`available` are backlog *visibility*, never authorization to `start` a task yourself. Idle means wait.
 - **One task at a time.** Complete the current task before taking another.

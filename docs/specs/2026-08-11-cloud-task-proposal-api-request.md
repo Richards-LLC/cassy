@@ -2,7 +2,7 @@
 
 CAS CLI is adding explicit `task create project=<canonical_id>` for supervisors. The client half must not ship on generic sync because generic task JSON cannot provide authoritative provenance and project-scoped pulls cannot tell an origin project when a target task closes.
 
-The full decided contract and evidence will land in `docs/specs/2026-08-11-cross-project-task-proposals.md` in the CAS repository (`pippenz/cas`, task `cas-a0ba`, issue `#171`). This request is tracked as `Richards-LLC/petra-stella-cloud#44`.
+The full decided contract and evidence will land in `docs/specs/2026-08-11-cross-project-task-proposals.md` in the CAS repository (`Richards-LLC/cassy`, task `cas-a0ba`, issue `#171`). This request is tracked as `Richards-LLC/petra-stella-cloud#44`.
 
 ## Requested cloud surface
 

@@ -7,7 +7,7 @@ set -euo pipefail
 DANIEL_SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGpA1xrG0zl8uYLVriPH4ptQCm98jpZET5pYqb93erqm pippenz@github"
 NVM_VERSION="v0.40.3"
 RUST_MIN="1.85"
-CAS_REPO="https://github.com/pippenz/cas.git"
+CAS_REPO="https://github.com/Richards-LLC/cassy.git"
 SWAP_SIZE="4G"
 
 log() { echo -e "\n\033[1;34m>>> $1\033[0m"; }

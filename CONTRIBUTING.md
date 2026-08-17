@@ -4,7 +4,7 @@ Thank you for your interest in CAS.
 
 ## Contribution Model
 
-This is the `pippenz/cas` development fork. The upstream `codingagentsystem/cas` is source-available and does not accept PRs — this fork does, on a **case-by-case** basis.
+This is the `Richards-LLC/cassy` development repository. Contributions are accepted on a **case-by-case** basis.
 
 - **Small, high-signal fixes** (bug fixes with clean diffs, warning hygiene, regression repros) are welcome. Send a PR.
 - **Larger changes** (new features, refactors, public API changes) — please open an issue first so we can talk about scope before you spend time on a diff.
@@ -14,7 +14,7 @@ This is the `pippenz/cas` development fork. The upstream `codingagentsystem/cas`
 
 ### Report Bugs
 
-Open an [issue](https://github.com/pippenz/cas/issues/new) with:
+Open an [issue](https://github.com/Richards-LLC/cassy/issues/new) with:
 
 - A clear description of what happened vs. what you expected
 - Steps to reproduce
@@ -22,13 +22,13 @@ Open an [issue](https://github.com/pippenz/cas/issues/new) with:
 
 ### Suggest Features
 
-Open a [discussion](https://github.com/pippenz/cas/discussions) before writing code, especially for anything that touches the public CLI / MCP surface or the daemon protocol.
+Open a [discussion](https://github.com/Richards-LLC/cassy/discussions) before writing code, especially for anything that touches the public CLI / MCP surface or the daemon protocol.
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/pippenz/cas.git
-cd cas
+git clone https://github.com/Richards-LLC/cassy.git
+cd cassy
 cargo build --release
 ```
 

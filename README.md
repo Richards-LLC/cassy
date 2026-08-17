@@ -12,8 +12,8 @@
 **Multi-agent coding factory with persistent memory.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/pippenz/cas/actions/workflows/ci.yml/badge.svg)](https://github.com/pippenz/cas/actions)
-[![Latest Release](https://img.shields.io/github/v/release/pippenz/cas)](https://github.com/pippenz/cas/releases)
+[![CI](https://github.com/Richards-LLC/cassy/actions/workflows/ci.yml/badge.svg)](https://github.com/Richards-LLC/cassy/actions)
+[![Latest Release](https://img.shields.io/github/v/release/Richards-LLC/cassy)](https://github.com/Richards-LLC/cassy/releases)
 
 [Factory](#factory) · [Context System](#context-system) · [Knowledge](#knowledge) · [Quick Start](#quick-start) · [Installation](#installation) · [Architecture](#architecture) · [Contributing](CONTRIBUTING.md)
 
@@ -130,7 +130,7 @@ Two properties worth knowing:
 
 ```bash
 # Install (Linux x86_64)
-curl -fsSL https://raw.githubusercontent.com/pippenz/cas/main/scripts/cas-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 
 # Initialize in your project — writes .mcp.json, .claude/settings.json hooks,
 # .codex config, and syncs the builtin skills/agents
@@ -149,22 +149,22 @@ cas
 ### Linux (x86_64)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pippenz/cas/main/scripts/cas-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 ```
 
 Installs the latest release binary to `~/.local/bin/cas`. Override with `CAS_INSTALL_DIR`, `CAS_VERSION`, or `CAS_REPO`.
 
 ### macOS (Apple Silicon)
 
-The installer script is Linux-only today. Releases publish a macOS ARM64 tarball — grab `cas-aarch64-apple-darwin.tar.gz` from [Releases](https://github.com/pippenz/cas/releases) and drop `cas` on your `PATH`, or build from source. A full from-zero Mac walkthrough lives in [docs/onboarding/macbook-from-zero.md](docs/onboarding/macbook-from-zero.md).
+The installer script is Linux-only today. Releases publish a macOS ARM64 tarball — grab `cas-aarch64-apple-darwin.tar.gz` from [Releases](https://github.com/Richards-LLC/cassy/releases) and drop `cas` on your `PATH`, or build from source. A full from-zero Mac walkthrough lives in [docs/onboarding/macbook-from-zero.md](docs/onboarding/macbook-from-zero.md).
 
 ### Build from source
 
 Building links the vendored libghostty-vt terminal engine, which needs a Zig compiler. The build script looks for `$ZIG`, then `zig` on `PATH`, then `.context/zig/zig`.
 
 ```bash
-git clone https://github.com/pippenz/cas.git
-cd cas
+git clone https://github.com/Richards-LLC/cassy.git
+cd cassy
 ./scripts/bootstrap-zig.sh          # or: brew install zig / your package manager
 export ZIG="$PWD/.context/zig/zig"  # skip if zig is already on PATH
 cargo build --profile release-fast  # binary at target/release-fast/cas
@@ -300,7 +300,7 @@ With devices registered (`cas device`), `cas attach --remote <device>:<factory-i
 
 ## Contributing
 
-This repository is where CAS development happens; it began as a fork of a source-available upstream project and has moved a long way since. Bug reports and feature suggestions are welcome through [Issues](https://github.com/pippenz/cas/issues) and [Discussions](https://github.com/pippenz/cas/discussions); PRs are considered case by case.
+This repository is where CAS development happens; it began as a fork of a source-available upstream project and has moved a long way since. Bug reports and feature suggestions are welcome through [Issues](https://github.com/Richards-LLC/cassy/issues) and [Discussions](https://github.com/Richards-LLC/cassy/discussions); PRs are considered case by case.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

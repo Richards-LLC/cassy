@@ -73,7 +73,7 @@ uses the same receipt command before any announcement digest is posted.
    receipt command fail.
 
    ```bash
-   gh release view vX.Y.Z --repo pippenz/cas --json isDraft,publishedAt,assets
+   gh release view vX.Y.Z --repo Richards-LLC/cassy --json isDraft,publishedAt,assets
    ./scripts/release-published-receipt.sh vX.Y.Z
    ```
 
@@ -86,8 +86,8 @@ uses the same receipt command before any announcement digest is posted.
    refuses an existing object precisely to prevent replacement-by-rerun.
 
    ```bash
-   gh release delete vX.Y.Z --repo pippenz/cas --yes
-   gh run rerun <failed-run-id> --repo pippenz/cas
+   gh release delete vX.Y.Z --repo Richards-LLC/cassy --yes
+   gh run rerun <failed-run-id> --repo Richards-LLC/cassy
    ```
 
    Do not use `--cleanup-tag`, force-push, or retag: the annotated tag remains

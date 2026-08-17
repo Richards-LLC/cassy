@@ -2,7 +2,7 @@
 name = "cas-tui-test"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "TUI testing framework with PTY-based terminal app runner"
 license = "MIT"
 

@@ -183,8 +183,12 @@ jobs:
         run: cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
 
       # The archive carries test executables, but integration tests that spawn
-      # `cas` resolve it from target/debug/. Preserve that one runner binary at
-      # its normal workspace-relative path beside the archive.
+      # `cas` resolve it from target/debug/. Package that runner separately:
+      # upload-artifact intentionally does not preserve executable mode bits.
+      - name: Package CLI runner
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: tar -czf fast-validation-suite-runner.tar.gz target/debug/cas
+
       - name: Upload full suite archive and CLI runner
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: actions/upload-artifact@v4
@@ -192,7 +196,7 @@ jobs:
           name: fast-validation-suite-archive
           path: |
             fast-validation-suite.tar.zst
-            target/debug/cas
+            fast-validation-suite-runner.tar.gz
           retention-days: 1
           compression-level: 0
 
@@ -236,6 +240,12 @@ jobs:
         with:
           name: fast-validation-suite-archive
           path: .
+
+      - name: Restore executable CLI runner
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: |
+          tar -xzf fast-validation-suite-runner.tar.gz
+          test -x target/debug/cas
 
       # count:1/3 through count:3/3 are disjoint and exhaustive. Keep
       # --no-fail-fast so failures never mask later binaries; doctests stay in

@@ -424,12 +424,22 @@ def embed(args: argparse.Namespace) -> None:
         raise SystemExit("CAS_CLOUD_ENDPOINT and CAS_CLOUD_TOKEN are required")
     db = sqlite3.connect(args.index)
     started = time.monotonic()
-    count = requests = 0
+    count = requests = retries = 0
     while args.limit == 0 or count < args.limit:
         budget = MAX_BATCH if args.limit == 0 else min(MAX_BATCH, args.limit-count)
         rows = db.execute("SELECT id,text FROM chunks WHERE embedded=0 ORDER BY id LIMIT ?", (budget,)).fetchall()
         if not rows: break
-        vectors = post_embeddings(endpoint, token, [text for _, text in rows])
+        for attempt in range(5):
+            try:
+                vectors = post_embeddings(endpoint, token, [text for _, text in rows])
+                break
+            except RuntimeError:
+                if attempt == 4:
+                    raise
+                retries += 1
+                delay = 2 ** attempt
+                print(f"embedding request failed; retry={attempt + 1}/4 delay={delay}s", file=sys.stderr)
+                time.sleep(delay)
         for (chunk_id, _), vector in zip(rows, vectors):
             norm = math.sqrt(sum(v*v for v in vector))
             if norm < 0.5: raise RuntimeError(f"zero/invalid vector for {chunk_id}")
@@ -442,10 +452,10 @@ def embed(args: argparse.Namespace) -> None:
         if requests % 20 == 0: print(f"embedded={count} requests={requests}", file=sys.stderr)
     duration = time.monotonic()-started
     db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_receipt',?)",
-               (json.dumps({"embedded_this_run": count, "requests": requests, "duration_seconds": round(duration,3),
+               (json.dumps({"embedded_this_run": count, "requests": requests, "retries": retries, "duration_seconds": round(duration,3),
                             "completed_at": datetime.now(timezone.utc).isoformat(), "server_retention": "no vectors/text; request metadata only per committed cloud response"}),))
     db.commit(); db.close()
-    print(json.dumps({"embedded": count, "requests": requests, "duration_seconds": round(duration, 3)}))
+    print(json.dumps({"embedded": count, "requests": requests, "retries": retries, "duration_seconds": round(duration, 3)}))
 
 
 def unpack(blob: bytes) -> array.array:

@@ -182,12 +182,17 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
 
-      - name: Upload full suite archive
+      # The archive carries test executables, but integration tests that spawn
+      # `cas` resolve it from target/debug/. Preserve that one runner binary at
+      # its normal workspace-relative path beside the archive.
+      - name: Upload full suite archive and CLI runner
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: fast-validation-suite-archive
-          path: fast-validation-suite.tar.zst
+          path: |
+            fast-validation-suite.tar.zst
+            target/debug/cas
           retention-days: 1
           compression-level: 0
 

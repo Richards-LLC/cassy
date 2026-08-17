@@ -194,6 +194,7 @@ require_text "$suite_shards" 'shard: [1, 2, 3]' 'suite uses three nextest shards
 require_text "$suite_shards" 'fail-fast: false' 'suite keeps running other shards after a failure'
 require_text "$suite_build" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'suite compiles the workspace test graph once into an archive'
 require_text "$suite_build" 'actions/upload-artifact@v4' 'suite build publishes the shared nextest archive'
+require_text "$suite_build" 'target/debug/cas' 'suite archive preserves the CLI path used by integration tests'
 require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait for the shared test archive'
 require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
 require_text "$suite_shards" 'cargo nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'

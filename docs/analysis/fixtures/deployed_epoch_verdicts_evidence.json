@@ -1,0 +1,8 @@
+[
+  {"id":"pre-1","timestamp":"2026-08-16T12:02:00Z","source":"daemon.log","text":"false confirm before the new binary","structured":["message-status-false-confirm"]},
+  {"id":"mixed-1","timestamp":"2026-08-16T12:12:00Z","source":"daemon.log","text":"false confirm while the old daemon is still alive","structured":["message-status-false-confirm"]},
+  {"id":"post-recur","timestamp":"2026-08-16T12:22:00Z","source":"transcript","text":"relay memory missing after a clean deployment","structured":["relay-memory-missing"]},
+  {"id":"post-2","timestamp":"2026-08-16T12:23:00Z","source":"daemon.log","text":"normal heartbeat","structured":[]},
+  {"id":"post-3","timestamp":"2026-08-16T12:24:00Z","source":"daemon.log","text":"normal heartbeat","structured":[]},
+  {"id":"post-4","timestamp":"2026-08-16T12:25:00Z","source":"daemon.log","text":"normal heartbeat","structured":[]}
+]

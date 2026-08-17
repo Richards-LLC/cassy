@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- **External expertise now crosses one enforced, receipted gateway.** `cas serve` replaces the proxy's compatibility default with an exact configured `(server, tool)` allowlist at boot and reload, denies every external call when that list is empty, and refuses paid verification routes outside the registered-supervisor gateway. The first production flow reserves a durable budget receipt before `ask_viktor`, resumes timed-out runs by their stored run ID, and returns only the fail-closed external-production-verification verdict; configuration and route/budget defaults are documented in `crates/cas-mcp-proxy/README.md`.
+
 ## [2.71.0] - 2026-08-16
 
 ### Added

@@ -349,7 +349,7 @@ pub struct SystemRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct VerificationRequest {
     /// Action to perform
-    #[schemars(description = "Action: 'add', 'show', 'list', 'latest'")]
+    #[schemars(description = "Action: 'add', 'show', 'list', 'latest', 'external_verify'")]
     pub action: String,
 
     /// Verification ID (for show)
@@ -414,6 +414,21 @@ pub struct VerificationRequest {
     #[schemars(description = "Exact durable verification dispatch ID")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_id: Option<String>,
+
+    /// Supervisor-owned external verification prompt.
+    #[schemars(description = "external_verify: bounded read-only verification request")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+
+    /// Durable local proof that must exist before external delegation.
+    #[schemars(description = "external_verify: non-secret local proof reference")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_proof_reference: Option<String>,
+
+    /// Exact checks the structured external response must satisfy.
+    #[schemars(description = "external_verify: JSON array of {name, expected} check objects")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_checks: Option<String>,
 }
 
 /// Unified distilled-knowledge (project wiki) operations request.

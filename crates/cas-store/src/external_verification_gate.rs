@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use cas_types::AgentRole;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -17,7 +17,8 @@ use crate::{
 
 pub const EXTERNAL_PRODUCTION_VERIFICATION_GATE: &str = "external_production_verification";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RequiredCheck {
     pub name: String,
     pub expected: String,

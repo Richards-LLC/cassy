@@ -2215,8 +2215,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn concurrent_optional_upstreams_share_one_bounded_startup_window() {
-        let hold = Duration::from_millis(250);
-        let timeout = Duration::from_millis(75);
+        // Wide margins on purpose: with a 400ms per-upstream timeout, serial
+        // startup would take >=800ms while concurrent startup finishes near
+        // 400ms, so the 700ms assertion below keeps ~300ms of scheduler slack
+        // on both sides. The previous 75ms/130ms constants left only ~55ms of
+        // slack and flaked on saturated CI runners (runs 32070409371 and
+        // 32075974620, 2026-08-17).
+        let hold = Duration::from_millis(1_000);
+        let timeout = Duration::from_millis(400);
         let (first, first_server) = hanging_http_upstream(hold);
         let (second, second_server) = hanging_http_upstream(hold);
         let started = std::time::Instant::now();
@@ -2231,7 +2237,7 @@ mod tests {
         let snapshot = engine.health_snapshot().await;
 
         assert!(
-            elapsed < Duration::from_millis(130),
+            elapsed < Duration::from_millis(700),
             "two optional upstreams must time out concurrently, not serially: {elapsed:?}"
         );
         assert_eq!(snapshot.degraded, 2);

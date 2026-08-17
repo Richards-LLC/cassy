@@ -325,6 +325,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 let snapshot_config = cfg.clone();
                 match cmcp_core::ProxyEngine::from_configs(cfg.servers).await {
                     Ok(engine) => {
+                        install_proxy_policy(&engine, &snapshot_config).await;
                         let count = engine.tool_count().await;
                         eprintln!("[CAS] MCP proxy ready ({count} upstream tools)");
                         if let Err(error) = write_proxy_snapshot_cache_for_config(
@@ -446,6 +447,39 @@ async fn run_server_impl() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Install the production external dispatch policy from parsed configuration.
+/// This is unconditional: an empty allowlist deliberately replaces the proxy
+/// crate's compatibility default with a fail-closed policy.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) async fn install_proxy_policy(
+    engine: &cmcp_core::ProxyEngine,
+    config: &cmcp_core::config::Config,
+) {
+    let routes = config
+        .allowlist
+        .iter()
+        .map(|route| cmcp_core::ExternalToolRoute::new(route.server.clone(), route.tool.clone()));
+    let delegation_routes = config
+        .delegation
+        .external_production_verification
+        .iter()
+        .flat_map(|gateway| {
+            [
+                cmcp_core::ExternalToolRoute::new(
+                    gateway.server.clone(),
+                    gateway.start_tool.clone(),
+                ),
+                cmcp_core::ExternalToolRoute::new(
+                    gateway.server.clone(),
+                    gateway.wait_tool.clone(),
+                ),
+            ]
+        });
+    let policy = cmcp_core::ExternalToolAllowlistPolicy::new(routes)
+        .with_supervisor_delegation_routes(delegation_routes);
+    engine.set_policy(std::sync::Arc::new(policy)).await;
 }
 
 /// Total time budget for the eager store-init phase before `cas serve` aborts.
@@ -1198,6 +1232,84 @@ mod tests {
     use crate::types::{Entry, Task};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test]
+    async fn boot_policy_is_fail_closed_exact_and_gateway_bound() {
+        use cmcp_core::config::{
+            Config as ProxyConfig, ExternalProductionVerificationConfig, ExternalToolConfig,
+        };
+
+        let engine = cmcp_core::ProxyEngine::from_configs(Default::default())
+            .await
+            .unwrap();
+        let mut config = ProxyConfig::default();
+        config.allowlist = vec![
+            ExternalToolConfig {
+                server: "github".to_string(),
+                tool: "list_issues".to_string(),
+            },
+            ExternalToolConfig {
+                server: "viktor".to_string(),
+                tool: "ask_viktor".to_string(),
+            },
+            ExternalToolConfig {
+                server: "viktor".to_string(),
+                tool: "wait_for_run".to_string(),
+            },
+        ];
+        config.delegation.external_production_verification =
+            Some(ExternalProductionVerificationConfig {
+                server: "viktor".to_string(),
+                start_tool: "ask_viktor".to_string(),
+                wait_tool: "wait_for_run".to_string(),
+                reserved_amount: 1,
+                max_per_run: 1,
+                max_active_per_factory_session: 4,
+                max_active_per_epic: 2,
+                timeout_seconds: 120,
+            });
+        super::install_proxy_policy(&engine, &config).await;
+        let caller = cmcp_core::ProxyCaller {
+            agent_id: "supervisor".to_string(),
+            role: crate::types::AgentRole::Supervisor,
+            session_id: "supervisor".to_string(),
+            factory_session: Some("factory-1".to_string()),
+            active_task_ids: Vec::new(),
+        };
+
+        let foreign = engine
+            .call_tool(&caller, "viktor-shadow", "ask_viktor", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(foreign.contains("external tool is not explicitly allowlisted"));
+        let direct_delegation = engine
+            .call_tool(&caller, "viktor", "ask_viktor", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(direct_delegation.contains("requires the registered supervisor gateway"));
+
+        let ordinary = engine
+            .call_tool(&caller, "github", "list_issues", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(ordinary.contains("server 'github' not connected"));
+        assert!(!ordinary.contains("proxy policy denied"));
+        let delegated = engine
+            .call_external_production_verification_tool(&caller, "viktor", "ask_viktor", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(delegated.contains("server 'viktor' not connected"));
+        assert!(!delegated.contains("proxy policy denied"));
+
+        let audit = engine.policy_audit();
+        assert_eq!(audit.iter().filter(|entry| entry.allowed).count(), 2);
+        assert_eq!(audit.iter().filter(|entry| !entry.allowed).count(), 2);
+    }
 
     fn make_m233_pending(cas_root: &std::path::Path, wrong_ledger_identity: bool) {
         let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();

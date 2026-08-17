@@ -452,8 +452,18 @@ impl EmbeddedDaemon {
             Ok(cfg) => {
                 let server_count = cfg.servers.len();
                 let snapshot_config = cfg.clone();
+                // Close the dispatch gate before mutating upstreams. Reload may
+                // await connection setup, and a removed route must not remain
+                // usable during that window. A failed reload deliberately
+                // leaves the proxy deny-all until a valid snapshot arrives.
+                proxy
+                    .set_policy(std::sync::Arc::new(
+                        cmcp_core::ExternalToolAllowlistPolicy::default(),
+                    ))
+                    .await;
                 match proxy.reload(cfg.servers).await {
                     Ok(()) => {
+                        crate::mcp::server::install_proxy_policy(&proxy, &snapshot_config).await;
                         let tool_count = proxy.tool_count().await;
                         eprintln!(
                             "[CAS] Proxy reloaded ({server_count} server(s), {tool_count} tools)"

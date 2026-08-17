@@ -889,6 +889,8 @@ mod prompts;
 mod resources;
 mod runtime;
 
+#[cfg(feature = "mcp-proxy")]
+pub(crate) use runtime::install_proxy_policy;
 pub use runtime::run_server;
 #[cfg(feature = "mcp-proxy")]
 pub use runtime::{

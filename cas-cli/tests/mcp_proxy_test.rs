@@ -156,6 +156,71 @@ fn session_start_output(sandbox: &CasSandbox) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+#[test]
+fn cas_serve_boot_installs_fail_closed_exact_allowlist_policy() {
+    let sandbox = CasSandbox::new();
+    std::fs::write(
+        sandbox.cas_root().join("proxy.toml"),
+        r#"
+[servers.github]
+transport = "stdio"
+command = "cas-f7ac-intentionally-missing-upstream"
+
+[[allowlist]]
+server = "github"
+tool = "list_issues"
+"#,
+    )
+    .unwrap();
+    let mut client = McpClient::spawn(&sandbox);
+    client.initialize();
+    let listed = client.request("tools/list", json!({}));
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "mcp_execute"),
+        "mcp_execute missing after configured proxy boot: {listed}"
+    );
+    client.request(
+        "tools/call",
+        json!({
+            "name": "coordination",
+            "arguments": {
+                "action": "register",
+                "session_id": "proxy-boot-policy-test",
+                "name": "proxy boot policy test",
+                "agent_type": "standard"
+            }
+        }),
+    );
+
+    let denied = client.request_raw(
+        "tools/call",
+        json!({
+            "name": "mcp_execute",
+            "arguments": {"code": json!({"server":"github-shadow","tool":"list_issues","args":{}}).to_string()}
+        }),
+    );
+    let denied_message = denied["error"]["message"].as_str().unwrap();
+    assert!(
+        denied_message.contains("external tool is not explicitly allowlisted"),
+        "unexpected denied response: {denied}"
+    );
+
+    let admitted = client.request_raw(
+        "tools/call",
+        json!({
+            "name": "mcp_execute",
+            "arguments": {"code": json!({"server":"github","tool":"list_issues","args":{}}).to_string()}
+        }),
+    );
+    let admitted_message = admitted["error"]["message"].as_str().unwrap();
+    assert!(admitted_message.contains("server 'github' not connected"));
+    assert!(!admitted_message.contains("proxy policy denied"));
+}
+
 // ── Config round-trip ────────────────────────────────────────────────
 
 #[test]

@@ -897,7 +897,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Verification operations (task quality gates). Actions: add (record verification result), show (verification details), list (verifications for task), latest (most recent for task)."
+        description = "Verification operations (task quality gates). Actions: add (record verification result), show (verification details), list (verifications for task), latest (most recent for task), external_verify (registered-supervisor-only receipted external production verification)."
     )]
     pub async fn verification(
         &self,
@@ -911,11 +911,18 @@ impl CasService {
                 "show" => this.verification_show(req).await,
                 "list" => this.verification_list(req).await,
                 "latest" => this.verification_latest(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "external_verify" => this.verification_external(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown verification action: {}. Valid: add, show, list, latest",
-                        req.action
+                        "Unknown verification action: {}. Valid: add, show, list, latest{}",
+                        req.action,
+                        if cfg!(feature = "mcp-proxy") {
+                            ", external_verify"
+                        } else {
+                            ""
+                        }
                     ),
                 )),
             };
@@ -1120,17 +1127,8 @@ impl CasService {
     // mcp_search - Search across all connected MCP servers
     // ========================================================================
 
-    #[cfg_attr(
-        feature = "mcp-proxy",
-        tool(
-            description = "Search across all tools from all connected MCP servers. Pass a keyword query to filter by tool name and description (case-insensitive). Use 'server:name' prefix to filter by server. Examples: 'screenshot', 'server:github issue', 'file read'."
-        )
-    )]
-    #[cfg_attr(
-        not(feature = "mcp-proxy"),
-        tool(
-            description = "Search across all tools from all connected MCP servers. Write TypeScript code to filter the tool catalog. A typed `tools` array is available with { server, name, description, input_schema } fields."
-        )
+    #[tool(
+        description = "Search across all tools from connected MCP servers. Pass a keyword query to filter by tool name and description (case-insensitive); use 'server:name' to filter by server. Builds without mcp-proxy return a rebuild instruction."
     )]
     pub async fn mcp_search(
         &self,
@@ -1172,17 +1170,8 @@ impl CasService {
     // mcp_execute - Execute tool calls across connected MCP servers
     // ========================================================================
 
-    #[cfg_attr(
-        feature = "mcp-proxy",
-        tool(
-            description = "Execute tool calls across all connected MCP servers. Use JSON dispatch: {\"server\": \"name\", \"tool\": \"tool_name\", \"args\": {...}} or an array for parallel calls. Also supports dot-call syntax: server.tool_name({\"param\": \"value\"})."
-        )
-    )]
-    #[cfg_attr(
-        not(feature = "mcp-proxy"),
-        tool(
-            description = "Execute TypeScript code that calls tools across all connected MCP servers. Each server is a typed global object (e.g. `canva`, `figma`) where every tool is an async function with typed parameters: `await server.tool_name({ param: value })`. Chain calls sequentially or run them in parallel with Promise.all across different servers."
-        )
+    #[tool(
+        description = "Execute calls across connected MCP servers after registered-caller policy enforcement. Use JSON dispatch: {\"server\":\"name\",\"tool\":\"tool_name\",\"args\":{...}} or dot-call syntax. Builds without mcp-proxy return a rebuild instruction."
     )]
     pub async fn mcp_execute(
         &self,
@@ -1293,6 +1282,8 @@ impl CasService {
 pub(crate) mod agent_liveness;
 pub(crate) mod agent_search_system;
 mod core;
+#[cfg(feature = "mcp-proxy")]
+mod external_verification;
 pub(crate) mod factory_ops;
 mod factory_remind;
 pub(crate) mod harness_observation;

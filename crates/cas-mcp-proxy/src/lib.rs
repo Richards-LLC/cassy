@@ -81,6 +81,15 @@ pub struct ProxyPolicyRequest<'a> {
     pub server: &'a str,
     pub tool: &'a str,
     pub arguments: &'a Option<serde_json::Map<String, Value>>,
+    pub dispatch_kind: ProxyDispatchKind,
+}
+
+/// Server-selected dispatch path. This value is never decoded from tool
+/// arguments, so a direct caller cannot nominate the receipted gateway path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyDispatchKind {
+    Direct,
+    ExternalProductionVerification,
 }
 
 /// A single external MCP tool, identified by its parsed server and tool names.
@@ -156,6 +165,7 @@ impl ProxyPolicy for AllowAllProxyPolicy {
 #[derive(Debug, Default)]
 pub struct ExternalToolAllowlistPolicy {
     allowed_routes: BTreeSet<ExternalToolRoute>,
+    supervisor_delegation_routes: BTreeSet<ExternalToolRoute>,
 }
 
 impl ExternalToolAllowlistPolicy {
@@ -163,7 +173,18 @@ impl ExternalToolAllowlistPolicy {
     pub fn new(routes: impl IntoIterator<Item = ExternalToolRoute>) -> Self {
         Self {
             allowed_routes: routes.into_iter().collect(),
+            supervisor_delegation_routes: BTreeSet::new(),
         }
+    }
+
+    /// Require selected allowlisted routes to enter through the registered
+    /// supervisor delegation gateway rather than generic proxy execution.
+    pub fn with_supervisor_delegation_routes(
+        mut self,
+        routes: impl IntoIterator<Item = ExternalToolRoute>,
+    ) -> Self {
+        self.supervisor_delegation_routes = routes.into_iter().collect();
+        self
     }
 
     /// Whether an upstream route is in this exact allowlist.
@@ -175,13 +196,22 @@ impl ExternalToolAllowlistPolicy {
 
 impl ProxyPolicy for ExternalToolAllowlistPolicy {
     fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
-        if self.allows(request.server, request.tool) {
-            ProxyPolicyDecision::Allow
-        } else {
-            ProxyPolicyDecision::Deny {
+        if !self.allows(request.server, request.tool) {
+            return ProxyPolicyDecision::Deny {
                 reason: "external tool is not explicitly allowlisted".to_string(),
-            }
+            };
         }
+        let route = ExternalToolRoute::new(request.server, request.tool);
+        if self.supervisor_delegation_routes.contains(&route)
+            && (request.dispatch_kind != ProxyDispatchKind::ExternalProductionVerification
+                || request.caller.role != cas_types::AgentRole::Supervisor)
+        {
+            return ProxyPolicyDecision::Deny {
+                reason: "external delegation route requires the registered supervisor gateway"
+                    .to_string(),
+            };
+        }
+        ProxyPolicyDecision::Allow
     }
 }
 
@@ -569,14 +599,28 @@ impl ProxyEngine {
         if calls.len() == 1 {
             let call = &calls[0];
             let result = self
-                .call_tool_raw(caller, &call.server, &call.tool, call.args.clone())
+                .call_tool_raw(
+                    caller,
+                    ProxyDispatchKind::Direct,
+                    &call.server,
+                    &call.tool,
+                    call.args.clone(),
+                )
                 .await?;
             collect_result(&result, &mut text_parts, &mut images);
         } else {
             // Execute in parallel
             let futures: Vec<_> = calls
                 .iter()
-                .map(|call| self.call_tool_raw(caller, &call.server, &call.tool, call.args.clone()))
+                .map(|call| {
+                    self.call_tool_raw(
+                        caller,
+                        ProxyDispatchKind::Direct,
+                        &call.server,
+                        &call.tool,
+                        call.args.clone(),
+                    )
+                })
                 .collect();
 
             let results = futures::future::join_all(futures).await;
@@ -722,23 +766,51 @@ impl ProxyEngine {
         arguments: Option<serde_json::Map<String, Value>>,
     ) -> Result<Value> {
         let result = self
-            .call_tool_raw(caller, server_name, tool_name, arguments)
+            .call_tool_raw(
+                caller,
+                ProxyDispatchKind::Direct,
+                server_name,
+                tool_name,
+                arguments,
+            )
             .await?;
 
         serde_json::to_value(result).context("failed to serialize tool result")
+    }
+
+    /// Call one tool through the receipted external-production verification
+    /// path. Only the CAS service should select this dispatch kind.
+    pub async fn call_external_production_verification_tool(
+        &self,
+        caller: &ProxyCaller,
+        server_name: &str,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, Value>>,
+    ) -> Result<Value> {
+        let result = self
+            .call_tool_raw(
+                caller,
+                ProxyDispatchKind::ExternalProductionVerification,
+                server_name,
+                tool_name,
+                arguments,
+            )
+            .await?;
+        serde_json::to_value(result).context("failed to serialize delegated tool result")
     }
 
     /// Call a tool and return the raw rmcp result (for internal use by execute).
     async fn call_tool_raw(
         &self,
         caller: &ProxyCaller,
+        dispatch_kind: ProxyDispatchKind,
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, Value>>,
     ) -> Result<rmcp::model::CallToolResult> {
         use rmcp::model::CallToolRequestParams;
 
-        self.authorize(caller, server_name, tool_name, &arguments)
+        self.authorize(caller, dispatch_kind, server_name, tool_name, &arguments)
             .await?;
 
         self.call_upstream(
@@ -756,6 +828,7 @@ impl ProxyEngine {
     async fn authorize(
         &self,
         caller: &ProxyCaller,
+        dispatch_kind: ProxyDispatchKind,
         server_name: &str,
         tool_name: &str,
         arguments: &Option<serde_json::Map<String, Value>>,
@@ -766,6 +839,7 @@ impl ProxyEngine {
             server: server_name,
             tool: tool_name,
             arguments,
+            dispatch_kind,
         };
         let decision = policy.decide(&request);
         let (allowed, reason) = match decision {
@@ -1480,6 +1554,7 @@ mod tests {
                 server,
                 tool,
                 arguments: &arguments,
+                dispatch_kind: ProxyDispatchKind::Direct,
             })
         };
 
@@ -1500,6 +1575,49 @@ mod tests {
                 "allowlist must compare parsed components exactly for {server}.{tool}"
             );
         }
+    }
+
+    #[test]
+    fn delegation_routes_require_internal_supervisor_dispatch_kind() {
+        let policy = ExternalToolAllowlistPolicy::new([
+            ExternalToolRoute::new("viktor", "ask_viktor"),
+            ExternalToolRoute::new("github", "list_issues"),
+        ])
+        .with_supervisor_delegation_routes([ExternalToolRoute::new("viktor", "ask_viktor")]);
+        let arguments = None;
+        let mut caller = registered_worker_caller();
+        let decide = |caller: &ProxyCaller, dispatch_kind, server, tool| {
+            policy.decide(&ProxyPolicyRequest {
+                caller,
+                server,
+                tool,
+                arguments: &arguments,
+                dispatch_kind,
+            })
+        };
+
+        assert_eq!(
+            decide(&caller, ProxyDispatchKind::Direct, "viktor", "ask_viktor"),
+            ProxyPolicyDecision::Deny {
+                reason: "external delegation route requires the registered supervisor gateway"
+                    .to_string()
+            }
+        );
+        caller.role = cas_types::AgentRole::Supervisor;
+        assert_eq!(
+            decide(
+                &caller,
+                ProxyDispatchKind::ExternalProductionVerification,
+                "viktor",
+                "ask_viktor"
+            ),
+            ProxyPolicyDecision::Allow
+        );
+        assert_eq!(
+            decide(&caller, ProxyDispatchKind::Direct, "github", "list_issues"),
+            ProxyPolicyDecision::Allow,
+            "ordinary allowlisted routes remain available through generic execution"
+        );
     }
 
     #[tokio::test]

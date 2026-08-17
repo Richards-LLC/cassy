@@ -164,19 +164,31 @@ run_build_case() {
 }
 
 test_build_uses_detached_fetched_worktree() {
-  local tmp out remote_short
+  local tmp out remote_short stable_worktree
   tmp="$(make_build_fixture)"; out="$tmp/out"
+  stable_worktree="$tmp/build-worktrees/cas-update-build"
   if run_build_case "$tmp" "$out" 1 1 \
     && [ "$(cat "$tmp/source/docs/release-notes/2026-08-16-operator.md")" = 'operator untracked release note' ] \
     && [ "$(git -C "$tmp/source" branch --show-current)" = operator-feature ] \
     && [ "$(cat "$tmp/source/tracked.txt")" = 'operator dirty content' ] \
     && [ "$(cat "$tmp/cargo.log")" != "$tmp/source" ] \
-    && assert_contains "$tmp/cargo.log" "$tmp/build-worktrees/cas-update." \
+    && [ "$(cat "$tmp/cargo.log")" = "$stable_worktree" ] \
     && [ "$(cat "$tmp/zig.log")" = "$tmp/source/.context/zig/zig" ] \
     && assert_contains "$tmp/bin/cas" '"fetched"' \
-    && ! git -C "$tmp/source" worktree list --porcelain | grep -Fq "$tmp/build-worktrees"; then
-    pass 'fetched builds use and clean a detached worktree without touching dirty or untracked operator checkout files'
-  else fail 'fetched builds use and clean a detached worktree without touching dirty or untracked operator checkout files'; fi
+    && git -C "$tmp/source" worktree list --porcelain | grep -Fq "$stable_worktree"; then
+    pass 'fetched builds use a persistent detached worktree without touching dirty or untracked operator checkout files'
+  else fail 'fetched builds use a persistent detached worktree without touching dirty or untracked operator checkout files'; fi
+
+  printf 'second upstream content\n' >"$tmp/seed/second-upstream-marker"
+  git -C "$tmp/seed" add second-upstream-marker
+  git -C "$tmp/seed" commit -m second-upstream-update >/dev/null
+  git -C "$tmp/seed" push origin main >/dev/null 2>&1
+  : >"$tmp/cargo.log"
+  if run_build_case "$tmp" "$out" 1 1 \
+    && [ "$(cat "$tmp/cargo.log")" = "$stable_worktree" ] \
+    && [ "$(git -C "$stable_worktree" rev-parse HEAD)" = "$(git -C "$tmp/seed" rev-parse main)" ]; then
+    pass 'a later fetched commit reuses the same detached worktree path and refreshes it'
+  else fail 'a later fetched commit reuses the same detached worktree path and refreshes it'; fi
 
   remote_short="$(git -C "$tmp/seed" rev-parse --short=7 main)"
   make_binary "$tmp/bin/cas" "cas build ($remote_short)" current
@@ -193,6 +205,26 @@ test_build_uses_detached_fetched_worktree() {
     && assert_contains "$tmp/bin/cas" '"checked-out"'; then
     pass '--no-pull still builds the current checked-out content directly'
   else fail '--no-pull still builds the current checked-out content directly'; fi
+
+  git -C "$tmp/source" worktree lock "$stable_worktree" --reason test-lock
+  : >"$tmp/cargo.log"
+  if run_build_case "$tmp" "$out" 1 1 \
+    && [ "$(cat "$tmp/cargo.log")" = "$stable_worktree" ] \
+    && ! git -C "$tmp/source" worktree list --porcelain | awk -v path="$stable_worktree" '
+      $1 == "worktree" { active = ($2 == path); next }
+      active && $1 == "locked" { found = 1 }
+      END { exit !found }
+    '; then
+    pass 'a locked stable worktree is recreated and the fetched build continues'
+  else fail 'a locked stable worktree is recreated and the fetched build continues'; fi
+
+  rm -f "$stable_worktree/.git"
+  : >"$tmp/cargo.log"
+  if run_build_case "$tmp" "$out" 1 1 \
+    && [ "$(cat "$tmp/cargo.log")" = "$stable_worktree" ] \
+    && [ "$(git -C "$stable_worktree" rev-parse --is-inside-work-tree)" = true ]; then
+    pass 'a corrupted stable worktree is recreated and the fetched build continues'
+  else fail 'a corrupted stable worktree is recreated and the fetched build continues'; fi
   rm -rf "$tmp"
 }
 

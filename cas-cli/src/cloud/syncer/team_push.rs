@@ -277,11 +277,10 @@ impl CloudSyncer {
                             if let Some(failure) = itemized.get(&item.entity_id) {
                                 let diagnostic = match failure {
                                     PushItemizedFailure::Rejection(rejection) => format!(
-                                        "cloud rejected team {entity_key} {}: {} (existing canonical project: {}); server response: {}",
-                                        rejection.id,
+                                        "permanent cloud rejection: reason={}; entity={entity_key}; id={}; existing_project={}",
                                         rejection.reason.as_str(),
+                                        rejection.id,
                                         rejection.existing_canonical_id,
-                                        raw_response
                                     ),
                                     PushItemizedFailure::Invalid(invalid) => format!(
                                         "cloud invalid team {entity_key} {}: {} ({}); server response: {}",
@@ -291,7 +290,16 @@ impl CloudSyncer {
                                         raw_response
                                     ),
                                 };
-                                let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                if matches!(failure, PushItemizedFailure::Rejection(rejection) if rejection.reason.is_permanent())
+                                {
+                                    let _ = self.queue.park_failed(
+                                        item.id,
+                                        &diagnostic,
+                                        self.config.max_retries,
+                                    );
+                                } else {
+                                    let _ = self.queue.mark_failed(item.id, &diagnostic);
+                                }
                                 errors.push(diagnostic);
                             } else {
                                 let _ = self.queue.mark_synced(item.id);

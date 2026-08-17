@@ -189,6 +189,55 @@ impl SyncResult {
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
+
+    /// Render errors for human-facing commands without repeating raw server
+    /// JSON for every rejected row. Permanent ownership refusals are grouped
+    /// by reason and retain a few IDs for queue drill-down.
+    pub fn concise_errors(&self) -> Vec<String> {
+        let mut parked: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut other: BTreeMap<String, usize> = BTreeMap::new();
+
+        for error in &self.errors {
+            let Some(fields) = error.strip_prefix("permanent cloud rejection: ") else {
+                let concise = error
+                    .split("; server response:")
+                    .next()
+                    .unwrap_or(error)
+                    .to_string();
+                *other.entry(concise).or_default() += 1;
+                continue;
+            };
+            let reason = fields
+                .split("; ")
+                .find_map(|field| field.strip_prefix("reason="));
+            let id = fields
+                .split("; ")
+                .find_map(|field| field.strip_prefix("id="));
+            match (reason, id) {
+                (Some(reason), Some(id)) => parked.entry(reason).or_default().push(id),
+                _ => *other.entry(error.clone()).or_default() += 1,
+            }
+        }
+
+        let mut summaries = parked
+            .into_iter()
+            .map(|(reason, ids)| {
+                let samples = ids.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+                format!(
+                    "{reason}: {} item(s) parked (sample IDs: {samples}); inspect with `cas cloud queue --verbose`",
+                    ids.len()
+                )
+            })
+            .collect::<Vec<_>>();
+        summaries.extend(other.into_iter().map(|(error, count)| {
+            if count == 1 {
+                error
+            } else {
+                format!("{error} ({count} occurrences)")
+            }
+        }));
+        summaries
+    }
 }
 
 /// Strategy for resolving sync conflicts
@@ -547,6 +596,12 @@ impl PushRejectionReason {
             Self::ProjectMismatch => "project_mismatch",
             Self::ScopeMismatch => "scope_mismatch",
         }
+    }
+
+    /// These identify an immutable ownership collision in the old global-key
+    /// server identity model. Retrying cannot change the outcome.
+    pub(crate) fn is_permanent(&self) -> bool {
+        matches!(self, Self::ProjectMismatch | Self::ScopeMismatch)
     }
 }
 

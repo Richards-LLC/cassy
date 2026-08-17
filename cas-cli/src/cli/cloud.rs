@@ -18,9 +18,9 @@ use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
 use crate::store::{
-    AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
-    open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
-    open_task_store_local,
+    AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store,
+    open_prompt_store, open_rule_store_local, open_skill_store_local, open_spec_store,
+    open_store_local, open_task_store_local,
 };
 
 #[derive(Subcommand)]
@@ -1188,11 +1188,7 @@ fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn execute_conflicts(
-    args: &CloudConflictsArgs,
-    cli: &Cli,
-    cas_root: &Path,
-) -> anyhow::Result<()> {
+fn execute_conflicts(args: &CloudConflictsArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
     if let Some(days) = args.prune {
@@ -1208,7 +1204,10 @@ fn execute_conflicts(
     let conflicts = queue.list_conflicts(args.limit)?;
     let count = queue.unreviewed_conflict_count()?;
     if cli.json {
-        println!("{}", serde_json::json!({"count": count, "conflicts": conflicts}));
+        println!(
+            "{}",
+            serde_json::json!({"count": count, "conflicts": conflicts})
+        );
     } else if conflicts.is_empty() {
         println!("No retained cloud sync conflicts.");
     } else {
@@ -1354,8 +1353,7 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
             Err(e) => embed_problems.push(format!("could not open knowledge vector cache: {e}")),
         }
     } else if awaiting > 0 {
-        embed_problems
-            .push("no cloud embedding capability configured (not logged in)".to_string());
+        embed_problems.push("no cloud embedding capability configured (not logged in)".to_string());
     }
 
     if cli.json {
@@ -1520,7 +1518,11 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                         .and_then(|store| store.is_daemon_active(60).ok())
                         .unwrap_or(false);
                     fmt.write_muted("  Embedded daemon/cas serve: ")?;
-                    fmt.write_raw(if daemon_live { "running" } else { "not running" })?;
+                    fmt.write_raw(if daemon_live {
+                        "running"
+                    } else {
+                        "not running"
+                    })?;
                     fmt.newline()?;
 
                     if let Some(state) = body.get("sync_state") {
@@ -1564,10 +1566,17 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                         if queue.init().is_ok() {
                             if let Ok(stats) = queue.stats(5) {
                                 fmt.write_muted("  Queue:  ")?;
-                                fmt.write_raw(&format!("{} pending, {} failed", stats.pending, stats.failed))?;
+                                fmt.write_raw(&format!(
+                                    "{} pending, {} failed",
+                                    stats.pending, stats.failed
+                                ))?;
                                 fmt.newline()?;
                                 fmt.write_muted("  Last successful pull: ")?;
-                                fmt.write_raw(&queue.get_metadata("last_pull_at")?.unwrap_or_else(|| "never".to_string()))?;
+                                fmt.write_raw(
+                                    &queue
+                                        .get_metadata("last_pull_at")?
+                                        .unwrap_or_else(|| "never".to_string()),
+                                )?;
                                 fmt.newline()?;
                                 if stats.total > 0 {
                                     fmt.newline()?;
@@ -1818,7 +1827,12 @@ pub fn check_canonical_id_rehome(
     let stored = queue.get_metadata("last_push_canonical_id").unwrap_or(None);
     match stored {
         None => Ok(()), // First push — no prior slug on record
-        Some(ref stored_id) if stored_id == project_id => Ok(()), // Unchanged, safe
+        Some(ref stored_id)
+            if crate::cloud::normalize_project_canonical_id(stored_id)
+                == crate::cloud::normalize_project_canonical_id(project_id) =>
+        {
+            Ok(()) // Case/protocol drift only — unchanged, safe.
+        }
         Some(stored_id) => {
             if rehome {
                 Ok(()) // User explicitly confirmed the re-home with --rehome
@@ -1968,7 +1982,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                 "project_canonical_id": project_id,
                 "scope": scope,
                 "pushed": counts,
-                "errors": result.errors,
+                "errors": result.concise_errors(),
             })
         );
     } else {
@@ -1986,7 +2000,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             fmt.write_raw(&format!("    {key}: {count} pushed"))?;
             fmt.newline()?;
         }
-        for error in &result.errors {
+        for error in result.concise_errors() {
             fmt.write_raw(&format!("    error: {error}"))?;
             fmt.newline()?;
         }
@@ -2516,7 +2530,7 @@ fn team_push_json(
     result: &crate::cloud::SyncResult,
     extra_errors: &[String],
 ) -> serde_json::Value {
-    let mut errors = result.errors.clone();
+    let mut errors = result.concise_errors();
     errors.extend(extra_errors.iter().cloned());
     serde_json::json!({
         "team_push": {
@@ -2556,13 +2570,13 @@ fn report_team_push_partial(
         let warning_color = fmt.theme().palette.status_warning;
         fmt.write_colored("  \u{26A0} ", warning_color)?;
         fmt.write_raw(&format!(
-            "Team push encountered {} error(s); items re-queued for next sync",
-            result.errors.len()
+            "Team push needs attention: {} issue(s); permanent rejections are parked",
+            result.concise_errors().len()
         ))?;
         fmt.newline()?;
-        for err in &result.errors {
+        for err in result.concise_errors() {
             fmt.write_muted("    - ")?;
-            fmt.write_raw(err)?;
+            fmt.write_raw(&err)?;
             fmt.newline()?;
         }
     }
@@ -3883,7 +3897,9 @@ mod team_cmd_tests {
 
     #[test]
     fn personal_pull_summary_names_personal_only_without_team() {
-        assert!(personal_pull_summary(0, false).contains("no team configured — personal scope only"));
+        assert!(
+            personal_pull_summary(0, false).contains("no team configured — personal scope only")
+        );
     }
 
     #[test]

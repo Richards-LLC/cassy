@@ -26,6 +26,21 @@ impl SyncQueue {
         Ok(())
     }
 
+    /// Park a row that the cloud has conclusively rejected.
+    ///
+    /// Permanent ownership rejections cannot be repaired by retrying the
+    /// exact same request.  Set the retry count directly to the configured
+    /// terminal threshold so the next sync excludes it, while retaining the
+    /// row and its operator-facing diagnostic for `cas cloud queue --verbose`.
+    pub fn park_failed(&self, id: i64, error: &str, max_retries: i32) -> Result<(), CasError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_queue SET retry_count = MAX(retry_count, ?2), last_error = ?3 WHERE id = ?1",
+            params![id, max_retries, error],
+        )?;
+        Ok(())
+    }
+
     /// Preserve a server-side refusal on a still-retryable queue row.
     ///
     /// Unlike [`Self::mark_failed`], this deliberately does not increment the

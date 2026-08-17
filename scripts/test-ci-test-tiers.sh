@@ -92,6 +92,8 @@ require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier r
 
 required_jobs=(
     fast-validation-preflight
+    fast-validation-suite-build
+    fast-validation-suite-shards
     fast-validation-suite
     fast-validation-docs
     fast-validation
@@ -106,26 +108,27 @@ done
 
 # Required contexts must always be emitted. The expensive work in each lane is
 # gated only after a shared, fail-closed diff classification step succeeds.
-for job in fast-validation-preflight fast-validation-suite fast-validation-docs macos-check; do
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs macos-check; do
     block="$(job_block "$job")"
     require_text "$block" 'id: classify-diff' "$job classifies before expensive work"
     require_text "$block" './.github/actions/classify-required-diff' "$job uses the shared classifier"
     require_text "$block" 'fetch-depth: 0' "$job computes a real merge base"
     require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job classifies the PR head rather than its synthetic merge commit"
-    require_text "$block" "steps.classify-diff.outputs.fast-pass != 'true'" "$job skips expensive work only after a safe classification"
+    require_text "$block" "steps.classify-diff.outputs.rust-unaffected" "$job gates Rust work only after a safe classification"
 done
 
 classifier="$repo_root/scripts/classify-ci-diff.sh"
 classify_action="$repo_root/.github/actions/classify-required-diff/action.yml"
 if [[ -x "$classifier" ]]; then
-    # These committed fixtures pin both directions: the three explicitly safe
-    # classes fast-pass, while a real mixed code/release change remains full.
+    # These committed fixtures pin both directions: the explicitly safe
+    # classes are Rust-unaffected, while every code or mixed change is full.
     require_text "$("$classifier" 967e85c7^ 967e85c7)" 'empty' 'empty ancestry merge fast-passes'
     require_text "$("$classifier" c6c4122f^ c6c4122f)" 'docs-only' 'docs-only change fast-passes'
+    require_text "$("$classifier" 7c233bef^ 7c233bef)" 'hub-web-only' 'hub-web-only change skips Rust work'
     require_text "$("$classifier" 15edf2ef^ 15edf2ef)" 'version-bump' 'two-file package version bump fast-passes'
     require_text "$("$classifier" 15edf2ef^ eab3901c)" 'version-bump' 'workspace-wide seven-file version bump fast-passes'
-    require_text "$("$classifier" 66b059b4^ 66b059b4)" 'full' 'version bump plus changelog does not fast-pass'
-    require_text "$("$classifier" bb7417ef^ bb7417ef)" 'full' 'code diff does not fast-pass'
+    require_text "$("$classifier" 66b059b4^ 66b059b4)" 'rust-touched' 'version bump plus changelog runs Rust tier'
+    require_text "$("$classifier" bb7417ef^ bb7417ef)" 'rust-touched' 'code diff runs Rust tier'
 else
     printf 'FAIL CI diff classifier is executable\n'
     fail=$((fail + 1))
@@ -141,15 +144,33 @@ if BASE_SHA="0000000000000000000000000000000000000000" \
         /^      run: \|$/ { in_run = 1; next }
         in_run { sub(/^        /, ""); print }
     ' "$classify_action"); then
-    require_text "$(<"$tag_push_output")" 'class=full' 'tag push with all-zero BASE_SHA falls back to full tier'
+    require_text "$(<"$tag_push_output")" 'class=rust-touched' 'tag push with all-zero BASE_SHA falls back to Rust tier'
     require_text "$(<"$tag_push_output")" 'fast-pass=false' 'tag push all-zero BASE_SHA never fast-passes'
+    require_text "$(<"$tag_push_output")" 'rust-unaffected=false' 'tag push all-zero BASE_SHA never skips Rust'
 else
     printf 'FAIL tag push all-zero BASE_SHA runs the shared classifier action\n'
     fail=$((fail + 1))
 fi
 rm -f "$tag_push_output"
 
-for job in fast-validation-preflight fast-validation-suite fast-validation-docs fast-validation macos-check; do
+# A non-zero-but-unresolvable base is another uncertainty case. The composite
+# action must not fail a required check before deciding to run the Rust tier.
+unknown_base_output="$(mktemp)"
+if BASE_SHA="1111111111111111111111111111111111111111" \
+    GITHUB_OUTPUT="$unknown_base_output" \
+    bash < <(awk '
+        /^      run: \|$/ { in_run = 1; next }
+        in_run { sub(/^        /, ""); print }
+    ' "$classify_action"); then
+    require_text "$(<"$unknown_base_output")" 'class=rust-touched' 'unresolvable base falls back to Rust tier'
+    require_text "$(<"$unknown_base_output")" 'rust-unaffected=false' 'unresolvable base never skips Rust'
+else
+    printf 'FAIL unresolvable base runs the shared classifier action\n'
+    fail=$((fail + 1))
+fi
+rm -f "$unknown_base_output"
+
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check; do
     block="$(job_block "$job")"
     require_text "$block" "refs/tags/" "$job runs on release tags"
 done
@@ -165,10 +186,22 @@ done
 
 preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
+suite_build="$(job_block fast-validation-suite-build)"
+suite_shards="$(job_block fast-validation-suite-shards)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
-require_text "$suite" 'cargo nextest run --workspace --no-fail-fast' 'suite executes every workspace nextest binary'
-require_absent "$suite" '--partition' 'suite avoids duplicate test-graph compilation across runners'
+require_text "$suite_shards" 'shard: [1, 2, 3]' 'suite uses three nextest shards'
+require_text "$suite_shards" 'fail-fast: false' 'suite keeps running other shards after a failure'
+require_text "$suite_build" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'suite compiles the workspace test graph once into an archive'
+require_text "$suite_build" 'actions/upload-artifact@v4' 'suite build publishes the shared nextest archive'
+require_text "$suite_build" 'tar -czf fast-validation-suite-runner.tar.gz target/debug/cas' 'suite packages the executable CLI runner with its mode bits'
+require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait for the shared test archive'
+require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
+require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'
+require_text "$suite_shards" 'test -x target/debug/cas' 'shards verify the restored CLI runner remains executable'
+require_text "$suite_shards" 'cargo nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
+require_text "$suite" 'needs: fast-validation-suite-shards' 'required full-suite context fans in every shard'
+require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
 require_text "$(<"$makefile")" '$(CARGO) nextest run --workspace --no-fail-fast' 'local make test matches CI workspace nextest scope'
 require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
 require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'

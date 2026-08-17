@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Print the only diff classes permitted to avoid the required CI workloads.
-# This is deliberately fail-closed: callers should run their normal job for
-# any output other than empty, docs-only, or version-bump.
+# Print a conservative CI diff class. Callers may skip Rust work only for the
+# explicitly Rust-unaffected classes; every other path, including an unknown
+# one, is rust-touched. This keeps the classifier fail-closed.
 set -euo pipefail
 
 usage() {
@@ -31,6 +31,21 @@ for file in "${files[@]}"; do
 done
 if "$docs_only"; then
     echo docs-only
+    exit 0
+fi
+
+# Commander assets are built and tested by their own preflight step. A change
+# entirely beneath hub-web/ cannot affect a Rust build, doctest, or macOS
+# check, but it must not be confused with a documentation-only change.
+hub_web_only=true
+for file in "${files[@]}"; do
+    case "$file" in
+        hub-web/*) ;;
+        *) hub_web_only=false; break ;;
+    esac
+done
+if "$hub_web_only"; then
+    echo hub-web-only
     exit 0
 fi
 
@@ -158,4 +173,4 @@ if "$valid_version_bump" && "$has_lock" && [[ ${#package_names[@]} -gt 0 ]]; the
     exit 0
 fi
 
-echo full
+echo rust-touched

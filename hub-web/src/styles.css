@@ -1324,6 +1324,31 @@ main {
   gap: var(--space-2);
 }
 
+.talk-supervisor {
+  display: flex;
+  flex: none;
+  width: auto;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-2) var(--space-2);
+}
+
+.talk-supervisor small {
+  color: var(--text-mid);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.message {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+
+.message h2 { margin: 0; font-size: var(--fs-md); }
+
 .message textarea {
   width: 100%;
   min-height: var(--toolbar-height);
@@ -1337,8 +1362,35 @@ main {
 
 .message button {
   width: 100%;
-  margin-top: var(--space-2);
 }
+
+.composer-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+}
+
+#message-mic {
+  display: inline-flex;
+  width: auto;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+#message-mic[hidden],
+#message-keyboard { display: none; }
+
+#message-mic.listening .mic-mark { color: var(--state-crit); }
+
+.composer-status,
+.message-delivery {
+  margin: 0;
+  color: var(--text-mid);
+  font-size: var(--fs-sm);
+}
+
+.message-delivery { color: var(--state-ok); }
 
 .control-disabled-reason {
   margin: 0;
@@ -1682,6 +1734,11 @@ fieldset {
     margin-left: var(--space-1);
   }
 
+  .talk-supervisor {
+    min-height: 48px;
+    margin: 0 var(--space-2) var(--space-2);
+  }
+
   /* A fixed label column leaves a phone barely 100px for a URL or a scope list,
      so the term stacks above its value instead of shredding it. */
   .pair-details div {
@@ -1778,6 +1835,20 @@ fieldset {
   .context-body { min-height: 0; }
   .context-tabs { flex-basis: var(--space-10); }
   .attention-group-label { max-width: var(--mobile-attention-label-width); }
+
+  .message { padding-bottom: env(safe-area-inset-bottom); }
+
+  .composer-actions { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+
+  #message-mic {
+    grid-column: 1 / -1;
+    min-height: 48px;
+    color: var(--text-hi);
+    background: var(--bg-active);
+    font-weight: var(--weight-medium);
+  }
+
+  #message-keyboard { display: block; }
 
 
   /* Phone composition keeps the supervisor readable and workers horizontally reachable.

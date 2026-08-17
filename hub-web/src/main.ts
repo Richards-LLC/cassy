@@ -18,6 +18,8 @@ import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
+import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
+import { supervisorMessage, supervisorTarget } from "./supervisor-message";
 import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 const pendingPairingStore = pendingPairingStoreFor(window);
@@ -73,6 +75,12 @@ let machineDrawerOpen = false;
 let attentionPanelCollapsed = window.matchMedia("(max-width: 850px)").matches;
 let activeContextTab: "attention" | "status" = "attention";
 let commandPaletteOpen = false;
+let speechCapability: SpeechInputCapability | undefined;
+let speechDetectionStarted = false;
+let speechController: SpeechDictationController | undefined;
+let speechInputState: SpeechInputState = "idle";
+let speechInputDetail = "";
+let messageDelivery: { session: string; target: string } | undefined;
 
 // One phone breakpoint shared by layout state, pane mounting, and pane tapping.
 function phoneLayout(): boolean { return window.matchMedia("(max-width: 850px)").matches; }
@@ -1132,6 +1140,92 @@ function restoreMessageDraft(): void {
   composer.setSelectionRange(caret, caret);
 }
 
+function speechStatusText(): string {
+  if (speechInputState === "listening") return "Listening… speak a short message, then review it before sending.";
+  if (speechInputState === "error") return speechInputDetail;
+  if (speechCapability?.mode === "local") return "On-device voice ready — tap the mic, review, then send.";
+  return "Voice ready — tap the mic, review, then send.";
+}
+
+function syncSpeechComposer(): void {
+  const mic = document.querySelector<HTMLButtonElement>("#message-mic");
+  const status = document.querySelector<HTMLElement>("#speech-status");
+  if (!mic || !status) return;
+  const available = speechCapability !== undefined && speechCapability.mode !== "typing";
+  mic.hidden = !available;
+  status.hidden = !available && speechInputDetail.length === 0;
+  mic.classList.toggle("listening", speechInputState === "listening");
+  mic.setAttribute("aria-pressed", String(speechInputState === "listening"));
+  mic.querySelector<HTMLElement>("[data-mic-label]")!.textContent = speechInputState === "listening" ? "Stop listening" : "Tap to talk";
+  status.textContent = speechStatusText();
+}
+
+function createSpeechController(capability: SpeechInputCapability): SpeechDictationController {
+  return new SpeechDictationController(capability, {
+    read: () => document.querySelector<HTMLTextAreaElement>("#message-text")?.value ?? messageDraft,
+    write: (value) => {
+      messageDraft = value;
+      messageDraftSelection = value.length;
+      messageDelivery = undefined;
+      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (!composer) return;
+      composer.value = value;
+      composer.setSelectionRange(value.length, value.length);
+      const delivery = document.querySelector<HTMLElement>("#message-delivery");
+      if (delivery) delivery.hidden = true;
+    },
+    state: (next, detail = "") => {
+      speechInputState = next;
+      speechInputDetail = detail;
+      syncSpeechComposer();
+    },
+    permissionDenied: () => {
+      speechCapability = { mode: "typing", language: capability.language };
+      speechController = undefined;
+      speechInputState = "idle";
+      speechInputDetail = "Mic permission was not granted. Type your message instead.";
+      syncSpeechComposer();
+    },
+  });
+}
+
+function bindSpeechComposer(): void {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  const keyboard = document.querySelector<HTMLButtonElement>("#message-keyboard");
+  const mic = document.querySelector<HTMLButtonElement>("#message-mic");
+  if (!composer || !keyboard || !mic) return;
+  composer.oninput = () => {
+    messageDraft = composer.value;
+    messageDraftSelection = composer.selectionStart ?? composer.value.length;
+    messageDelivery = undefined;
+    const delivery = document.querySelector<HTMLElement>("#message-delivery");
+    if (delivery) delivery.hidden = true;
+  };
+  keyboard.onclick = () => composer.focus();
+  mic.onclick = () => speechController?.toggle();
+  syncSpeechComposer();
+  if (speechDetectionStarted) return;
+  speechDetectionStarted = true;
+  void detectSpeechInput().then((capability) => {
+    speechCapability = capability;
+    speechController = capability.mode === "typing" ? undefined : createSpeechController(capability);
+    syncSpeechComposer();
+  });
+}
+
+function openSupervisorComposer(): void {
+  activeContextTab = "status";
+  attentionPanelCollapsed = false;
+  render();
+  queueMicrotask(() => {
+    const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+    composer?.scrollIntoView({ block: "nearest" });
+    const mic = document.querySelector<HTMLButtonElement>("#message-mic");
+    if (phoneLayout() && mic && !mic.hidden) mic.focus();
+    else composer?.focus();
+  });
+}
+
 /**
  * The canvas is the first thing a new operator reads. With nothing paired it has
  * to offer pairing — pointing at a session list that cannot exist yet is a dead
@@ -1167,6 +1261,11 @@ function render(captureDraft = true): void {
   const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = takeControlDisabledReason(selected, selectedSession, lease);
+  const selectedHubSession = selected && selectedSession
+    ? sessions.get(selected.id)?.find((item) => item.name === selectedSession)
+    : undefined;
+  const supervisor = supervisorTarget(selectedHubSession);
+  const delivery = selectedSession && messageDelivery?.session === selectedSession ? messageDelivery : undefined;
   // A phone has no hover, so a title attribute is an explanation nobody can
   // reach. Unavailable controls stay focusable and say why when tapped.
   const interruptReason = !selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt")
@@ -1242,6 +1341,7 @@ function render(captureDraft = true): void {
           <div class="actions">${sessionCommands ? '<button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>' : ""}${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : emptyCanvasMarkup()}</div></section>
+        ${supervisor ? `<button id="talk-supervisor" class="talk-supervisor primary" type="button"><span>Talk to supervisor</span><small>${escapeHtml(supervisor)}</small></button>` : ""}
       </main>
       <aside class="context-panel${attentionPanelCollapsed ? " collapsed" : ""}" aria-label="Attention, workers, and tasks">
         <div class="attention-rail">
@@ -1255,7 +1355,7 @@ function render(captureDraft = true): void {
             <button type="button" role="tab" data-context-tab="status" aria-selected="${activeContextTab === "status"}">Workers &amp; Tasks</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}>${staleStatusNotice}<div id="status-view"></div><div class="message"><h2>Message supervisor</h2><textarea id="message-text" placeholder="Send an attributed semantic message"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<button id="message-send" ${!selected || !selectedSession || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}>${staleStatusNotice}<div id="status-view"></div><div class="message"><h2>Talk to ${escapeHtml(supervisor ?? "supervisor")}</h2><textarea id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea>${controlReason ? `<p class="control-disabled-reason" role="note">${escapeHtml(controlReason)}</p>` : ""}<div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary" ${!selected || !selectedSession || !supervisor || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" ${delivery ? "" : "hidden"}>${delivery ? `Message sent to ${escapeHtml(delivery.target)}` : ""}</p></div></section>
         </div>
       </aside>
     </div>
@@ -1560,16 +1660,9 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
   document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
-  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = () => {
-    activeContextTab = "status"; attentionPanelCollapsed = false; render();
-    // The envelope promises a composer, so land on it instead of the top of a
-    // status list the operator then has to scroll past.
-    queueMicrotask(() => {
-      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-      composer?.scrollIntoView({ block: "nearest" });
-      composer?.focus();
-    });
-  };
+  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = openSupervisorComposer;
+  const talkSupervisor = document.querySelector<HTMLButtonElement>("#talk-supervisor");
+  if (talkSupervisor) talkSupervisor.onclick = openSupervisorComposer;
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
     button.onclick = () => { activeContextTab = "attention"; attentionPanelCollapsed = false; render(); };
   }
@@ -1649,6 +1742,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     const pane = selectedPanes.get(sessionKey(selected.id, selectedSession));
     if (pane) sendControl(selected.id, selectedSession, { InterruptPane: { pane_id: pane } });
   };
+  bindSpeechComposer();
   document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => {
     if (!selected || !selectedSession) return;
     const composer = document.querySelector<HTMLTextAreaElement>("#message-text")!;
@@ -1658,14 +1752,24 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       composer.focus();
       return;
     }
-    const supervisor = sessions.get(selected.id)?.find((item) => item.name === selectedSession)?.supervisor ?? "supervisor";
-    const sent = sendControl(selected.id, selectedSession, { SendMessage: { target: supervisor, text, summary: "Commander message", urgent: false, attribution: { device_id: null, credential_id: null, device_label: null, operator_label: null, controller_origin: null, request_id: null } } });
+    const supervisor = supervisorTarget(sessions.get(selected.id)?.find((item) => item.name === selectedSession));
+    if (!supervisor) {
+      toast("This session has no supervisor target");
+      return;
+    }
+    const sent = sendControl(selected.id, selectedSession, supervisorMessage(supervisor, text));
     // Without an outcome the operator cannot tell a sent message from a lost
     // one, and the natural response is to send it a second time.
     if (!sent) return;
     composer.value = "";
     messageDraft = "";
     messageDraftSelection = 0;
+    messageDelivery = { session: selectedSession, target: supervisor };
+    const delivery = document.querySelector<HTMLElement>("#message-delivery");
+    if (delivery) {
+      delivery.hidden = false;
+      delivery.textContent = `Message sent to ${supervisor}`;
+    }
     toast(`Message sent to ${supervisor}`);
   };
 }

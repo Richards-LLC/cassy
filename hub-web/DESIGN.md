@@ -83,6 +83,8 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - `.session-header` is exactly 44px. The supervisor receives 65% of the pane grid and the worker strip 35%; collapsed worker bars are exactly 32px.
 - The collapsed attention region is the same 48px rail width, while the expanded operations panel occupies the 320px context column.
 - At `max-width: 53rem`, navigation becomes a 48px bottom rail, drawers open above it, and workers scroll horizontally below the readable supervisor terminal.
+- The selected session's `.talk-supervisor` action occupies its own 48px row immediately above the phone rail; it is never moved into the top-bar overflow or a drawer.
+- The phone message composer makes `#message-mic` the full-width first action, with Keyboard and explicit Send beneath it; desktop leaves the textarea keyboard-primary and keeps the mic secondary.
 - Compact pane-order controls use 24px geometry; primary buttons remain 40px high.
 - `.shell` owns `100dvh`; interior regions scroll independently and no page-height content sits beside it.
 
@@ -113,6 +115,7 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - Attention/status cards: `.attention-item` and `.status-row`; prose stays UI face while `.attention-group-label`, `.attention-ticket`, and `.status-identifier` isolate machine copy.
 - Primary button: `.primary`; it uses `--bg-active` because blue is state/focus, not a decorative call-to-action fill.
 - Pairing dialog: `dialog`, `.pair-flow`, `.pair-code`, and `.pair-details`; code, origins, URLs, and scopes are mono inside an otherwise UI-face flow.
+- Supervisor messaging: `.talk-supervisor`, `.message textarea`, `.composer-actions`, and `openSupervisorComposer()` in `hub-web/src/main.ts`; the selected session supplies the exact supervisor target, the phone mic is primary only when feature detection succeeds, and Send remains explicit.
 - Inputs: `dialog input` and `.message textarea`; raised or terminal fills replace permanent one-pixel boxes, with focus-visible outline for keyboard state.
 - Terminal state: `.terminal-state`; warning tint is allowed because connection degradation is actionable state, and the retry remains a normal button.
 - Toast: `#toast`; it is an overlay, so it may use the one soft overlay shadow but no saturated fill.
@@ -131,6 +134,8 @@ Ghostty's ANSI palette in `hub-web/src/terminal/ghostty-adapter.ts` is terminal 
 - ❌ Never use font weight above 600 or add an unscaled one-off display size.
 - ✅ Use 12px padding for cards/rows, 16px for panels, and 8px gaps between panes.
 - ❌ Never add off-grid spacing or radii other than 6px, 8px, and 999px.
+- ✅ Hide speech controls when secure-context/browser detection fails and keep the same editable textarea and explicit Send path after dictation.
+- ❌ Never auto-send a speech transcript, nag after mic denial, or remove the one-tap keyboard fallback on phone.
 - ✅ Separate shell regions with the graphite surface ramp and the 8px root gutter.
 - ❌ Never restore full-height 1px column borders or shadows on non-overlay surfaces.
 - ✅ Change `hub-web/src/styles.css`, then let the integration owner rebuild distribution assets once.

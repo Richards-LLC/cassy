@@ -35,6 +35,10 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_GHA_VERSION: "cas-v2"
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
@@ -248,6 +252,8 @@ jobs:
     name: Clippy (advisory, compiles only — no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
@@ -256,11 +262,23 @@ jobs:
         with:
           submodules: recursive
 
+      - id: tree-dedupe
+        name: Check for protected-PR validation of this tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-ci-tree-validation.sh
+
+      - name: Report deduplicated heavy validation
+        if: steps.tree-dedupe.outputs.run-heavy == 'false'
+        run: echo "Skipping Clippy; this tree was validated by ${{ steps.tree-dedupe.outputs.prior-run-url }}"
+
       - uses: ./.github/actions/setup-rust-linux
+        if: steps.tree-dedupe.outputs.run-heavy != 'false'
         with:
           cache-key: clippy
 
       - name: Clippy (report warnings)
+        if: steps.tree-dedupe.outputs.run-heavy != 'false'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo clippy -p cas --all-targets
@@ -355,6 +373,44 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas --no-default-features
 
+  # A receipt is trustworthy only after every per-tree PR lane passes. The
+  # artifact name is the checked-out Git tree, so a merge commit with identical
+  # contents can reuse it even though the commit SHA changed.
+  record-pr-validation:
+    name: Record protected PR tree validation
+    if: >-
+      github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch
+      && needs.fast-validation.result == 'success'
+      && needs.macos-check.result == 'success'
+      && needs.clippy.result == 'success'
+      && needs.test-compile-guard.result == 'success'
+    needs: [fast-validation, macos-check, clippy, test-compile-guard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - id: tree
+        name: Compute validated tree receipt
+        run: |
+          tree_hash="$(git rev-parse 'HEAD^{tree}')"
+          echo "hash=$tree_hash" >> "$GITHUB_OUTPUT"
+          printf 'tree=%s\ncommit=%s\nrun=%s/actions/runs/%s\n' \
+            "$tree_hash" "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.server_url }}/${{ github.repository }}" "${{ github.run_id }}" \
+            > pr-validation-receipt.txt
+
+      - name: Publish tree validation receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-validated-tree-${{ steps.tree.outputs.hash }}
+          path: pr-validation-receipt.txt
+          retention-days: 30
+          if-no-files-found: error
+
   # ┌───────────────────────────────────────────────────────────────────────┐
   # │ THIS JOB RUNS NO TESTS. Its green means "the test binaries still      │
   # │ compile" — nothing about whether they pass.                           │
@@ -370,6 +426,8 @@ jobs:
     name: Test Compile Guard (compile-only, executes nothing)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
@@ -378,13 +436,25 @@ jobs:
         with:
           submodules: recursive
 
+      - id: tree-dedupe
+        name: Check for protected-PR validation of this tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-ci-tree-validation.sh
+
+      - name: Report deduplicated heavy validation
+        if: steps.tree-dedupe.outputs.run-heavy == 'false'
+        run: echo "Skipping test compilation; this tree was validated by ${{ steps.tree-dedupe.outputs.prior-run-url }}"
+
       - uses: ./.github/actions/setup-rust-linux
+        if: steps.tree-dedupe.outputs.run-heavy != 'false'
         with:
           cache-key: test-compile-guard
 
       # --no-run COMPILES the test binaries and executes nothing. A green here
       # says the tests still build; it says nothing about whether they pass.
       - name: Compile tests only (--no-run, executes nothing)
+        if: steps.tree-dedupe.outputs.run-heavy != 'false'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --no-run
@@ -406,8 +476,6 @@ jobs:
     name: Panic Isolation — release profile (named subset, not the suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push'
-      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -430,8 +498,6 @@ jobs:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push'
-      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -462,8 +528,6 @@ jobs:
     name: Build Benchmark & Timings (measurement only, no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push'
-      && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     # This job measures a genuinely cold compiler. Letting the repaired remote
     # sccache serve objects after `cargo clean` would turn the benchmark into a

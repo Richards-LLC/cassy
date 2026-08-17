@@ -169,20 +169,82 @@ require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required Fast Validation r
 require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed full suite'
 require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation rejects failed doctests'
 
-# Main PRs schedule only the required Fast Validation lanes and macOS Check.
-# The scoped subset is deliberately excluded, and advisory/release jobs remain
-# push/schedule-only, so a non-required job cannot consume a PR runner first.
+# Main PRs validate the reusable compile surfaces while the release-profile
+# panic probes and cold benchmark remain schedule/manual workloads.
 require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane skips main PRs'
-for job in clippy test-compile-guard panic-isolation-release panic-isolation-release-fast build-benchmark; do
+for job in clippy test-compile-guard; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"
     require_text "$block" "github.event_name == 'schedule'" "$job runs on schedule"
     require_text "$block" "github.event_name == 'workflow_dispatch'" "$job supports supervisor dispatch"
-    require_absent "$block" "github.event_name == 'pull_request'" "$job cannot run on PRs"
+    require_text "$block" "github.event_name == 'pull_request'" "$job validates protected PR trees"
+    require_text "$block" 'github.base_ref == github.event.repository.default_branch' "$job targets the protected PR base"
     require_absent "$block" 'refs/heads/epic/' "$job cannot run on epic pushes"
     require_absent "$block" 'refs/heads/factory/' "$job cannot run on factory pushes"
     require_absent "$block" 'refs/tags/' "$job cannot run on tag pushes"
+    require_text "$block" 'id: tree-dedupe' "$job checks for an identical PR-validated tree first"
+    require_text "$block" 'scripts/check-ci-tree-validation.sh' "$job uses the shared fail-closed tree guard"
+    require_text "$block" "steps.tree-dedupe.outputs.run-heavy != 'false'" "$job gates expensive work on the tree receipt"
+    require_text "$block" 'steps.tree-dedupe.outputs.prior-run-url' "$job logs the validating run URL when deduped"
 done
+
+for job in panic-isolation-release panic-isolation-release-fast build-benchmark; do
+    block="$(job_block "$job")"
+    require_text "$block" "github.event_name == 'schedule'" "$job runs on schedule"
+    require_text "$block" "github.event_name == 'workflow_dispatch'" "$job supports supervisor dispatch"
+    require_absent "$block" 'refs/heads/main' "$job does not consume runners on ordinary main pushes"
+    require_absent "$block" "github.event_name == 'pull_request'" "$job does not delay PR validation"
+done
+
+receipt_job="$(job_block record-pr-validation)"
+require_text "$ci_text" 'actions: read' 'CI may query validation receipt artifacts'
+require_text "$receipt_job" 'needs: [fast-validation, macos-check, clippy, test-compile-guard]' 'tree receipt waits for every per-tree validation lane'
+require_text "$receipt_job" "needs.fast-validation.result == 'success'" 'tree receipt requires successful Fast Validation'
+require_text "$receipt_job" "needs.macos-check.result == 'success'" 'tree receipt requires successful macOS Check'
+require_text "$receipt_job" "needs.clippy.result == 'success'" 'tree receipt requires successful Clippy'
+require_text "$receipt_job" "needs.test-compile-guard.result == 'success'" 'tree receipt requires successful test compilation'
+require_text "$receipt_job" "git rev-parse 'HEAD^{tree}'" 'tree receipt keys exact Git contents'
+require_text "$receipt_job" 'name: pr-validated-tree-${{ steps.tree.outputs.hash }}' 'tree receipt artifact is named by tree hash'
+
+tree_guard="$repo_root/scripts/check-ci-tree-validation.sh"
+guard_tmp="$(mktemp -d)"
+mkdir -p "$guard_tmp/bin"
+cat >"$guard_tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
+case "${FAKE_GH_MODE:?}:$*" in
+  hit:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":123}}]}' ;;
+  hit:*actions/runs/123*) printf '%s\n' '{"event":"pull_request","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/123"}' ;;
+  wrong-event:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":456}}]}' ;;
+  wrong-event:*actions/runs/456*) printf '%s\n' '{"event":"push","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/456"}' ;;
+  miss:*actions/artifacts*) printf '%s\n' '{"artifacts":[]}' ;;
+  error:*) exit 1 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$guard_tmp/bin/gh"
+
+guard_tree="$(git -C "$repo_root" rev-parse 'HEAD^{tree}')"
+run_guard() {
+    local mode="$1"
+    local output="$guard_tmp/$mode.output"
+    : >"$output"
+    GITHUB_OUTPUT="$output" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+        GITHUB_REPOSITORY=example/repo FAKE_GH_MODE="$mode" FAKE_GH_LOG="$guard_tmp/gh.log" \
+        PATH="$guard_tmp/bin:$PATH" "$tree_guard" >/dev/null
+    cat "$output"
+}
+
+hit_output="$(run_guard hit)"
+require_text "$hit_output" 'run-heavy=false' 'matching successful PR receipt skips heavy work'
+require_text "$hit_output" 'prior-run-url=https://example.test/actions/runs/123' 'matching receipt exposes the prior run URL'
+require_text "$(<"$guard_tmp/gh.log")" "pr-validated-tree-$guard_tree" 'tree lookup queries the exact current Git tree'
+for mode in miss wrong-event error; do
+    output_path="$(run_guard "$mode")"
+    require_text "$output_path" 'run-heavy=true' "$mode receipt evidence fails closed to heavy work"
+    require_absent "$output_path" 'run-heavy=false' "$mode receipt evidence never dedupes"
+done
+rm -rf "$guard_tmp"
 
 all_actions="$(<"$setup")$(<"$ci")$(<"$release")"
 require_text "$all_actions" 'mozilla-actions/sccache-action@v0.0.11' 'cache-v2-capable sccache action is pinned'

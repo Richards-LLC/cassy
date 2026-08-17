@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Historical CAS operational vector index — 2026-08-17</title>
+  <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfd;--panel:#fff;--text:#17202a;--muted:#52606d;--line:#7b8794;--accent:#2457a7;--good:#176b3a;--warn:#8a4b08;--bad:#a22222;--soft:#eaf1fb}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}header,main,footer{max-width:1120px;margin:auto;padding:1.25rem}header{border-bottom:3px solid var(--accent)}h1{font-size:clamp(2rem,5vw,3.8rem);line-height:1.05;margin:.4rem 0}h2{margin-top:2.5rem;border-bottom:1px solid var(--line);padding-bottom:.35rem}h3{margin-top:1.7rem}.skip{position:absolute;left:-9999px}.skip:focus{left:1rem;top:1rem;background:var(--panel);padding:.6rem;z-index:10;outline:3px solid var(--accent)}a{color:var(--accent)}:focus-visible{outline:3px solid var(--accent);outline-offset:2px}.lead{font-size:1.25rem;max-width:78ch}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.8rem;margin:1rem 0}.card{background:var(--panel);border:1px solid var(--line);border-left:5px solid var(--accent);padding:1rem;border-radius:.35rem}.card strong{display:block;font-size:1.65rem;font-variant-numeric:tabular-nums}.table-wrap{overflow-x:auto;margin:1rem 0}table{border-collapse:collapse;width:100%;background:var(--panel);font-variant-numeric:tabular-nums}caption{text-align:left;font-weight:700;margin-bottom:.4rem}th,td{border:1px solid var(--line);padding:.55rem .65rem;text-align:left;vertical-align:top}thead th{background:var(--soft)}td.num,th.num{text-align:right}.total{font-weight:700;border-top:2px solid var(--text)}blockquote{border-left:5px solid var(--accent);margin:1rem 0;padding:.4rem 1rem;background:var(--panel)}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#111827;color:#f9fafb;padding:1rem;border-radius:.35rem}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}figure{margin:1.4rem 0;padding:1rem;border:1px solid var(--line);background:var(--panel);break-inside:avoid}figure svg{width:100%;height:auto}.chart-label{fill:var(--text);font:14px system-ui}.bar-kept{fill:var(--accent)}.bar-removed{fill:none;stroke:var(--warn);stroke-width:2}.zero{stroke:var(--line);stroke-width:1}figcaption,.provenance{color:var(--muted);font-size:.9rem}details{border:1px solid var(--line);padding:.65rem;margin:.7rem 0;background:var(--panel)}summary{font-weight:700;cursor:pointer}.status{font-weight:700}.status.open{color:var(--warn)}.status.covered{color:var(--good)}footer{border-top:1px solid var(--line);color:var(--muted)}
+@media(prefers-color-scheme:dark){:root{--bg:#111827;--panel:#182235;--text:#f3f4f6;--muted:#c3cad5;--line:#8995a6;--accent:#3f83d6;--good:#71d99d;--warn:#d57420;--bad:#ff9696;--soft:#24334d}}
+@media(max-width:520px){header,main,footer{padding:1rem}th,td{padding:.45rem;font-size:.9rem}.cards{grid-template-columns:1fr 1fr}.card strong{font-size:1.35rem}}
+@media print{:root{--bg:#fff;--panel:#fff;--text:#000;--muted:#333;--line:#555;--accent:#174a8b;--soft:#eee}body{font-size:10.5pt}header,main,footer{max-width:none;padding:.4in}a[href^="http"]::after{content:" (" attr(href) ")";font-size:8pt}.table-wrap{overflow:visible}table{table-layout:fixed;font-size:7.5pt}th,td{overflow-wrap:anywhere;word-break:break-word;padding:.25rem}thead{display:table-header-group}tr,figure,.card,details{break-inside:avoid}details{display:block}details>*{display:block!important}.cards{grid-template-columns:repeat(4,1fr)}pre{background:#fff;color:#000;border:1px solid #555}}
+</style>
+
+</head>
+<body><a class="skip" href="#main">Skip to report</a><header><p>CAS operational intelligence · frozen evidence artifact</p></header><main id="main">
+<h1 id="historical-cas-operational-vector-index">Historical CAS
+operational vector index</h1>
+<p class="lead"><strong>Headline finding.</strong> Structural normalization removed <strong>92.17%</strong> of 1,033,752 candidate evidence chunks before embedding, turning 3.03 GB of CAS operational sources into 80,951 provenance-bearing semantic units without adding anything to live CAS search.</p>
+
+<div class="cards">
+<div class="card"><strong>3.03 GB</strong>eligible frozen source data<br><small>cut off 2026-08-17 13:44:57 UTC</small></div>
+<div class="card"><strong>80,951</strong>unique semantic chunks<br><small>from 1,033,752 candidates</small></div>
+<div class="card"><strong>92.17% ↓</strong>candidate reduction<br><small>952,801 repeats collapsed</small></div>
+<div class="card"><strong>32,433</strong>redactions<br><small>secrets and email addresses before embedding</small></div>
+</div>
+
+<h2 id="overview">Overview</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th style="text-align: right;">Current</th>
+<th style="text-align: right;">Baseline</th>
+<th style="text-align: right;">Absolute variance</th>
+<th style="text-align: right;">Percent variance</th>
+<th style="text-align: right;">Sample</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Eligible source bytes</td>
+<td style="text-align: right;">3,032,566,716</td>
+<td style="text-align: right;">1,000,000,000 task estimate</td>
+<td style="text-align: right;">+2,032,566,716</td>
+<td style="text-align: right;">+203.26%</td>
+<td style="text-align: right;">1 snapshot + 1,510 files</td>
+</tr>
+<tr>
+<td>Unique chunks sent for embedding</td>
+<td style="text-align: right;">80,951</td>
+<td style="text-align: right;">1,033,752 candidates</td>
+<td style="text-align: right;">-952,801</td>
+<td style="text-align: right;">-92.17%</td>
+<td style="text-align: right;">1,033,752 candidates</td>
+</tr>
+<tr>
+<td>Estimated embedding tokens</td>
+<td style="text-align: right;">13,530,757</td>
+<td style="text-align: right;">unfiltered estimate¹</td>
+<td style="text-align: right;">-744,744,243</td>
+<td style="text-align: right;">-98.22%</td>
+<td style="text-align: right;">54,123,027 retained characters</td>
+</tr>
+<tr>
+<td>Provider-list-price equivalent</td>
+<td style="text-align: right;">$1.759</td>
+<td style="text-align: right;">$97.27 unfiltered¹</td>
+<td style="text-align: right;">-$95.51</td>
+<td style="text-align: right;">-98.19%</td>
+<td style="text-align: right;">$0.13 / million tokens</td>
+</tr>
+</tbody>
+</table></div>
+<p>¹ The unfiltered estimate uses the deliberately conservative
+four-bytes-per-token approximation over 3.03 GB. It is a comparison
+model, not a measured tokenizer count. Sources:
+<code>full-prepare.json</code>; <a
+href="https://platform.openai.com/docs/models/text-embedding-3-large">OpenAI's
+<code>text-embedding-3-large</code> model page</a>, checked
+2026-08-17.</p>
+<figure aria-describedby="reduction-summary">
+<svg viewBox="0 0 820 180" role="img" aria-labelledby="reduction-title reduction-desc">
+<title id="reduction-title">Normalization removed 92.17% of candidate chunks before embedding</title>
+<desc id="reduction-desc">An outlined baseline bar represents 1,033,752 candidate chunks. A solid bar occupies 7.83 percent of that width and represents the 80,951 unique chunks retained for embedding.</desc>
+<rect class="bar-removed" x="170" y="48" width="600" height="42" rx="3"/>
+<rect class="bar-kept" x="170" y="48" width="47" height="42" rx="3"/>
+<text class="chart-label" x="10" y="74">Candidates</text><text class="chart-label" x="780" y="74" text-anchor="end">1,033,752</text>
+<path class="zero" d="M217 40 V115"/><text class="chart-label" x="225" y="112">80,951 kept (7.83%)</text>
+<text class="chart-label" x="170" y="145">952,801 collapsed before embedding (92.17% reduction)</text>
+</svg>
+<figcaption id="reduction-summary">Candidate-to-unique variance. Source: `historical_vector_index.py prepare`, frozen cutoff 2026-08-17T13:44:57Z; extracted 2026-08-17.</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th style="text-align: right;">Chunks</th>
+<th style="text-align: right;">Share of candidate baseline</th>
+<th>Encoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Semantic candidates after structural filtering</td>
+<td style="text-align: right;">1,033,752</td>
+<td style="text-align: right;">100.00%</td>
+<td>outlined baseline</td>
+</tr>
+<tr>
+<td>Repeats/boilerplate/storm instances collapsed</td>
+<td style="text-align: right;">952,801</td>
+<td style="text-align: right;">92.17%</td>
+<td>removed variance</td>
+</tr>
+<tr>
+<td>Unique chunks retained</td>
+<td style="text-align: right;"><strong>80,951</strong></td>
+<td style="text-align: right;"><strong>7.83%</strong></td>
+<td>solid actual</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="method">Method</h2>
+<h3 id="fixed-cutoff-and-read-only-snapshot">Fixed cutoff and read-only
+snapshot</h3>
+<p>The corpus cutoff is <strong>2026-08-17T13:44:57Z</strong>. The live
+coordination database was never queried for analysis and was never
+written. <code>cas.db</code>, <code>cas.db-wal</code>, and
+<code>cas.db-shm</code> were filesystem-copied to the task artifact
+root, opened with SQLite <code>mode=ro</code>, and passed
+<code>PRAGMA integrity_check</code> (<code>ok</code>). SHA-256
+receipts:</p>
+<ul>
+<li>database:
+<code>718709c7eff20f48c16c547337b16addbf81aba27c5079e362124128a065c786</code></li>
+<li>WAL:
+<code>94dd799bff9b28775949c51b3b3068c7376cc0a6a462b378e6f7ae25d243f2a8</code></li>
+<li>SHM:
+<code>82041a3b79f1ab2b738cc44304d917e67d44a8bde9395a60623fa248b1e62ca6</code></li>
+</ul>
+<p>Rows and transcript/log events after the cutoff are excluded by
+timestamp. Grok's canonical chat history does not carry reliable per-row
+timestamps; its files were complete before the cutoff and this
+limitation is retained in provenance as <code>unattributed</code> rather
+than assigned a guessed epoch.</p>
+<h3 id="source-inventory-before-filtering">Source inventory before
+filtering</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Source</th>
+<th style="text-align: right;">Discovery population</th>
+<th style="text-align: right;">Eligible canonical population</th>
+<th style="text-align: right;">Bytes embedded from</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Coordination snapshot (<code>db</code> + WAL + SHM)</td>
+<td style="text-align: right;">3 files</td>
+<td style="text-align: right;">3 files</td>
+<td style="text-align: right;">637,929,328</td>
+</tr>
+<tr>
+<td>Claude CAS transcripts</td>
+<td style="text-align: right;">628 files</td>
+<td style="text-align: right;">628 files</td>
+<td style="text-align: right;">464,310,658</td>
+</tr>
+<tr>
+<td>Codex transcript store</td>
+<td style="text-align: right;">2,018 files / 4,685,246,440 bytes</td>
+<td style="text-align: right;">821 CAS-cwd sessions</td>
+<td style="text-align: right;">1,888,567,587</td>
+</tr>
+<tr>
+<td>Grok CAS transcript representations</td>
+<td style="text-align: right;">71 files / 100,708,411 bytes</td>
+<td style="text-align: right;">13 canonical
+<code>chat_history.jsonl</code> files</td>
+<td style="text-align: right;">10,682,798</td>
+</tr>
+<tr>
+<td>Daemon/factory logs</td>
+<td style="text-align: right;">48 files</td>
+<td style="text-align: right;">48 files</td>
+<td style="text-align: right;">31,076,345</td>
+</tr>
+<tr>
+<td><strong>Total canonical input</strong></td>
+<td style="text-align: right;"></td>
+<td style="text-align: right;"><strong>1,510 files +
+snapshot</strong></td>
+<td style="text-align: right;"><strong>3,032,566,716</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>Codex eligibility is determined from <code>session_meta.cwd</code>
+under <code>/Petrastella/cas-src</code>; other projects are inventoried
+but never parsed into the index. Grok's 58 <code>events</code>,
+<code>updates</code>, and <code>rewind_points</code> files (90,025,613
+bytes) are alternate serializations of the 13 canonical chat histories
+and are structurally excluded before text extraction.</p>
+<h3 id="structural-preprocessing">Structural preprocessing</h3>
+<p>The reproducible builder performs these operations in order:</p>
+<ol type="1">
+<li>Extract natural-language task, task-note/event, delivery message,
+canonical user/assistant transcript, and log-message text while
+excluding system/developer/tool payloads.</li>
+<li>Strip deterministic harness blocks
+(<code>skills_instructions</code>, permissions, environment, git status,
+system reminders) and transport provenance wrappers.</li>
+<li>Redact bearer/API tokens, private-key blocks, explicit
+password/secret assignments, and email addresses.</li>
+<li>Split retained text into at most 3,600-character chunks with
+240-character overlap.</li>
+<li>Normalize volatile hashes, identifiers, durations, numeric counts,
+and absolute paths for the deduplication key; preserve the unnormalized
+redacted text for retrieval.</li>
+<li>Store one <code>chunks</code> row per unique normalized hash and one
+<code>occurrences</code> row for every source occurrence. This collapses
+storms without discarding provenance or frequency.</li>
+<li>Attach source, session, task, worker, timestamp, privacy scope, and
+deployed-binary epoch to every occurrence. Mixed-version intervals are
+labeled <code>mixed:&lt;versions&gt;</code>, not treated as
+post-fix.</li>
+</ol>
+<p>The index is a standalone SQLite artifact at
+<code>~/.cas/artifacts/cas-c505/frozen-index/index.sqlite3</code>. It is
+never registered beneath project <code>.cas/index</code>, the
+personal/global knowledge cache, the history namespace, or the
+code-vector cache. It therefore cannot contribute hits to live memory,
+knowledge, history, or code search.</p>
+<h3 id="privacy-and-embedding-receipt">Privacy and embedding
+receipt</h3>
+<p>The explicit task authorization covers one fixed historical embedding
+build. Text is redacted locally before the request. The CAS cloud
+contract maps <code>cas-embed-v1</code> to OpenAI
+<code>text-embedding-3-large</code> at 1,024 dimensions; the committed
+cloud response states that the endpoint persists neither text nor
+vectors and retains only request metadata (count, model, duration). The
+local artifact retains the returned vectors and the project-private
+provenance. It must not be published outside the task artifact
+boundary.</p>
+<h2 id="results">Results</h2>
+<h3 id="corpus-reduction-by-source">Corpus reduction by source</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>First-seen source kind</th>
+<th style="text-align: right;">Unique chunks</th>
+<th style="text-align: right;">Source occurrences</th>
+<th style="text-align: right;">Collapse signal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Codex transcript</td>
+<td style="text-align: right;">22,486</td>
+<td style="text-align: right;">25,798</td>
+<td style="text-align: right;">12.84% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Daemon log</td>
+<td style="text-align: right;">16,358</td>
+<td style="text-align: right;">70,627</td>
+<td style="text-align: right;">76.84% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Coordination event</td>
+<td style="text-align: right;">15,937</td>
+<td style="text-align: right;">882,733</td>
+<td style="text-align: right;">98.19% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Claude transcript</td>
+<td style="text-align: right;">13,518</td>
+<td style="text-align: right;">41,646</td>
+<td style="text-align: right;">67.54% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Task</td>
+<td style="text-align: right;">5,183</td>
+<td style="text-align: right;">5,185</td>
+<td style="text-align: right;">0.04% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Supervisor queue</td>
+<td style="text-align: right;">3,720</td>
+<td style="text-align: right;">3,852</td>
+<td style="text-align: right;">3.43% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Prompt queue</td>
+<td style="text-align: right;">3,205</td>
+<td style="text-align: right;">3,367</td>
+<td style="text-align: right;">4.81% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td>Grok transcript</td>
+<td style="text-align: right;">544</td>
+<td style="text-align: right;">544</td>
+<td style="text-align: right;">0.00% fewer unique than occurrences</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td style="text-align: right;"><strong>80,951</strong></td>
+<td style="text-align: right;"><strong>1,033,752</strong></td>
+<td style="text-align: right;"><strong>92.17% fewer unique than
+occurrences</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>The event table supplies 85.39% of occurrences but only 19.69% of
+unique chunks. That is the quantitative reason structural deduplication
+had to precede embedding: raw event counts would have spent almost the
+entire budget on repeated lifecycle text.</p>
+<h3 id="index-build-and-retrieval-performance">Index build and retrieval
+performance</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Measure</th>
+<th style="text-align: right;">Result</th>
+<th>Receipt</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Embedded chunks</td>
+<td style="text-align: right;">80,951 / 80,951</td>
+<td>zero pending; SQLite integrity <code>ok</code></td>
+</tr>
+<tr>
+<td>Successful embedding requests</td>
+<td style="text-align: right;">2,530</td>
+<td>maximum 32 inputs/request</td>
+</tr>
+<tr>
+<td>Provider failures</td>
+<td style="text-align: right;">1 transient HTTP 502</td>
+<td>failed batch wrote nothing; resume completed 823 pending chunks in
+26 requests</td>
+</tr>
+<tr>
+<td>Full embedding wall time</td>
+<td style="text-align: right;">53 min 11 sec</td>
+<td>52:39.83 initial run + 30.96 sec resumable tail</td>
+</tr>
+<tr>
+<td>Frozen index size</td>
+<td style="text-align: right;">616,759,296 bytes</td>
+<td>588.19 MiB standalone SQLite file</td>
+</tr>
+<tr>
+<td>Local full-index ranking latency</td>
+<td style="text-align: right;">2.23–2.54 sec/query</td>
+<td>median 2.27 sec over eight labels; query-embedding network time
+excluded</td>
+</tr>
+<tr>
+<td>Evaluation run</td>
+<td style="text-align: right;">24.16 sec</td>
+<td>one batch query-embedding request + eight lexical/vector/hybrid
+ranks</td>
+</tr>
+</tbody>
+</table></div>
+<p>The only provider failure occurred after 80,128 vectors had
+committed. Because a batch writes vectors and <code>embedded=1</code>
+flags in one SQLite transaction, the failed batch left 823 chunks
+pending and the resume embedded only those chunks. The builder now
+applies bounded exponential retry (four retries after the first attempt)
+in addition to resumability.</p>
+<h3 id="labeled-lexical-vector-and-hybrid-queries">Labeled lexical,
+vector, and hybrid queries</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Lexical lead</th>
+<th>Vector lead</th>
+<th>Hybrid judgment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Silent delivery and replay</td>
+<td>live transcript evidence (<code>cas-20ac</code>) and task
+<code>cas-6ad2</code></td>
+<td>lifecycle events for <code>cas-6ad2</code></td>
+<td><strong>Best:</strong> task narrative plus two independent
+acknowledged-then-replayed samples</td>
+</tr>
+<tr>
+<td>Poll-tick redelivery storm</td>
+<td>exact GH #166 task <code>cas-5c50</code></td>
+<td>adjacent idle-delivery tasks
+<code>cas-893c</code>/<code>cas-977e</code></td>
+<td><strong>Best:</strong> exact storm plus precursor
+<code>cas-ceae</code>; dense alone broadened too far</td>
+</tr>
+<tr>
+<td>Instruction-prefix drift</td>
+<td>exact hardcoded-prefix task <code>cas-ba76</code></td>
+<td>adjacent “tool loaded but not callable” task
+<code>cas-e7c8</code></td>
+<td><strong>Mixed:</strong> hybrid linked obsolete manifest spelling and
+harness prompt drift, but lexical was more precise</td>
+</tr>
+<tr>
+<td>Merge/close/amendment race</td>
+<td>cas-9d92 premature-close correction and lost amendments</td>
+<td>GH #101 task <code>cas-f02b</code> on missing MERGE REQUIRED
+delivery</td>
+<td><strong>Best:</strong> combines the concrete cas-9d92 incident with
+the merge-rejection family</td>
+</tr>
+<tr>
+<td>Parallel migration collision</td>
+<td>cas-6212 ledger narrative</td>
+<td>cas-6212, concurrent migration transaction evidence, and guard task
+<code>cas-b4bb</code></td>
+<td><strong>Best:</strong> promoted the actual uniqueness-guard fix to
+hybrid rank 2</td>
+</tr>
+<tr>
+<td>Missed harness mirror</td>
+<td>transcript statements about aligned mirrors</td>
+<td>capability-parity task <code>cas-cc8c</code></td>
+<td><strong>Best:</strong> combined the parity epic with wrong-prefix
+task <code>cas-2c61</code></td>
+</tr>
+<tr>
+<td>Workspace-contract conflict</td>
+<td>repeated sanctioned-fallback transcripts</td>
+<td>the same recovery family</td>
+<td><strong>Equivalent:</strong> exact vocabulary already made lexical
+sufficient; no dense-only gain</td>
+</tr>
+<tr>
+<td>Withdrawn missing-code-path claim</td>
+<td>unrelated reconciliation prose</td>
+<td>adjacent “evidence not reproduction” and later-defect caveats</td>
+<td><strong>Safety failure:</strong> neither ranker surfaced the
+authoritative correction; current source inspection was required</td>
+</tr>
+</tbody>
+</table></div>
+<p>In 31 of 40 vector top-five chunk positions, the exact chunk was
+absent from the lexical top 50. That number measures <em>novel
+chunks</em>, not 31 proven new incidents: lifecycle rows for a task can
+be different chunks from its task narrative. Human adjudication found
+genuine cross-wording value in the merge, migration, and mirror
+families; it also found dense over-broadening in the storm/prefix
+queries and a correction-retrieval failure in the withdrawn-claim
+query.</p>
+<h3 id="what-semantic-search-added">What semantic search added</h3>
+<p>SQL, grep, and exact-hash baselines remain superior for counts, state
+transitions, and duplicate rates. Semantic search added three narrower
+capabilities:</p>
+<ol type="1">
+<li><strong>Symptom-family expansion.</strong> “Close before merge, then
+discover amendments” retrieved both the cas-9d92 incident and the
+separately worded GH #101 missing-MERGE-REQUIRED family. Exact SQL can
+count either state, but it cannot propose that relationship.</li>
+<li><strong>Observation → guard association.</strong> The parallel-lane
+narrative retrieved <code>cas-b4bb</code>, the build-time uniqueness
+guard, without requiring the query to name migration 222, GH #181, or
+the test function. Hybrid ranking kept the exact cas-6212 ledger first
+and raised the guard to second.</li>
+<li><strong>Cross-harness drift association.</strong> The mirror query
+joined worker statements about keeping copies aligned, the
+<code>cas-cc8c</code> capability-parity task, and the
+<code>cas-2c61</code> wrong-prefix task. The common concept is harness
+divergence, not a shared exact phrase.</li>
+</ol>
+<p>What it did <strong>not</strong> add is equally important. Dense
+retrieval did not reliably distinguish a repeated withdrawn claim from
+its later correction. The correction was established only by current
+source (<code>SurfacingSource::HookSurfaced</code>) and the explicit
+inbox-poll non-ack contract. The operational index is therefore a
+candidate generator; hybrid/current-code evidence is the decision
+surface.</p>
+<h3 id="cross-channel-association">Cross-channel association</h3>
+<p>The frozen operational index is intentionally only one evidence
+channel. The labeled queries were also checked against the existing CAS
+surfaces:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operational association</th>
+<th>Memory/knowledge</th>
+<th>Task/issue</th>
+<th>Code/symbol</th>
+<th>Commit/provenance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Harness-prefix drift</td>
+<td>memory <code>2026-08-06-19</code>; knowledge page on three-harness
+diaries</td>
+<td><code>cas-2c61</code>, <code>cas-48aa</code>,
+<code>cas-703a</code></td>
+<td>harness-aware prefix guards and builtin parity tests</td>
+<td><code>0b074b23</code> fixed ~25 Codex skill files;
+<code>1cda0319</code> made the wrong change and <code>8fd6cecf</code>
+reverted it two minutes later</td>
+</tr>
+<tr>
+<td>Parallel migration-ID collision</td>
+<td>memory <code>2026-08-08-269</code> on parallel same-file lanes</td>
+<td>cas-6212 migration ledger notes; existing GH #181
+recommendation</td>
+<td><code>Migration.id</code> and <code>test_migration_ids_unique</code>
+(<code>crates/cas-core/src/migration/migrations/mod.rs</code>)</td>
+<td>history search exposes migration commits but only 15.26% exact
+task-provenance coverage</td>
+</tr>
+<tr>
+<td>Silent delivery / replay</td>
+<td>cas-9d92 decision and correction record</td>
+<td>GH #155/#160 and tasks <code>cas-7787</code>,
+<code>cas-9d92</code></td>
+<td><code>SurfacingSource::HookSurfaced</code> and inbox-poll non-ack
+contract</td>
+<td>history provenance distinguishes fixes from later correction
+commits</td>
+</tr>
+<tr>
+<td>Missed harness mirror</td>
+<td>memory <code>2026-08-06-19</code>; harness diary knowledge</td>
+<td><code>cas-703a</code> flavor-drift guard, <code>cas-cc8c</code>
+capability parity</td>
+<td>three-way builtin catalogs/tests</td>
+<td><code>da6c52ee</code> adds the three-harness parity manifest</td>
+</tr>
+</tbody>
+</table></div>
+<p>This composition is more useful than concatenating every corpus into
+one vector store: operational similarity finds the symptom family, while
+the existing structured channels establish current source truth, the
+fixing commit, task/issue ownership, and provenance confidence.</p>
+<h3
+id="cas-9d92-baseline-reproduction-and-correction-integrity">cas-9d92
+baseline reproduction and correction integrity</h3>
+<p>The inherited SQL/grep baseline was rerun on the cutoff snapshot.
+Current retained rows show:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Baseline query</th>
+<th style="text-align: right;">Cutoff result</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>worker_died</code> supervisor notices unprocessed</td>
+<td style="text-align: right;">2,081 / 2,294 (90.71%)</td>
+<td>the backlog shape remains measurable; dedupe/issue review required
+before any new filing</td>
+</tr>
+<tr>
+<td><code>prompt_queue.delivery_attempts = 0</code></td>
+<td style="text-align: right;">3,292 / 3,330 (98.86%)</td>
+<td>reproduces the dead/rare instrumentation shape on the retained
+queue</td>
+</tr>
+<tr>
+<td>Undelivered messages on 2026-08-13</td>
+<td style="text-align: right;">90 / 1,199 (7.5%)</td>
+<td>later days fall to 0–0.1%; absence in a short window is not proof of
+resolution</td>
+</tr>
+<tr>
+<td>Most repeated message in 2026-08-17 log</td>
+<td style="text-align: right;">3 lines</td>
+<td>the 704,901-line 2026-08-06 storm is not present in retained current
+logs; the committed cas-9d92 report remains its durable evidence</td>
+</tr>
+</tbody>
+</table></div>
+<p>Two cas-9d92 claims are explicitly <strong>not
+reproduced</strong>:</p>
+<ul>
+<li>“There is no reconciliation code path” is withdrawn. Current source
+at <code>crates/cas-store/src/prompt_queue_store.rs:4493</code> handles
+<code>SurfacingSource::HookSurfaced</code> and stamps
+<code>acked_via='hook_surfaced'</code>.</li>
+<li>Rows obtained through <code>inbox_poll</code> do not prove
+acknowledgement is broken. The current source contract explicitly says
+that inbox polling does not acknowledge
+(<code>prompt_queue_store.rs:64</code>, <code>:4553</code>, and its
+regression test at <code>:9582</code>).</li>
+</ul>
+<p>This matters to semantic analysis: repeated historical prose can rank
+a withdrawn claim highly. A vector hit is a lead, not a verdict; current
+code and later correction events outrank similarity.</p>
+<h3 id="ranked-association-recommendations-after-dedupe">Ranked
+association recommendations after dedupe</h3>
+<ol type="1">
+<li><strong>Fold correction-aware evidence units into open task
+<code>cas-b78b</code> (P1 recommendation).</strong> Add
+<code>supersedes</code> / <code>withdrawn</code> /
+<code>contradicted_by</code> metadata and down-rank a claim when a later
+correction explicitly names it. Evidence: the eighth labeled query
+failed to retrieve cas-9d92's authoritative correction even though the
+corpus contains it. Dedupe: <code>cas-b78b</code> already owns
+evidence-unit normalization and continuous read-only ingestion, so
+filing another task would split the same layer.</li>
+<li><strong>Validate assignment artifact paths against the factory
+workspace contract (P2 new-task recommendation).</strong> At task
+assignment/spawn, reject or rewrite prescribed output paths that are
+outside the worktree, task artifact root, or harness scratchpad; surface
+the resolved <code>artifacts_root</code> in the brief. Evidence: this
+task prescribed <code>/mnt/datacube</code>, the gate correctly blocked
+it, and the supervisor confirmed the brief predated the gate. Dedupe:
+closed #196/#201/#203 cover gate enforcement and sanctioned roots, not
+stale paths embedded in task briefs.</li>
+<li><strong>Keep the delivery family closed unless new binary-epoch
+evidence reproduces it (covered; no issue).</strong> The index strongly
+clusters #70/#75/#119/#123/#124/#130/#155/#160/#165/#166/#390. Current
+retained SQL still shows large unprocessed/zero-attempt populations, but
+those fields alone do not prove the old mechanism; cas-9d92 demonstrated
+why inferring mechanism from missing data is unsafe.</li>
+<li><strong>No migration-collision issue (covered by #181 /
+<code>cas-b4bb</code>).</strong> The semantic association correctly
+found the guard and current source has
+<code>test_migration_ids_unique</code>. A new issue would be a
+duplicate.</li>
+<li><strong>No harness-mirror issue (covered by #116/#302,
+<code>cas-2c61</code>, <code>cas-703a</code>,
+<code>cas-cc8c</code>).</strong> The current three-way parity manifests
+and prefix guards are the remediation. Future observations should first
+prove a current guard escape.</li>
+<li><strong>Reuse the 92.17% structural reduction in
+<code>cas-b78b</code>, but do not turn this artifact into a
+watcher.</strong> The one-time index remains frozen by design. Any later
+continuous lane must rebuild evidence from read-only sources, retain
+correction metadata, and use a separate namespace; it must not append to
+this cutoff artifact.</li>
+</ol>
+<h2 id="threats-to-validity">Threats to validity</h2>
+<ul>
+<li><strong>Corpus growth:</strong> the task was estimated at about 1
+GB; the fixed-cutoff eligible corpus is 3.03 GB because Codex and
+factory history grew after task creation. The inventory states both the
+discovery population and the selected CAS population.</li>
+<li><strong>Snapshot time versus row update time:</strong> cutoff
+filters are applied to event creation timestamps. A row created before
+the cutoff but mutated between the cutoff and filesystem copy may
+reflect later state. Immutable historical event text and transcripts are
+unaffected; mutable queue-state metrics carry this caveat.</li>
+<li><strong>Grok timestamps:</strong> canonical Grok chat rows lack
+reliable timestamps. They preserve session/source provenance and an
+<code>unattributed</code> epoch instead of a fabricated timestamp.</li>
+<li><strong>Approximate tokens and list price:</strong> token count uses
+characters divided by four and cost uses the direct provider list price.
+The CAS service may meter differently; both are labeled estimates.</li>
+<li><strong>Dense similarity is non-causal:</strong> high cosine
+similarity associates descriptions, not mechanisms. Recommendations
+require corroboration from SQL, current code, task/issue state, and
+change history.</li>
+<li><strong>History provenance coverage:</strong> the history surface
+reports 557/3,651 exact task edges (15.26%) and 918/3,651 commits with
+any populated edge (25.14%). Missing provenance is returned honestly
+rather than treated as a negative association.</li>
+<li><strong>No continuous refresh:</strong> the artifact ends at the
+fixed cutoff. Later fixes or regressions must be checked in live
+structured channels; this index deliberately has no watcher, daemon
+hook, or model turn.</li>
+</ul>
+<h2 id="provenance-and-reproduction">Provenance and reproduction</h2>
+<ul>
+<li>Markdown source:
+<code>docs/analysis/2026-08-17-historical-operational-vector-index.md</code></li>
+<li>HTML review surface:
+<code>docs/analysis/2026-08-17-historical-operational-vector-index.html</code></li>
+<li>Builder/query script:
+<code>docs/analysis/scripts/historical_vector_index.py</code></li>
+<li>Labeled query manifest:
+<code>docs/analysis/scripts/historical_vector_queries.json</code></li>
+<li>Renderer:
+<code>docs/analysis/scripts/render_historical_vector_report.py</code></li>
+<li>Frozen index and receipts:
+<code>~/.cas/artifacts/cas-c505/frozen-index/</code> and sibling
+JSON/text receipts</li>
+<li>Source commit at analysis start:
+<code>a8052bcf20be8dca7153fc155e213bbc31ff5a23</code></li>
+<li>Worker implementation branch:
+<code>factory/swift-puma-69</code></li>
+<li>Data window: earliest retained source through
+<strong>2026-08-17T13:44:57Z</strong></li>
+</ul>
+<p>Reproduction commands:</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python3</span> docs/analysis/scripts/historical_vector_index.py inventory</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="ex">python3</span> docs/analysis/scripts/historical_vector_index.py prepare</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python3</span> docs/analysis/scripts/historical_vector_index.py embed</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="ex">python3</span> docs/analysis/scripts/historical_vector_index.py evaluate <span class="dt">\</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--queries</span> docs/analysis/scripts/historical_vector_queries.json</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="ex">python3</span> docs/analysis/scripts/render_historical_vector_report.py <span class="dt">\</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>  docs/analysis/2026-08-17-historical-operational-vector-index.md <span class="dt">\</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>  docs/analysis/2026-08-17-historical-operational-vector-index.html</span></code></pre></div>
+<p>The Exa research pass adopted two practices: template/deduplication
+before vectorization (<a href="https://arxiv.org/abs/2302.09520">iPACK,
+arXiv:2302.09520</a>) and hybrid lexical+dense retrieval with structured
+evidence kept separate (<a
+href="https://arxiv.org/abs/2506.03691">LogSage, arXiv:2506.03691</a>).
+The price receipt uses the official OpenAI model page for
+<code>text-embedding-3-large</code>, retrieved 2026-08-17. These sources
+informed the method; all CAS findings above come from the frozen local
+corpus and committed code/history channels.</p>
+</main><footer><p>Markdown source: <a href="2026-08-17-historical-operational-vector-index.md">2026-08-17-historical-operational-vector-index.md</a>. Offline, dependency-free rendering.</p></footer></body>
+</html>

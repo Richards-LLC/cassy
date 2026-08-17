@@ -32,6 +32,9 @@
 #   CAS_SRC                   Source checkout (default: ~/Petrastella/cas-src)
 #   CAS_INSTALL               Binary destination (default: ~/.local/bin/cas)
 #   CAS_PROJECT_ROOTS         Default project scan roots (default: $HOME)
+#   CAS_UPDATE_WORKTREE_ROOT  Disposable detached build worktree parent
+#                            (default: sibling .cas-update-worktrees directory)
+#   CAS_UPDATE_TARGET_DIR     Persistent Cargo target directory (default: $CAS_SRC/target)
 #
 # Test-only injection points (fixture paths; never needed by operators):
 #   CAS_UPDATE_PROC_ROOT, CAS_UPDATE_KILL_BIN, CAS_UPDATE_SESSIONS_DIR,
@@ -49,6 +52,7 @@ SESSIONS_DIR="${CAS_UPDATE_SESSIONS_DIR:-$HOME/.cas/sessions}"
 SERVER_REGISTRY_ROOTS="${CAS_UPDATE_SERVER_REGISTRY_ROOTS:-}"
 WAIT_STEPS="${CAS_UPDATE_WAIT_STEPS:-20}"
 WAIT_SLEEP="${CAS_UPDATE_WAIT_SLEEP:-0.25}"
+BUILD_WORKTREE_DIR=""
 
 BRANCH="main"
 DO_BUILD=1
@@ -488,38 +492,71 @@ build_and_install() {
   info "src: $CAS_SRC"; info "branch: $BRANCH"; info "target: $CAS_INSTALL"; info "profile: $PROFILE"
   if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
   command -v cargo >/dev/null 2>&1 || { error "cargo not on PATH"; return 1; }
-  cd "$CAS_SRC"
-  if [ -n "$(git status --porcelain 2>/dev/null | head -1)" ]; then
-    warn "Working tree is dirty; building the checked-out content"
+  local build_src="$CAS_SRC" fetched_commit="" target_hash installed_git_hash target_dirty=0
+  local worktree_root target_dir source_root_abs
+  source_root_abs="$(cd "$CAS_SRC" && pwd -P)"
+
+  if [ "$DO_PULL" = "1" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      dim "  [dry-run] git -C $CAS_SRC fetch origin $BRANCH"
+      dim "  [dry-run] git worktree add --detach <temporary> origin/$BRANCH"
+    else
+      info "Fetching origin/$BRANCH"
+      git -C "$CAS_SRC" fetch origin "$BRANCH"
+      fetched_commit="$(git -C "$CAS_SRC" rev-parse FETCH_HEAD^{commit})"
+      target_hash="$(git -C "$CAS_SRC" rev-parse --short=7 "$fetched_commit")"
+    fi
+  else
+    if [ -n "$(git -C "$CAS_SRC" status --porcelain 2>/dev/null | head -1)" ]; then
+      warn "Working tree is dirty; --no-pull builds the checked-out content"
+    fi
+    target_hash="$(git -C "$CAS_SRC" rev-parse --short=7 HEAD 2>/dev/null || true)"
+    git -C "$CAS_SRC" diff --quiet HEAD 2>/dev/null || target_dirty=1
   fi
-  local current_branch target_hash installed_git_hash target_dirty=0
-  current_branch="$(git rev-parse --abbrev-ref HEAD)"
-  [ "$current_branch" = "$BRANCH" ] || { info "Switching $current_branch -> $BRANCH"; run_cmd git checkout "$BRANCH"; }
-  if [ "$DO_PULL" = "1" ]; then info "Pulling origin/$BRANCH"; run_cmd git pull --ff-only origin "$BRANCH"; fi
 
   if [ "$DRY_RUN" != "1" ] && [ "$FORCE_BUILD" != "1" ] && [ -x "$CAS_INSTALL" ]; then
-    target_hash="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
-    git diff --quiet HEAD 2>/dev/null || target_dirty=1
     installed_git_hash="$(binary_version "$CAS_INSTALL" | grep -oE '\([a-f0-9]+(-dirty)?' | head -1 | sed 's/^(//' || true)"
     if [ -n "$target_hash" ] && [ "$target_dirty" = "0" ] && [ "$installed_git_hash" = "$target_hash" ]; then
-      info "$(binary_version "$CAS_INSTALL") — already at $BRANCH HEAD; skipping build"
+      info "$(binary_version "$CAS_INSTALL") — already at fetched origin/$BRANCH; skipping build"
       return 0
     fi
   fi
 
+  if [ "$DO_PULL" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+    worktree_root="${CAS_UPDATE_WORKTREE_ROOT:-$(dirname "$source_root_abs")/.cas-update-worktrees}"
+    mkdir -p "$worktree_root"
+    BUILD_WORKTREE_DIR="$(mktemp -d "$worktree_root/cas-update.XXXXXX")"
+    rmdir "$BUILD_WORKTREE_DIR"
+    if ! git -C "$CAS_SRC" worktree add --detach "$BUILD_WORKTREE_DIR" "$fetched_commit"; then
+      BUILD_WORKTREE_DIR=""
+      error "could not create detached build worktree"
+      return 1
+    fi
+    build_src="$BUILD_WORKTREE_DIR"
+    info "Building detached fetched commit ${target_hash:-unknown} in $build_src"
+  fi
+
   local build_log build_args=(--quiet) built_bin elapsed warn_count tmp_install
+  target_dir="${CAS_UPDATE_TARGET_DIR:-$source_root_abs/target}"
+  if [ -n "${ZIG:-}" ] && [ "${ZIG#/}" = "$ZIG" ]; then
+    # Before detached builds, cargo ran from CAS_SRC, so preserve relative ZIG
+    # values by resolving them against that checkout rather than the worktree.
+    export ZIG="$source_root_abs/$ZIG"
+  elif [ -z "${ZIG:-}" ] && [ -x "$source_root_abs/.context/zig/zig" ]; then
+    export ZIG="$source_root_abs/.context/zig/zig"
+  fi
   build_log="$(mktemp -t cas-build.XXXXXX.log)"
   if [ "$PROFILE" = "release" ]; then
-    build_args+=(--profile release-fast -p cas); built_bin="$CAS_SRC/target/release-fast/cas"
+    build_args+=(--profile release-fast -p cas); built_bin="$target_dir/release-fast/cas"
   else
-    build_args+=(-p cas); built_bin="$CAS_SRC/target/debug/cas"
+    build_args+=(-p cas); built_bin="$target_dir/debug/cas"
   fi
   step "cargo build"
   if [ "$DRY_RUN" = "1" ]; then
-    dim "  [dry-run] cargo build ${build_args[*]}"
+    dim "  [dry-run] (cd detached fetched worktree && CARGO_TARGET_DIR=$target_dir cargo build ${build_args[*]})"
   else
     local t0=$SECONDS
-    if ! cargo build "${build_args[@]}" >"$build_log" 2>&1; then
+    if ! (cd "$build_src" && CARGO_TARGET_DIR="$target_dir" cargo build "${build_args[@]}") >"$build_log" 2>&1; then
       error "cargo build failed"; tail -80 "$build_log" >&2; rm -f "$build_log"; return 1
     fi
     elapsed=$((SECONDS - t0)); warn_count="$(grep -cE '^warning:' "$build_log" || true)"
@@ -540,6 +577,7 @@ build_and_install() {
     NEW_INSTALLED_HASH="$(sha256_file "$CAS_INSTALL")"
     info "$NEW_INSTALLED_VERSION"
   fi
+  cleanup_build_worktree
 }
 
 migrate_host_db() {
@@ -619,9 +657,17 @@ print_summary() {
 }
 
 cleanup() {
+  cleanup_build_worktree
   [ -z "$OLD_PROCESS_FILE" ] || rm -f "$OLD_PROCESS_FILE"
   [ -z "$TURNOVER_RESULTS_FILE" ] || rm -f "$TURNOVER_RESULTS_FILE"
   [ -z "$SERVER_RECORD_FILE" ] || rm -f "$SERVER_RECORD_FILE"
+}
+
+cleanup_build_worktree() {
+  [ -z "$BUILD_WORKTREE_DIR" ] && return
+  git -C "$CAS_SRC" worktree remove --force "$BUILD_WORKTREE_DIR" >/dev/null 2>&1 \
+    || rm -rf "$BUILD_WORKTREE_DIR"
+  BUILD_WORKTREE_DIR=""
 }
 
 finish() {

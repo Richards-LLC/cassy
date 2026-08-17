@@ -97,6 +97,105 @@ new_fixture() {
   printf '%s' "$tmp"
 }
 
+make_build_fixture() {
+  local tmp remote seed source tools
+  tmp="$(new_fixture)"
+  remote="$tmp/origin.git"; seed="$tmp/seed"; source="$tmp/source"; tools="$tmp/tools"
+  rm -rf "$source"
+  git init --bare --initial-branch=main "$remote" >/dev/null
+  git init --initial-branch=main "$seed" >/dev/null
+  git -C "$seed" config user.email cas-update-test@example.invalid
+  git -C "$seed" config user.name 'cas-update test'
+  mkdir -p "$seed/docs/release-notes"
+  printf 'base tracked content\n' >"$seed/tracked.txt"
+  git -C "$seed" add tracked.txt
+  git -C "$seed" commit -m base >/dev/null
+  git -C "$seed" remote add origin "$remote"
+  git -C "$seed" push -u origin main >/dev/null 2>&1
+  git clone "$remote" "$source" >/dev/null 2>&1
+  git -C "$source" config user.email cas-update-test@example.invalid
+  git -C "$source" config user.name 'cas-update test'
+  git -C "$source" checkout -b operator-feature >/dev/null 2>&1
+  mkdir -p "$source/docs/release-notes"
+  mkdir -p "$source/.context/zig"
+  printf '#!/usr/bin/env bash\n' >"$source/.context/zig/zig"
+  chmod +x "$source/.context/zig/zig"
+  printf 'operator branch only\n' >"$source/local-marker"
+  git -C "$source" add local-marker
+  git -C "$source" commit -m operator-feature >/dev/null
+  printf 'operator dirty content\n' >"$source/tracked.txt"
+  printf 'operator untracked release note\n' >"$source/docs/release-notes/2026-08-16-operator.md"
+
+  printf 'upstream main content\n' >"$seed/upstream-marker"
+  printf 'upstream release note\n' >"$seed/docs/release-notes/2026-08-16-operator.md"
+  git -C "$seed" add upstream-marker docs/release-notes/2026-08-16-operator.md
+  git -C "$seed" commit -m upstream-update >/dev/null
+  git -C "$seed" push origin main >/dev/null 2>&1
+
+  mkdir -p "$tools"
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+    'printf "%s\\n" "$PWD" >>"$CAS_UPDATE_CARGO_LOG"' \
+    'printf "%s\\n" "${ZIG:-}" >>"$CAS_UPDATE_ZIG_LOG"' \
+    'mkdir -p "$CARGO_TARGET_DIR/release-fast"' \
+    'marker=checked-out' \
+    '[ -f "$PWD/upstream-marker" ] && marker=fetched' \
+    'printf "%s\\n" "#!/usr/bin/env bash" "if [ \"\${1:-}\" = --version ]; then printf \"cas build (%s)\\n\" \"$marker\"; fi" >"$CARGO_TARGET_DIR/release-fast/cas"' \
+    'chmod +x "$CARGO_TARGET_DIR/release-fast/cas"' >"$tools/cargo"
+  chmod +x "$tools/cargo"
+  printf '%s' "$tmp"
+}
+
+run_build_case() {
+  local tmp="$1" out="$2" pull="$3" force="$4"
+  (
+    export HOME="$tmp/home"
+    export CAS_INSTALL="$tmp/bin/cas"
+    export CAS_SRC="$tmp/source"
+    export CAS_UPDATE_WORKTREE_ROOT="$tmp/build-worktrees"
+    export CAS_UPDATE_CARGO_LOG="$tmp/cargo.log"
+    export CAS_UPDATE_ZIG_LOG="$tmp/zig.log"
+    export PATH="$tmp/tools:$PATH"
+    unset ZIG
+    # shellcheck source=../cas-update
+    source "$helper"
+    DO_PULL="$pull"; FORCE_BUILD="$force"; PROFILE=release
+    build_and_install
+  ) >"$out" 2>&1
+}
+
+test_build_uses_detached_fetched_worktree() {
+  local tmp out remote_short
+  tmp="$(make_build_fixture)"; out="$tmp/out"
+  if run_build_case "$tmp" "$out" 1 1 \
+    && [ "$(cat "$tmp/source/docs/release-notes/2026-08-16-operator.md")" = 'operator untracked release note' ] \
+    && [ "$(git -C "$tmp/source" branch --show-current)" = operator-feature ] \
+    && [ "$(cat "$tmp/source/tracked.txt")" = 'operator dirty content' ] \
+    && [ "$(cat "$tmp/cargo.log")" != "$tmp/source" ] \
+    && assert_contains "$tmp/cargo.log" "$tmp/build-worktrees/cas-update." \
+    && [ "$(cat "$tmp/zig.log")" = "$tmp/source/.context/zig/zig" ] \
+    && assert_contains "$tmp/bin/cas" '"fetched"' \
+    && ! git -C "$tmp/source" worktree list --porcelain | grep -Fq "$tmp/build-worktrees"; then
+    pass 'fetched builds use and clean a detached worktree without touching dirty or untracked operator checkout files'
+  else fail 'fetched builds use and clean a detached worktree without touching dirty or untracked operator checkout files'; fi
+
+  remote_short="$(git -C "$tmp/seed" rev-parse --short=7 main)"
+  make_binary "$tmp/bin/cas" "cas build ($remote_short)" current
+  : >"$tmp/cargo.log"
+  if run_build_case "$tmp" "$out" 1 0 \
+    && [ ! -s "$tmp/cargo.log" ] \
+    && assert_contains "$out" 'already at fetched origin/main; skipping build'; then
+    pass 'installed-hash short-circuit compares the fetched origin commit, not the operator checkout HEAD'
+  else fail 'installed-hash short-circuit compares the fetched origin commit, not the operator checkout HEAD'; fi
+
+  : >"$tmp/cargo.log"
+  if run_build_case "$tmp" "$out" 0 1 \
+    && [ "$(cat "$tmp/cargo.log")" = "$tmp/source" ] \
+    && assert_contains "$tmp/bin/cas" '"checked-out"'; then
+    pass '--no-pull still builds the current checked-out content directly'
+  else fail '--no-pull still builds the current checked-out content directly'; fi
+  rm -rf "$tmp"
+}
+
 test_graceful_and_forced() {
   local tmp out
   tmp="$(new_fixture)"; out="$tmp/out"
@@ -254,6 +353,7 @@ test_no_process_and_flag_semantics
 test_installer
 test_updater_ancestry_is_protected
 test_main_exit_and_help
+test_build_uses_detached_fetched_worktree
 
 if [ "$failures" -ne 0 ]; then
   printf '%s of %s tests failed\n' "$failures" "$tests" >&2

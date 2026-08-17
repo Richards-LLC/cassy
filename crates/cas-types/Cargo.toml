@@ -2,7 +2,7 @@
 name = "cas-types"
 version = "2.71.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Core types for CAS (Coding Agent System)"
 license = "MIT"
 

@@ -2,7 +2,7 @@
 name = "cas-diffs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Diff parsing, rendering, and syntax highlighting for CAS"
 license = "MIT"
 

@@ -2,7 +2,7 @@
 name = "cas-store"
 version = "2.71.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Storage layer for CAS (Coding Agent System)"
 license = "MIT"
 

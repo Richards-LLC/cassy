@@ -89,7 +89,7 @@ The MCP server is always included because factory agents depend on `cas serve`; 
 
 ## Rust Version
 
-Minimum supported Rust version: **1.85** (edition 2024).
+Minimum supported Rust version: **1.88** (edition 2024).
 
 ## Architecture & Contributing
 

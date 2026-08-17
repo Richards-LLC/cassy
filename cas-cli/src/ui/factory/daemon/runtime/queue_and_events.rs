@@ -8513,6 +8513,86 @@ mod tests {
         );
     }
 
+    /// cas-4a4f: task prose is checked before a worker acts on a stale output
+    /// location, while an in-worktree location remains quiet.
+    #[test]
+    fn registration_brief_warns_only_for_out_of_contract_artifact_paths() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let worktree = temp.path().join("worker-worktree");
+        std::fs::create_dir(&worktree).unwrap();
+
+        let mut worker = cas_types::Agent::new("worker-id".into(), "path-worker".into());
+        worker.role = cas_types::AgentRole::Worker;
+        worker
+            .metadata
+            .insert("clone_path".into(), worktree.to_string_lossy().into_owned());
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&worker)
+            .unwrap();
+
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut stale = Task::new("cas-stale-path".into(), "stale artifact path".into());
+        stale.description = "Write the receipt to /mnt/datacube/staging/proof.json".into();
+        task_store.add(&stale).unwrap();
+        let mut clean = Task::new("cas-clean-path".into(), "clean artifact path".into());
+        clean.description = format!(
+            "Write build output to {}/proof.json",
+            worktree.display()
+        );
+        task_store.add(&clean).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "path-worker",
+            "cas-stale-path",
+            "stale artifact path",
+        )
+        .unwrap();
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "path-worker",
+            "cas-clean-path",
+            "clean artifact path",
+        )
+        .unwrap();
+
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        let stale_prompt = prompts
+            .iter()
+            .find(|prompt| prompt.prompt.contains("cas-stale-path"))
+            .expect("stale task brief");
+        let clean_prompt = prompts
+            .iter()
+            .find(|prompt| prompt.prompt.contains("cas-clean-path"))
+            .expect("clean task brief");
+        let resolved_stale_root = crate::config::resolved_factory_artifacts_root(None)
+            .join("cas-stale-path");
+        assert!(
+            stale_prompt.prompt.contains("Workspace-contract warning"),
+            "out-of-contract path must be surfaced before work begins: {}",
+            stale_prompt.prompt
+        );
+        assert!(
+            stale_prompt
+                .prompt
+                .contains(&format!("{}/", resolved_stale_root.display())),
+            "warning must name the resolved task artifacts root: {}",
+            stale_prompt.prompt
+        );
+        assert!(
+            !clean_prompt.prompt.contains("Workspace-contract warning"),
+            "in-worktree paths must not produce a stale-path warning: {}",
+            clean_prompt.prompt
+        );
+    }
+
     /// GH #286: an isolated Node worktree has no gitignored `node_modules`.
     /// The worker must see the branch-local install command in its spawn-time
     /// task brief, before it starts its task and attempts its first JS command.

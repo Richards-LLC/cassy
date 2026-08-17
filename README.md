@@ -119,12 +119,20 @@ cas knowledge search "hook scoring"
 cas knowledge read cas-kn007    # by page id, or by path: subsystem/hooks.md
 ```
 
-`build` reads the repo's own documentation, README, agent instructions, key configuration and a summary of every indexed code module, and writes prose pages as ordinary markdown under `.cas/knowledge/` — greppable, hand-editable, reviewable in a PR. Sources are fingerprinted, so a pass over an unchanged project distills nothing and costs nothing. Distillation calls a model, so it never runs on its own.
+`build` is a two-stage ingest: it collects the repo's own documentation, README, agent instructions, key configuration and a summary of every indexed code module, then asks a model to turn changed sources into concise pages. Pages live as ordinary markdown under `.cas/knowledge/` — greppable, hand-editable and reviewable in a PR — with a canonical relative path, source provenance and a fingerprint ledger behind them. An unchanged source set produces no distillation work; a removed source can cascade away pages that no longer have provenance. Distillation calls a model, so it never runs on its own.
 
-Two properties worth knowing:
+Knowledge is designed to be useful without making every prompt enormous:
 
-- **Hand-written text is never overwritten.** A page can be locked; a locked page cannot be re-distilled, garbage-collected, or overwritten by a teammate's copy arriving over sync. Text above the first generated section is treated as yours even on an unlocked page.
-- **Session start gets an index, not the bodies.** The startup briefing carries one pointer line per page — id, type, title, snippet — capped and byte-identical between runs so it does not defeat prompt caching. Bodies are pulled through the `knowledge` MCP tool only when a question needs them.
+- **Session start gets an index, not the bodies.** The startup briefing carries stable pointer lines — id, type, title and snippet — in a 600-token budget. It deliberately does not inject page bodies. Ask the `knowledge` MCP tool to `read` a known page, or `search` its titles, snippets and bodies when you do not yet know the page.
+- **Hand-written text stays yours.** A locked page is never overwritten by distillation, cascade cleanup or an incoming cloud copy. `knowledge write` creates locked pages for this reason; locking an existing page gives it the same protection. The lock travels with a synced page, so collaboration does not weaken ownership.
+
+### Bringing forward existing memory
+
+Knowledge complements persistent memory; it does not erase it. `cas memory-migrate` is dry-run first: it opens legacy stores read-only, routes and audits every discovered row before writing anything, and records a ledger, audit and quarantine report. The migration is resumable and idempotent, while the audit fails rather than silently dropping an unrouted row. Records that should remain as legacy entries stay there; the point is a safe, accountable path into durable project pages, not a destructive conversion.
+
+If you need to undo an applied migration, its rollback follows that ledger and removes only pages it can prove the migration wrote. Quarantined foreign or suspicious content is held back for review instead of being placed on the always-on project-knowledge surface.
+
+Knowledge stays local-first: the SQLite metadata and markdown bodies are the source of truth. When optional Cloud sync is configured, pages and their ownership metadata can travel to teammates; a logged-out machine still has a complete local knowledge base.
 
 ## Quick Start
 

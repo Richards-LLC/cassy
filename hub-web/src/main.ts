@@ -1190,6 +1190,11 @@ function render(captureDraft = true): void {
   const latency = machineConnectionSnapshot?.latencyMs;
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
+  // With no paired machine and no event to inspect, the canvas is the only
+  // useful surface. The rail's second pairing button and the empty attention
+  // well otherwise split a phone into three unrelated empty states.
+  const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;
+  const showSessionControls = selected !== undefined && selectedSession !== undefined;
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
   const machineLabel = selected?.label ?? "No machine";
@@ -1216,10 +1221,10 @@ function render(captureDraft = true): void {
     surfaces.clear();
   }
   app.innerHTML = `
-    <div class="shell${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}">
+    <div class="shell${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}${fleetEmpty ? " fleet-empty" : ""}">
       <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
         <div class="machine-rail">
-          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}"><svg class="commander-mark-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg></button>
+          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}"><svg class="commander-mark-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg><span class="commander-mark-label">Machines</span></button>
           <nav id="machine-rail-list" aria-label="Machines"></nav>
           <button id="pair-toggle" class="rail-control pair-machine" type="button" aria-label="Pair a machine" title="Pair a machine"><span aria-hidden="true">+</span><span class="pair-machine-label">Pair</span></button>
         </div>
@@ -1233,10 +1238,8 @@ function render(captureDraft = true): void {
       <main>
         <header class="session-header">
           <h1 class="${selectedSession ? "toolbar-session-title" : ""}">${escapeHtml(selectedSession ?? "Fleet overview")}</h1>
-          <span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span>
-          <span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span>
-          <span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected?.id ?? "")}">${latency === undefined ? "—" : `${latency}ms`}</span></span>
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button><span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button></div>
+          ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latency === undefined ? "Status unavailable" : `${latency}ms`}</span></span>` : ""}
+          <div class="actions">${sessionCommands ? '<button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>' : ""}${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}><div class="empty${selectedSession ? "" : " empty-pane-slot"}">${selectedSession ? "Connecting to terminal…" : emptyCanvasMarkup()}</div></section>
       </main>
@@ -1513,7 +1516,8 @@ function globalShortcut(event: KeyboardEvent): void {
 }
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
-  document.querySelector<HTMLButtonElement>("#command-palette-toggle")!.onclick = openCommandPalette;
+  const paletteToggle = document.querySelector<HTMLButtonElement>("#command-palette-toggle");
+  if (paletteToggle) paletteToggle.onclick = openCommandPalette;
   const palette = document.querySelector<HTMLDialogElement>("#command-palette")!;
   const closePalette = () => { commandPaletteOpen = false; palette.close(); };
   document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
@@ -1633,13 +1637,13 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     toast(reason);
     return true;
   };
-  const leaseButton = document.querySelector<HTMLButtonElement>("#lease")!;
-  leaseButton.onclick = () => {
+  const leaseButton = document.querySelector<HTMLButtonElement>("#lease");
+  if (leaseButton) leaseButton.onclick = () => {
     if (explainIfUnavailable(leaseButton)) return;
     void toggleControl(selected, lease);
   };
-  const interruptButton = document.querySelector<HTMLButtonElement>("#interrupt")!;
-  interruptButton.onclick = () => {
+  const interruptButton = document.querySelector<HTMLButtonElement>("#interrupt");
+  if (interruptButton) interruptButton.onclick = () => {
     if (explainIfUnavailable(interruptButton)) return;
     if (!selected || !selectedSession) return;
     const pane = selectedPanes.get(sessionKey(selected.id, selectedSession));

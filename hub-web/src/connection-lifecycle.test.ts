@@ -19,8 +19,8 @@ function storedMachine(credentialId: string): StoredMachine {
 }
 
 describe("Commander live connection lifecycle", () => {
-  it("stops and replaces an existing same-hub supervisor with the newly paired credential", () => {
-    const prior = storedMachine("revoked");
+  it("stops and replaces a needs-pairing supervisor with the newly paired credential", () => {
+    const prior = storedMachine("needs-pairing");
     const replacement = storedMachine("replacement");
     const events: string[] = [];
     const oldSupervisor = {
@@ -31,7 +31,7 @@ describe("Commander live connection lifecycle", () => {
     const connections = new Map([[prior.id, oldSupervisor]]);
     const connectionStates = new Map<string, ConnectionState>([[prior.id, {
       phase: "failed", stage: "auth", since: 0, attempt: 0,
-      missedHeartbeats: 0, degraded: false, authFailure: "revoked",
+      missedHeartbeats: 0, degraded: false, authFailure: "needs-pairing",
     }]]);
     const createConnection = vi.fn((machine: StoredMachine) => ({
       machine,

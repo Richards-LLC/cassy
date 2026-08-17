@@ -438,6 +438,70 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("this.callbacks.onAuthFailure?.(kind, detail)");
   });
 
+  it("turns a reachable hub with opaque authenticated reads into a re-pair stop", async () => {
+    vi.stubGlobal("window", globalThis);
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["machine-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (new URL(String(input)).pathname === "/v1/health") {
+        return { ok: true, status: 200 };
+      }
+      throw new TypeError("Failed to fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    supervisor.start();
+
+    await vi.waitFor(() => {
+      expect(callbacks.onAuthFailure).toHaveBeenCalledWith(
+        "needs-pairing",
+        "Hub is reachable but this Commander is no longer paired. Re-pair to continue.",
+      );
+    });
+    expect(supervisor.snapshot()).toMatchObject({
+      phase: "failed", stage: "auth", authFailure: "needs-pairing",
+    });
+    expect(callbacks.onState).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
+    expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
+      "/v1/health", "/v1/machine", "/v1/sessions",
+    ]);
+    const main = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(main).toContain('state.authFailure === "needs-pairing" ? "Machine needs pairing"');
+    expect(main).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
+    supervisor.stop();
+  });
+
+  it("keeps a health-probe failure in the offline dialing backoff", async () => {
+    vi.stubGlobal("window", globalThis);
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "offline-machine", label: "Offline machine", baseUrl: "https://offline.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: ["machine-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+
+    const supervisor = new HubConnectionSupervisor(machine, callbacks);
+    supervisor.start();
+
+    await vi.waitFor(() => expect(supervisor.snapshot()).toMatchObject({ phase: "backoff", stage: "dialing" }));
+    expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    supervisor.stop();
+  });
+
   it("bounds a terminal that opens but never sends its initial session state", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", globalThis);

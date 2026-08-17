@@ -7,8 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.72.0] - 2026-08-17
+
 ### Added
 - **External expertise now crosses one enforced, receipted gateway.** `cas serve` replaces the proxy's compatibility default with an exact configured `(server, tool)` allowlist at boot and reload, denies every external call when that list is empty, and refuses paid verification routes outside the registered-supervisor gateway. The first production flow reserves a durable budget receipt before `ask_viktor`, resumes timed-out runs by their stored run ID, and returns only the fail-closed external-production-verification verdict; configuration and route/budget defaults are documented in `crates/cas-mcp-proxy/README.md`.
+
+### Changed
+- **Cloud synchronization retains an auditable outcome.** Terminal task updates are guarded before they can regress, pull provenance and sync receipts surface the applied result, permanent push rejections are parked with concise errors, and canonical task identifiers remain normalized through the full sync path.
+- **Repository and release references now point at `Richards-LLC/cassy`.** Install, update, Homebrew, release, and API links follow the canonical repository home.
+- **Commander and CLI guidance better match live behavior.** Hosted Commander health checks admit the supported origin, reachable hubs clearly guide users through re-pairing, and command help exposes cloud operations while keeping internal maintenance tools out of the public surface.
+- **Supported Rust is now 1.88.** The declared MSRV and all workspace package requirements advance from 1.85 to 1.88.
+- **README documentation now explains the knowledge system.**
+
+### Fixed
+- **Factory workers see stale output instructions before acting on them.** Spawn briefs name each task's resolved durable artifact directory and warn when task prose prescribes an absolute or home-relative path outside the worktree or sanctioned artifact root.
+- **Release and test operations recover more predictably.** The repository includes an Actions-outage release fallback runbook, and PTY tests tolerate loaded runners without flaking.
 
 ## [2.71.0] - 2026-08-16
 

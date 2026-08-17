@@ -292,6 +292,7 @@ fn deliver_worker_task_brief(
          Start with `mcp__cas__task action=show id={task_id}`, then \
          `mcp__cas__task action=start id={task_id}` before you change any code."
     );
+    append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
         .ok()
         .and_then(|store| store.list(None).ok())
@@ -314,6 +315,85 @@ fn deliver_worker_task_brief(
         Some(factory_session),
         Some(&summary),
     )?)
+}
+
+/// Surface stale output-path instructions before a worker acts on them. This is
+/// deliberately advisory: task prose is historical data, while the PreToolUse
+/// gate remains the authority that enforces the workspace contract.
+fn append_workspace_contract_brief(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    task_id: &str,
+    message: &mut String,
+) {
+    let artifacts_root = crate::config::Config::load(cas_dir)
+        .ok()
+        .map(|config| {
+            crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            )
+        })
+        .unwrap_or_else(|| crate::config::resolved_factory_artifacts_root(None));
+    let task_artifacts = artifacts_root.join(task_id);
+    message.push_str(&format!(
+        "\n\nDurable artifacts for this task belong under `{}/`. Source and build output belong in the worktree.",
+        task_artifacts.display()
+    ));
+
+    let Some(task) = crate::store::open_task_store(cas_dir)
+        .ok()
+        .and_then(|store| store.get(task_id).ok())
+    else {
+        return;
+    };
+    let worktree = open_agent_store(cas_dir)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .and_then(|agents| agents.into_iter().find(|agent| agent.name == worker_name))
+        .and_then(|agent| agent.metadata.get("clone_path").cloned())
+        .map(std::path::PathBuf::from);
+    let texts = [
+        task.description,
+        task.design,
+        task.acceptance_criteria,
+        task.notes,
+    ];
+    let stale = texts
+        .iter()
+        .flat_map(|text| text.split_whitespace())
+        .map(|word| {
+            word.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | '.' | ':'))
+        })
+        .find(|word| {
+            prescribed_path_is_outside_contract(word, worktree.as_deref(), &artifacts_root)
+        });
+    if let Some(path) = stale {
+        message.push_str(&format!(
+            "\n\n⚠️ Workspace-contract warning: this task brief prescribes `{path}`, outside the worker worktree and durable artifacts root. Do not use it for output; use `{}/` instead (or the harness scratchpad only for ephemeral notes).",
+            task_artifacts.display()
+        ));
+    }
+}
+
+fn prescribed_path_is_outside_contract(
+    raw: &str,
+    worktree: Option<&std::path::Path>,
+    artifacts_root: &std::path::Path,
+) -> bool {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let path = if let Some(suffix) = raw.strip_prefix("~/") {
+        home.map(|home| home.join(suffix))
+    } else if let Some(suffix) = raw.strip_prefix("$HOME/") {
+        home.map(|home| home.join(suffix))
+    } else if raw.starts_with('/') {
+        Some(std::path::PathBuf::from(raw))
+    } else {
+        None
+    };
+    let Some(path) = path else {
+        return false;
+    };
+    !worktree.is_some_and(|root| path.starts_with(root)) && !path.starts_with(artifacts_root)
 }
 
 /// cas-2702: verify a spawn-time `task_id` pre-assignment actually landed on

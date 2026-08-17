@@ -241,10 +241,14 @@ async fn preflight<R: SessionReadModel>(
     if uri.path() == "/v1/auth/pairing/exchange" {
         return pairing_preflight(&origin, &headers);
     }
-    let allowed = state.auth.as_ref().is_some_and(|auth| {
-        auth.is_paired_origin(&origin, chrono::Utc::now())
-            .unwrap_or(false)
-    });
+    // A health probe contains only readiness data, so the reviewed hosted
+    // Commander may read it before a credential exists. All other routes
+    // still require an active paired origin.
+    let allowed = (uri.path() == "/v1/health" && valid_unpaired_health_origin(&origin))
+        || state.auth.as_ref().is_some_and(|auth| {
+            auth.is_paired_origin(&origin, chrono::Utc::now())
+                .unwrap_or(false)
+        });
     if !allowed {
         return unauthorized();
     }
@@ -328,20 +332,31 @@ fn valid_pairing_origin(origin: &str) -> bool {
     }
 }
 
+/// The hosted Commander is the only unpaired browser origin allowed to learn
+/// hub readiness. `valid_pairing_origin` deliberately accepts arbitrary HTTPS
+/// origins for an explicit pairing ceremony, which is broader than a liveness
+/// read may be.
+fn valid_unpaired_health_origin(origin: &str) -> bool {
+    valid_pairing_origin(origin) && origin == "https://hub.petrastella.io"
+}
+
 async fn health<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
     let response = Json(HealthResponse::ready()).into_response();
     // Health remains available to curl and local readiness checks. A browser
-    // may read it cross-origin only after that origin has been paired.
-    let paired_origin = origin(&headers).is_some_and(|origin| {
-        state.auth.as_ref().is_some_and(|auth| {
-            auth.is_paired_origin(&origin, chrono::Utc::now())
-                .unwrap_or(false)
-        })
+    // may read it cross-origin when it is the reviewed hosted Commander,
+    // even before that origin has an active pairing. Existing paired origins
+    // retain their previous health-read behavior.
+    let cors_allowed = origin(&headers).is_some_and(|origin| {
+        valid_unpaired_health_origin(&origin)
+            || state.auth.as_ref().is_some_and(|auth| {
+                auth.is_paired_origin(&origin, chrono::Utc::now())
+                    .unwrap_or(false)
+            })
     });
-    if paired_origin {
+    if cors_allowed {
         with_cors(response, &headers)
     } else {
         response

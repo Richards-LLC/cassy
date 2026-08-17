@@ -504,7 +504,7 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
 }
 
 #[tokio::test]
-async fn h4_real_browser_safe_reads_derive_only_a_trusted_same_origin() {
+async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_origins() {
     use chrono::Utc;
     use p256::ecdsa::SigningKey;
     use p256::elliptic_curve::rand_core::OsRng;
@@ -556,6 +556,22 @@ async fn h4_real_browser_safe_reads_derive_only_a_trusted_same_origin() {
         "http://127.0.0.1:4173"
     );
     assert_eq!(health.headers()["vary"], "Origin");
+    let unpaired_trusted_health = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/health")
+                .header("origin", "https://hub.petrastella.io")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unpaired_trusted_health.status(), StatusCode::OK);
+    assert_eq!(
+        unpaired_trusted_health.headers()["access-control-allow-origin"],
+        "https://hub.petrastella.io"
+    );
+    assert_eq!(unpaired_trusted_health.headers()["vary"], "Origin");
     let unpaired_health = app
         .clone()
         .oneshot(
@@ -571,6 +587,25 @@ async fn h4_real_browser_safe_reads_derive_only_a_trusted_same_origin() {
             .headers()
             .contains_key("access-control-allow-origin")
     );
+    let health_preflight = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/health")
+                .header("origin", "https://hub.petrastella.io")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health_preflight.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        health_preflight.headers()["access-control-allow-origin"],
+        "https://hub.petrastella.io"
+    );
+    assert_eq!(health_preflight.headers()["vary"], "Origin");
     let proof = |method: &str, uri: &str| {
         sign_dpop(
             &signing,

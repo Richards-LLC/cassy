@@ -292,6 +292,7 @@ fn deliver_worker_task_brief(
          Start with `mcp__cas__task action=show id={task_id}`, then \
          `mcp__cas__task action=start id={task_id}` before you change any code."
     );
+    append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
         .ok()
         .and_then(|store| store.list(None).ok())
@@ -314,6 +315,85 @@ fn deliver_worker_task_brief(
         Some(factory_session),
         Some(&summary),
     )?)
+}
+
+/// Surface stale output-path instructions before a worker acts on them. This is
+/// deliberately advisory: task prose is historical data, while the PreToolUse
+/// gate remains the authority that enforces the workspace contract.
+fn append_workspace_contract_brief(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    task_id: &str,
+    message: &mut String,
+) {
+    let artifacts_root = crate::config::Config::load(cas_dir)
+        .ok()
+        .map(|config| {
+            crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            )
+        })
+        .unwrap_or_else(|| crate::config::resolved_factory_artifacts_root(None));
+    let task_artifacts = artifacts_root.join(task_id);
+    message.push_str(&format!(
+        "\n\nDurable artifacts for this task belong under `{}/`. Source and build output belong in the worktree.",
+        task_artifacts.display()
+    ));
+
+    let Some(task) = crate::store::open_task_store(cas_dir)
+        .ok()
+        .and_then(|store| store.get(task_id).ok())
+    else {
+        return;
+    };
+    let worktree = open_agent_store(cas_dir)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .and_then(|agents| agents.into_iter().find(|agent| agent.name == worker_name))
+        .and_then(|agent| agent.metadata.get("clone_path").cloned())
+        .map(std::path::PathBuf::from);
+    let texts = [
+        task.description,
+        task.design,
+        task.acceptance_criteria,
+        task.notes,
+    ];
+    let stale = texts
+        .iter()
+        .flat_map(|text| text.split_whitespace())
+        .map(|word| {
+            word.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | '.' | ':'))
+        })
+        .find(|word| {
+            prescribed_path_is_outside_contract(word, worktree.as_deref(), &artifacts_root)
+        });
+    if let Some(path) = stale {
+        message.push_str(&format!(
+            "\n\n⚠️ Workspace-contract warning: this task brief prescribes `{path}`, outside the worker worktree and durable artifacts root. Do not use it for output; use `{}/` instead (or the harness scratchpad only for ephemeral notes).",
+            task_artifacts.display()
+        ));
+    }
+}
+
+fn prescribed_path_is_outside_contract(
+    raw: &str,
+    worktree: Option<&std::path::Path>,
+    artifacts_root: &std::path::Path,
+) -> bool {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let path = if let Some(suffix) = raw.strip_prefix("~/") {
+        home.map(|home| home.join(suffix))
+    } else if let Some(suffix) = raw.strip_prefix("$HOME/") {
+        home.map(|home| home.join(suffix))
+    } else if raw.starts_with('/') {
+        Some(std::path::PathBuf::from(raw))
+    } else {
+        None
+    };
+    let Some(path) = path else {
+        return false;
+    };
+    !worktree.is_some_and(|root| path.starts_with(root)) && !path.starts_with(artifacts_root)
 }
 
 /// cas-2702: verify a spawn-time `task_id` pre-assignment actually landed on
@@ -8430,6 +8510,86 @@ mod tests {
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
+        );
+    }
+
+    /// cas-4a4f: task prose is checked before a worker acts on a stale output
+    /// location, while an in-worktree location remains quiet.
+    #[test]
+    fn registration_brief_warns_only_for_out_of_contract_artifact_paths() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let worktree = temp.path().join("worker-worktree");
+        std::fs::create_dir(&worktree).unwrap();
+
+        let mut worker = cas_types::Agent::new("worker-id".into(), "path-worker".into());
+        worker.role = cas_types::AgentRole::Worker;
+        worker
+            .metadata
+            .insert("clone_path".into(), worktree.to_string_lossy().into_owned());
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&worker)
+            .unwrap();
+
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut stale = Task::new("cas-stale-path".into(), "stale artifact path".into());
+        stale.description = "Write the receipt to /mnt/datacube/staging/proof.json".into();
+        task_store.add(&stale).unwrap();
+        let mut clean = Task::new("cas-clean-path".into(), "clean artifact path".into());
+        clean.description = format!(
+            "Write build output to {}/proof.json",
+            worktree.display()
+        );
+        task_store.add(&clean).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "path-worker",
+            "cas-stale-path",
+            "stale artifact path",
+        )
+        .unwrap();
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "path-worker",
+            "cas-clean-path",
+            "clean artifact path",
+        )
+        .unwrap();
+
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        let stale_prompt = prompts
+            .iter()
+            .find(|prompt| prompt.prompt.contains("cas-stale-path"))
+            .expect("stale task brief");
+        let clean_prompt = prompts
+            .iter()
+            .find(|prompt| prompt.prompt.contains("cas-clean-path"))
+            .expect("clean task brief");
+        let resolved_stale_root = crate::config::resolved_factory_artifacts_root(None)
+            .join("cas-stale-path");
+        assert!(
+            stale_prompt.prompt.contains("Workspace-contract warning"),
+            "out-of-contract path must be surfaced before work begins: {}",
+            stale_prompt.prompt
+        );
+        assert!(
+            stale_prompt
+                .prompt
+                .contains(&format!("{}/", resolved_stale_root.display())),
+            "warning must name the resolved task artifacts root: {}",
+            stale_prompt.prompt
+        );
+        assert!(
+            !clean_prompt.prompt.contains("Workspace-contract warning"),
+            "in-worktree paths must not produce a stale-path warning: {}",
+            clean_prompt.prompt
         );
     }
 

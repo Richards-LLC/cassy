@@ -10,6 +10,11 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_GHA_VERSION: "cas-v2"
+  # Thin LTO preserves cross-crate optimization while allowing parallel codegen.
+  # The packaged binaries are explicitly stripped below, matching the shipped
+  # size behavior of the full release profile.
+  RELEASE_PROFILE: release-fast
+  RELEASE_DIR: release-fast
 
 jobs:
   verify:
@@ -63,7 +68,6 @@ jobs:
 
   build:
     name: Build Linux x86_64
-    needs: verify
     runs-on: ubuntu-latest
 
     steps:
@@ -114,18 +118,19 @@ jobs:
         run: |
           # The subsequent build-input audit must inspect this build, never a
           # stale BLAKE3 output restored from the target cache.
-          cargo clean -p blake3 --release --target x86_64-unknown-linux-gnu
-          cargo build -p cas --release --target x86_64-unknown-linux-gnu --locked
+          cargo clean -p blake3 --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu
+          cargo build -p cas --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu --locked
 
       - name: Stage package
         run: |
           mkdir -p package
-          cp target/x86_64-unknown-linux-gnu/release/cas package/
+          cp "target/x86_64-unknown-linux-gnu/$RELEASE_DIR/cas" package/
+          strip package/cas
           cp LICENSE package/
 
       - name: Audit exact packaged Linux executable
         run: |
-          ./scripts/check-blake3-no-avx512-build.sh target/x86_64-unknown-linux-gnu/release/build
+          ./scripts/check-blake3-no-avx512-build.sh "target/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"
           ./scripts/test-check-portable-x86_64-isa.sh package/cas
 
       - name: Package
@@ -142,7 +147,6 @@ jobs:
 
   build-macos:
     name: Build macOS ARM64
-    needs: verify
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
     # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
     runs-on: macos-26
@@ -186,12 +190,13 @@ jobs:
       - name: Build
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --release --target aarch64-apple-darwin --locked
+        run: cargo build -p cas --profile "$RELEASE_PROFILE" --target aarch64-apple-darwin --locked
 
       - name: Package
         run: |
           mkdir -p package
-          cp target/aarch64-apple-darwin/release/cas package/
+          cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
+          strip package/cas
           cp LICENSE package/
           cd package
           tar -czvf cas-aarch64-apple-darwin.tar.gz cas LICENSE

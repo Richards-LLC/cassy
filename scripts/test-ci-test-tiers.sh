@@ -57,6 +57,15 @@ job_block() {
     ' "$ci"
 }
 
+release_job_block() {
+    local job="$1"
+    awk -v header="  ${job}:" '
+        $0 == header { inside = 1; next }
+        inside && /^  [A-Za-z0-9_-]+:$/ { exit }
+        inside { print }
+    ' "$release"
+}
+
 ci_text="$(<"$ci")"
 mapfile -t required_contexts < <(
     grep -oE '"context": "[^"]+"' "$ruleset" | sed -E 's/"context": "(.*)"/\1/'
@@ -257,7 +266,22 @@ else
 fi
 require_text "$ci_text" 'SCCACHE_GHA_ENABLED: "true"' 'CI enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables GitHub cache-v2 backend'
-require_text "$(<"$release")" 'needs: [verify, build, build-macos]' 'release publication waits for both Linux and macOS builds'
+release_text="$(<"$release")"
+release_linux="$(release_job_block build)"
+release_macos="$(release_job_block build-macos)"
+release_publish="$(release_job_block release)"
+require_absent "$release_linux" 'needs: verify' 'Linux release build starts in parallel with input verification'
+require_absent "$release_macos" 'needs: verify' 'macOS release build starts in parallel with input verification'
+require_text "$release_publish" 'needs: [verify, build, build-macos]' 'release publication waits for verification and both platform builds'
+for platform_build in "$release_linux" "$release_macos"; do
+    require_text "$platform_build" '--profile "$RELEASE_PROFILE"' 'platform release build uses the thin-LTO profile'
+    require_text "$platform_build" 'strip package/cas' 'platform package strips symbols before publication'
+    require_text "$platform_build" '$RELEASE_DIR/cas' 'platform package selects the configured profile output'
+done
+require_text "$release_linux" 'check-blake3-no-avx512-build.sh "target/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"' 'Linux release audits BLAKE3 inputs from the selected profile'
+require_text "$release_linux" 'test-check-portable-x86_64-isa.sh package/cas' 'Linux release audits the exact stripped executable'
+require_text "$release_linux" 'name: cas-x86_64-unknown-linux-gnu' 'Linux release asset remains required'
+require_text "$release_macos" 'name: cas-aarch64-apple-darwin' 'macOS release asset remains required'
 require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
 require_text "$(<"$release")" 'refusing to replace its assets' 'release rerun with an existing release fails loudly'
 require_text "$(<"$release")" 'RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release' 'release rerun names its recovery procedure'

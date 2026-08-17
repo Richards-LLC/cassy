@@ -153,6 +153,23 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain("render(false);");
   });
 
+  it("gives an unpaired phone one pairing path and no empty-state debris", async () => {
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    expect(main).toContain("const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;");
+    expect(main).toContain('fleetEmpty ? " fleet-empty" : ""');
+    expect(main).toContain("const showSessionControls = selected !== undefined && selectedSession !== undefined;");
+    expect(main).toContain("${showSessionControls ?");
+    expect(main).toContain('if (paletteToggle) paletteToggle.onclick = openCommandPalette;');
+    expect(main).toContain('if (leaseButton) leaseButton.onclick = () =>');
+    expect(main).toContain('<span class="commander-mark-label">Machines</span>');
+    expect(css).toContain(".shell.fleet-empty .machine-navigation,");
+    expect(css).toContain(".shell.fleet-empty .context-panel");
+    expect(css).toContain(".shell.fleet-empty .session-header");
+    expect(css).toContain(".attention-last-event {\n  font-family: var(--font-ui);");
+    expect(css).toContain(".machine-chip, .mode-badge, .connection-summary { display: none; }");
+    expect(css).toContain(".machine-rail .commander-mark-label { display: inline; }");
+  });
+
   it("names the ticket from the card's derived attention content", async () => {
     const view = await readFile(new URL("attention-view.ts", import.meta.url), "utf8");
     // Hub event-stream cards derive their CAS ticket during coalescing, so the
@@ -402,7 +419,8 @@ describe("binding Commander browser invariants", () => {
     expect(css).toContain('.secondary-pane-strip .pane.collapsed');
     expect(css).toContain('grid-template-rows: minmax(0, 1fr) calc(var(--machine-rail-width) + env(safe-area-inset-bottom))');
     expect(css).toContain('grid-template-rows: minmax(0, 1fr) minmax(0, min(45dvh, var(--mobile-drawer-max-height))) calc(var(--machine-rail-width) + env(safe-area-inset-bottom))');
-    expect(css).toContain('.session-header .actions [data-compact-label] { font-size: 0; }');
+    expect(css).toContain('/* Full words or no chip: OBS / Ctrl / Int made a first-time Pixel pass read');
+    expect(css).toContain('.machine-chip, .mode-badge, .connection-summary { display: none; }');
     expect(main).not.toContain('class="toolbar"');
     expect(main).not.toContain('class="machines"');
     expect(main).not.toContain('class="sessions"');

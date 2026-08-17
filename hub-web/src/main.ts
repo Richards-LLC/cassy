@@ -188,7 +188,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // burying the feed under a card for each attempt.
       if (state.authFailure) {
         void addAttention(machine, undefined, "auth_loss", {
-          headline: "Authentication blocked",
+          headline: state.authFailure === "needs-pairing" ? "Machine needs pairing" : "Authentication blocked",
           detail: state.reason ?? "Authentication blocked",
           severity: "critical",
           action: "repair",
@@ -670,7 +670,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     diagnose.textContent = "Diagnose";
     diagnose.onclick = () => openConnectionLog(machineId);
     actions.append(retry, diagnose);
-    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch") {
+    if (snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing") {
       const repair = document.createElement("button");
       repair.type = "button";
       repair.textContent = "Re-pair";

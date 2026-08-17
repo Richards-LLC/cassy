@@ -32,7 +32,7 @@
 #   CAS_SRC                   Source checkout (default: ~/Petrastella/cas-src)
 #   CAS_INSTALL               Binary destination (default: ~/.local/bin/cas)
 #   CAS_PROJECT_ROOTS         Default project scan roots (default: $HOME)
-#   CAS_UPDATE_WORKTREE_ROOT  Disposable detached build worktree parent
+#   CAS_UPDATE_WORKTREE_ROOT  Persistent detached build worktree parent
 #                            (default: sibling .cas-update-worktrees directory)
 #   CAS_UPDATE_TARGET_DIR     Persistent Cargo target directory (default: $CAS_SRC/target)
 #
@@ -499,7 +499,7 @@ build_and_install() {
   if [ "$DO_PULL" = "1" ]; then
     if [ "$DRY_RUN" = "1" ]; then
       dim "  [dry-run] git -C $CAS_SRC fetch origin $BRANCH"
-      dim "  [dry-run] git worktree add --detach <temporary> origin/$BRANCH"
+      dim "  [dry-run] reuse detached build worktree <root>/cas-update-build at origin/$BRANCH"
     else
       info "Fetching origin/$BRANCH"
       git -C "$CAS_SRC" fetch origin "$BRANCH"
@@ -525,11 +525,9 @@ build_and_install() {
   if [ "$DO_PULL" = "1" ] && [ "$DRY_RUN" != "1" ]; then
     worktree_root="${CAS_UPDATE_WORKTREE_ROOT:-$(dirname "$source_root_abs")/.cas-update-worktrees}"
     mkdir -p "$worktree_root"
-    BUILD_WORKTREE_DIR="$(mktemp -d "$worktree_root/cas-update.XXXXXX")"
-    rmdir "$BUILD_WORKTREE_DIR"
-    if ! git -C "$CAS_SRC" worktree add --detach "$BUILD_WORKTREE_DIR" "$fetched_commit"; then
+    if ! prepare_build_worktree "$worktree_root" "$fetched_commit"; then
       BUILD_WORKTREE_DIR=""
-      error "could not create detached build worktree"
+      error "could not prepare detached build worktree"
       return 1
     fi
     build_src="$BUILD_WORKTREE_DIR"
@@ -664,10 +662,47 @@ cleanup() {
 }
 
 cleanup_build_worktree() {
-  [ -z "$BUILD_WORKTREE_DIR" ] && return
-  git -C "$CAS_SRC" worktree remove --force "$BUILD_WORKTREE_DIR" >/dev/null 2>&1 \
-    || rm -rf "$BUILD_WORKTREE_DIR"
+  # The fetched-build worktree is deliberately persistent: Cargo fingerprints
+  # workspace manifests by absolute path, so removing it defeats target reuse.
   BUILD_WORKTREE_DIR=""
+}
+
+recreate_build_worktree() {
+  local path="$1" fetched_commit="$2"
+  warn "Recreating unusable detached build worktree at $path"
+  # A locked worktree needs force twice; a corrupted directory might no longer
+  # be registered, in which case removing this exact stable path is safe.
+  git -C "$CAS_SRC" worktree remove --force --force "$path" >/dev/null 2>&1 || true
+  rm -rf "$path"
+  git -C "$CAS_SRC" worktree prune
+  git -C "$CAS_SRC" worktree add --detach "$path" "$fetched_commit"
+}
+
+prepare_build_worktree() {
+  local worktree_root="$1" fetched_commit="$2" source_common worktree_common
+  mkdir -p "$worktree_root"
+  worktree_root="$(cd "$worktree_root" && pwd -P)"
+  BUILD_WORKTREE_DIR="$worktree_root/cas-update-build"
+  source_common="$(git -C "$CAS_SRC" rev-parse --path-format=absolute --git-common-dir)"
+
+  if [ -e "$BUILD_WORKTREE_DIR" ]; then
+    worktree_common="$(git -C "$BUILD_WORKTREE_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [ "$worktree_common" != "$source_common" ] \
+      || git -C "$CAS_SRC" worktree list --porcelain | awk -v path="$BUILD_WORKTREE_DIR" '
+          $1 == "worktree" { active = ($2 == path); next }
+          active && $1 == "locked" { found = 1 }
+          END { exit !found }
+        '; then
+      recreate_build_worktree "$BUILD_WORKTREE_DIR" "$fetched_commit" || return 1
+      return
+    fi
+    git -C "$BUILD_WORKTREE_DIR" checkout --detach "$fetched_commit" >/dev/null \
+      && git -C "$BUILD_WORKTREE_DIR" reset --hard "$fetched_commit" >/dev/null \
+      || { recreate_build_worktree "$BUILD_WORKTREE_DIR" "$fetched_commit" || return 1; }
+  else
+    git -C "$CAS_SRC" worktree prune
+    git -C "$CAS_SRC" worktree add --detach "$BUILD_WORKTREE_DIR" "$fetched_commit" || return 1
+  fi
 }
 
 finish() {

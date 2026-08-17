@@ -1,0 +1,42 @@
+[
+  {
+    "label": "silent-delivery-and-replay",
+    "query": "A supervisor amendment was marked delivered but never appeared in the worker context, then the same message was injected again after it had already been consumed.",
+    "hypothesis": "Dense retrieval should join silent loss and duplicate replay even when exact delivery-state terms differ."
+  },
+  {
+    "label": "poll-tick-redelivery-storm",
+    "query": "One pending worker message generated thousands of misleading delivered and wake-deferred log lines on every poll tick without a durable state transition.",
+    "hypothesis": "Template-normalized log evidence should retrieve the historical redelivery storm and its fix task."
+  },
+  {
+    "label": "instruction-prefix-drift",
+    "query": "Worker startup guidance used an obsolete MCP tool prefix or told an already registered worker to start another session.",
+    "hypothesis": "Semantic retrieval should link differently worded harness-guidance drift observations."
+  },
+  {
+    "label": "merge-close-race",
+    "query": "A worker claimed completion and attempted to close before the factory branch was merged, then discovered binding supervisor amendments during the rejection handshake.",
+    "hypothesis": "Dense retrieval should connect premature close, merge-required, and crossed-message evidence."
+  },
+  {
+    "label": "parallel-migration-collision",
+    "query": "Parallel implementation lanes independently selected the same database migration number because each derived the next identifier from a stale branch tip.",
+    "hypothesis": "Semantic retrieval should find the collision family without requiring the exact migration IDs."
+  },
+  {
+    "label": "missed-harness-mirror",
+    "query": "A built-in skill or agent change updated the Claude copy but forgot the corresponding Codex and Grok mirrors.",
+    "hypothesis": "Dense retrieval should associate missed surfaces across differently named harness copies."
+  },
+  {
+    "label": "workspace-contract-conflict",
+    "query": "Task instructions prescribed a large artifact path that the factory workspace policy rejected, requiring a sanctioned durable fallback without retrying the denied path.",
+    "hypothesis": "Hybrid retrieval should connect policy text, denials, and recovery decisions."
+  },
+  {
+    "label": "withdrawn-missing-code-path-claim",
+    "query": "An investigation claimed there was no reconciliation code path, but later source inspection proved the mechanism existed and the original evidence did not test it.",
+    "hypothesis": "Dense retrieval should surface the correction and distinguish it from repetitions of the withdrawn claim."
+  }
+]

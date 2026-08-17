@@ -506,6 +506,33 @@ def query(args: argparse.Namespace) -> None:
     db.close()
 
 
+def evaluate(args: argparse.Namespace) -> None:
+    endpoint = os.environ.get("CAS_CLOUD_ENDPOINT", ""); token = os.environ.get("CAS_CLOUD_TOKEN", "")
+    if not endpoint or not token: raise SystemExit("CAS cloud credentials required for evaluation")
+    labels = json.loads(args.queries.read_text())
+    query_vectors = post_embeddings(endpoint, token, [item["query"] for item in labels])
+    db = sqlite3.connect(args.index)
+    output = []
+    for item, vector in zip(labels, query_vectors):
+        started = time.monotonic()
+        semantic = vector_ranking(db, vector)
+        lexical = lexical_ranking(db, item["query"])
+        fused = collections.defaultdict(float)
+        for rank, (_, chunk_id) in enumerate(semantic[:200], 1): fused[chunk_id] += 1/(60+rank)
+        for rank, (_, chunk_id) in enumerate(lexical[:200], 1): fused[chunk_id] += 1/(60+rank)
+        hybrid = sorted(((score, chunk_id) for chunk_id, score in fused.items()), reverse=True)
+        lexical_ids = {chunk_id for _, chunk_id in lexical[:50]}
+        semantic_unique = sum(chunk_id not in lexical_ids for _, chunk_id in semantic[:args.top])
+        output.append({"label": item["label"], "query": item["query"],
+                       "hypothesis": item["hypothesis"], "latency_ms_local_rankers": round((time.monotonic()-started)*1000, 2),
+                       "semantic_top_k_absent_from_lexical_top_50": semantic_unique,
+                       "lexical": hydrate_results(db, lexical, args.top),
+                       "vector": hydrate_results(db, semantic, args.top),
+                       "hybrid": hydrate_results(db, hybrid, args.top)})
+    print(json.dumps({"evaluated_at": datetime.now(timezone.utc).isoformat(), "top_k": args.top, "queries": output}, indent=2))
+    db.close()
+
+
 def command_inventory(args: argparse.Namespace) -> None:
     cutoff = parse_time(args.cutoff); assert cutoff
     print(json.dumps(inventory(args.snapshot, cutoff), indent=2, sort_keys=True))
@@ -518,6 +545,7 @@ def main() -> None:
     prep = sub.add_parser("prepare"); prep.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT); prep.add_argument("--index", type=Path, default=DEFAULT_INDEX); prep.add_argument("--cutoff", default=DEFAULT_CUTOFF); prep.add_argument("--sample-files", type=int, default=0); prep.add_argument("--sample-rows", type=int, default=0); prep.set_defaults(func=prepare)
     emb = sub.add_parser("embed"); emb.add_argument("--index", type=Path, default=DEFAULT_INDEX); emb.add_argument("--limit", type=int, default=0, help="0 means all pending"); emb.add_argument("--pause", type=float, default=0.55); emb.set_defaults(func=embed)
     qry = sub.add_parser("query"); qry.add_argument("query"); qry.add_argument("--index", type=Path, default=DEFAULT_INDEX); qry.add_argument("--top", type=int, default=8); qry.add_argument("--mode", choices=("vector", "lexical", "hybrid"), default="hybrid"); qry.set_defaults(func=query)
+    eva = sub.add_parser("evaluate"); eva.add_argument("--queries", type=Path, required=True); eva.add_argument("--index", type=Path, default=DEFAULT_INDEX); eva.add_argument("--top", type=int, default=5); eva.set_defaults(func=evaluate)
     args = parser.parse_args(); args.func(args)
 
 

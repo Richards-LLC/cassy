@@ -92,6 +92,7 @@ require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier r
 
 required_jobs=(
     fast-validation-preflight
+    fast-validation-suite-build
     fast-validation-suite-shards
     fast-validation-suite
     fast-validation-docs
@@ -107,7 +108,7 @@ done
 
 # Required contexts must always be emitted. The expensive work in each lane is
 # gated only after a shared, fail-closed diff classification step succeeds.
-for job in fast-validation-preflight fast-validation-suite-shards fast-validation-suite fast-validation-docs macos-check; do
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs macos-check; do
     block="$(job_block "$job")"
     require_text "$block" 'id: classify-diff' "$job classifies before expensive work"
     require_text "$block" './.github/actions/classify-required-diff' "$job uses the shared classifier"
@@ -169,7 +170,7 @@ else
 fi
 rm -f "$unknown_base_output"
 
-for job in fast-validation-preflight fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check; do
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check; do
     block="$(job_block "$job")"
     require_text "$block" "refs/tags/" "$job runs on release tags"
 done
@@ -185,12 +186,17 @@ done
 
 preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
+suite_build="$(job_block fast-validation-suite-build)"
 suite_shards="$(job_block fast-validation-suite-shards)"
 docs="$(job_block fast-validation-docs)"
 fan_in="$(job_block fast-validation)"
 require_text "$suite_shards" 'shard: [1, 2, 3]' 'suite uses three nextest shards'
 require_text "$suite_shards" 'fail-fast: false' 'suite keeps running other shards after a failure'
-require_text "$suite_shards" 'cargo nextest run --workspace --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every workspace nextest binary exactly once'
+require_text "$suite_build" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'suite compiles the workspace test graph once into an archive'
+require_text "$suite_build" 'actions/upload-artifact@v4' 'suite build publishes the shared nextest archive'
+require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait for the shared test archive'
+require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
+require_text "$suite_shards" 'cargo nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
 require_text "$suite" 'needs: fast-validation-suite-shards' 'required full-suite context fans in every shard'
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
 require_text "$(<"$makefile")" '$(CARGO) nextest run --workspace --no-fail-fast' 'local make test matches CI workspace nextest scope'

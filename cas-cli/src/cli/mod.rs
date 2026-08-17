@@ -19,7 +19,10 @@ mod purge_fixtures;
 
 // EPIC cas-7d31: the daemon's auto-distill path needs the same complete symbol
 // load the CLI does — a narrower source set would cascade-delete module pages.
-pub use knowledge_cmd::{DEFAULT_MAX_SYMBOLS as KNOWLEDGE_MAX_SYMBOLS, SymbolLoad, load_symbols as knowledge_symbols_with_limit};
+pub use knowledge_cmd::{
+    DEFAULT_MAX_SYMBOLS as KNOWLEDGE_MAX_SYMBOLS, SymbolLoad,
+    load_symbols as knowledge_symbols_with_limit,
+};
 mod known_repos;
 mod project_overview_cmd;
 mod provider_default;
@@ -77,11 +80,11 @@ pub use init::InitArgs;
 pub use limits::LimitsArgs;
 pub use list::ListArgs;
 pub use mcp_cmd::McpCommands;
+pub use open::OpenArgs;
 pub use provider_default::DefaultArgs;
 pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
-pub use open::OpenArgs;
 pub use update::UpdateArgs;
 
 /// Build version string including git hash and date
@@ -183,7 +186,7 @@ pub enum Commands {
     /// Stable machine-local Commander hub
     Hub(HubArgs),
 
-    /// Run MCP server for Claude Code integration
+    /// Run the CAS MCP server
     Serve,
 
     /// Run diagnostics
@@ -199,7 +202,7 @@ pub enum Commands {
     /// Show local provider rate-limit and credit availability
     Limits(LimitsArgs),
 
-    /// Output status line for Claude Code integration
+    /// Output a status line for agent integrations
     #[command(alias = "statusline")]
     StatusLine(StatusLineArgs),
 
@@ -233,8 +236,8 @@ pub enum Commands {
     #[command(subcommand)]
     Queue(queue::QueueCommands),
 
-    /// Cloud sync (push/pull data to CAS Cloud)
-    #[command(subcommand, hide = true)]
+    /// Sync data with CAS Cloud
+    #[command(subcommand)]
     Cloud(cloud::CloudCommands),
 
     /// Manage registered devices
@@ -265,12 +268,12 @@ pub enum Commands {
     #[command(subcommand)]
     Knowledge(knowledge_cmd::KnowledgeCommands),
 
-    /// Migrate the legacy memory store into knowledge pages (EPIC cas-b129)
+    /// Migrate the legacy memory store into knowledge pages
     #[command(name = "memory-migrate")]
     MemoryMigrate(memory_migrate::MemoryMigrateArgs),
 
     /// Delete integration-test fixture memories that leaked into real stores
-    #[command(name = "purge-test-fixtures")]
+    #[command(name = "purge-test-fixtures", hide = true)]
     PurgeTestFixtures(purge_fixtures::PurgeFixturesArgs),
 
     /// PRODUCT_OVERVIEW.md staleness info and pending changes
@@ -297,8 +300,8 @@ pub enum Commands {
     #[command(name = "sweep-all")]
     SweepAll(sweep::SweepBaseArgs),
 
-    /// Capture and replay memory-retrieval baselines (migration parity harness)
-    #[command(name = "retrieval-parity", subcommand)]
+    /// Capture and replay memory-retrieval baselines
+    #[command(name = "retrieval-parity", subcommand, hide = true)]
     RetrievalParity(retrieval_parity::RetrievalParityCommands),
 }
 
@@ -637,4 +640,37 @@ fn serve_execute() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(crate::mcp::run_server())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::Cli;
+
+    #[test]
+    fn top_level_help_exposes_cloud_without_internal_migration_language() {
+        let mut command = Cli::command();
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).expect("render help");
+        let help = String::from_utf8(help).expect("help is UTF-8");
+
+        assert!(help.contains("cloud"));
+        assert!(help.contains("Sync data with CAS Cloud"));
+        assert!(help.contains("memory-migrate"));
+        assert!(!help.contains("purge-test-fixtures"));
+        assert!(!help.contains("retrieval-parity"));
+        assert!(!help.contains("EPIC cas-"));
+    }
+
+    #[test]
+    fn cloud_help_describes_the_available_sync_command() {
+        let parsed = Cli::try_parse_from(["cas", "cloud", "sync", "--help"]);
+        let Err(error) = parsed else {
+            panic!("--help exits through clap");
+        };
+        let help = error.to_string();
+
+        assert!(help.contains("Full sync (push then pull)"));
+    }
 }

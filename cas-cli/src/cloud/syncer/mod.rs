@@ -77,6 +77,21 @@ pub struct SyncResult {
     pub errors: Vec<String>,
     /// Duration of sync in milliseconds
     pub duration_ms: u64,
+    /// Task lifecycle changes actually applied by a pull. These are kept
+    /// separately from `pulled_tasks`: an unchanged task body is not a
+    /// lifecycle transition and must not make the operator think work was
+    /// reopened or closed.
+    pub task_status_transitions: Vec<TaskStatusTransition>,
+}
+
+/// An auditable task lifecycle transition applied from a cloud pull.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskStatusTransition {
+    pub task_id: String,
+    pub project_id: String,
+    pub source: String,
+    pub from: crate::types::TaskStatus,
+    pub to: crate::types::TaskStatus,
 }
 
 /// Entity selection for a personal queue-driven push.

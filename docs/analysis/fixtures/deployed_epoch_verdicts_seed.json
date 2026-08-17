@@ -1,0 +1,5 @@
+[
+  {"id":"GH-374","title":"truthful message status","fix_commit":"aaaaaaaa","fix_built_at":"2026-08-16T12:00:00Z","structured_terms":["message-status-false-confirm"],"lexical_terms":["false confirm"],"semantic_threshold":0.8,"sample_threshold":3},
+  {"id":"GH-401","title":"relay memory capture","fix_commit":"bbbbbbbb","fix_built_at":"2026-08-16T12:00:00Z","structured_terms":["relay-memory-missing"],"lexical_terms":["relay memory missing"],"semantic_threshold":0.8,"sample_threshold":3},
+  {"id":"GH-445","title":"session end panic","fix_commit":"c0fada94","fix_built_at":"2026-08-16T12:00:00Z","structured_terms":["session-end-panic"],"lexical_terms":["end sessions outside dispatcher runtime"],"semantic_threshold":0.8,"sample_threshold":5}
+]

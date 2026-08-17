@@ -8,7 +8,7 @@ Date: 2026-08-11
 
 Audience: CAS CLI and Petra Stella Cloud maintainers
 
-Source task: `cas-a0ba` / GitHub issue `pippenz/cas#171`
+Source task: `cas-a0ba` / GitHub issue `Richards-LLC/cassy#171`
 
 Cloud contract: [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44)
 

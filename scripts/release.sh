@@ -211,7 +211,7 @@ if "$MANUAL_PUBLISH"; then
     echo "WARNING: emergency manual publishing is intentionally competing with CI."
     echo "Use only after disabling/cancelling the workflow or when its runners cannot publish."
     gh release create "$TAG" \
-        --repo "${RELEASE_REPO:-pippenz/cas}" \
+        --repo "${RELEASE_REPO:-Richards-LLC/cassy}" \
         --title "CAS $TAG" \
         --generate-notes \
         "$DIST_DIR"/*.tar.gz

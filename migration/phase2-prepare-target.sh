@@ -356,7 +356,7 @@ step4_cas_binary() {
 
   md "Current version is not v${REQUIRED_CAS_MAJOR}.x. Installing."
   md ""
-  md "\`pippenz/cas\` has no GitHub Releases yet (\`GET /repos/pippenz/cas/releases/latest\` returns 404), so \`scripts/cas-install.sh\` cannot resolve a tag. Falling back to **build from source** per the spec: clone \`pippenz/cas\` on the server to \`~/src/cas-src\`, \`cargo install --path cas-cli --force\`, and symlink into \`/usr/local/bin/cas\`."
+  md "\`Richards-LLC/cassy\` has no GitHub Releases yet (\`GET /repos/Richards-LLC/cassy/releases/latest\` returns 404), so \`scripts/cas-install.sh\` cannot resolve a tag. Falling back to **build from source** per the spec: clone \`Richards-LLC/cassy\` on the server to \`~/src/cas-src\`, \`cargo install --path cas-cli --force\`, and symlink into \`/usr/local/bin/cas\`."
   md ""
 
   progress "  ↳ building cas v2 from source on server (this takes ~5-8 min on CCX23)"
@@ -366,7 +366,7 @@ step4_cas_binary() {
     mkdir -p "$HOME/src"
     cd "$HOME/src"
     if [ ! -d cas-src ]; then
-      git clone --depth 50 https://github.com/pippenz/cas.git cas-src
+      git clone --depth 50 https://github.com/Richards-LLC/cassy.git cas-src
     fi
     cd cas-src
     git fetch origin main

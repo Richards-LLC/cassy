@@ -1,8 +1,8 @@
-# MacBook from zero to CAS (pippenz fork)
+# MacBook from zero to CAS
 
-End-to-end setup for installing CAS on a Mac **from the `pippenz/cas` fork**, built from source. Assumes you are comfortable with a terminal but have never installed CAS or Claude Code before.
+End-to-end setup for installing CAS on a Mac **from `Richards-LLC/cassy`**, built from source. Assumes you are comfortable with a terminal but have never installed CAS or Claude Code before.
 
-> **What this is not.** The upstream `codingagentsystem/cas` repo ships a public `install.sh` and Homebrew formula, but those distribute **v1.0** (2026-03-12) and **v0.2.1** respectively — months behind the development tip on this fork (currently **v2.15.0**). Use them only if you specifically want the old public release; this guide ignores them.
+> **What this is not.** This guide does not use the legacy public `install.sh` or Homebrew paths, which distributed **v1.0** (2026-03-12) and **v0.2.1** respectively — months behind the development tip at the time. It intentionally builds from the current source repository instead.
 
 > **Hard requirement:** Apple Silicon Mac (M1 / M2 / M3 / M4). The build itself works on Intel Mac, but the vendored Ghostty terminal renderer and several profiling paths are tested only on `aarch64-apple-darwin`. If you're on Intel, expect to debug.
 
@@ -156,8 +156,8 @@ The installer offers to modify `~/.zshenv`, `~/.zshrc`, etc. on its own; accept 
 mkdir -p ~/code && cd ~/code
 
 # Clone the fork (HTTPS — switch to SSH if you've set up keys).
-git clone https://github.com/pippenz/cas.git
-cd cas
+git clone https://github.com/Richards-LLC/cassy.git
+cd cassy
 
 # CRITICAL: pull the vendored Ghostty submodule. Build panics without this with
 # "Ghostty submodule not found at vendor/ghostty".
@@ -347,7 +347,7 @@ You're on a custom Cargo profile that overrides `panic`. The MCP panic catcher r
 
 ## What this guide does NOT cover
 
-- **The upstream `codingagentsystem/cas` install paths** (`install.sh`, Homebrew). They ship a much older binary; use this fork's build instead.
+- **Legacy public install paths** (`install.sh`, Homebrew). They ship a much older binary; use this repository's build instead.
 - **CAS Cloud sync setup beyond the basics** — `cas login` + `cas cloud sync` are packaged commands; team scope auto-resolves from your `/api/me` membership. See the [README Team Memories section](../../README.md#team-memories-optional) for the full flow (`cas cloud team default <slug>` if you want to pin a team override).
 - **`cas-update` / `cas-refresh` orchestrator scripts** — author-specific wrappers in `~/.local/bin/`. See `docs/ideation/2026-04-30-cas-shell-helpers-distribution-ideation.md`.
 - **Multi-user setups**, shared `cas.db`, team collaboration patterns.

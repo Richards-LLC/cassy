@@ -110,4 +110,4 @@ CAS must never delegate: repository writes, merge/push/tag/release, CAS task/lea
 
 ## Provenance
 
-CAS source and Viktor documentation were inspected on 2026-08-14. The issue request is GH #316: https://github.com/pippenz/cas/issues/316. This document deliberately makes no network call, credential request, key creation, or implementation change.
+CAS source and Viktor documentation were inspected on 2026-08-14. The issue request is GH #316: https://github.com/Richards-LLC/cassy/issues/316. This document deliberately makes no network call, credential request, key creation, or implementation change.

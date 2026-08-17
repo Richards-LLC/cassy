@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const UPDATE_CHECK_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 const UPDATE_CHECK_CACHE_FAILURE_TTL_SECS: u64 = 60 * 60;
 const UPDATE_CHECK_TIMEOUT_MS: u64 = 1200;
-const UPDATE_CHECK_URL: &str = "https://api.github.com/repos/pippenz/cas/releases/latest";
+const UPDATE_CHECK_URL: &str = "https://api.github.com/repos/Richards-LLC/cassy/releases/latest";
 const UPDATE_CHECK_CACHE_RELATIVE: &str = "cache/update-check.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

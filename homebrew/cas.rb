@@ -7,13 +7,13 @@
 # Homebrew formula for the CAS command-line application.
 class Cas < Formula
   desc "Coding Agent System - persistent memory, tasks, rules, and skills for AI agents"
-  homepage "https://github.com/pippenz/cas"
+  homepage "https://github.com/Richards-LLC/cassy"
   version "2.55.5"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/pippenz/cas/releases/download/v#{version}/cas-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/Richards-LLC/cassy/releases/download/v#{version}/cas-aarch64-apple-darwin.tar.gz"
       sha256 "c97fb8358ed70a6d068be765cab2f30c102c8767b66a50707a4617ef8b9e34be"
     end
     on_intel do
@@ -23,7 +23,7 @@ class Cas < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/pippenz/cas/releases/download/v#{version}/cas-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/Richards-LLC/cassy/releases/download/v#{version}/cas-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "8aa2c54f313a38a8df7cb29a1974e271a3f049342911940fecc6fec4fa7feb0a"
     end
     on_arm do

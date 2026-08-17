@@ -2,12 +2,12 @@
 # CAS Installer — install the CAS binary from GitHub Releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/pippenz/cas/main/scripts/cas-install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 #
 # Options (via env vars):
 #   CAS_INSTALL_DIR   Override install directory (default: ~/.local/bin — the canonical location)
 #   CAS_VERSION       Install a specific version (default: latest)
-#   CAS_REPO          Override GitHub repo (default: pippenz/cas)
+#   CAS_REPO          Override GitHub repo (default: Richards-LLC/cassy)
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 
-REPO="${CAS_REPO:-pippenz/cas}"
+REPO="${CAS_REPO:-Richards-LLC/cassy}"
 INSTALL_DIR="${CAS_INSTALL_DIR:-}"
 VERSION="${CAS_VERSION:-}"
 BINARY_NAME="cas"

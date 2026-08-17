@@ -181,7 +181,7 @@ async fn team_itemized_rejection_syncs_owned_row_and_names_scope_mismatch() {
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .expect(5)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -201,26 +201,27 @@ async fn team_itemized_rejection_syncs_owned_row_and_names_scope_mismatch() {
         make_cloud_config(server.uri()),
         CloudSyncerConfig::default(),
     );
-    let (results, queue) = tokio::task::spawn_blocking(move || {
-        let results = (0..5)
-            .map(|_| syncer.push_team(TEST_TEAM))
-            .collect::<Vec<_>>();
-        (results, queue)
+    let (first, second, queue) = tokio::task::spawn_blocking(move || {
+        let first = syncer.push_team(TEST_TEAM);
+        let second = syncer.push_team(TEST_TEAM);
+        (first, second, queue)
     })
     .await
     .expect("spawn_blocking join");
 
-    assert!(results.iter().all(|result| {
-        result
-            .as_ref()
-            .is_ok_and(|result| !result.errors.is_empty())
-    }));
+    assert!(first.as_ref().is_ok_and(|result| !result.errors.is_empty()));
+    assert!(
+        second.as_ref().is_ok_and(|result| result.errors.is_empty()),
+        "a parked permanent rejection must not recur on the next sync"
+    );
     assert_eq!(queue.stats(5).unwrap().failed, 1);
     assert_eq!(queue.list_all(10).unwrap().len(), 1);
     let failed = &queue.list_all(10).unwrap()[0];
     assert_eq!(failed.entity_id, "rejected-team-entry-002");
     assert!(failed.last_error.as_deref().is_some_and(|error| {
-        error.contains("scope_mismatch") && error.contains("existing canonical project: cas-src")
+        error.contains("scope_mismatch")
+            && error.contains("existing_project=cas-src")
+            && !error.contains("server response")
     }));
 }
 
@@ -304,7 +305,8 @@ async fn team_itemized_rejection_subset_settles_unrejected_rows_for_fourteen_of_
         assert!(rejected_ids.contains(&item.entity_id.as_str()));
         assert!(item.last_error.as_deref().is_some_and(|error| {
             error.contains("scope_mismatch")
-                && error.contains("existing canonical project: cas-src")
+                && error.contains("existing_project=cas-src")
+                && !error.contains("server response")
         }));
     }
 }

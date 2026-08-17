@@ -1,9 +1,9 @@
 name: CI
 
 # ┌───────────────────────────────────────────────────────────────────────────┐
-# │ WHAT EXECUTES THE TEST SUITE: exactly one job — `Fast Validation`.        │
-# │ Every other job in this file COMPILES things or runs a narrow, named      │
-# │ subset. Read job names literally; they are kept honest on purpose (#138). │
+# │ WHAT EXECUTES THE TEST SUITE: the `Fast Validation — suite shard` jobs.  │
+# │ Every other job in this file compiles things, fans in results, or runs a  │
+# │ narrow, named subset. Read job names literally; they stay honest (#138). │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
 # Wall-clock shape (GH #142): total run time is max(job), not sum(job), so the
@@ -73,10 +73,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
 
-  # The required check is a fan-in over independent lanes. The full suite is
-  # deliberately one lane: nextest partitions rebuild the same test graph on
-  # separate runners, which made the measured PR slower rather than faster.
-  # Preflight and doctests remain independent, so neither extends suite time.
+  # Required checks always start: path selection happens in steps, never with
+  # job-level `paths` filters, so their exact ruleset contexts keep reporting.
+  # A Rust-unaffected diff short-circuits Rust work only; hub-web-only diffs
+  # still run the Commander asset validation below.
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
@@ -99,17 +99,17 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-      - if: steps.classify-diff.outputs.fast-pass != 'true'
+      - name: Report Rust short-circuit
+        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        run: echo "Rust work skipped for ${{ steps.classify-diff.outputs.class }} diff."
+
+      - if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
 
-      - name: Install nextest
-        if: steps.classify-diff.outputs.fast-pass != 'true'
-        uses: taiki-e/install-action@nextest
-
       - name: Build and test Commander web assets
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.web-check-needed == 'true'
         working-directory: hub-web
         run: |
           npm ci
@@ -119,27 +119,27 @@ jobs:
           git diff --exit-code -- dist
 
       - name: Check
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas
 
       - name: Test portable x86_64 ISA audit
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
       - name: Test release publication guards
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         run: make -C cas-cli test-ci-tiers
 
       - name: Build (without MCP proxy)
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
 
-  fast-validation-suite:
-    name: Fast Validation — full suite
+  fast-validation-suite-shards:
+    name: Fast Validation — suite shard ${{ matrix.shard }}/3
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'pull_request'
@@ -147,6 +147,10 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/')))
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,23 +164,64 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-      - if: steps.classify-diff.outputs.fast-pass != 'true'
+      - name: Report Rust short-circuit
+        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        run: echo "Rust suite shard skipped for ${{ steps.classify-diff.outputs.class }} diff."
+
+      # Each runner restores its own cache key. A preceding build-and-artifact
+      # job would serialize the critical path and upload/download the target
+      # tree, so this keeps the shards independent and lets sccache converge.
+      - if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: ./.github/actions/setup-rust-linux
         with:
-          cache-key: fast-validation-suite
+          cache-key: fast-validation-suite-${{ matrix.shard }}
 
       - name: Install nextest
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
-      # Keep --no-fail-fast so failures never mask later binaries. This runs
-      # every workspace test binary; the doctest lane below covers what
-      # nextest cannot.
-      - name: Test full suite
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+      # count:1/3 through count:3/3 are disjoint and exhaustive. Keep
+      # --no-fail-fast so failures never mask later binaries; doctests stay in
+      # their own required lane because nextest cannot run them.
+      - name: Test full suite shard ${{ matrix.shard }}/3
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo nextest run --workspace --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast --partition count:${{ matrix.shard }}/3
+
+  # Keep the protected ruleset's exact full-suite context while the actual
+  # test execution fans out above. This job runs even when a shard fails and
+  # makes a failed or cancelled shard fail the required check.
+  fast-validation-suite:
+    name: Fast Validation — full suite
+    if: >-
+      always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: fast-validation-suite-shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - name: Report Rust short-circuit
+        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        run: echo "Full-suite fan-in short-circuited for ${{ steps.classify-diff.outputs.class }} diff."
+
+      - name: Require every suite shard to pass
+        env:
+          SHARDS: ${{ needs.fast-validation-suite-shards.result }}
+        run: test "$SHARDS" = success
 
   fast-validation-docs:
     name: Fast Validation — doctests
@@ -200,7 +245,11 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-      - if: steps.classify-diff.outputs.fast-pass != 'true'
+      - name: Report Rust short-circuit
+        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        run: echo "Doctests skipped for ${{ steps.classify-diff.outputs.class }} diff."
+
+      - if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-docs
@@ -208,13 +257,13 @@ jobs:
       # nextest does not run doctests; keep this separate so it never waits
       # behind the partitioned suite.
       - name: Test doctests
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --doc
 
   # The repository ruleset requires this exact check name. It reports success
-  # only after preflight, both exhaustive nextest partitions, and doctests pass.
+  # only after preflight, all exhaustive nextest shards, and doctests pass.
   # Queue (rather than cancel) matching head-SHA checks per cas-9eaf; because
   # this fan-in does no compilation, a duplicate cannot inflate the PR path.
   fast-validation:
@@ -316,19 +365,23 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      - name: Report Rust short-circuit
+        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        run: echo "macOS Rust checks skipped for ${{ steps.classify-diff.outputs.class }} diff."
+
       - name: Install Rust
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       # ghostty_vt_sys builds its native library with Zig even for cargo check.
       - name: Install Zig
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         run: ./scripts/bootstrap-zig.sh
 
       # Zig discovers Darwin SDKs through xcrun, which follows DEVELOPER_DIR.
       # Keep this visible so runner-image/toolchain drift is diagnosable.
       - name: Report Apple and Zig toolchains
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         run: |
           echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           xcode-select --print-path
@@ -339,13 +392,13 @@ jobs:
           ./.context/zig/zig env
 
       - name: Setup sccache
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         shell: bash
         run: |
           if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
@@ -356,19 +409,19 @@ jobs:
           fi
 
       - name: Cache cargo
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
       - name: Check workspace
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check --workspace --all-targets
 
       - name: Check (without MCP proxy)
-        if: steps.classify-diff.outputs.fast-pass != 'true'
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas --no-default-features

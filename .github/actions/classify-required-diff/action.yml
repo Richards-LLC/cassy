@@ -1,5 +1,5 @@
 name: Classify required CI diff
-description: Fast-pass only empty, documentation-only, and exact package-version diffs.
+description: Fail-closed classification for required CI jobs.
 inputs:
   base-sha:
     description: Commit on the base side of the comparison.
@@ -9,8 +9,14 @@ outputs:
     description: The conservative CI diff classification.
     value: ${{ steps.classify.outputs.class }}
   fast-pass:
-    description: Whether expensive job steps may be skipped.
+    description: Whether the diff is Rust-unaffected (kept for existing callers).
     value: ${{ steps.classify.outputs.fast-pass }}
+  rust-unaffected:
+    description: Whether Rust builds, tests, doctests, and macOS checks may be skipped.
+    value: ${{ steps.classify.outputs.rust-unaffected }}
+  web-check-needed:
+    description: Whether the Commander web build and tests must run.
+    value: ${{ steps.classify.outputs.web-check-needed }}
 runs:
   using: composite
   steps:
@@ -21,19 +27,44 @@ runs:
       run: |
         # checkout fetch-depth: 0 makes this a true merge-base comparison,
         # including an ancestry-only merge with no content changes.
+        class=rust-touched
         if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
           # Schedules, manual dispatches, and tag pushes without a predecessor
-          # do not have a comparison event.
-          # They are intentionally never eligible to fast-pass.
-          class=full
-        else
-          merge_base="$(git merge-base "$BASE_SHA" HEAD)"
-          class="$(scripts/classify-ci-diff.sh "$merge_base" HEAD)"
+          # do not have a comparison event, so uncertainty runs the full tier.
+          echo "::notice title=CI diff class::No comparable base; running Rust tier"
+        elif ! merge_base="$(git merge-base "$BASE_SHA" HEAD)"; then
+          echo "::warning title=CI diff class::Could not find merge base; running Rust tier"
+        elif ! class="$(scripts/classify-ci-diff.sh "$merge_base" HEAD)"; then
+          echo "::warning title=CI diff class::Classifier failed; running Rust tier"
+          class=rust-touched
         fi
+
+        case "$class" in
+          empty|docs-only|hub-web-only|version-bump|rust-touched) ;;
+          *)
+            echo "::warning title=CI diff class::Unknown class '$class'; running Rust tier"
+            class=rust-touched
+            ;;
+        esac
+
+        rust_unaffected=false
+        web_check_needed=true
+        case "$class" in
+          empty|docs-only|version-bump)
+            rust_unaffected=true
+            web_check_needed=false
+            ;;
+          hub-web-only)
+            rust_unaffected=true
+            ;;
+        esac
+
         printf 'class=%s\n' "$class" >> "$GITHUB_OUTPUT"
-        if [[ "$class" == empty || "$class" == docs-only || "$class" == version-bump ]]; then
-          printf 'fast-pass=true\n' >> "$GITHUB_OUTPUT"
-          echo "::notice title=CI fast-pass::fast-passed: $class"
+        printf 'rust-unaffected=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
+        printf 'web-check-needed=%s\n' "$web_check_needed" >> "$GITHUB_OUTPUT"
+        printf 'fast-pass=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
+        if [[ "$rust_unaffected" == true ]]; then
+          echo "::notice title=CI Rust short-circuit::Diff class '$class' is Rust-unaffected"
         else
-          printf 'fast-pass=false\n' >> "$GITHUB_OUTPUT"
+          echo "::notice title=CI Rust tier::Diff class '$class' runs the full Rust tier"
         fi

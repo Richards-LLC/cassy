@@ -162,7 +162,7 @@ async fn itemized_rejection_syncs_owned_row_and_names_project_mismatch() {
     Mock::given(method("POST"))
         .and(path("/api/sync/push"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .expect(5)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -191,25 +191,27 @@ async fn itemized_rejection_syncs_owned_row_and_names_project_mismatch() {
             ..Default::default()
         },
     );
-    let (results, syncer) = tokio::task::spawn_blocking(move || {
-        let results = (0..5).map(|_| syncer.push()).collect::<Vec<_>>();
-        (results, syncer)
+    let (first, second, syncer) = tokio::task::spawn_blocking(move || {
+        let first = syncer.push();
+        let second = syncer.push();
+        (first, second, syncer)
     })
     .await
     .expect("spawn_blocking join");
 
+    assert!(first.as_ref().is_ok_and(|result| !result.errors.is_empty()));
     assert!(
-        results
-            .iter()
-            .all(|result| result.as_ref().is_ok_and(|result| !result.errors.is_empty())),
-        "each refusal is surfaced"
+        second.as_ref().is_ok_and(|result| result.errors.is_empty()),
+        "a parked permanent rejection must not recur on the next sync"
     );
     assert_eq!(syncer.queue().stats(5).unwrap().failed, 1);
     assert_eq!(syncer.queue().list_all(10).unwrap().len(), 1);
     let failed = &syncer.queue().list_all(10).unwrap()[0];
     assert_eq!(failed.entity_id, "rejected-project-entry-002");
     assert!(failed.last_error.as_deref().is_some_and(|error| {
-        error.contains("project_mismatch") && error.contains("foreign-project")
+        error.contains("project_mismatch")
+            && error.contains("foreign-project")
+            && !error.contains("server response")
     }));
 }
 
@@ -287,7 +289,8 @@ async fn itemized_rejection_subset_settles_unrejected_rows_for_six_of_twenty() {
         assert!(rejected_ids.contains(&item.entity_id.as_str()));
         assert!(item.last_error.as_deref().is_some_and(|error| {
             error.contains("scope_mismatch")
-                && error.contains("existing canonical project: cas-src")
+                && error.contains("existing_project=cas-src")
+                && !error.contains("server response")
         }));
     }
 }

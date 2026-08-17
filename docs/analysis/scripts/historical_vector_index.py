@@ -454,15 +454,9 @@ def unpack(blob: bytes) -> array.array:
     return result
 
 
-def vector_query(db: sqlite3.Connection, vector: list[float], k: int) -> list[dict]:
-    scored = []
-    for chunk_id, blob in db.execute("SELECT chunk_id,vector FROM vectors"):
-        candidate = unpack(blob)
-        score = sum(a*b for a, b in zip(vector, candidate))
-        scored.append((score, chunk_id))
-    scored.sort(reverse=True)
+def hydrate_results(db: sqlite3.Connection, ranked: list[tuple[float, int]], k: int) -> list[dict]:
     result = []
-    for score, chunk_id in scored[:k]:
+    for score, chunk_id in ranked[:k]:
         row = db.execute("SELECT source_kind,text,duplicate_count FROM chunks WHERE id=?", (chunk_id,)).fetchone()
         prov = db.execute("SELECT source_path,session_id,task_id,worker,timestamp,epoch,privacy_scope FROM occurrences WHERE chunk_id=? ORDER BY timestamp LIMIT 8", (chunk_id,)).fetchall()
         result.append({"chunk_id": chunk_id, "score": round(score, 6), "source_kind": row[0],
@@ -470,14 +464,45 @@ def vector_query(db: sqlite3.Connection, vector: list[float], k: int) -> list[di
     return result
 
 
+def vector_ranking(db: sqlite3.Connection, vector: list[float]) -> list[tuple[float, int]]:
+    scored = []
+    for chunk_id, blob in db.execute("SELECT chunk_id,vector FROM vectors"):
+        candidate = unpack(blob)
+        score = sum(a*b for a, b in zip(vector, candidate))
+        scored.append((score, chunk_id))
+    scored.sort(reverse=True)
+    return scored
+
+
+def lexical_ranking(db: sqlite3.Connection, query_text: str) -> list[tuple[float, int]]:
+    terms = list(dict.fromkeys(re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query_text.lower())))
+    if not terms:
+        return []
+    expression = " OR ".join('"'+term.replace('"', '')+'"' for term in terms[:24])
+    rows = db.execute("SELECT rowid,bm25(chunks_fts) FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT 200", (expression,)).fetchall()
+    return [(-float(score), int(rowid)) for rowid, score in rows]
+
+
 def query(args: argparse.Namespace) -> None:
-    endpoint = os.environ.get("CAS_CLOUD_ENDPOINT", ""); token = os.environ.get("CAS_CLOUD_TOKEN", "")
-    if not endpoint or not token: raise SystemExit("CAS cloud credentials required for query embedding")
     db = sqlite3.connect(args.index)
     started = time.monotonic()
-    vector = post_embeddings(endpoint, token, [args.query])[0]
-    result = vector_query(db, vector, args.top)
-    print(json.dumps({"query": args.query, "latency_ms": round((time.monotonic()-started)*1000, 2), "results": result}, indent=2))
+    lexical = lexical_ranking(db, args.query)
+    if args.mode == "lexical":
+        ranked = lexical
+    else:
+        endpoint = os.environ.get("CAS_CLOUD_ENDPOINT", ""); token = os.environ.get("CAS_CLOUD_TOKEN", "")
+        if not endpoint or not token: raise SystemExit("CAS cloud credentials required for vector query")
+        vector = post_embeddings(endpoint, token, [args.query])[0]
+        semantic = vector_ranking(db, vector)
+        if args.mode == "vector":
+            ranked = semantic
+        else:
+            fused = collections.defaultdict(float)
+            for rank, (_, chunk_id) in enumerate(semantic[:200], 1): fused[chunk_id] += 1/(60+rank)
+            for rank, (_, chunk_id) in enumerate(lexical[:200], 1): fused[chunk_id] += 1/(60+rank)
+            ranked = sorted(((score, chunk_id) for chunk_id, score in fused.items()), reverse=True)
+    result = hydrate_results(db, ranked, args.top)
+    print(json.dumps({"query": args.query, "mode": args.mode, "latency_ms": round((time.monotonic()-started)*1000, 2), "results": result}, indent=2))
     db.close()
 
 
@@ -492,7 +517,7 @@ def main() -> None:
     inv = sub.add_parser("inventory"); inv.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT); inv.add_argument("--cutoff", default=DEFAULT_CUTOFF); inv.set_defaults(func=command_inventory)
     prep = sub.add_parser("prepare"); prep.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT); prep.add_argument("--index", type=Path, default=DEFAULT_INDEX); prep.add_argument("--cutoff", default=DEFAULT_CUTOFF); prep.add_argument("--sample-files", type=int, default=0); prep.add_argument("--sample-rows", type=int, default=0); prep.set_defaults(func=prepare)
     emb = sub.add_parser("embed"); emb.add_argument("--index", type=Path, default=DEFAULT_INDEX); emb.add_argument("--limit", type=int, default=0, help="0 means all pending"); emb.add_argument("--pause", type=float, default=0.55); emb.set_defaults(func=embed)
-    qry = sub.add_parser("query"); qry.add_argument("query"); qry.add_argument("--index", type=Path, default=DEFAULT_INDEX); qry.add_argument("--top", type=int, default=8); qry.set_defaults(func=query)
+    qry = sub.add_parser("query"); qry.add_argument("query"); qry.add_argument("--index", type=Path, default=DEFAULT_INDEX); qry.add_argument("--top", type=int, default=8); qry.add_argument("--mode", choices=("vector", "lexical", "hybrid"), default="hybrid"); qry.set_defaults(func=query)
     args = parser.parse_args(); args.func(args)
 
 

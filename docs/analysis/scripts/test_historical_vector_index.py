@@ -50,7 +50,7 @@ class HistoricalVectorIndexTests(unittest.TestCase):
             vec = [0.0] * hvi.DIMS
             vec[0] = 1.0
             db.execute("INSERT INTO vectors(chunk_id,vector) VALUES(?,?)", (chunk_id, struct.pack(f"<{hvi.DIMS}f", *vec)))
-            result = hvi.vector_query(db, vec, 1)
+            result = hvi.hydrate_results(db, hvi.vector_ranking(db, vec), 1)
             self.assertEqual(result[0]["chunk_id"], chunk_id)
             self.assertEqual(result[0]["provenance"][0][2], "cas-abcd")
 

@@ -1,6 +1,6 @@
 ---
 name: cas-github-issues
-description: Use when sweeping, triaging, deduplicating, verifying, closing, or filing GitHub issues, or reconciling issues with CAS tasks.
+description: Use when sweeping, triaging, deduplicating, verifying, closing, or filing GitHub issues, or reconciling issues with Cassy tasks.
 managed_by: cas
 ---
 
@@ -8,8 +8,8 @@ managed_by: cas
 
 GitHub Issues is the canonical intake when a project has more than one machine
 filing bugs. This skill is the reconciliation loop between that intake and the
-CAS task graph: **every open issue ends the sweep either closed, deduped, or
-pointing at a live CAS task.**
+Cassy task graph: **every open issue ends the sweep either closed, deduped, or
+pointing at a live Cassy task.**
 
 Run all six steps in order. **If no step changed anything, end the turn without
 a report** — a silent sweep is the success case, and a "nothing to do" summary
@@ -17,9 +17,9 @@ every hour is noise.
 
 ## Why you may be here: the unfiled-reports banner
 
-`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a CAS memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
+`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
 
-CAS emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
+Cassy emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
 staged at the `docs/requests/` root — reports the write-first flow wrote but
 never pushed, so nobody outside that checkout can see them. Sweeping those
 staged files into GitHub is part of this skill's job: read each one, search for
@@ -42,7 +42,7 @@ gh issue list --state open --limit 100 --json number,title,body,labels,createdAt
 If `gh` is not authenticated (`gh auth status` fails), stop and say so — do not
 fall back to guessing from local files.
 
-Then load the CAS side once, so every later step reads from the same picture:
+Then load the Cassy side once, so every later step reads from the same picture:
 
 ```
 mcp__cs__task action=list limit=100
@@ -66,7 +66,7 @@ new, and step 4 must not task it again. Build the working set:
 | Duplicate | Same defect as another open issue | Step 2 |
 | Claims fixed | Body or comments assert the fix shipped | Step 3 |
 | New | Real, unduplicated, untasked | Step 4 |
-| Already tasked | Comment names a live CAS task | Step 5 |
+| Already tasked | Comment names a live Cassy task | Step 5 |
 
 ## 2. Dedupe double-filings
 

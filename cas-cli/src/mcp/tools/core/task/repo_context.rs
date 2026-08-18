@@ -816,7 +816,7 @@ pub(crate) fn resolve_repo_context(
              Task targets `{}` (normalized `{}`), but no current-host known \
              repository or verified path hint resolves to that selector. \
              Each known checkout's full normalized identity set was compared: \
-             {}. Register/open the target repo with CAS, then retry. No git \
+             {}. Register/open the target repo with Cassy, then retry. No git \
              merge/reachability check was run.",
             target.repo_selector,
             canonical_selector(&target.repo_selector),
@@ -1033,7 +1033,7 @@ mod tests {
             &main,
             &[
                 "-c",
-                "user.name=CAS",
+                "user.name=Cassy",
                 "-c",
                 "user.email=cas@example.com",
                 "commit",
@@ -1128,7 +1128,7 @@ mod tests {
                 &repo,
                 &[
                     "-c",
-                    "user.name=CAS",
+                    "user.name=Cassy",
                     "-c",
                     "user.email=cas@example.com",
                     "commit",
@@ -1327,7 +1327,7 @@ mod tests {
             &main,
             &[
                 "-c",
-                "user.name=CAS",
+                "user.name=Cassy",
                 "-c",
                 "user.email=cas@example.com",
                 "commit",
@@ -1430,7 +1430,7 @@ mod tests {
                     &repo,
                     &[
                         "-c",
-                        "user.name=CAS",
+                        "user.name=Cassy",
                         "-c",
                         "user.email=cas@example.com",
                         "commit",
@@ -1588,7 +1588,7 @@ mod tests {
             dir.path(),
             &[
                 "-c",
-                "user.name=CAS",
+                "user.name=Cassy",
                 "-c",
                 "user.email=cas@example.com",
                 "commit",
@@ -1631,7 +1631,7 @@ mod tests {
                 repo,
                 &[
                     "-c",
-                    "user.name=CAS",
+                    "user.name=Cassy",
                     "-c",
                     "user.email=cas@example.com",
                     "commit",
@@ -1649,7 +1649,7 @@ mod tests {
             &repo_a,
             &[
                 "-c",
-                "user.name=CAS",
+                "user.name=Cassy",
                 "-c",
                 "user.email=cas@example.com",
                 "commit",
@@ -1672,7 +1672,7 @@ mod tests {
             &repo_b,
             &[
                 "-c",
-                "user.name=CAS",
+                "user.name=Cassy",
                 "-c",
                 "user.email=cas@example.com",
                 "commit",
@@ -1714,7 +1714,7 @@ mod tests {
                     repo,
                     &[
                         "-c",
-                        "user.name=CAS",
+                        "user.name=Cassy",
                         "-c",
                         "user.email=cas@example.com",
                         "commit",
@@ -1734,7 +1734,7 @@ mod tests {
                 &repo_a,
                 &[
                     "-c",
-                    "user.name=CAS",
+                    "user.name=Cassy",
                     "-c",
                     "user.email=cas@example.com",
                     "commit",
@@ -1753,7 +1753,7 @@ mod tests {
                 &repo_b,
                 &[
                     "-c",
-                    "user.name=CAS",
+                    "user.name=Cassy",
                     "-c",
                     "user.email=cas@example.com",
                     "commit",
@@ -1768,7 +1768,7 @@ mod tests {
                 &repo_b,
                 &[
                     "-c",
-                    "user.name=CAS",
+                    "user.name=Cassy",
                     "-c",
                     "user.email=cas@example.com",
                     "merge",

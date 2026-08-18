@@ -1,8 +1,8 @@
-# CAS Memory: the learning loop for every agent
+# Cassy Memory: the learning loop for every agent
 
 **Product showcase · refreshed 9 August 2026 · implementation reference `85963767`**
 
-CAS turns the useful signal left by work into a reusable, inspectable asset. The product is not a bigger transcript: it is a controlled loop that captures what matters, gives it durable shape, retrieves the right part later, and lets the next task start with more context than the last one.
+Cassy turns the useful signal left by work into a reusable, inspectable asset. The product is not a bigger transcript: it is a controlled loop that captures what matters, gives it durable shape, retrieves the right part later, and lets the next task start with more context than the last one.
 
 > **Work becomes memory; memory changes the next piece of work.**
 
@@ -29,7 +29,7 @@ This is an implementation-grounded product explainer. It describes what the curr
  next session   focused detail on demand        temporal / entity / semantic        history, code symbols
 ```
 
-The loop is deliberately selective. CAS can provide a compact session orientation and pinned guidance, then let the agent search and open only the detail needed for the task. A useful outcome, correction, or preference can be captured again, improving the next pass rather than vanishing into a transcript.
+The loop is deliberately selective. Cassy can provide a compact session orientation and pinned guidance, then let the agent search and open only the detail needed for the task. A useful outcome, correction, or preference can be captured again, improving the next pass rather than vanishing into a transcript.
 
 ## The memory surfaces, mapped to the loop
 
@@ -78,7 +78,7 @@ The loop is deliberately selective. CAS can provide a compact session orientatio
 
 - **Knowledge and history vectorization are implemented.** Their pending queues drain through the same cloud embedding client and local cache, while the durable pages, history ledger, and local lexical retrieval remain useful offline.
 - **Source-code vectorization is also implemented.** The tree-sitter indexer queues eligible symbols; their identity, path, documentation, signature, and bounded source context form the embedding text. Vectors live in an isolated `index/code-vectors` LMDB environment, separate from knowledge/history.
-- **Semantic retrieval is capability-gated.** It becomes live only with cloud authentication and a non-empty, model-compatible local cache. When those conditions are absent—or a query embedding fails—CAS retains the always-local tree-sitter/BM25 symbol path and does not create an empty vector cache just for lookup.
+- **Semantic retrieval is capability-gated.** It becomes live only with cloud authentication and a non-empty, model-compatible local cache. When those conditions are absent—or a query embedding fails—Cassy retains the always-local tree-sitter/BM25 symbol path and does not create an empty vector cache just for lookup.
 - **Hybrid does not mean “vectors only.”** Semantic similarity can join lexical, structural, temporal, and entity signals. Exact symbol names and paths retain their precision advantage; a semantic code result is merged with the pattern channel rather than replacing it.
 
 ### Live coverage snapshot: implemented ≠ enabled ≠ indexed ≠ complete
@@ -87,7 +87,7 @@ The 9 August live status is deliberately shown as coverage, not as a blanket sem
 
 | State | Live observation | What it means—and does not mean |
 | --- | --- | --- |
-| **Implemented** | The checkout contains `code_embedding_text` and `embed_pending_code` in `cas-cli/src/cloud/code_embeddings.rs` (lines 22 and 54), plus the source-code hybrid merge path. | CAS has a source-symbol vector pipeline; it is not merely a planned design. |
+| **Implemented** | The checkout contains `code_embedding_text` and `embed_pending_code` in `cas-cli/src/cloud/code_embeddings.rs` (lines 22 and 54), plus the source-code hybrid merge path. | Cassy has a source-symbol vector pipeline; it is not merely a planned design. |
 | **Authenticated** | `cas auth whoami --json` reported `logged_in: true`. | A cloud embedder can be configured; authentication alone does not prove an individual query will receive a semantic row. |
 | **Indexed** | `cas status --json` reported 362 indexed files, 6,694 stored symbols, no file lag, and the current `85963767` HEAD. | The always-local tree-sitter/BM25 source path is current. |
 | **Vector coverage** | The same status reported 548 vector-eligible symbols: 533 vectorized, 15 pending, 0 failed. | Source vectors exist and the queue is partly caught up; pending work means coverage is not yet 100%. |
@@ -115,14 +115,14 @@ The MCP code-search query `embedding pending code symbol` supplied a live semant
 
 ## Grounding: convergence, not endorsement
 
-Tencent’s public Agent Memory materials describe reusable assets drawn from conversations, documents, and code; layered context; selective retrieval; and governed sharing. CAS follows the same broad product direction in a local-first coding-agent system: capture reusable work, keep it inspectable, retrieve it selectively, and scope who can reuse it. This is an architectural comparison only—not a partnership, benchmark, or endorsement by Tencent.
+Tencent’s public Agent Memory materials describe reusable assets drawn from conversations, documents, and code; layered context; selective retrieval; and governed sharing. Cassy follows the same broad product direction in a local-first coding-agent system: capture reusable work, keep it inspectable, retrieve it selectively, and scope who can reuse it. This is an architectural comparison only—not a partnership, benchmark, or endorsement by Tencent.
 
 | Public grounding | What it contributes to this showcase |
 | --- | --- |
 | [TencentDB Agent Memory: reusable assets, Wiki, and CodeGraph](https://github.com/TencentCloud/TencentDB-Agent-Memory#what-is-tencentdb-agent-memory) | A public example of memory extending beyond conversation retention into reusable work assets. |
 | [TencentDB Agent Memory: layered refinement and retrieval](https://github.com/TencentCloud/TencentDB-Agent-Memory#technical-implementation) | Support for the product principle of selective, layered context rather than prompt sprawl. |
 | [Tencent Cloud: Agent Long-Term Memory overview](https://www.tencentcloud.com/document/product/409/80363) | Public discussion of memory types, metadata, isolation, and lifecycle. |
-| [CAS public repository](https://github.com/pippenz/cas) | The public product and source evidence for CAS; links below point to the corresponding implementation areas. |
+| [Cassy public repository](https://github.com/pippenz/cas) | The public product and source evidence for Cassy; links below point to the corresponding implementation areas. |
 
 ## Evidence map
 
@@ -153,4 +153,4 @@ cas status --json
 cas auth whoami --json
 ```
 
-The doctor/status receipts showed a current source index, 533 vectorized source symbols, 15 pending symbols, no failed symbols, and authenticated cloud status. The code-search call returned indexed symbols from the live CAS environment, while local source inspection found the current source-vector implementation from `cas-733e` plus its race-safety follow-up `cas-c84d`. This report therefore supersedes earlier wording that described source vectors as planned. It still labels semantic retrieval accurately: cloud authentication, a compatible model, and populated cache are required before that channel contributes results.
+The doctor/status receipts showed a current source index, 533 vectorized source symbols, 15 pending symbols, no failed symbols, and authenticated cloud status. The code-search call returned indexed symbols from the live Cassy environment, while local source inspection found the current source-vector implementation from `cas-733e` plus its race-safety follow-up `cas-c84d`. This report therefore supersedes earlier wording that described source vectors as planned. It still labels semantic retrieval accurately: cloud authentication, a compatible model, and populated cache are required before that channel contributes results.

@@ -1,12 +1,12 @@
-//! MCP Server for CAS
+//! MCP Server for Cassy
 //!
-//! Comprehensive MCP (Model Context Protocol) server exposing all CAS functionality.
+//! Comprehensive MCP (Model Context Protocol) server exposing all Cassy functionality.
 //!
 //! # Features
 //!
 //! - **55 Tools**: Memory, tasks, rules, skills, search, and system operations
 //! - **9 Prompts**: Reusable prompt templates for common workflows
-//! - **Resources**: Read-only access to all CAS data via cas:// URIs
+//! - **Resources**: Read-only access to all Cassy data via cas:// URIs
 //! - **Embedded Daemon**: Background maintenance during idle periods
 //!
 //! # Usage

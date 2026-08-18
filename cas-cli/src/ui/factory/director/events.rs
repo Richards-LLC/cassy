@@ -1,6 +1,6 @@
 //! Event detection for the Director
 //!
-//! Detects state changes in CAS data by comparing snapshots.
+//! Detects state changes in Cassy data by comparing snapshots.
 //! Used to trigger auto-prompting and activity logging.
 
 use std::collections::{HashMap, HashSet};
@@ -76,7 +76,7 @@ const IDLE_CONSECUTIVE_TICKS: u32 = 2;
 /// alert before the assignment write lands.
 const SPAWN_ASSIGN_GRACE_SECS: i64 = 10;
 
-/// Events detected from CAS state changes
+/// Events detected from Cassy state changes
 #[derive(Debug, Clone)]
 pub enum DirectorEvent {
     /// A task was assigned to a worker
@@ -438,7 +438,7 @@ impl DirectorState {
     }
 }
 
-/// Detects events by comparing CAS state snapshots
+/// Detects events by comparing Cassy state snapshots
 pub struct DirectorEventDetector {
     /// Previous state snapshot
     last_state: DirectorState,
@@ -519,7 +519,7 @@ pub struct DirectorEventDetector {
     /// timestamp from before this task started can't fire a false stall in
     /// the grace window right after start.
     task_start_observed: HashMap<String, (String, DateTime<chrono::Utc>)>,
-    /// (cas-728b) CAS root directory, set via [`Self::set_cas_root`]. When
+    /// (cas-728b) Cassy root directory, set via [`Self::set_cas_root`]. When
     /// present, a checkpoint-age stall candidate is additionally confirmed
     /// against transcript mtime — the same liveness signal
     /// `cas factory is-wedged` reads (cas-4513) — before firing/escalating:
@@ -691,7 +691,7 @@ impl DirectorEventDetector {
         self.stall_threshold_secs = secs;
     }
 
-    /// (cas-728b) Set the CAS root directory so stall-candidate confirmation
+    /// (cas-728b) Set the Cassy root directory so stall-candidate confirmation
     /// can consult transcript mtime the same way `cas factory is-wedged`
     /// does. Call once after construction. Leaving this unset skips the
     /// confirmation step (checkpoint-age-only predicate, the pre-cas-728b

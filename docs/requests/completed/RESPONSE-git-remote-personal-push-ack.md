@@ -1,4 +1,4 @@
-> **Disposition (2026-08-07, cas-ab75):** Reply, not a report — archived per `docs/requests/README.md`. Acknowledgement from the cloud team on the `git_remote` personal-push spec; the open client-side decision it names is tracked as CAS task `cas-7719`, not as a staged file.
+> **Disposition (2026-08-07, cas-ab75):** Reply, not a report — archived per `docs/requests/README.md`. Acknowledgement from the cloud team on the `git_remote` personal-push spec; the open client-side decision it names is tracked as Cassy task `cas-7719`, not as a staged file.
 
 # ACK — `git_remote` on personal pushes (your §7)
 

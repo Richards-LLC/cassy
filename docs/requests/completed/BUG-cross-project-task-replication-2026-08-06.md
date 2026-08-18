@@ -28,7 +28,7 @@ payment-reminder / recurring-invoice work (abundant-mines), OpenClaw-on-Vultr wo
 (cas-src). Closed foreign replicas raised the count to **125 rows** attributable by
 epic-child expansion alone.
 
-Daniel's report: *"other projects' tasks/epics are polluting gabber-studio's CAS queue."*
+Daniel's report: *"other projects' tasks/epics are polluting gabber-studio's Cassy queue."*
 
 ## 2. Confirmed root cause (already fixed upstream — this section is corroboration)
 
@@ -118,7 +118,7 @@ now contradict the authoritative rows:
 | `cas-7fa8` QBO Cleanup — Roark 2022 | `open` | **closed** in `Richards LLC/Accounting` |
 | `cas-e9e9` EPIC per-worker backend/model/effort | `open` | **closed** in `cas-src` |
 | `cas-7237` E4 Wallet QA / store submission | `open` | **closed** in `ozer` |
-| `cas-84a9` CAS Remote Deployment & Slack Bridge | `open` | **closed** in `cas-src` |
+| `cas-84a9` Cassy Remote Deployment & Slack Bridge | `open` | **closed** in `cas-src` |
 
 Anyone reading gabber's queue was being told that finished work was still outstanding.
 
@@ -154,7 +154,7 @@ parent-folder name, leave `[project] canonical_id` unset in both, sync each — 
     live in abundant-mines.
   * Telehealth group (10) → `/home/pippenz/Petrastella/ozer` (4 closed, notes 10,904;
     `ozer/.cas/worktrees/telehealth*` exist)
-  * OpenClaw/Vultr → ozer; CAS-server + cas-cli groups → cas-src
+  * OpenClaw/Vultr → ozer; Cassy-server + cas-cli groups → cas-src
 * `cas-2e0b` was absent from ozer → row copied in (full-column INSERT) before deletion.
 * 125 task rows + 1 dependency row + 4 `task_lease_history` rows + 2 `verifications`
   rows deleted from gabber's DB; 78 of the same ids deleted from `~/.cas/cas.db`.
@@ -192,7 +192,7 @@ project**, not just the one that complained.
 ### 6.1 A new finding that invalidates the obvious fix: task ids COLLIDE
 
 Before purging anything machine-wide we tested the assumption every purge tool relies on —
-"same task id in two DBs ⇒ replica". **It is false.** CAS ids are 4 hex chars (~65k space);
+"same task id in two DBs ⇒ replica". **It is false.** Cassy ids are 4 hex chars (~65k space);
 across 39 DBs and 5,824 distinct ids, 2,265 ids appear in more than one DB:
 
 | class | count | meaning |
@@ -201,7 +201,7 @@ across 39 DBs and 5,824 distinct ids, 2,265 ids appear in more than one DB:
 | **pure collision** | **73** | every copy is a *different task* that merely shares the id |
 | **mixed** | **43** | a replicated blob task **plus** a distinct colliding task elsewhere |
 
-Live examples: `cas-ee3f` is a gabber CAS-hygiene chore *and* pantheon's "Paywall modal on
+Live examples: `cas-ee3f` is a gabber Cassy-hygiene chore *and* pantheon's "Paywall modal on
 /dashboard has no dismiss". `cas-9d74` is a gabber cancellation epic *and* cas-src's closed
 "depth flag: end-to-end test + user docs". `cas-90b1` is Accounting's "FONCE eligibility
 analysis" *and* pantheon's "Apply confirmed code-review fixes to Plaid epic".
@@ -245,7 +245,7 @@ deleted only when another DB holds the same `(id, title)` **and** that DB is the
 home; rows unique to a DB are never touched; score ties are left in place, never broken
 arbitrarily.
 
-**13,704 rows removed across 13 DBs**, plus 290 CAS self-test fixtures ("Context test task",
+**13,704 rows removed across 13 DBs**, plus 290 Cassy self-test fixtures ("Context test task",
 "MCP Protocol Test Task", "Test task for notification test", "Consolidated task test")
 removed from every DB except their cas-src home. 0 orphaned dependency rows anywhere.
 

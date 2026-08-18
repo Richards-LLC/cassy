@@ -228,7 +228,7 @@ pub enum TransactionState {
 pub struct UpdateTransaction {
     /// Project root directory
     project_root: PathBuf,
-    /// CAS directory (.cas)
+    /// Cassy directory (.cas)
     cas_dir: PathBuf,
     /// Backup directory for this transaction
     backup_dir: Option<PathBuf>,

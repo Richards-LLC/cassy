@@ -1,8 +1,8 @@
-# CAS on a Mac from zero — Petra Stella team member guide
+# Cassy on a Mac from zero — Petra Stella team member guide
 
-Date: 2026-08-17 · Revised 2026-08-18 after a clean-install run found the step order, `cas cloud team`, and `cas update --user` claims wrong · Verified against: CAS v2.72.0 (released 2026-08-17), `cas` CLI help and measured command behaviour on a live install · Audience: a new Petra Stella team member with an Apple Silicon Mac and terminal comfort.
+Date: 2026-08-17 · Revised 2026-08-18 after a clean-install run found the step order, `cas cloud team`, and `cas update --user` claims wrong · Verified against: Cassy v2.72.0 (released 2026-08-17), `cas` CLI help and measured command behaviour on a live install · Audience: a new Petra Stella team member with an Apple Silicon Mac and terminal comfort.
 
-**Time: about 15 minutes**, none of it compiling. This uses the published release binary, not a source build. (The older `docs/onboarding/macbook-from-zero.md` is the source-build path for people hacking on CAS itself; it predates current releases — see Known gaps.)
+**Time: about 15 minutes**, none of it compiling. This uses the published release binary, not a source build. (The older `docs/onboarding/macbook-from-zero.md` is the source-build path for people hacking on Cassy itself; it predates current releases — see Known gaps.)
 
 ---
 
@@ -26,7 +26,7 @@ Claude Code ≥ 2.1.126 is required (earlier 2.1.117–2.1.125 had a factory-mod
 
 Steps 1 and 2 are safe to paste twice: each `~/.zprofile` line is appended only when it is not already present, so a re-run cannot duplicate it.
 
-## 2. Install the CAS binary
+## 2. Install the Cassy binary
 
 > **Heads-up (gap #469):** the documented one-liner installer (`cas-install.sh`) currently refuses macOS even though macOS builds ship with every release. Until that fix lands, download the release asset directly:
 
@@ -45,10 +45,10 @@ cas --version                        # expect: cas 2.72.0 (or newer)
 
 The block used to end with `exec zsh -l`, which replaced the shell mid-paste so the lines after it never ran. `export PATH=…` does the same job for the current shell and lets the rest of the block finish. New terminals pick the PATH up from `~/.zprofile`.
 
-## 3. One-time CAS setup
+## 3. One-time Cassy setup
 
 ```bash
-mkdir -p ~/.claude   # opt this machine's Claude Code install into CAS built-ins
+mkdir -p ~/.claude   # opt this machine's Claude Code install into Cassy built-ins
 cas update --user    # seeds the harness dirs that exist: ~/.claude, ~/.codex, ~/.grok
 ```
 
@@ -80,7 +80,7 @@ Or start from the phone/browser: open hub.petrastella.io → **Pair a machine**,
 
 Pairings expire (90 days absolute, 30 days idle). Since v2.72.0 an expired pairing shows **"Machine needs pairing"** with a **Re-pair** button in the Commander — it is not offline, just re-pair and continue.
 
-## 5. CAS Cloud — set and forget
+## 5. Cassy Cloud — set and forget
 
 The team runs the self-hosted **Petra Stella Cloud** at **`https://petra-stella-cloud.vercel.app`** — that is the domain you are authenticating against, and it is already the CLI's built-in default, so no endpoint flag is needed. Auth is a personal static API key.
 
@@ -95,7 +95,7 @@ cas whoami                                  # prints the endpoint you are signed
 
 **Once per machine, not once per project.** The credential is stored at user level in `~/.cas/cloud.json`, so this step works from anywhere — including here, before any project exists — and every project you set up afterwards is already signed in. `cas logout` signs the whole machine out.
 
-Team scope and sync status are *project*-scoped, so they are confirmed in step 7, after you have a project. Running them here fails with `CAS not initialized`.
+Team scope and sync status are *project*-scoped, so they are confirmed in step 7, after you have a project. Running them here fails with `Cassy not initialized`.
 
 **When to sync: normally never by hand.** Auto-sync is on by default (`cloud.auto_sync = true`) and runs every 60 seconds while you are logged in. Manual commands exist for exactly three situations:
 
@@ -135,7 +135,7 @@ Then start working: bare `cas` launches the factory TUI with defaults.
 
 - Binary killed instantly on first run → Gatekeeper: `xattr -d com.apple.quarantine ~/.local/bin/cas`.
 - `cas` not found → `~/.local/bin` missing from PATH; re-check the `~/.zprofile` line, then open a new terminal (or `source ~/.zprofile`).
-- `CAS not initialized` from a cloud command → you are outside a project. `cas login`, `cas logout` and `cas whoami` work anywhere; `cas doctor`, `cas cloud status` and `cas cloud team show` need you to `cd` into a `cas init`-ed project.
+- `Cassy not initialized` from a cloud command → you are outside a project. `cas login`, `cas logout` and `cas whoami` work anywhere; `cas doctor`, `cas cloud status` and `cas cloud team show` need you to `cd` into a `cas init`-ed project.
 - `cas init` refuses with "is your home directory" → that is the guard working; `cd` into the project first.
 - Hub unreachable from hub.petrastella.io → `cas hub service status`; confirm Tailscale is connected; re-pair if the Commander shows "Machine needs pairing".
 - Anything else → `cas doctor` first, then ask in #cas-internal.
@@ -144,8 +144,8 @@ Then start working: bare `cas` launches the factory TUI with defaults.
 
 - **[#469](https://github.com/Richards-LLC/cassy/issues/469)** `cas-install.sh` rejects macOS — the reason this guide hand-downloads the release asset. When fixed, step 2 collapses to one curl|bash line.
 - **[#470](https://github.com/Richards-LLC/cassy/issues/470)** the older from-zero doc is source-build-only with stale claims about release channels; this guide supersedes it for non-contributors.
-- **[#471](https://github.com/Richards-LLC/cassy/issues/471)** there is no CLI or documented flow for the *admin* side of team invites — a Petra Stella admin must invite your account in the CAS Cloud web UI before `cas cloud team show` will show the team.
+- **[#471](https://github.com/Richards-LLC/cassy/issues/471)** there is no CLI or documented flow for the *admin* side of team invites — a Petra Stella admin must invite your account in the Cassy Cloud web UI before `cas cloud team show` will show the team.
 
 ---
 
-Provenance: commands and flags verified against `cas 2.71.0/2.72.0` `--help` output and `cas config` defaults on the machine `soundwave-linux` (2026-08-17); release asset names and checksums from the published v2.72.0 GitHub release; memory-sharing semantics from the CAS memory MCP contract and `cas memory`/`cas cloud team-memories` CLI. The 2026-08-18 revision additionally measured each step's real behaviour outside and inside a project (`cas login --token`, `cas whoami`, `cas cloud team show`, `cas cloud status`, `cas doctor`, `cas init`) and read `sync_user_builtins` in `cas-cli/src/cli/update.rs` for the `--user` claim.
+Provenance: commands and flags verified against `cas 2.71.0/2.72.0` `--help` output and `cas config` defaults on the machine `soundwave-linux` (2026-08-17); release asset names and checksums from the published v2.72.0 GitHub release; memory-sharing semantics from the Cassy memory MCP contract and `cas memory`/`cas cloud team-memories` CLI. The 2026-08-18 revision additionally measured each step's real behaviour outside and inside a project (`cas login --token`, `cas whoami`, `cas cloud team show`, `cas cloud status`, `cas doctor`, `cas init`) and read `sync_user_builtins` in `cas-cli/src/cli/update.rs` for the `--user` claim.

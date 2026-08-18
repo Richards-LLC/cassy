@@ -1,4 +1,4 @@
-//! Friendly name generator for CAS agents
+//! Friendly name generator for Cassy agents
 //!
 //! Generates random adjective-noun combinations like "jolly-panda" or "swift-falcon"
 //! for use as human-friendly agent identifiers in multi-agent sessions.

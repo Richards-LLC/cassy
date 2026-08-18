@@ -1,4 +1,4 @@
-//! Self-update command for CAS CLI
+//! Self-update command for Cassy CLI
 //!
 //! Downloads and installs the latest version from GitHub releases,
 //! and runs schema migrations for the local database.
@@ -43,7 +43,7 @@ fn report_modified_builtin_references(
     fmt.write_raw("  ")?;
     fmt.warning(&format!(
         "{} locally modified builtin reference file(s) in {location} were preserved \
-         (content matches no version CAS has shipped):",
+         (content matches no version Cassy has shipped):",
         result.modified_reference_files.len()
     ))?;
     for file in &result.modified_reference_files {
@@ -52,7 +52,7 @@ fn report_modified_builtin_references(
     }
     fmt.write_raw("    ")?;
     fmt.write_raw(
-        "Review each file; to accept the CAS version, delete it and rerun `cas update --sync`.",
+        "Review each file; to accept the Cassy version, delete it and rerun `cas update --sync`.",
     )?;
     fmt.newline()
 }
@@ -170,7 +170,7 @@ pub struct UpdateArgs {
 }
 
 pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
-    // Note: update command accepts Option<&Path> because it can run without an initialized CAS
+    // Note: update command accepts Option<&Path> because it can run without an initialized Cassy
     // (e.g., binary update only, or checking for updates before init)
     let current_version = env!("CARGO_PKG_VERSION");
 
@@ -205,7 +205,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Full update: binary + schema + sync files
     let mut steps = UpdateStepTracker::new(3, !cli.json);
-    steps.run("Updating CAS binary", || {
+    steps.run("Updating Cassy binary", || {
         perform_update(args, current_version, cli)
     })?;
     if !cli.json {
@@ -242,7 +242,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
 /// Sync rules, skills, and configuration to .claude/.codex directories
 fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result<()> {
-    // cas_root is optional - if not provided and CAS is not initialized, nothing to sync
+    // cas_root is optional - if not provided and Cassy is not initialized, nothing to sync
     let cas_root = match cas_root_param {
         Some(path) => path.to_path_buf(),
         None => {
@@ -337,7 +337,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
     }
 
-    // 4. Main CAS skill (.claude/skills/cas/SKILL.md)
+    // 4. Main Cassy skill (.claude/skills/cas/SKILL.md)
     match generate_cas_skill(project_root) {
         Ok(true) => {
             config_updated.push("skills/cas/SKILL.md");
@@ -354,7 +354,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
                 let mut out = io::stdout();
                 let mut fmt = Formatter::stdout(&mut out, theme.clone());
                 fmt.write_raw("  ")?;
-                fmt.warning(&format!("Could not update CAS skill: {e}"))?;
+                fmt.warning(&format!("Could not update Cassy skill: {e}"))?;
             }
         }
     }
@@ -725,7 +725,7 @@ fn run_schema_migrations(
     cli: &Cli,
     cas_root_param: Option<&Path>,
 ) -> anyhow::Result<()> {
-    // cas_root is optional - if not provided, CAS is not initialized
+    // cas_root is optional - if not provided, Cassy is not initialized
     let cas_root = match cas_root_param {
         Some(path) => path.to_path_buf(),
         None => {
@@ -735,7 +735,7 @@ fn run_schema_migrations(
                 let mut out = io::stdout();
                 let theme = ActiveTheme::default();
                 let mut fmt = Formatter::stdout(&mut out, theme);
-                fmt.warning("CAS not initialized in this directory")?;
+                fmt.warning("Cassy not initialized in this directory")?;
                 fmt.write_raw("  Run ")?;
                 fmt.write_accent("cas init")?;
                 fmt.write_raw(" to initialize")?;
@@ -765,7 +765,7 @@ fn run_schema_migrations(
                 let mut out = io::stdout();
                 let theme = ActiveTheme::default();
                 let mut fmt = Formatter::stdout(&mut out, theme);
-                fmt.warning("CAS database not initialized")?;
+                fmt.warning("Cassy database not initialized")?;
                 fmt.write_raw("  Run ")?;
                 fmt.write_accent("cas init")?;
                 fmt.write_raw(" to initialize")?;
@@ -964,7 +964,7 @@ fn check_for_updates(
     let latest_version = latest.version.trim_start_matches('v');
     let binary_update_available = is_newer(latest_version, current_version);
 
-    // Check schema migrations - only if cas_root is provided (CAS is initialized)
+    // Check schema migrations - only if cas_root is provided (Cassy is initialized)
     let schema_status = cas_root_param.and_then(|path| check_migrations(path).ok());
 
     let pending_migrations = schema_status.as_ref().map(|s| s.pending.len()).unwrap_or(0);
@@ -1044,7 +1044,7 @@ fn check_for_updates(
         }
     } else {
         fmt.write_raw("  ")?;
-        fmt.warning("CAS not initialized in this directory")?;
+        fmt.warning("Cassy not initialized in this directory")?;
     }
 
     Ok(())

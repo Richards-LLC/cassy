@@ -1,6 +1,6 @@
-# Historical CAS operational vector index
+# Historical Cassy operational vector index
 
-<p class="lead"><strong>Headline finding.</strong> Structural normalization removed <strong>92.17%</strong> of 1,033,752 candidate evidence chunks before embedding, turning 3.03 GB of CAS operational sources into 80,951 provenance-bearing semantic units without adding anything to live CAS search.</p>
+<p class="lead"><strong>Headline finding.</strong> Structural normalization removed <strong>92.17%</strong> of 1,033,752 candidate evidence chunks before embedding, turning 3.03 GB of Cassy operational sources into 80,951 provenance-bearing semantic units without adding anything to live Cassy search.</p>
 
 <div class="cards">
 <div class="card"><strong>3.03 GB</strong>eligible frozen source data<br><small>cut off 2026-08-17 13:44:57 UTC</small></div>
@@ -56,9 +56,9 @@ Rows and transcript/log events after the cutoff are excluded by timestamp. Grok'
 | Source | Discovery population | Eligible canonical population | Bytes embedded from |
 |---|---:|---:|---:|
 | Coordination snapshot (`db` + WAL + SHM) | 3 files | 3 files | 637,929,328 |
-| Claude CAS transcripts | 628 files | 628 files | 464,310,658 |
-| Codex transcript store | 2,018 files / 4,685,246,440 bytes | 821 CAS-cwd sessions | 1,888,567,587 |
-| Grok CAS transcript representations | 71 files / 100,708,411 bytes | 13 canonical `chat_history.jsonl` files | 10,682,798 |
+| Claude Cassy transcripts | 628 files | 628 files | 464,310,658 |
+| Codex transcript store | 2,018 files / 4,685,246,440 bytes | 821 Cassy-cwd sessions | 1,888,567,587 |
+| Grok Cassy transcript representations | 71 files / 100,708,411 bytes | 13 canonical `chat_history.jsonl` files | 10,682,798 |
 | Daemon/factory logs | 48 files | 48 files | 31,076,345 |
 | **Total canonical input** |  | **1,510 files + snapshot** | **3,032,566,716** |
 
@@ -80,7 +80,7 @@ The index is a standalone SQLite artifact at `~/.cas/artifacts/cas-c505/frozen-i
 
 ### Privacy and embedding receipt
 
-The explicit task authorization covers one fixed historical embedding build. Text is redacted locally before the request. The CAS cloud contract maps `cas-embed-v1` to OpenAI `text-embedding-3-large` at 1,024 dimensions; the committed cloud response states that the endpoint persists neither text nor vectors and retains only request metadata (count, model, duration). The local artifact retains the returned vectors and the project-private provenance. It must not be published outside the task artifact boundary.
+The explicit task authorization covers one fixed historical embedding build. Text is redacted locally before the request. The Cassy cloud contract maps `cas-embed-v1` to OpenAI `text-embedding-3-large` at 1,024 dimensions; the committed cloud response states that the endpoint persists neither text nor vectors and retains only request metadata (count, model, duration). The local artifact retains the returned vectors and the project-private provenance. It must not be published outside the task artifact boundary.
 
 ## Results
 
@@ -141,7 +141,7 @@ What it did **not** add is equally important. Dense retrieval did not reliably d
 
 ### Cross-channel association
 
-The frozen operational index is intentionally only one evidence channel. The labeled queries were also checked against the existing CAS surfaces:
+The frozen operational index is intentionally only one evidence channel. The labeled queries were also checked against the existing Cassy surfaces:
 
 | Operational association | Memory/knowledge | Task/issue | Code/symbol | Commit/provenance |
 |---|---|---|---|---|
@@ -181,10 +181,10 @@ This matters to semantic analysis: repeated historical prose can rank a withdraw
 
 ## Threats to validity
 
-- **Corpus growth:** the task was estimated at about 1 GB; the fixed-cutoff eligible corpus is 3.03 GB because Codex and factory history grew after task creation. The inventory states both the discovery population and the selected CAS population.
+- **Corpus growth:** the task was estimated at about 1 GB; the fixed-cutoff eligible corpus is 3.03 GB because Codex and factory history grew after task creation. The inventory states both the discovery population and the selected Cassy population.
 - **Snapshot time versus row update time:** cutoff filters are applied to event creation timestamps. A row created before the cutoff but mutated between the cutoff and filesystem copy may reflect later state. Immutable historical event text and transcripts are unaffected; mutable queue-state metrics carry this caveat.
 - **Grok timestamps:** canonical Grok chat rows lack reliable timestamps. They preserve session/source provenance and an `unattributed` epoch instead of a fabricated timestamp.
-- **Approximate tokens and list price:** token count uses characters divided by four and cost uses the direct provider list price. The CAS service may meter differently; both are labeled estimates.
+- **Approximate tokens and list price:** token count uses characters divided by four and cost uses the direct provider list price. The Cassy service may meter differently; both are labeled estimates.
 - **Dense similarity is non-causal:** high cosine similarity associates descriptions, not mechanisms. Recommendations require corroboration from SQL, current code, task/issue state, and change history.
 - **History provenance coverage:** the history surface reports 557/3,651 exact task edges (15.26%) and 918/3,651 commits with any populated edge (25.14%). Missing provenance is returned honestly rather than treated as a negative association.
 - **No continuous refresh:** the artifact ends at the fixed cutoff. Later fixes or regressions must be checked in live structured channels; this index deliberately has no watcher, daemon hook, or model turn.
@@ -214,4 +214,4 @@ python3 docs/analysis/scripts/render_historical_vector_report.py \
   docs/analysis/2026-08-17-historical-operational-vector-index.html
 ```
 
-The Exa research pass adopted two practices: template/deduplication before vectorization ([iPACK, arXiv:2302.09520](https://arxiv.org/abs/2302.09520)) and hybrid lexical+dense retrieval with structured evidence kept separate ([LogSage, arXiv:2506.03691](https://arxiv.org/abs/2506.03691)). The price receipt uses the official OpenAI model page for `text-embedding-3-large`, retrieved 2026-08-17. These sources informed the method; all CAS findings above come from the frozen local corpus and committed code/history channels.
+The Exa research pass adopted two practices: template/deduplication before vectorization ([iPACK, arXiv:2302.09520](https://arxiv.org/abs/2302.09520)) and hybrid lexical+dense retrieval with structured evidence kept separate ([LogSage, arXiv:2506.03691](https://arxiv.org/abs/2506.03691)). The price receipt uses the official OpenAI model page for `text-embedding-3-large`, retrieved 2026-08-17. These sources informed the method; all Cassy findings above come from the frozen local corpus and committed code/history channels.

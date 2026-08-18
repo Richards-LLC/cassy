@@ -7,7 +7,7 @@
 
 ## Problem
 
-The operator has two Claude subscriptions and wants CAS workers to be able to
+The operator has two Claude subscriptions and wants Cassy workers to be able to
 use a different account than the interactive/supervisor session. Today all
 `claude` CLI processes on the machine share `~/.claude/.credentials.json`, so
 `/login` in any one session switches the account for every session and every

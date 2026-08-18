@@ -1,4 +1,4 @@
-# Spike A — Cross-repo sweep topology + CAS repo discovery
+# Spike A — Cross-repo sweep topology + Cassy repo discovery
 
 **Task:** cas-7ef1 (spike) · **EPIC:** cas-7c88 · **Date:** 2026-04-21
 **Requirements covered:** R3, R4, R8, R9, R15 (portability-critical)
@@ -7,7 +7,7 @@
 
 ## Evidence gathered
 
-### CAS storage topology on this host
+### Cassy storage topology on this host
 
 - **Per-repo `.cas/`** — each project directory has its own `.cas/cas.db`, e.g. `/home/pippenz/Petrastella/cas-src/.cas/cas.db` (1409 tasks), `/home/pippenz/Petrastella/pantheon/.cas/cas.db` (22 tasks). `find /home/pippenz -maxdepth 4 -name .cas -type d` returns 20+ repos.
 - **Host `~/.cas/`** — global scope: `cas.db` (1231 tasks, 15 sessions), `config.toml`, `cloud.json`, `proxy_catalog.json`, `sessions/*.json`, `factory-*.sock`, `logs/factory/<session>/`.
@@ -77,7 +77,7 @@ CREATE INDEX idx_known_repos_last_touched ON known_repos(last_touched_at DESC);
 
 **Two-sentence justification:** This piggybacks on existing always-created lifecycles (MCP server startup per session, factory daemon startup per factory) instead of introducing a new persistent process the removed-daemon architecture no longer supports. Debouncing on a host file keeps the cost O(1) per extra invocation, isolates failure (one repo's sweep error doesn't block others), and needs zero user-facing installation — works identically on Linux and macOS.
 
-**Rejected alternative: (c) host cron/launchd.** Reason: non-portable surface area — Linux needs `systemd --user` or crontab, macOS needs launchd plist, Windows (out of scope today but a future tripwire) needs Task Scheduler. Each requires install-time user consent, and silent failures on any of them are invisible to CAS. Installation friction alone disqualifies it per R15; (a) is rejected secondarily because a daemon bound to repo X has no legitimate reason to write into repo Y's `.cas/`, violating isolation.
+**Rejected alternative: (c) host cron/launchd.** Reason: non-portable surface area — Linux needs `systemd --user` or crontab, macOS needs launchd plist, Windows (out of scope today but a future tripwire) needs Task Scheduler. Each requires install-time user consent, and silent failures on any of them are invisible to Cassy. Installation friction alone disqualifies it per R15; (a) is rejected secondarily because a daemon bound to repo X has no legitimate reason to write into repo Y's `.cas/`, violating isolation.
 
 **Why opportunistic-(b) over dedicated-daemon-(b):** the standalone daemon pattern was deliberately removed (cas-cli/src/daemon/mod.rs:11-13). Reintroducing a persistent host-level process would re-open that design question; the opportunistic variant satisfies the functional requirement (cross-repo sweep runs regularly) without the architectural reversal.
 

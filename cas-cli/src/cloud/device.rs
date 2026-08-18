@@ -100,7 +100,7 @@ impl DeviceConfig {
         std::env::consts::ARCH.to_string()
     }
 
-    /// Get current CAS version
+    /// Get current Cassy version
     pub fn cas_version() -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }

@@ -24,7 +24,7 @@ The other personas (`maintainability`, `project-standards`, `correctness`) defer
 - **Logic bugs** → `correctness` persona. Fallow does not understand semantics; an unused export is structural, not a logic bug.
 - **Test quality** → `testing` persona.
 - **Naming, premature abstraction, comment rot, layering judgment** → `maintainability` persona. You only emit deterministic findings.
-- **CAS rule compliance** → `project-standards` persona.
+- **Cassy rule compliance** → `project-standards` persona.
 - **Security / performance smells** → respective personas.
 - **Anything in non-JS/TS files.** Fallow only analyzes JavaScript/TypeScript (plus Vue/Svelte/Astro/MDX/CSS modules). Rust/Python/Go diffs are not in scope; emit a clean envelope.
 

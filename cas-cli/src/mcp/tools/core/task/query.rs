@@ -42,7 +42,7 @@ impl CasCore {
                         "registered supervisor worktree_merge with this task_id"
                     }
                     cas_types::WorkerDeliveryState::MergeAuthorized => {
-                        "registered supervisor retry; CAS reconciles exact target ancestry"
+                        "registered supervisor retry; Cassy reconciles exact target ancestry"
                     }
                     cas_types::WorkerDeliveryState::Merged
                     | cas_types::WorkerDeliveryState::CloseReady => {
@@ -79,7 +79,7 @@ impl CasCore {
             Ok(None) => {}
             Err(error) => {
                 return Ok(Self::tool_error(format!(
-                    "DELIVERY STATE INVALID: task {} has unreadable durable worker-delivery state: {error}. CAS refuses to infer a plausible state or next action.",
+                    "DELIVERY STATE INVALID: task {} has unreadable durable worker-delivery state: {error}. Cassy refuses to infer a plausible state or next action.",
                     task.id
                 )));
             }
@@ -473,7 +473,7 @@ impl CasCore {
         if scope == "global" {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "Global task scope is unsupported. Tasks belong to the current CAS project database.",
+                "Global task scope is unsupported. Tasks belong to the current Cassy project database.",
             ));
         }
         if !matches!(scope.as_str(), "project" | "all") {
@@ -554,7 +554,7 @@ impl CasCore {
                 "Scope: all (currently equivalent to the current project database `{project_id}`; no multi-project aggregator exists)"
             )
         } else {
-            format!("Scope: project `{project_id}` (current CAS database)")
+            format!("Scope: project `{project_id}` (current Cassy database)")
         };
         if filtered.is_empty() {
             return Ok(Self::success(format!(

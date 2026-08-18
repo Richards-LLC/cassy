@@ -28,7 +28,7 @@ The approval never completes, so the waiting `cas login` eventually times out.
 
 ## Reproduction
 
-1. On a machine with the CAS CLI, run `cas login`.
+1. On a machine with the Cassy CLI, run `cas login`.
 2. Note the `user_code` printed by the CLI (for example `FEUE-NMWQ`).
 3. In a browser already signed in to `https://petra-stella-cloud.vercel.app`,
    open `https://petra-stella-cloud.vercel.app/device?code=<user_code>`.
@@ -81,5 +81,5 @@ any directory and logs in every project on the machine.
 
 ## Escalation
 
-Owner: the cloud web app maintainer. This file is the CAS-side record; the CLI
+Owner: the cloud web app maintainer. This file is the Cassy-side record; the CLI
 work is complete and the remaining fix is a server change.

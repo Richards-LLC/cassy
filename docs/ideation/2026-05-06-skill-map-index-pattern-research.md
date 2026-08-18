@@ -10,9 +10,9 @@ relevance: claude-code-feedback, future-cas-skill-loading-design
 
 ## TL;DR
 
-Claude Code (and CAS, by inheritance) currently front-loads every installed skill's full `description` into the system prompt at session start. For users with many skills (60+ in Daniel's case), this hits the configured budget cap (`skillListingBudgetFraction`, default 1% of context ≈ 4k tokens) and triggers crude truncation — full descriptions dropped entirely for cold-tier skills, with only the name surviving.
+Claude Code (and Cassy, by inheritance) currently front-loads every installed skill's full `description` into the system prompt at session start. For users with many skills (60+ in Daniel's case), this hits the configured budget cap (`skillListingBudgetFraction`, default 1% of context ≈ 4k tokens) and triggers crude truncation — full descriptions dropped entirely for cold-tier skills, with only the name surviving.
 
-A better pattern, already proven in CAS itself, is **index-with-fetch-on-demand** — load a tight `MEMORY.md`-style index of name + 1-line hook for every skill, and provide a tool to fetch the full description (frontmatter + trigger keywords + examples) when a skill looks relevant. This trades a fixed 4k-token cost for a smaller fixed index plus a variable per-session fetch cost that scales with actual skill use.
+A better pattern, already proven in Cassy itself, is **index-with-fetch-on-demand** — load a tight `MEMORY.md`-style index of name + 1-line hook for every skill, and provide a tool to fetch the full description (frontmatter + trigger keywords + examples) when a skill looks relevant. This trades a fixed 4k-token cost for a smaller fixed index plus a variable per-session fetch cost that scales with actual skill use.
 
 ## Trigger event
 
@@ -20,7 +20,7 @@ Daniel's `/doctor` output 2026-05-06 surfaced the truncation warning:
 
 > Skill listing will be truncated. 20 descriptions dropped (full descriptions kept for most-used skills) (1.8%/1% of context): fallow, fallow, cas-brainstorm, +17 more.
 
-The `+17 more` plus visible duplicate listings (`fallow` and `cas-brainstorm` each appear twice in the loaded set) suggest both a budget pressure and a pre-existing dedup bug. The dedup bug is not just `fallow` and `cas-brainstorm` — verified 2026-05-06 that all 16 first-party CAS skills are duplicated in the loaded skill list, byte-identical between `/home/pippenz/Petrastella/cas-src/.claude/skills/` (project) and `/home/pippenz/.claude/skills/` (user). The user-level copy is intentionally seeded by `cas update --user` (commit b35d0db) so worker worktrees can fall back to it when host projects gitignore `.claude/skills/`. Claude Code's skill loader does not dedupe by name across project + user source paths, so every CAS skill appears twice in any session running inside cas-src. The Anthropic-shipped skills (`init`, `review`, `claude-api`, etc.) only appear once because they live in one location only — confirming the duplication is tied to "skill present in two source dirs," not a listing-pass bug.
+The `+17 more` plus visible duplicate listings (`fallow` and `cas-brainstorm` each appear twice in the loaded set) suggest both a budget pressure and a pre-existing dedup bug. The dedup bug is not just `fallow` and `cas-brainstorm` — verified 2026-05-06 that all 16 first-party Cassy skills are duplicated in the loaded skill list, byte-identical between `/home/pippenz/Petrastella/cas-src/.claude/skills/` (project) and `/home/pippenz/.claude/skills/` (user). The user-level copy is intentionally seeded by `cas update --user` (commit b35d0db) so worker worktrees can fall back to it when host projects gitignore `.claude/skills/`. Claude Code's skill loader does not dedupe by name across project + user source paths, so every Cassy skill appears twice in any session running inside cas-src. The Anthropic-shipped skills (`init`, `review`, `claude-api`, etc.) only appear once because they live in one location only — confirming the duplication is tied to "skill present in two source dirs," not a listing-pass bug.
 
 Daniel's instinct: "with our skills we generally have really tight short top level and then link to sub resources, why can't we do something like that with a skills map?"
 
@@ -31,9 +31,9 @@ Daniel's instinct: "with our skills we generally have really tight short top lev
 - **Trigger evaluation:** Claude scans the loaded descriptions every turn to decide whether to fire a skill proactively. Trigger keywords, examples, and "use when" rubrics live inside the description body — so the description must be in-context for proactive trigger detection to work.
 - **Caching:** the system prompt (including skill listings) is prompt-cached. Once a session starts, the 4k tokens of skill listings are essentially free for the rest of the session — they do not re-bill on each turn.
 
-## CAS's existing pattern (MEMORY.md)
+## Cassy's existing pattern (MEMORY.md)
 
-CAS auto-memory implements exactly the index-with-fetch-on-demand pattern Daniel intuited:
+Cassy auto-memory implements exactly the index-with-fetch-on-demand pattern Daniel intuited:
 
 - **`MEMORY.md`** is always loaded into the system prompt — a flat list of `- [Title](file.md) — one-line hook` entries, ~150 chars each, max 200 lines (truncation enforced).
 - **Individual memory files** (e.g. `feedback_prisma_relation_shadows_scalar_fk.md`) are NOT loaded eagerly. Claude reads them via the `Read` tool when the index hook flags them as potentially relevant to the current turn.
@@ -106,20 +106,20 @@ Tier assignment could be:
 
 The simplest first cut is **recency-based with the existing primitive** — change the truncation behavior from "drop" to "demote to index." Zero new config, zero new tools required *if* Claude is willing to invoke an existing tool (e.g. `Skill` itself, with a hypothetical `describe` action) on cold-tier matches.
 
-## CAS implications
+## Cassy implications
 
-CAS itself currently has the same constraint — every CAS skill (`cas-supervisor`, `cas-worker`, `cas-search`, etc.) ships a full frontmatter description that lands in the system prompt. As CAS adds more skills (current count: ~15 first-party + plugin skills), the same budget pressure will hit eventually.
+Cassy itself currently has the same constraint — every Cassy skill (`cas-supervisor`, `cas-worker`, `cas-search`, etc.) ships a full frontmatter description that lands in the system prompt. As Cassy adds more skills (current count: ~15 first-party + plugin skills), the same budget pressure will hit eventually.
 
 The design lessons from this research:
-1. **CAS skill-listing should adopt the MEMORY.md index pattern early**, before hitting Claude Code's truncation cliff. Sketch: `cas-skills.md` index always loaded, individual skill bodies fetchable via `mcp__cas__skill action=describe`.
-2. **CAS already has the on-demand-fetch primitive** — `mcp__cas__skill` exists as an MCP tool. The only missing piece is documenting that skill descriptions can be fetched lazily, and adjusting the harness's skill-loading pass to emit index entries instead of full bodies for cold skills.
-3. **Trigger keywords matter.** If CAS adopts the index pattern, the 1-line index hooks must encode enough trigger signal that Claude knows when to fetch the full description. The hook is essentially a recall query against the full description — same dynamic as the auto-memory MEMORY.md hooks, where good hooks lead to good recall.
+1. **Cassy skill-listing should adopt the MEMORY.md index pattern early**, before hitting Claude Code's truncation cliff. Sketch: `cas-skills.md` index always loaded, individual skill bodies fetchable via `mcp__cas__skill action=describe`.
+2. **Cassy already has the on-demand-fetch primitive** — `mcp__cas__skill` exists as an MCP tool. The only missing piece is documenting that skill descriptions can be fetched lazily, and adjusting the harness's skill-loading pass to emit index entries instead of full bodies for cold skills.
+3. **Trigger keywords matter.** If Cassy adopts the index pattern, the 1-line index hooks must encode enough trigger signal that Claude knows when to fetch the full description. The hook is essentially a recall query against the full description — same dynamic as the auto-memory MEMORY.md hooks, where good hooks lead to good recall.
 
 ## Recommendation
 
 **For Claude Code (Anthropic):** file as feature request via `/feedback` or github.com/anthropics/claude-code. Framing: "skill-map index pattern, mirror how MEMORY.md works in auto-memory." Cite the existing MEMORY.md primitive as proof that the harness already supports the pattern internally.
 
-**For CAS:** keep an eye on this as Anthropic ships (or doesn't). If they do — adopt their convention. If they don't — design CAS's skill-listing around the index pattern proactively, since CAS users (especially Daniel) will hit the same wall sooner than typical Claude Code users.
+**For Cassy:** keep an eye on this as Anthropic ships (or doesn't). If they do — adopt their convention. If they don't — design Cassy's skill-listing around the index pattern proactively, since Cassy users (especially Daniel) will hit the same wall sooner than typical Claude Code users.
 
 **Side observation — already tracked upstream, no new ticket needed:** verified 2026-05-06 that the duplication is exactly the "loader does not dedupe across multiple `.claude/` source dirs" bug, already filed multiple times against Claude Code:
 
@@ -132,14 +132,14 @@ All open with `area:skills`, `bug`, `has repro` labels. Filing a fifth report wo
 
 ## Status
 
-Research only. No CAS code change proposed at this time. Pattern documented for future reference and external feedback to Anthropic.
+Research only. No Cassy code change proposed at this time. Pattern documented for future reference and external feedback to Anthropic.
 
 ## 2026-05-06 verification addendum
 
 Prior to drafting any external feedback, the dup claim and the index-pattern motivation were verified end-to-end:
 
-1. **Dup is real and self-inflicted:** all 16 CAS skills are byte-identical between project `.claude/skills/` and user `~/.claude/skills/`. Source: `cas update --user` seeds the user-level copy so worker worktrees have a fallback when host projects gitignore the project-level dir.
+1. **Dup is real and self-inflicted:** all 16 Cassy skills are byte-identical between project `.claude/skills/` and user `~/.claude/skills/`. Source: `cas update --user` seeds the user-level copy so worker worktrees have a fallback when host projects gitignore the project-level dir.
 2. **Already filed upstream four times** (#27069, #43003, #51008, #34831). No new ticket warranted. The fix is on Anthropic's side: dedupe skills by name during loader pass.
-3. **Index-pattern proposal still stands** but with reduced urgency once #27069 lands — a fixed loader gives back roughly 2k tokens for any cas-update--user user, postponing the truncation cliff for typical CAS users by maybe 15-20 skills' worth of headroom.
+3. **Index-pattern proposal still stands** but with reduced urgency once #27069 lands — a fixed loader gives back roughly 2k tokens for any cas-update--user user, postponing the truncation cliff for typical Cassy users by maybe 15-20 skills' worth of headroom.
 
 Net: the strongest immediate ask to Anthropic is "fix #27069." The index-pattern proposal is a follow-on once that's resolved and a real long-tail-skills user actually hits the new (post-dedup) cap.

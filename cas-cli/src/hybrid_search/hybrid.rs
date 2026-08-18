@@ -362,7 +362,7 @@ impl HybridSearch {
         }
     }
 
-    /// Open hybrid search from a CAS directory
+    /// Open hybrid search from a Cassy directory
     ///
     /// Note: Local semantic search has been removed and is now cloud-only.
     /// This opens BM25 search only.
@@ -415,7 +415,7 @@ impl HybridSearch {
         self.graph_retriever = Some(GraphRetriever::new(entity_store, config));
     }
 
-    /// Set the code search from a CAS directory path
+    /// Set the code search from a Cassy directory path
     ///
     /// Opens all required components (code store, vector store, BM25 index, embedder)
     /// and wires them together into a CasCodeSearch instance.

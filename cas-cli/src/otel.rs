@@ -1,7 +1,7 @@
-//! OpenTelemetry context management for CAS
+//! OpenTelemetry context management for Cassy
 //!
 //! Provides OTEL resource attributes for correlating Claude Code telemetry
-//! with CAS sessions, agents, tasks, and projects.
+//! with Cassy sessions, agents, tasks, and projects.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ pub struct OtelContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 
-    /// CAS agent ID (if registered)
+    /// Cassy agent ID (if registered)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
 
@@ -32,7 +32,7 @@ pub struct OtelContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_path: Option<String>,
 
-    /// CAS version
+    /// Cassy version
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cas_version: Option<String>,
 
@@ -137,7 +137,7 @@ impl OtelContext {
             attrs.push(("service.version".to_string(), version.clone()));
         }
 
-        // CAS-specific attributes
+        // Cassy-specific attributes
         if let Some(ref session_id) = self.session_id {
             attrs.push(("cas.session_id".to_string(), session_id.clone()));
         }

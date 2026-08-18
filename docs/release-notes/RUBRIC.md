@@ -1,6 +1,6 @@
 # Release Notes Rubric — cas-src
 
-> cas-src's copy of the CAS release-notes rubric (canonical template ships in the
+> cas-src's copy of the Cassy release-notes rubric (canonical template ships in the
 > `release-notes` builtin skill at `references/RUBRIC-template.md`). This repo has
 > an additional, stricter workflow for runtime releases and harness diaries — see
 > [docs/RELEASE_SLACK_RUBRIC.md](../RELEASE_SLACK_RUBRIC.md). Where the two

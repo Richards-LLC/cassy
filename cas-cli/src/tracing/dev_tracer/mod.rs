@@ -1,6 +1,6 @@
 //! Dev mode tracer for comprehensive operation tracing
 //!
-//! Provides a global singleton tracer that records all CAS operations
+//! Provides a global singleton tracer that records all Cassy operations
 //! when dev mode is enabled. Traces command execution, Claude API calls,
 //! store operations, and hook events.
 

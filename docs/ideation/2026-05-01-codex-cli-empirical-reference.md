@@ -14,8 +14,8 @@ Empirical reference for the OpenAI Codex CLI as of 2026-05-01.
 
 ## TL;DR
 
-- Codex is structurally **far closer to Claude Code than the existing CAS abstraction assumes**. Same SKILL.md format, same plugin manifest convention, hooks with identical wire format, first-class MCP, role-based subagents.
-- Codex's own source ships `codex-rs/external-agent-sessions/` — a Claude Code session importer. CAS doing the reverse direction is the symmetric problem with reference code already written.
+- Codex is structurally **far closer to Claude Code than the existing Cassy abstraction assumes**. Same SKILL.md format, same plugin manifest convention, hooks with identical wire format, first-class MCP, role-based subagents.
+- Codex's own source ships `codex-rs/external-agent-sessions/` — a Claude Code session importer. Cassy doing the reverse direction is the symmetric problem with reference code already written.
 - AGENTS.md was donated to the Linux Foundation Agentic AI Foundation in December 2025 (alongside MCP from Anthropic). It is now the cross-tool standard backed by Google, OpenAI, Cursor, Factory, Sourcegraph.
 - Major real gap: Codex speaks **only the OpenAI Responses API on the wire**. Pointing it at Anthropic models requires a Responses-shimming proxy.
 - The `cas-mux/harness.rs:26-31` capability matrix is stale — declares `supports_hooks: false` and `supports_subagents: false`, both wrong for current Codex.
@@ -84,7 +84,7 @@ approval_mode = "auto"  # auto | prompt | approve
 
 **Plugin-bundled MCP:** `.codex-plugin/plugin.json` references `./.mcp.json` (Claude-compatible format).
 
-## 4. Hooks (the critical correction to current CAS state)
+## 4. Hooks (the critical correction to current Cassy state)
 
 **Codex has a fully functional hook system** that is ~95% wire-compatible with Claude Code's. The `cas-mux/harness.rs:27` claim that Codex `supports_hooks: false` is outdated.
 
@@ -146,7 +146,7 @@ url = "https://developers.openai.com/mcp"
 
 Roles are loaded as **a real config layer** (full config.toml schema), so a role can override model/provider/profile/MCP servers/skills.
 
-**Critical semantic difference vs Claude:** Codex only spawns subagents on **explicit user request** — there is no autonomous Task-tool delegation analog. CAS factory orchestration that depends on the assistant choosing to delegate (e.g., cas-code-review fires automatically) needs to either land as a skill the agent invokes, or trigger via Stop/PostToolUse hook.
+**Critical semantic difference vs Claude:** Codex only spawns subagents on **explicit user request** — there is no autonomous Task-tool delegation analog. Cassy factory orchestration that depends on the assistant choosing to delegate (e.g., cas-code-review fires automatically) needs to either land as a skill the agent invokes, or trigger via Stop/PostToolUse hook.
 
 Global limits: `[agents] max_threads = 6, max_depth = 1, job_max_runtime_seconds`. `/agent` switches threads in TUI.
 
@@ -209,7 +209,7 @@ Plus enterprise `requirements.toml` (managed config) which can disallow specific
 - `apps` → `./.app.json`
 - `interface { displayName, brandColor, composerIcon, ... }`
 
-**Codex auto-discovers Claude plugins:** `codex-rs/utils/plugins/src/plugin_namespace.rs:8-9` reads **both** `.codex-plugin/plugin.json` AND `.claude-plugin/plugin.json`. **A CAS plugin authored for Claude with `.claude-plugin/plugin.json` is recognized by Codex without changes.** This is a significant integration shortcut.
+**Codex auto-discovers Claude plugins:** `codex-rs/utils/plugins/src/plugin_namespace.rs:8-9` reads **both** `.codex-plugin/plugin.json` AND `.claude-plugin/plugin.json`. **A Cassy plugin authored for Claude with `.claude-plugin/plugin.json` is recognized by Codex without changes.** This is a significant integration shortcut.
 
 **Marketplaces:** `codex plugin marketplace add owner/repo[@ref]`, supports git-backed (`source: "url"`/`"git-subdir"` with `ref`/`sha`) and local. Reads Claude-style `.claude-plugin/marketplace.json` too. Cache: `~/.codex/plugins/cache/$MARKETPLACE/$PLUGIN/$VERSION/`.
 
@@ -258,15 +258,15 @@ Built-in IDs: `openai`, `ollama`, `lmstudio`, `amazon-bedrock` (reserved). Auth 
 
 Recommended models per docs: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (research preview, ChatGPT Pro only).
 
-## 12. Memory subsystem (overlap with CAS)
+## 12. Memory subsystem (overlap with Cassy)
 
 Codex has built-in `~/.codex/memories/` thread summarization (`MemoriesToml` config block; `memories/{read,write}` crates). Auto-generates from threads when `[features] memories = true`.
 
-**Recommendation:** Disable Codex memories (`generate_memories = false, use_memories = false`) so CAS owns memory unambiguously, OR accept dual systems and document which is authoritative.
+**Recommendation:** Disable Codex memories (`generate_memories = false, use_memories = false`) so Cassy owns memory unambiguously, OR accept dual systems and document which is authoritative.
 
 ## 13. Statusline
 
-Closed-set list of built-in items (`codex-rs/config/src/types.rs:631-636`): `model-with-reasoning`, `current-dir`, etc. **No `statusLine.command` shell hook**. CAS's current Claude-Code statusline shell command has no equivalent. Workaround: Stop/SessionStart hook that emits a notification or sets terminal title.
+Closed-set list of built-in items (`codex-rs/config/src/types.rs:631-636`): `model-with-reasoning`, `current-dir`, etc. **No `statusLine.command` shell hook**. Cassy's current Claude-Code statusline shell command has no equivalent. Workaround: Stop/SessionStart hook that emits a notification or sets terminal title.
 
 ## 14. Migration crate (the gift)
 
@@ -276,7 +276,7 @@ Closed-set list of built-in items (`codex-rs/config/src/types.rs:631-636`): `mod
 - `count_missing_commands` — drift detection.
 - Imports `.claude/hooks/` directory.
 
-CAS doing the reverse (read Codex artifacts) is the symmetric problem; this crate is the reference for how to do it cleanly.
+Cassy doing the reverse (read Codex artifacts) is the symmetric problem; this crate is the reference for how to do it cleanly.
 
 ## 15. Latest release & ecosystem
 
@@ -298,12 +298,12 @@ CAS doing the reverse (read Codex artifacts) is the symmetric problem; this crat
 - **Claude Code:** still primarily reads `CLAUDE.md`; reads `AGENTS.md` only via symlink. Native support pending.
 - **Common pattern:** AGENTS.md as shared cross-tool instructions; `CLAUDE.md` either symlinks or `@./AGENTS.md` imports plus Claude-specific bits.
 
-## 17. Cross-tool ecosystem (CAS-spirit projects)
+## 17. Cross-tool ecosystem (Cassy-spirit projects)
 
-None own CAS's full plane (memory + tasks + rules + skills + search + factory orchestration), but several reach for cross-harness orchestration:
+None own Cassy's full plane (memory + tasks + rules + skills + search + factory orchestration), but several reach for cross-harness orchestration:
 
 - **Archon** (April 2026) — "first open-source harness builder for orchestrating Claude Code and Codex." YAML-defined deterministic workflows with `agent:` declarations + adapters.
-- **Citadel** — Parallel agents in isolated worktrees, four-tier intent routing, persistent campaign memory across sessions. Closest CAS analog.
+- **Citadel** — Parallel agents in isolated worktrees, four-tier intent routing, persistent campaign memory across sessions. Closest Cassy analog.
 - **OpenClaw** — Plugin offering unified `ISession` interface for Claude/Codex/Gemini/Cursor with multi-agent council.
 - **everything-claude-code** ("Anthropic Hackathon Winner") — Cross-tool agents/skills/hooks/rules/MCP for Claude Code, Codex, Cursor, OpenCode, Gemini.
 - **CodexMonitor** (MIT, Tauri) — Multi-agent orchestrator using Codex app-server protocol.
@@ -318,7 +318,7 @@ None own CAS's full plane (memory + tasks + rules + skills + search + factory or
 
 **Convergent install pattern:** `~/.claude/skills/` + `~/.agents/skills/` with symlinks for both-tool discovery.
 
-## 18. Top user complaints about Codex (gaps CAS could fill)
+## 18. Top user complaints about Codex (gaps Cassy could fill)
 
 Synthesized from Reddit/HN/WhatsTechIn:
 
@@ -328,7 +328,7 @@ Synthesized from Reddit/HN/WhatsTechIn:
 4. **Unreviewable Python-based edits** — Codex often uses Python to mutate files instead of structured edit tools, producing diffs that are hard to review mid-flight.
 5. **Thin harness** — "just a really good model wrapped in an okay harness." Lacks Claude Code's hook depth, agent teams, checkpoint/rewind, statusline customization.
 
-Items 4 and 5 are exactly the gaps a CAS+Codex integration could fill — CAS's task tracking provides a checkpoint surface; CAS's skills/rules/memory provide the harness depth Codex lacks natively.
+Items 4 and 5 are exactly the gaps a Cassy+Codex integration could fill — Cassy's task tracking provides a checkpoint surface; Cassy's skills/rules/memory provide the harness depth Codex lacks natively.
 
 ---
 
@@ -346,7 +346,7 @@ Items 4 and 5 are exactly the gaps a CAS+Codex integration could fill — CAS's 
 | `core-plugins/src/manifest.rs` | Plugin manifest format |
 | `utils/plugins/src/plugin_namespace.rs` | Dual `.codex-plugin`/`.claude-plugin` discovery |
 | `external-agent-migration/src/lib.rs` | Reference Claude → Codex importer |
-| `external-agent-sessions/src/` | Reference Claude session reader (symmetric to what CAS wants) |
+| `external-agent-sessions/src/` | Reference Claude session reader (symmetric to what Cassy wants) |
 | `exec/src/cli.rs`, `exec/src/exec_events.rs` | Headless mode, JSONL event schema |
 | `model-provider-info/src/lib.rs` | Provider abstraction (Responses-API only) |
 | `protocol/src/protocol.rs:2922-2927` | `RolloutLine` (on-disk session line) |
@@ -357,7 +357,7 @@ Items 4 and 5 are exactly the gaps a CAS+Codex integration could fill — CAS's 
 
 ---
 
-## Stale assumptions in current CAS code
+## Stale assumptions in current Cassy code
 
 These will cause silent breakage if not corrected before Codex variant work proceeds:
 

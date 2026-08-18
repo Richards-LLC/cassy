@@ -8,7 +8,7 @@ migration. Do not run it as a deletion script.
 
 ## Finding
 
-CAS task scope is determined by the database opened by the caller. It is not
+Cassy task scope is determined by the database opened by the caller. It is not
 stored as task provenance: `crates/cas-store/src/task_store.rs:221-224` assigns
 `Scope::Project` while reading any task row, and the `tasks` insert at
 `crates/cas-store/src/task_store.rs:291-325` has no project identifier.
@@ -63,7 +63,7 @@ database was modified.
 Approximately 18 additional stores contained no tasks. The identical 1,525-ID
 overlap in cas-src, tmp-bugrepro, and a disposable demo store rules out an
 isolated restore error. Every heavily used project is affected.
-The internal store-name mapping remains available in the CAS task record for
+The internal store-name mapping remains available in the Cassy task record for
 `cas-de89`; it is intentionally omitted from this public report.
 
 The duplicated cas-src tasks are sharply bounded by creation date: 665 were
@@ -157,7 +157,7 @@ machines.
    know its origin. Use content-based evidence and explicit user review; if
    ownership remains ambiguous, preserve every copy and make no queue decision
    for that ID.
-5. **Snapshot before local remediation.** With CAS stopped, create verified,
+5. **Snapshot before local remediation.** With Cassy stopped, create verified,
    read-only copies of every database and its WAL/SHM state using SQLite's
    online backup API or a checkpointed copy procedure. Record checksums. All
    inventory and comparison work runs against copies, never the live files.

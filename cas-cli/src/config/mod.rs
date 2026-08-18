@@ -1,4 +1,4 @@
-//! Configuration management for CAS
+//! Configuration management for Cassy
 
 pub mod meta;
 
@@ -110,9 +110,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_review: Option<CodeReviewConfig>,
 
-    /// `[issues]` — project-scoped GitHub repository for CAS-system bug
+    /// `[issues]` — project-scoped GitHub repository for Cassy-system bug
     /// intake. No repository is inferred when this is unset because a
-    /// downstream project's origin is not necessarily the CAS upstream.
+    /// downstream project's origin is not necessarily the Cassy upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues: Option<IssuesConfig>,
 

@@ -1,4 +1,4 @@
-//! CAS - Coding Agent System
+//! Cassy - Coding Agent System
 //!
 //! A CLI tool for AI agents to build persistent memory across sessions.
 
@@ -237,7 +237,7 @@ fn contains_factory_launch_flag(tokens: &[String]) -> bool {
 
 /// Initialize the logging system
 fn init_logging(cli: &cli::Cli) {
-    // Try to find CAS root and load config
+    // Try to find Cassy root and load config
     let cas_root = store::find_cas_root().ok();
     let logging_config = cas_root
         .as_ref()
@@ -297,7 +297,7 @@ fn cleanup_vector_files(cas_root: &std::path::Path) {
     }
 }
 
-/// Record argument parsing errors for tracing bad CAS usage
+/// Record argument parsing errors for tracing bad Cassy usage
 fn record_arg_error(err: &clap::Error) {
     use cas::tracing::{DevTracer, TraceTimer};
 
@@ -309,7 +309,7 @@ fn record_arg_error(err: &clap::Error) {
         return;
     }
 
-    // Try to initialize tracer (may fail if not in a CAS project)
+    // Try to initialize tracer (may fail if not in a Cassy project)
     if let Ok(cas_root) = store::find_cas_root() {
         if DevTracer::init_global(&cas_root).unwrap_or(false) {
             if let Some(tracer) = DevTracer::get() {

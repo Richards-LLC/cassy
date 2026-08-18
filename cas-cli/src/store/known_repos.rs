@@ -16,7 +16,7 @@
 //!
 //! **Why `dirs::home_dir().join(".cas")` instead of `global_cas_dir()`:**
 //! the latter resolves to `~/.config/cas` on Linux / `Application Support`
-//! on macOS, which is **not** where the live host CAS state actually lives
+//! on macOS, which is **not** where the live host Cassy state actually lives
 //! (sessions, logs, the factory sockets — all under `~/.cas`). Spike A
 //! deferred reconciling that inconsistency; this module picks the de-facto
 //! root per `ui/factory/session.rs:22-26`.
@@ -242,7 +242,7 @@ fn open_holder_pids(_db_path: &Path) -> Vec<u32> {
 }
 
 /// PIDs with the host registry database, WAL, or shared-memory file open.
-/// Used by `gc_report` to surface CAS children that survived their worker.
+/// Used by `gc_report` to surface Cassy children that survived their worker.
 pub(crate) fn host_registry_open_pids() -> Vec<u32> {
     open_holder_pids(&host_cas_dir().join("cas.db"))
 }

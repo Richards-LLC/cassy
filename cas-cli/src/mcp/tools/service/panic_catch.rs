@@ -70,7 +70,7 @@ where
                 // server see the panic without having to open the log file.
                 // The full backtrace is already in cas-serve-*.log via the
                 // serve startup panic hook.
-                eprintln!("[CAS] tool '{tool_name}' handler panicked: {msg}");
+                eprintln!("[Cassy] tool '{tool_name}' handler panicked: {msg}");
                 Err(McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::Owned(format!(

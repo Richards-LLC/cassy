@@ -35,7 +35,7 @@ pub fn execute(
 fn project_root_from(cas_root: &Path) -> anyhow::Result<&Path> {
     cas_root
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from CAS directory"))
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from Cassy directory"))
 }
 
 fn execute_status(cas_root: &Path) -> anyhow::Result<()> {

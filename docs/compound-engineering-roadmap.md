@@ -9,7 +9,7 @@
 
 **Source:** [EveryInc/compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin)
 **Reviewed:** 2026-04-06
-**Purpose:** Feature ideas for CAS inspired by Every's compound engineering workflow plugin.
+**Purpose:** Feature ideas for Cassy inspired by Every's compound engineering workflow plugin.
 
 ---
 
@@ -20,7 +20,7 @@ Compound Engineering is a Claude Code plugin that implements a full development 
 
 The philosophy: each unit of engineering work should make subsequent units easier. 80% planning and review, 20% execution.
 
-This document catalogs ideas worth adopting in CAS, organized by priority tier.
+This document catalogs ideas worth adopting in Cassy, organized by priority tier.
 
 ---
 
@@ -30,7 +30,7 @@ This document catalogs ideas worth adopting in CAS, organized by priority tier.
 
 **What CE does:** The `/ce:review` skill spawns 6+ specialized reviewer agents in parallel, each with a focused hunting mandate, structured JSON output, and confidence calibration. Results are merged with deduplication, confidence gating, and severity-based routing.
 
-**What CAS has today:** A `code-reviewer` agent that runs as a single pass.
+**What Cassy has today:** A `code-reviewer` agent that runs as a single pass.
 
 **What to build:**
 
@@ -128,13 +128,13 @@ Before spawning reviewers, extract a 2-3 line intent summary (from PR descriptio
 
 **What CE does:** After every completed task, `/ce:compound` captures the solution in `docs/solutions/` with structured YAML frontmatter, categorized by problem type, with overlap detection, and a refresh workflow to keep docs current.
 
-**What CAS has today:** Memory system with markdown files and MEMORY.md index. Good persistence but informal structure.
+**What Cassy has today:** Memory system with markdown files and MEMORY.md index. Good persistence but informal structure.
 
 **What to build:**
 
 #### 1.2.1 Structured Frontmatter Schema for Memories
 
-Extend CAS memory files with richer frontmatter:
+Extend Cassy memory files with richer frontmatter:
 
 ```yaml
 ---
@@ -170,7 +170,7 @@ This prevents the drift that comes from having two memories about the same probl
 **Bug track sections:** Problem, Symptoms, What Didn't Work, Solution, Why This Works, Prevention
 **Knowledge track sections:** Context, Guidance, Why This Matters, When to Apply, Examples
 
-Current CAS memories mix these. Separating them makes retrieval more predictable.
+Current Cassy memories mix these. Separating them makes retrieval more predictable.
 
 #### 1.2.4 Memory Refresh Command
 
@@ -203,7 +203,7 @@ Scales from 10 to 1000+ memories without reading everything.
 
 **What CE does:** Three-skill chain: ideate (divergent generation) -> brainstorm (interactive Q&A) -> plan (structured implementation units). Each produces a durable artifact that feeds the next.
 
-**What CAS has today:** Adversarial supervisor for EPICs with intake gate and structured specs. Good but informal compared to CE.
+**What Cassy has today:** Adversarial supervisor for EPICs with intake gate and structured specs. Good but informal compared to CE.
 
 **What to build:**
 
@@ -277,7 +277,7 @@ Inline at point of relevance, explicitly framed as "directional guidance, not im
 
 **What CE does:** `/ce:resolve-pr-feedback` fetches unresolved PR threads, triages, clusters by theme when 3+ comments relate, dispatches resolver agents, commits/pushes/replies/resolves threads.
 
-**What CAS has today:** Nothing automated for PR feedback.
+**What Cassy has today:** Nothing automated for PR feedback.
 
 **What to build:**
 
@@ -300,13 +300,13 @@ Philosophy: "Agent time is cheap, tech debt is expensive" -- fix everything vali
 
 **What CE does:** Code review findings automatically become file-based todos with severity/priority mapping. Todos flow through create -> triage -> resolve lifecycle.
 
-**What CAS has today:** Tasks and code-reviewer are separate systems with no automatic connection.
+**What Cassy has today:** Tasks and code-reviewer are separate systems with no automatic connection.
 
 **What to build:**
 
 When code-reviewer produces findings:
-- P0/P1 `safe_auto` or `gated_auto` -> auto-create CAS tasks with priority `high`
-- P2 `manual` -> auto-create CAS tasks with priority `medium`
+- P0/P1 `safe_auto` or `gated_auto` -> auto-create Cassy tasks with priority `high`
+- P2 `manual` -> auto-create Cassy tasks with priority `medium`
 - P3 `advisory` -> include in report only, no task creation
 
 Add `cas task triage` command for interactive review of pending tasks: approve, skip, or modify each one.
@@ -319,7 +319,7 @@ Add `cas task triage` command for interactive review of pending tasks: approve, 
 
 **What CE has:** Six specialized research agents, each with clear methodology.
 
-**What CAS should add:**
+**What Cassy should add:**
 
 #### 2.1.1 Git History Analyzer
 
@@ -345,7 +345,7 @@ Useful for ideation and prioritization.
 
 #### 2.1.3 Learnings Researcher (Enhanced Search)
 
-Specialized search agent for CAS memories:
+Specialized search agent for Cassy memories:
 1. Extract keywords from feature/task
 2. Category-based narrowing (performance -> performance memories)
 3. Content-search pre-filter with parallel queries
@@ -360,7 +360,7 @@ Specialized search agent for CAS memories:
 
 **What CE does:** Reviews plans and requirements with different personas than code review.
 
-**What CAS should add:**
+**What Cassy should add:**
 
 Separate document-review skill for EPIC specs with these personas:
 
@@ -371,7 +371,7 @@ Separate document-review skill for EPIC specs with these personas:
 | Scope Guardian | Scope creep detection, unjustified complexity |
 | Adversarial | Challenge assumptions, stress-test decisions, surface alternative blindness |
 
-CAS's adversarial supervisor already does informal versions of these. Formalizing them as parallel sub-agents with structured output would improve spec quality before workers start.
+Cassy's adversarial supervisor already does informal versions of these. Formalizing them as parallel sub-agents with structured output would improve spec quality before workers start.
 
 ---
 
@@ -379,7 +379,7 @@ CAS's adversarial supervisor already does informal versions of these. Formalizin
 
 **What CE does:** Every PR must include `## Post-Deploy Monitoring & Validation` with log queries, metrics to watch, healthy signals, failure triggers, validation window.
 
-**What CAS should adopt:**
+**What Cassy should adopt:**
 
 Add to code-reviewer or PR template:
 - Log queries to run after deployment
@@ -404,7 +404,7 @@ Even for no-production-impact changes: "No additional operational monitoring req
 3. Assumption-breaking
 4. Leverage and compounding
 
-**What CAS should adopt:**
+**What Cassy should adopt:**
 
 A `cas ideate` skill or EPIC planning phase that:
 1. Scans codebase for pain points and leverage points
@@ -419,7 +419,7 @@ A `cas ideate` skill or EPIC planning phase that:
 
 **What CE does:** Auto-generates `ONBOARDING.md` with six sections answering questions new contributors ask in hour one.
 
-**What CAS should add:**
+**What Cassy should add:**
 
 `cas onboard` or `/onboard` skill that generates:
 1. **What Is This?** -- Purpose, problem solved, audience
@@ -429,7 +429,7 @@ A `cas ideate` skill or EPIC planning phase that:
 5. **Primary Flows** -- 1-3 entry paths with diagrams referencing specific files
 6. **Developer Guide** -- Setup, running, testing, common change patterns
 
-CAS already has CODEMAP.md. This would complement it as a human-oriented intro vs. CODEMAP's breadcrumb navigation.
+Cassy already has CODEMAP.md. This would complement it as a human-oriented intro vs. CODEMAP's breadcrumb navigation.
 
 ---
 
@@ -437,7 +437,7 @@ CAS already has CODEMAP.md. This would complement it as a human-oriented intro v
 
 **What CE does:** Systematic hypothesis-driven debugging.
 
-**What CAS should add to its debugger agent:**
+**What Cassy should add to its debugger agent:**
 
 1. **Understand** -- Extract symptoms, expected behavior, reproduction steps
 2. **Hypothesize** -- Form 2-3 theories about root cause BEFORE running anything
@@ -453,7 +453,7 @@ Key principle: hypothesis-first prevents aimless exploration.
 
 ### 3.1 Execution Posture Signals on Tasks
 
-Add to CAS task metadata:
+Add to Cassy task metadata:
 
 ```
 execution_note: test-first | characterization-first | additive-only
@@ -480,7 +480,7 @@ Add as a step in the factory worker execution flow.
 After every 2-3 implementation units in an EPIC:
 1. Review completed work for consolidation and reuse
 2. Catch pattern accumulation before it becomes debt
-3. CAS already has a `simplify` skill -- trigger it automatically mid-EPIC
+3. Cassy already has a `simplify` skill -- trigger it automatically mid-EPIC
 
 ---
 
@@ -494,7 +494,7 @@ Priority order:
 3. `gh repo view defaultBranchRef`
 4. Common branch names (main, master, develop, trunk)
 
-Resolves from the correct remote for that branch, not just `origin`. Useful for CAS's code-reviewer when reviewing PRs from forks.
+Resolves from the correct remote for that branch, not just `origin`. Useful for Cassy's code-reviewer when reviewing PRs from forks.
 
 ---
 
@@ -502,7 +502,7 @@ Resolves from the correct remote for that branch, not just `origin`. Useful for 
 
 CE uses mid-tier models (Sonnet) for persona sub-agents and the most capable model (Opus) for orchestration.
 
-CAS could adopt:
+Cassy could adopt:
 - Factory workers on Sonnet for speed/cost on scoped tasks
 - Supervisor on Opus for synthesis, intent discovery, finding merge
 - Code-reviewer personas on Sonnet; orchestrator on Opus
@@ -521,7 +521,7 @@ This distinction matters: "clean PR with pre-existing debt" vs. "PR introduces n
 
 CE protects `docs/brainstorms/`, `docs/plans/`, `docs/solutions/` -- if a reviewer recommends deleting files in these paths, the synthesis step discards that finding.
 
-CAS equivalent: protect `.claude/`, `docs/`, memory files from reviewer deletion recommendations.
+Cassy equivalent: protect `.claude/`, `docs/`, memory files from reviewer deletion recommendations.
 
 ---
 

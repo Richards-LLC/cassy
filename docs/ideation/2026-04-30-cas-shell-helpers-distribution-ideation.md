@@ -1,4 +1,4 @@
-# CAS shell helpers — how they're made and what to consider for distribution
+# Cassy shell helpers — how they're made and what to consider for distribution
 
 **Date:** 2026-04-30
 **Status:** ideation / pre-decision
@@ -11,7 +11,7 @@ There are three "aliases" in `~/.local/bin/` (they're full bash scripts, not she
 ## Inventory
 
 ### `~/.local/bin/cas-login` (~1.6 KB)
-Env-driven wrapper around `cas auth login`. Reads `CAS_CLOUD_TOKEN` and `CAS_CLOUD_ENDPOINT` from the shell environment (set by a `# >>> CAS Cloud auth <<<` block in `~/.bashrc`), then `exec cas auth login --token "$CAS_CLOUD_TOKEN" --endpoint "$CAS_CLOUD_ENDPOINT"`. Also surfaces `--whoami` and `--logout` as passthroughs.
+Env-driven wrapper around `cas auth login`. Reads `CAS_CLOUD_TOKEN` and `CAS_CLOUD_ENDPOINT` from the shell environment (set by a `# >>> Cassy Cloud auth <<<` block in `~/.bashrc`), then `exec cas auth login --token "$CAS_CLOUD_TOKEN" --endpoint "$CAS_CLOUD_ENDPOINT"`. Also surfaces `--whoami` and `--logout` as passthroughs.
 
 **Why it exists:** `cas auth login` assumes interactive terminal. `cas-login` makes "log in with the token I already have in env" a one-word command and surfaces a useful error if the env vars are missing.
 
@@ -66,7 +66,7 @@ If we hand any of these to a second user as-is, they break on first run. Concret
 2. **Path: `$CAS_INSTALL` defaults to `$HOME/.local/bin/cas`** — same story. Could honor `cargo install` conventions or `XDG_BIN_HOME`.
 3. **Build profile: `release-fast`** — assumes the cas-src `Cargo.toml` defines that profile. True today, but a second user installing from a tarball or different fork might not have it.
 4. **Rust toolchain assumption** — `cas-update` runs `cargo build`. Distributing this means the user has Rust. Most distributions of `cas` are *binary* releases. Build-from-source isn't usable for a non-developer audience.
-5. **Auth env block in `~/.bashrc`** — `cas-login` requires `CAS_CLOUD_TOKEN` + `CAS_CLOUD_ENDPOINT` exported. Comment in the script says "set by the `# >>> CAS Cloud auth <<<` block in `~/.bashrc`" — that block is hand-edited and never automated. Bootstrapping a new user requires manual rc-file surgery.
+5. **Auth env block in `~/.bashrc`** — `cas-login` requires `CAS_CLOUD_TOKEN` + `CAS_CLOUD_ENDPOINT` exported. Comment in the script says "set by the `# >>> Cassy Cloud auth <<<` block in `~/.bashrc`" — that block is hand-edited and never automated. Bootstrapping a new user requires manual rc-file surgery.
 6. **Bash-only shebang** — `#!/usr/bin/env bash`. Fine on macOS/Linux. Windows users running git-bash also work. Native Windows or fish-only users do not.
 7. **cas-refresh exclusion lists** are hand-coded in the script body (`Penguinz|cas-src|petra_stella_tools`, `ai|ai-toolkit|Apps`). These are author-specific. A shipped version needs either a config file (`~/.cas/refresh.toml` excludes), a discovery convention (per-project `.cas/cloud-sync = false`), or both.
 8. **Output-parsing fragility** — both `cas-update` and `cas-refresh` parse the cas binary's `--sync` and `--schema-only` stdout with regexes (`Schema (up to date|migrated to) \(v[0-9]+\)`, `Synced [0-9]+ skills, removed [0-9]+`). When the binary's wording changed in any past release, the wrappers silently produced empty summaries. There is no contract between the binary and the wrappers; this is a pure scrape.
@@ -134,7 +134,7 @@ In rough priority order:
 - Is there appetite for a `--json` output mode on `cas update`? It would let the multi-project sweep parse structured data instead of regex-scraping stdout.
 - Do we want to support shell completion (bash + zsh) for whatever ships? That's a separate distribution surface.
 - Where does `cas-refresh`'s "launch factory at the end" step belong if we absorb the rest? `cas factory --refresh-first` is one option; `cas refresh && cas factory` is the other and probably better.
-- The maintainer's `~/.bashrc` "CAS Cloud auth" block isn't checked in anywhere. Should the cas binary emit it via `cas auth login --print-shell-block` for users to drop into their rc?
+- The maintainer's `~/.bashrc` "Cassy Cloud auth" block isn't checked in anywhere. Should the cas binary emit it via `cas auth login --print-shell-block` for users to drop into their rc?
 
 ## Related
 

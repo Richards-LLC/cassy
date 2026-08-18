@@ -194,7 +194,7 @@ fn public_name_after_mutation(raw_name: &str, cas_root: &Path) -> Result<String>
 /// Manually parse raw args from `cas mcp add`, matching `claude mcp add` syntax.
 ///
 /// Supports all Claude flags: -s/--scope, -t/--transport, -e/--env, -H/--header
-/// Plus CAS extras: -a/--auth
+/// Plus Cassy extras: -a/--auth
 /// Ignores Claude-only flags: --callback-port, --client-id, --client-secret
 ///
 /// After flags, first positional = server name, rest = url/command + args.

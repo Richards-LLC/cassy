@@ -1,6 +1,6 @@
 //! Shared UI widgets for sidecar and factory TUI
 //!
-//! Reusable stateless widgets for rendering CAS data.
+//! Reusable stateless widgets for rendering Cassy data.
 //! These widgets can be used by both the standalone sidecar
 //! and the integrated factory TUI panels.
 

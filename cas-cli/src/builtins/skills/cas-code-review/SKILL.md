@@ -6,7 +6,7 @@ managed_by: cas
 
 # cas-code-review — Workflow-backed multi-persona code review
 
-**Architecture (Phase C, EPIC cas-b667; large-diff mode cas-33f1):** This skill is a thin wrapper. Steps 1-4 (intent extraction, persona selection, size-gated dispatch, merge) run inside the `cas-code-review` Workflow (`.claude/workflows/cas-code-review.js`). This skill handles Step 0 (tiny-diff bypass), Step 5 (mode routing + CAS integration), and pre-fetches the diff.
+**Architecture (Phase C, EPIC cas-b667; large-diff mode cas-33f1):** This skill is a thin wrapper. Steps 1-4 (intent extraction, persona selection, size-gated dispatch, merge) run inside the `cas-code-review` Workflow (`.claude/workflows/cas-code-review.js`). This skill handles Step 0 (tiny-diff bypass), Step 5 (mode routing + Cassy integration), and pre-fetches the diff.
 
 ## Step 0: Tiny-diff bypass
 
@@ -40,7 +40,7 @@ Return shape: `{"residual": [], "pre_existing": [], "dropped": [], "mode": "<mod
        commit_log,    // git log output (for intent extraction)
        task_context,  // optional: task title+description+notes
        mode,          // current mode
-       task_id,       // optional CAS task ID
+       task_id,       // optional Cassy task ID
 
        // optional large-diff threshold override:
        // large_diff_token_threshold, review_shard_token_threshold,
@@ -64,7 +64,7 @@ Return shape: `{"residual": [], "pre_existing": [], "dropped": [], "mode": "<mod
 
 With the Workflow result in hand, branch on `mode`:
 
-- **`autofix`** — feed merged output to Unit 7 (fixer sub-agent, max 2 rounds). Route residual non-`safe_auto` findings to CAS tasks (P0→0, P1→1, P2→2, P3→3; `advisory` never becomes a task). Any P0 hard-blocks the close; worker must fix or get supervisor override (R9). Legacy `owner=worker` path only.
+- **`autofix`** — feed merged output to Unit 7 (fixer sub-agent, max 2 rounds). Route residual non-`safe_auto` findings to Cassy tasks (P0→0, P1→1, P2→2, P3→3; `advisory` never becomes a task). Any P0 hard-blocks the close; worker must fix or get supervisor override (R9). Legacy `owner=worker` path only.
 - **`interactive`** — render findings severity-sorted, file+line anchored; offer bounded 2-round fix loop as an explicit choice; wait for human decision. Primary path under `owner=supervisor`.
 - **`report-only`** — write merged envelope to `docs/reviews/<YYYY-MM-DD>-<short-ref>.md`. No edits, no task creation, no `task.close` side effects. Safe to run in parallel.
 - **`headless`** — return merged envelope as structured text to the caller. No side effects.
@@ -121,13 +121,13 @@ Under `owner = "supervisor"` this is enforced mechanically, not by instruction (
 - **Dispatch layer** — a factory worker reaching for this pipeline is refused in `PreToolUse` (`cas-cli/src/code_review_dispatch.rs`, `REVIEW_ENTRY_TOOLS`). That covers the `Skill` and `Workflow` entries *and* `Agent`/`Task` subagent spawns, so hand-spawning the personas yourself instead of invoking this skill is refused too — the fan-out is where the tokens actually go. `task-verifier` spawns are exempt.
 - **Close path** — `task.close` no longer asks a factory worker for a review envelope under supervisor ownership; it routes the worker to the supervisor instead of printing instructions to run this pipeline.
 
-Known limit, stated rather than glossed: the dispatch refusal is a `PreToolUse` hook, so it can only fire for tools the session's settings route to `cas hook PreToolUse`. Sessions spawned by a current CAS binary are routed; a session running on hand-edited or pre-cas-62b0 settings is not, and there the rule is advisory again. A **solo (non-factory)** caller is never redirected — with no supervisor to defer to, that caller owns the review itself.
+Known limit, stated rather than glossed: the dispatch refusal is a `PreToolUse` hook, so it can only fire for tools the session's settings route to `cas hook PreToolUse`. Sessions spawned by a current Cassy binary are routed; a session running on hand-edited or pre-cas-62b0 settings is not, and there the rule is advisory again. A **solo (non-factory)** caller is never redirected — with no supervisor to defer to, that caller owns the review itself.
 
 ## Mode reference
 
 | Mode | Edits files? | Creates tasks? | Gates close? | Fix loop |
 |---|---|---|---|---|
-| `autofix` (legacy `owner=worker`) | Yes via fixer on `safe_auto` | Yes, residual → CAS tasks | Yes, P0 hard-blocks | Bounded max 2 rounds |
+| `autofix` (legacy `owner=worker`) | Yes via fixer on `safe_auto` | Yes, residual → Cassy tasks | Yes, P0 hard-blocks | Bounded max 2 rounds |
 | `interactive` | Only if user accepts loop | Only if user accepts | No | Bounded 2-round on consent |
 | `report-only` | No | No | No | None |
 | `headless` | No | No | No | None |

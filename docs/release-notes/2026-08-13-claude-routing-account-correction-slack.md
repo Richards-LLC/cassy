@@ -6,7 +6,7 @@ Channel: `#cas-internal` (`C0B44GUKDK2`). Merged to `main` → **Live on product
 Live on production — *User* — The Claude fallback policy on main now recognizes the approved `pippenz@gmail.com` profile instead of rejecting it as the wrong account.
 
 === MESSAGE 2 (user reply, thread of 1) ===
-Was: the routing guidance allowed only `daniel@petrastella.io`, so it blocked the authenticated profile that is actually approved for this environment. Now: the policy on main checks for the exact `pippenz@gmail.com` first-party profile and still refuses every other account, missing profile, or unclear login result. This main landing updates the routing policy source; it does not announce a new tagged CAS runtime or a runtime restart.
+Was: the routing guidance allowed only `daniel@petrastella.io`, so it blocked the authenticated profile that is actually approved for this environment. Now: the policy on main checks for the exact `pippenz@gmail.com` first-party profile and still refuses every other account, missing profile, or unclear login result. This main landing updates the routing policy source; it does not announce a new tagged Cassy runtime or a runtime restart.
 
 === MESSAGE 3 (dev top-level, NEW top-level, not a reply) ===
 Live on production — *Dev* — The source-managed CLI router on main now gates Claude on a one-entry `pippenz@gmail.com` first-party allowlist across all three harness flavors.

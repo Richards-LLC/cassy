@@ -76,7 +76,7 @@ pub enum DaemonResponse {
     Error { message: String },
 }
 
-/// Get the socket path for a CAS root
+/// Get the socket path for a Cassy root
 pub fn socket_path(cas_root: &Path) -> PathBuf {
     cas_root.join("daemon.sock")
 }
@@ -387,7 +387,7 @@ where
                 deferral_logged = false;
                 config.owns_socket.store(true, Ordering::SeqCst);
                 eprintln!(
-                    "[CAS] Daemon socket listening at {:?}",
+                    "[Cassy] Daemon socket listening at {:?}",
                     socket_path(&config.cas_root)
                 );
 
@@ -409,7 +409,7 @@ where
                             .and_then(ExeIdentity::staleness_reason)
                             .unwrap_or_else(|| "running binary is stale".to_string());
                         eprintln!(
-                            "[CAS] STALE DAEMON BINARY: {why}. Released {:?} for {}s so a current-binary `cas serve` can take over.",
+                            "[Cassy] STALE DAEMON BINARY: {why}. Released {:?} for {}s so a current-binary `cas serve` can take over.",
                             socket_path(&config.cas_root),
                             config.stale_handover_grace.as_secs()
                         );
@@ -420,7 +420,7 @@ where
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 if !deferral_logged {
                     eprintln!(
-                        "[CAS] Daemon socket {:?} is owned by another process; standing by (retrying every {}s to take over if it exits)",
+                        "[Cassy] Daemon socket {:?} is owned by another process; standing by (retrying every {}s to take over if it exits)",
                         socket_path(&config.cas_root),
                         config.election_interval.as_secs().max(1)
                     );
@@ -429,7 +429,7 @@ where
                 sleep_until_shutdown(&config.shutdown, config.election_interval).await;
             }
             Err(e) => {
-                eprintln!("[CAS] Warning: Could not create daemon socket: {e} (retrying)");
+                eprintln!("[Cassy] Warning: Could not create daemon socket: {e} (retrying)");
                 sleep_until_shutdown(&config.shutdown, config.election_interval).await;
             }
         }
@@ -460,7 +460,7 @@ where
                         tokio::spawn(async move { handler(stream).await });
                     }
                     Err(e) => {
-                        eprintln!("[CAS] Socket accept error: {e}");
+                        eprintln!("[Cassy] Socket accept error: {e}");
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
@@ -533,12 +533,12 @@ pub async fn read_event(stream: &mut UnixStream) -> Option<DaemonEvent> {
         Ok(_) => match serde_json::from_str::<DaemonEvent>(&line) {
             Ok(event) => Some(event),
             Err(e) => {
-                eprintln!("[CAS] Invalid event from hook: {e}");
+                eprintln!("[Cassy] Invalid event from hook: {e}");
                 None
             }
         },
         Err(e) => {
-            eprintln!("[CAS] Error reading from hook socket: {e}");
+            eprintln!("[Cassy] Error reading from hook socket: {e}");
             None
         }
     }

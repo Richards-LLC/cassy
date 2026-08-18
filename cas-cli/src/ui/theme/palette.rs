@@ -464,7 +464,7 @@ mod contrast_guard {
 
     /// The chip/badge foreground must be legible against every saturated
     /// background it's actually painted on (status bar mode indicators,
-    /// error banner, feedback selector, CAS/TERM badges) in both theme
+    /// error banner, feedback selector, Cassy/TERM badges) in both theme
     /// modes. Before cas-7bf4 these used `text_primary`, which is
     /// near-white in dark mode and failed badly here (~1.7-2.1:1) — chip_fg
     /// is a fixed near-black chosen to work against both.

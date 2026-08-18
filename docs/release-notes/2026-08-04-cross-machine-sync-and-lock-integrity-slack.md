@@ -6,7 +6,7 @@
 
 Was: work done on one machine quietly never reached any other one — tasks, memories and bug reports piled up locally while the sync that was meant to move them had been doing nothing for weeks. Now: sync actually runs, and when it cannot, it says so.
 
-- If you use CAS on more than one computer and found that switching machines meant starting from an empty-looking project, this is the cause. Nothing was deleted. The queue of unsent work was building up untouched, and the part of the program responsible for sending it was never being called at all.
+- If you use Cassy on more than one computer and found that switching machines meant starting from an empty-looking project, this is the cause. Nothing was deleted. The queue of unsent work was building up untouched, and the part of the program responsible for sending it was never being called at all.
 - Because a silent failure is worse than a loud one, a failed send now records the error and the attempt count instead of leaving the queue looking untouched. Silence used to be indistinguishable from success.
 - Worktrees that appeared to be locked by nobody now release properly. If you ever hit an operation that refused to proceed because something was "in use", with no sign of what was using it, that lock was being held open by a background process that had already finished its work.
 - Bug reports written on one machine now reach the project instead of sitting unread on the machine that wrote them. Reports go to a configured issue tracker, and the report is written to disk before anything is sent, so a failure to file can no longer lose what you wrote.

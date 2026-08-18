@@ -331,7 +331,7 @@ impl CasCore {
         }
     }
 
-    /// Create a new CAS service with daemon support
+    /// Create a new Cassy service with daemon support
     pub fn with_daemon(
         cas_root: std::path::PathBuf,
         activity: Option<std::sync::Arc<ActivityTracker>>,

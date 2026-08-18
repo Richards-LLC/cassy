@@ -4,7 +4,7 @@ pub fn global_cas_dir() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("cas"))
 }
 
-/// Load the global CAS config from ~/.config/cas/
+/// Load the global Cassy config from ~/.config/cas/
 ///
 /// Returns default config if the directory or config file doesn't exist.
 pub fn load_global_config() -> Config {
@@ -19,7 +19,7 @@ pub fn load_global_config() -> Config {
     }
 }
 
-/// Save config to the global CAS directory (~/.config/cas/)
+/// Save config to the global Cassy directory (~/.config/cas/)
 ///
 /// Creates the directory if it doesn't exist.
 pub fn save_global_config(config: &Config) -> Result<(), MemError> {
@@ -60,7 +60,7 @@ pub fn prompt_telemetry_consent() -> bool {
     use std::io::{self, Write};
 
     println!();
-    println!("CAS collects anonymous usage data to improve the product.");
+    println!("Cassy collects anonymous usage data to improve the product.");
     println!("- No personal data or file contents collected");
     println!("- You can disable anytime: cas config telemetry.enabled false");
     println!();

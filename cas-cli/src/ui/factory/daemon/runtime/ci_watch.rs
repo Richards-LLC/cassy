@@ -96,7 +96,7 @@ struct CiJob {
 
 /// Real, bounded `gh` transport.  The watcher intentionally uses the CLI so
 /// it inherits the operator's normal `gh auth`/token setup without persisting
-/// credentials in CAS.
+/// credentials in Cassy.
 pub(crate) struct GhCiTransport {
     repo: String,
     cwd: PathBuf,

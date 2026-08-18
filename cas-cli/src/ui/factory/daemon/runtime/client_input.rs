@@ -851,7 +851,7 @@ impl FactoryDaemon {
                 continue;
             }
 
-            // Ctrl+R (0x12) = refresh CAS data (global)
+            // Ctrl+R (0x12) = refresh Cassy data (global)
             if byte == 0x12 {
                 let _ = self.app.refresh_data();
                 i += 1;

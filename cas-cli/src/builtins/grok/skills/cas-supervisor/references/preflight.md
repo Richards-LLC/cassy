@@ -12,7 +12,7 @@ known-repository lookup and Git subprocess. It does not connect optional
 upstreams, start a model, or spawn a worker. The human and JSON views come from
 the same schema-versioned report covering:
 
-- the running CAS build SHA versus identifiable CAS source or configured
+- the running Cassy build SHA versus identifiable Cassy source or configured
   deployment evidence;
 - the portable repository selector and active target branch;
 - CAS MCP registration and compiled `coordination`/`task` availability;
@@ -29,7 +29,7 @@ evidence for the factory configuration that will actually launch.
 
 Exit status is nonzero only for critical factory blockers: unresolved,
 ambiguous, or wrong repository identity; uninitialized/missing CAS MCP; or a
-compiled registry missing required CAS tools. Dirty, unknown, or stale binary
+compiled registry missing required Cassy tools. Dirty, unknown, or stale binary
 identity is a warning. Optional upstream failures and harness version drift are
 warnings and never block factory launch.
 
@@ -51,7 +51,7 @@ If two live clones share one selector, inspect host-local state with
 with `cas known-repos bind --repo <path>`. Remove a stale choice with
 `cas known-repos unbind <exact-selector>` before rebinding. Bindings stay in the
 host registry only; task, delivery, MCP, and preflight JSON remain path-free.
-`CAS_SOURCE_DIR` can identify a CAS source checkout when the
+`CAS_SOURCE_DIR` can identify a Cassy source checkout when the
 project being checked is downstream; `CAS_EXPECTED_DEPLOYMENT_SHA` can provide
 an explicit expected 7–40 character hexadecimal deployment commit. A
-downstream project HEAD is never compared to the embedded CAS SHA.
+downstream project HEAD is never compared to the embedded Cassy SHA.

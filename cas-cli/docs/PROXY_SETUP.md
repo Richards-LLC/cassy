@@ -1,6 +1,6 @@
-# Reverse Proxy Setup for CAS Factory Server
+# Reverse Proxy Setup for Cassy Factory Server
 
-This guide covers deploying CAS Factory Server behind a reverse proxy with TLS termination.
+This guide covers deploying Cassy Factory Server behind a reverse proxy with TLS termination.
 
 ## Overview
 
@@ -271,7 +271,7 @@ Error: 426 Upgrade Required
 ```ini
 # /etc/systemd/system/cas-factory.service
 [Unit]
-Description=CAS Factory Server
+Description=Cassy Factory Server
 After=network.target
 
 [Service]

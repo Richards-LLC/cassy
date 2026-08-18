@@ -24,9 +24,9 @@ and the worker reported running targeted `rustfmt` on its task files before abou
 | Question | What repeatedly rewrites unrelated Rust files in Codex worker worktrees? |
 | Verdict | Explicit workspace Cargo formatting and recursive direct rustfmt module traversal |
 | Confidence | High for the causal mechanisms and the 2026-08-11 incident; medium-high for the retrospective `cas-bb1c` attribution |
-| Scope examined | Three task incident notes; the complete eager-leopard-72 Codex rollout; formatter commands across stored 2026-08-09 through 2026-08-11 rollouts; repository Codex hooks and CAS PreToolUse policy |
+| Scope examined | Three task incident notes; the complete eager-leopard-72 Codex rollout; formatter commands across stored 2026-08-09 through 2026-08-11 rollouts; repository Codex hooks and Cassy PreToolUse policy |
 | Date | 2026-08-11 |
-| Author | CAS factory worker `warm-cheetah-6`, task `cas-852a0` |
+| Author | Cassy factory worker `warm-cheetah-6`, task `cas-852a0` |
 
 ## Evidence
 
@@ -38,8 +38,8 @@ and the worker reported running targeted `rustfmt` on its task files before abou
 | At 13:08:23Z the model invoked direct `rustfmt` on seven named files, including `cas-cli/src/cli/mod.rs`, `crates/cas-core/src/lib.rs`, and `crates/cas-core/src/sync/mod.rs`. | Same rollout, response ordinal 152 | The second experiment appeared file-scoped but included module roots. |
 | One second later, `git status --short` listed unrelated children such as `cas-cli/src/cli/auth.rs`, `cloud.rs`, `doctor.rs`, `factory/mod.rs`, and many more. | Same rollout, command-execution ordinal 153 | Direct rustfmt recursively followed module declarations and produced a second spill without `cargo fmt` or an external writer. |
 | At 13:08:30Z the worker again restored every non-task path. | Same rollout, ordinals 158–160 | The child-module spill was distinct from the earlier workspace spill. |
-| The `cas-bb1c` worker stated it ran targeted `rustfmt --edition 2024` on task files; commit `d5e2ef4b` includes `crates/cas-store/src/lib.rs`; about 19 unrelated `cas-store` files then changed. | CAS task `cas-bb1c` notes and `git show --name-only d5e2ef4b` | The historical file family and timing match rustfmt traversal from the crate module root. This is a retrospective inference because that original rollout is not present in the retained Codex session directory. |
-| Before this change, `.codex/hooks.json` registered only `PostToolUse`, which cannot prevent writes. | Repository `.codex/hooks.json` at investigation start | CAS already had worker safety logic, but Codex unified exec was not routed through it before execution. |
+| The `cas-bb1c` worker stated it ran targeted `rustfmt --edition 2024` on task files; commit `d5e2ef4b` includes `crates/cas-store/src/lib.rs`; about 19 unrelated `cas-store` files then changed. | Cassy task `cas-bb1c` notes and `git show --name-only d5e2ef4b` | The historical file family and timing match rustfmt traversal from the crate module root. This is a retrospective inference because that original rollout is not present in the retained Codex session directory. |
+| Before this change, `.codex/hooks.json` registered only `PostToolUse`, which cannot prevent writes. | Repository `.codex/hooks.json` at investigation start | Cassy already had worker safety logic, but Codex unified exec was not routed through it before execution. |
 
 ## Reasoning chain
 
@@ -104,7 +104,7 @@ command windows would also overturn the single-writer attribution.
    absolute tool paths, recursive module-root calls, safe checks, safe explicit
    `skip_children=true`, and supervisor exemption. Also assert that the project
    Codex hook configuration contains the `PreToolUse` route and that fresh
-   `cas init/update` configuration installs both CAS pre- and post-tool hooks
+   `cas init/update` configuration installs both Cassy pre- and post-tool hooks
    without replacing custom hooks.
 3. **Operator decision — do not execute in this task.** A one-time workspace
    `cargo fmt --all` normalization followed immediately by a CI

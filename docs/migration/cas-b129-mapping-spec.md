@@ -47,12 +47,12 @@ disposition on its own.** The epic's zero-loss requirement needs a carrier.
 
 ## 2. The carrier — reserved `cas_legacy_*` frontmatter (APPROVED direction)
 
-`cas-cli/src/knowledge/merge.rs` defines exactly five keys CAS owns and
+`cas-cli/src/knowledge/merge.rs` defines exactly five keys Cassy owns and
 regenerates — `OWNED_KEYS = ["title", "type", "sources", "locked", "updated"]`
 (`merge.rs:92`). Every other frontmatter key is captured into
 `Frontmatter.passthrough` (`merge.rs:85-88`, `:155-162`) and re-emitted verbatim
 by `render_frontmatter` (`merge.rs:~185`). The doc comment states the intent
-outright: *"Lines CAS does not own, carried through a round trip verbatim.
+outright: *"Lines Cassy does not own, carried through a round trip verbatim.
 Without this, a `tags:` or `owner:` key a human added to a page would be silently
 destroyed by the next distillation pass."*
 
@@ -319,11 +319,11 @@ be an explicit, logged step rather than an incidental side effect.
 | `deliberately-leave` | None. Each use in §5 states what is lost and why it is zero-substance | ledger note |
 
 **Rule P1 — dual-writing native + `cas_legacy_*` timestamps is deliberate.**
-`created_at` is a CAS-owned page column that later processes may touch;
+`created_at` is a Cassy-owned page column that later processes may touch;
 `cas_legacy_created` is passthrough and cannot be rewritten. Belt and braces on
 the one provenance fact the epic names explicitly.
 
-**Rule P2 — `sources_json`.** `sources` is CAS-owned (`OWNED_KEYS`) and is a list
+**Rule P2 — `sources_json`.** `sources` is Cassy-owned (`OWNED_KEYS`) and is a list
 of *file paths* that distillation regenerates. A legacy memory has no source
 file, so M3 MUST write `sources_json = []` and record origin in
 `cas_legacy_id` / `cas_legacy_db` instead. Writing a synthetic path into

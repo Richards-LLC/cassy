@@ -6,7 +6,7 @@ pub(super) fn register_issues(registry: &mut ConfigRegistry) {
         key: "issues.repo",
         section: "issues",
         name: "Issue Intake Repository",
-        description: "GitHub repository in owner/repo form for CAS-system bug reports. This is project-local and intentionally has no inferred default: a downstream project's origin may not be the CAS upstream.",
+        description: "GitHub repository in owner/repo form for Cassy-system bug reports. This is project-local and intentionally has no inferred default: a downstream project's origin may not be the Cassy upstream.",
         value_type: ConfigType::String,
         default: "",
         constraint: Constraint::None,
@@ -14,7 +14,7 @@ pub(super) fn register_issues(registry: &mut ConfigRegistry) {
         requires_feature: None,
         keywords: &["issues", "github", "bugs", "intake", "repository", "upstream"],
         use_cases: &[
-            "Route CAS-system bugs from a downstream project to its configured CAS upstream",
+            "Route Cassy-system bugs from a downstream project to its configured Cassy upstream",
             "Leave empty to preserve reports locally until an explicit target is configured",
         ],
     });

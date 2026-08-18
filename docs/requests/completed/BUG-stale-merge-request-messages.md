@@ -39,7 +39,7 @@ The worker states it drained its inbox to "No unread messages" immediately befor
 - **Wasted round trips.** Each stale request is a message the supervisor must recognise as already-handled and either ignore or answer redundantly. At ~12 occurrences that is a meaningful fraction of coordination traffic.
 - **Ambiguity for the supervisor.** A "please merge X" arriving after merging X is indistinguishable, without checking git, from a *second* push that genuinely needs merging. Every one had to be verified against `git log`/`merge-base` to rule that out.
 - **Misleading transcripts.** The task log reads as though the supervisor ignored repeated merge requests.
-- **It defeats the freshness protocol.** CAS's own MERGE REQUIRED text instructs workers to drain the inbox to empty before escalating, precisely to avoid stale requests. Workers followed that instruction and the requests were still stale, so the protocol is not achieving its purpose.
+- **It defeats the freshness protocol.** Cassy's own MERGE REQUIRED text instructs workers to drain the inbox to empty before escalating, precisely to avoid stale requests. Workers followed that instruction and the requests were still stale, so the protocol is not achieving its purpose.
 
 ## Probable cause
 

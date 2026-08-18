@@ -51,7 +51,7 @@ pub struct DocRefs {
     /// `#123` style issue/PR references.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<i64>,
-    /// CAS task ids (`cas-9a38`).
+    /// Cassy task ids (`cas-9a38`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<String>,
     /// A merged PR's merge commit, straight from GraphQL. Full 40 chars.
@@ -146,7 +146,7 @@ fn is_token_char(ch: char) -> bool {
 }
 
 /// `cas-9a38`, case-insensitively; the stored form is lowercase so a body
-/// shouting `CAS-9A38` joins the same task as one that does not.
+/// shouting `Cassy-9A38` joins the same task as one that does not.
 fn task_id(token: &str) -> Option<String> {
     let lower = token.to_ascii_lowercase();
     let suffix = lower.strip_prefix("cas-")?;
@@ -181,7 +181,7 @@ mod tests {
     fn extracts_shas_issue_numbers_and_task_ids() {
         let refs = extract_from_text(
             "Fixes #155 and #7. Landed as 58084e5a, full f509695b365c84dd868d12df7411470cbae5c227. \
-             Tracked by cas-9a38 (see CAS-6212).",
+             Tracked by cas-9a38 (see Cassy-6212).",
         );
         assert_eq!(refs.issues, vec![7, 155]);
         assert_eq!(refs.tasks, vec!["cas-6212".to_string(), "cas-9a38".to_string()]);

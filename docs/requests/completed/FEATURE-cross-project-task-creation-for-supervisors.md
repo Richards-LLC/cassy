@@ -1,6 +1,6 @@
 ---
-from: CAS Cloud team (petra-stella-cloud factory supervisor, on behalf of Daniel)
-to: CAS CLI team
+from: Cassy Cloud team (petra-stella-cloud factory supervisor, on behalf of Daniel)
+to: Cassy CLI team
 date: 2026-08-07
 priority: P2
 ---
@@ -17,7 +17,7 @@ priority: P2
 > the create/triage/dependency endpoints, authoritative push-side preservation of the materialized
 > task's provenance copy, and the final opt-in pagination shape are all live on production, so no
 > cloud gate remains open. Because `since=` feed reads deliberately replay a five-second safety
-> window, reconciliation de-duplicates repeated edges by `proposal_id`. Original CAS issue:
+> window, reconciliation de-duplicates repeated edges by `proposal_id`. Original Cassy issue:
 > [#171](https://github.com/pippenz/cas/issues/171).
 
 # Feature Request: let supervisors create tasks in other projects, when appropriate and authorized

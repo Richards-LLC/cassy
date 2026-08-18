@@ -22,7 +22,7 @@ reports healthy investigation-heavy workers as dead.
 Worker `vivid-panther-55` (`cli=codex`, `model=gpt-5.6-sol`, `effort=medium`,
 `isolate=true`) on task `cas-b0b4` — a diagnosis/characterization spike that is
 almost entirely `exec_command` shell work (nvidia-smi traces, journalctl reads,
-py-spy/gdb stack sampling) and deliberately makes **no repo commits and few CAS
+py-spy/gdb stack sampling) and deliberately makes **no repo commits and few Cassy
 MCP calls** for long stretches.
 
 1. Assign a worker a read-only investigation task (no commits, no CAS MCP calls
@@ -56,7 +56,7 @@ minute | events | tool_calls
  12:01  |    18  |  4
  12:02  |     9  |  2
  12:03  |    23  |  6
- 12:04  |     4  |  1     <-- CAS believed the worker died here
+ 12:04  |     4  |  1     <-- Cassy believed the worker died here
  12:05  |     8  |  2
  12:06  |     8  |  2
  12:07  |     8  |  2
@@ -81,7 +81,7 @@ same window:
 
 ## Suspected root cause
 
-`last_activity` appears to be updated only by CAS-side events (CAS MCP tool
+`last_activity` appears to be updated only by Cassy-side events (CAS MCP tool
 invocations, and/or git-observable commits), not by the worker CLI's own
 tool-call stream (`exec_command`, `apply_patch`, shell work).
 
@@ -91,7 +91,7 @@ notes), showed a healthy `last activity: 50s ago` throughout — while
 `vivid-panther-55`, doing pure shell diagnostics, froze. Same CLI, same model,
 same spawn parameters; the only difference is how often they touched CAS MCP.
 
-This makes the metric a proxy for "how chatty is this worker with CAS", not
+This makes the metric a proxy for "how chatty is this worker with Cassy", not
 "is this worker doing work".
 
 ## Impact
@@ -123,7 +123,7 @@ Primary:
   what is used today.
 - Until that lands, do not render `⚠ STALLED` from this metric, or downgrade its
   wording to something that cannot be mistaken for a liveness verdict (e.g.
-  `no CAS interaction for Ns — not a liveness signal`).
+  `no Cassy interaction for Ns — not a liveness signal`).
 
 Secondary (same root cause, surfaced together):
 
@@ -165,7 +165,7 @@ text to name the parameter and ID the tool actually wants.
 
 ## Environment
 
-- CAS factory session `Penguinz-keen-newt-48`, supervisor CLI `claude`, worker CLI `codex`
+- Cassy factory session `Penguinz-keen-newt-48`, supervisor CLI `claude`, worker CLI `codex`
 - codex-cli `0.145.0`, `--model gpt-5.6-sol -c model_reasoning_effort=medium`
 - Host soundwave, Kubuntu 26.04, kernel 7.0.0-28
 - Logs: `.cas/logs/factory-session-2026-07-28.log`, `.cas/logs/cas-2026-07-28.log`

@@ -20,7 +20,7 @@ Earlier the same day, in the SAME session, spawns worked instantly (requests 361
 The `shutdown_workers count=0` directive is sticky/unexpired and the launcher applies it to newly spawned workers (kill-on-boot or skip-launch), or the shutdown handler tears down the per-session launcher loop while leaving worktree provisioning running.
 
 ## Impact
-Factory cannot spawn any further workers for the rest of the session; supervisor had to hand-dispatch a raw subagent inside the CAS-provisioned worktree to keep a user-facing release moving.
+Factory cannot spawn any further workers for the rest of the session; supervisor had to hand-dispatch a raw subagent inside the Cassy-provisioned worktree to keep a user-facing release moving.
 
 ## Repro sketch
 1. Spawn workers, let them finish, `shutdown_workers count=0`.

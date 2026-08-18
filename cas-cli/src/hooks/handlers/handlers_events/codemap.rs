@@ -996,7 +996,7 @@ mod tests {
             );
         };
         git(&["init", "-q"]);
-        git(&["config", "user.name", "CAS Test"]);
+        git(&["config", "user.name", "Cassy Test"]);
         git(&["config", "user.email", "cas-test@example.invalid"]);
         git(&["add", ".claude/CODEMAP.md", "src/new.rs"]);
         git(&["commit", "-q", "-m", "update codemap with new source"]);
@@ -1033,7 +1033,7 @@ mod tests {
             );
         };
         git(&["init", "-q"]);
-        git(&["config", "user.name", "CAS Test"]);
+        git(&["config", "user.name", "Cassy Test"]);
         git(&["config", "user.email", "cas-test@example.invalid"]);
         git(&["add", ".claude/CODEMAP.md"]);
         git(&["commit", "-q", "-m", "add codemap"]);
@@ -1087,7 +1087,7 @@ mod tests {
             );
         };
         git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.name", "CAS Test"]);
+        git(&["config", "user.name", "Cassy Test"]);
         git(&["config", "user.email", "cas-test@example.invalid"]);
         git(&["add", ".claude/CODEMAP.md"]);
         git(&["commit", "-q", "-m", "initial codemap"]);

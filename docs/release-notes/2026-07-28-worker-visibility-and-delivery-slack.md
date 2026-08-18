@@ -9,8 +9,8 @@ STATUS: DRAFT — awaiting operator review. Do not post without explicit approva
 
 ## POST 1 — User perspective (top-level)
 
-**Was:** you'd check on a busy worker and CAS would tell you it had stalled — so you'd kill it, and lose the work it was in the middle of.
-**Now:** CAS watches what the worker is actually doing, so a working worker reads as working.
+**Was:** you'd check on a busy worker and Cassy would tell you it had stalled — so you'd kill it, and lose the work it was in the middle of.
+**Now:** Cassy watches what the worker is actually doing, so a working worker reads as working.
 
 - A worker running shell commands, editing files, or investigating for long stretches no longer looks dead just because it hasn't checked in. The "stalled" warning now reflects reality, so it's safe to act on again.
 - Messages you send to a worker actually arrive. Previously a message could be reported as delivered and never reach it — leaving you waiting on a worker that was waiting on you, indefinitely.

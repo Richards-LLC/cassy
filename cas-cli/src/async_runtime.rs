@@ -1,4 +1,4 @@
-//! Async runtime utilities for CAS
+//! Async runtime utilities for Cassy
 //!
 //! Provides helpers for running async operations from sync code,
 //! progress reporting, and cancellation support.

@@ -10,7 +10,7 @@ branch: epic/mcp-server-robustness
 
 ## Problem
 
-`mcp__cas__search` deterministically crashes `cas serve`. Every non-search CAS tool works; every search call kills the server. Claude Code auto-respawns the process, but the model sees `MCP error -32000: Connection closed` and eventually gets a `MCP server disconnected` system reminder — at which point CAS task creation, memory recall, and skill lookup are unavailable for the rest of the session.
+`mcp__cas__search` deterministically crashes `cas serve`. Every non-search Cassy tool works; every search call kills the server. Claude Code auto-respawns the process, but the model sees `MCP error -32000: Connection closed` and eventually gets a `MCP server disconnected` system reminder — at which point Cassy task creation, memory recall, and skill lookup are unavailable for the rest of the session.
 
 ### Evidence
 
@@ -33,7 +33,7 @@ No coredump. No entry in `dmesg`. The "cleanly" part of the disconnect message s
 Two independent problems:
 
 1. **Server dies on any handler failure.** A panic in any tool — not just search — takes down the whole process. Every other tool is one unwrap away from the same fate.
-2. **The search crash itself.** Root cause unknown because crash output isn't preserved anywhere. Stderr reaches the Claude Code jsonl only up to the `[CAS] Starting MCP server...` line; nothing after that.
+2. **The search crash itself.** Root cause unknown because crash output isn't preserved anywhere. Stderr reaches the Claude Code jsonl only up to the `[Cassy] Starting MCP server...` line; nothing after that.
 
 ## EPIC goal
 
@@ -43,7 +43,7 @@ Two independent problems:
 
 - MCP client-side auto-reconnect behavior (that's Claude Code; it already works).
 - Broader supervisor/worker resilience (separate surface area).
-- The team-memories bug (blocked by this EPIC — the EPIC planning session itself couldn't create CAS tasks because search crashed).
+- The team-memories bug (blocked by this EPIC — the EPIC planning session itself couldn't create Cassy tasks because search crashed).
 
 ---
 

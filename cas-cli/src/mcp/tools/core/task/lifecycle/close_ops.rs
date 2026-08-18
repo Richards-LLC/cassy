@@ -984,7 +984,7 @@ impl CasCore {
             Ok(id) => id,
             Err(_) => {
                 return Ok(Self::tool_error(
-                    "DELIVERY RECEIPT REJECTED: an already registered authenticated CAS worker holding the exact active task lease is required.",
+                    "DELIVERY RECEIPT REJECTED: an already registered authenticated Cassy worker holding the exact active task lease is required.",
                 ));
             }
         };
@@ -993,7 +993,7 @@ impl CasCore {
             Ok(caller) => caller,
             Err(_) => {
                 return Ok(Self::tool_error(
-                    "DELIVERY RECEIPT REJECTED: authenticated session is not an active registered CAS worker holding the exact active task lease.",
+                    "DELIVERY RECEIPT REJECTED: authenticated session is not an active registered Cassy worker holding the exact active task lease.",
                 ));
             }
         };
@@ -1300,7 +1300,7 @@ impl CasCore {
             };
             if !cleanup_complete {
                 return Ok(Self::tool_error(format!(
-                    "DELIVERY RECEIPT HANDOFF INCOMPLETE\n\nReceipt: {}\nTransaction: {}\nState: {}\n\nThe immutable delivery boundary is safely persisted, but exact task-lease cleanup did not complete, so CAS did not report a clean handoff or advance this invocation's task projection. The lease remains active or could not be verified as released.\n\nRemediation: resolve the lease cleanup failure, then retry the exact same completion_receipt from this worker session. Do not create a replacement receipt. If lease ownership changed, a supervisor must reconcile the task lease before delivery continues.",
+                    "DELIVERY RECEIPT HANDOFF INCOMPLETE\n\nReceipt: {}\nTransaction: {}\nState: {}\n\nThe immutable delivery boundary is safely persisted, but exact task-lease cleanup did not complete, so Cassy did not report a clean handoff or advance this invocation's task projection. The lease remains active or could not be verified as released.\n\nRemediation: resolve the lease cleanup failure, then retry the exact same completion_receipt from this worker session. Do not create a replacement receipt. If lease ownership changed, a supervisor must reconcile the task lease before delivery continues.",
                     receipt.id, transaction.id, transaction.state
                 )));
             }
@@ -1337,7 +1337,7 @@ impl CasCore {
             | cas_types::WorkerDeliveryState::MergeAuthorized
             | cas_types::WorkerDeliveryState::Merged
             | cas_types::WorkerDeliveryState::CloseReady => {
-                "A registered supervisor may call worktree_merge with this task_id; CAS will revalidate and resume the delivery."
+                "A registered supervisor may call worktree_merge with this task_id; Cassy will revalidate and resume the delivery."
             }
             cas_types::WorkerDeliveryState::Delivered => {
                 "No action; the exact immutable delivery is already complete."
@@ -1362,7 +1362,7 @@ impl CasCore {
         let requester = agent_store.get(requester_id).map_err(|_| McpError {
             code: ErrorCode::INVALID_REQUEST,
             message: Cow::from(
-                "Verification dispatch requires an authenticated registered CAS session.",
+                "Verification dispatch requires an authenticated registered Cassy session.",
             ),
             data: None,
         })?;
@@ -1424,7 +1424,7 @@ impl CasCore {
         parked.status = TaskStatus::AwaitingMerge;
         // cas-a844/cas-7308a: snapshot whether THIS park needs worker merge
         // rework: either a genuine conflict, or a preflight error that means
-        // CAS cannot prove it clean. This only fires once per task (same
+        // Cassy cannot prove it clean. This only fires once per task (same
         // guard as the anchor below); a later preflight re-check on retry
         // (see call site) can still flip it true if the situation changes.
         parked.deliverables.merge_conflicted = merge_conflicted;
@@ -1825,7 +1825,7 @@ impl CasCore {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                 Err(error) => {
                     return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. CAS refuses to infer close authority.",
+                        "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. Cassy refuses to infer close authority.",
                         req.id, error
                     )));
                 }
@@ -1985,10 +1985,10 @@ impl CasCore {
 
         // cas-ede8: every factory merge-enforcement gate must bind to the same
         // verified repository. `cas_root.parent()` is only correct for the
-        // conventional `<repo>/.cas` layout; nested/custom CAS roots otherwise
+        // conventional `<repo>/.cas` layout; nested/custom Cassy roots otherwise
         // make the gates query a non-repository and silently proceed.
         //
-        // CAS also supports non-git stores (including verification-only MCP
+        // Cassy also supports non-git stores (including verification-only MCP
         // usage) that never enter factory merge enforcement. Preserve that
         // behavior outside factory mode; once factory enforcement is active,
         // an unresolved repository is a hard rejection.
@@ -2587,7 +2587,7 @@ impl CasCore {
                             return Ok(Self::tool_error(format!(
                                 "⚠️ VERIFICATION DISPATCH INVALID\n\n\
                                  Task {} has unreadable durable verification-dispatch state: {}. \
-                                 CAS refuses to infer authority or recovery from corrupt metadata.",
+                                 Cassy refuses to infer authority or recovery from corrupt metadata.",
                                 req.id, error
                             )));
                         }
@@ -5481,7 +5481,7 @@ pub(crate) struct AdditiveOnlyViolation {
 pub(crate) struct TaskCommitIdentity {
     /// The task id, matched as a whole token against commit messages.
     pub task_id: Option<String>,
-    /// Commit ids CAS durably recorded for this task (parked factory anchor,
+    /// Commit ids Cassy durably recorded for this task (parked factory anchor,
     /// worker delivery receipts). Exact evidence that needs no convention.
     pub known_commits: Vec<String>,
 }
@@ -5494,7 +5494,7 @@ impl TaskCommitIdentity {
     /// True when `commit` is one of the durably recorded task commits.
     ///
     /// Both sides are git object ids, so a prefix match in either direction is
-    /// the same commit (CAS records full ids; git may hand back an
+    /// the same commit (Cassy records full ids; git may hand back an
     /// abbreviation).
     fn matches_known_commit(&self, commit: &str) -> bool {
         let commit = commit.trim().to_ascii_lowercase();
@@ -5508,7 +5508,7 @@ impl TaskCommitIdentity {
     }
 }
 
-/// Collect every durable commit id CAS recorded for this task, plus the task
+/// Collect every durable commit id Cassy recorded for this task, plus the task
 /// id itself, into one attribution record.
 ///
 /// `latest_delivery_commit` is the commit sha from the task's most recent
@@ -5708,7 +5708,7 @@ pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<Unco
 /// cas-f102 incident is exactly the failure mode that ambiguity hides — a
 /// worker's tree diverged from the reviewed tip (an `Edit` reported REJECTED
 /// but the write landed on disk) and nothing at close said so. Same anti-
-/// pattern CAS already fixed for review envelopes in cas-acf83: an empty
+/// pattern Cassy already fixed for review envelopes in cas-acf83: an empty
 /// findings list must not be indistinguishable from a review that never ran.
 ///
 /// So the receipt carries all four facts and the close path NAMES whichever
@@ -6414,9 +6414,9 @@ fn enrich_merge_required_with_conflict_check(
     } else if let Some(error) = check_error {
         format!(
             "{message}\n\n\
-             ⚠️ CAS could not determine whether this branch merges cleanly \
+             ⚠️ Cassy could not determine whether this branch merges cleanly \
              into {parent_branch}. Git conflict preflight failed: {error}.\n\n\
-             To avoid stranding the task in `awaiting_merge`, CAS marks this \
+             To avoid stranding the task in `awaiting_merge`, Cassy marks this \
              park as reopen-eligible. The assigned worker can \
              `mcp__cas__task action=start id={task_id}` to inspect or resolve \
              the branch, then re-close."
@@ -6452,7 +6452,7 @@ fn anchored_delivery_content_gate(
             Some(MergeStateGateOutcome::Reject(format!(
                 "⚠️ DELIVERY CONTENT UNVERIFIABLE\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
-                 `{parent_branch}`, but CAS could not prove its tree effect is still \
+                 `{parent_branch}`, but Cassy could not prove its tree effect is still \
                  present: {reason}.\n\n\
                  Reachability alone is not sufficient. Inspect the named delivery \
                  commit and target tree for task {task_id}, then retry."
@@ -6889,7 +6889,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              must not land, a registered supervisor may instead close with \
              `negative_result=true negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
              negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
-             CAS validates all three receipts and logs the decision. If the supervisor \
+             Cassy validates all three receipts and logs the decision. If the supervisor \
              declines an actual delivery for rework instead, the supervisor runs \
              `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
@@ -6906,7 +6906,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              messages in case the MCP response was lost after claiming rows.\n\
              2. Push {factory_branch} to its remote\n\
              3. Open a PR targeting {parent_branch}\n\
-             4. Merge the PR. CAS already fetched and measured this branch \
+             4. Merge the PR. Cassy already fetched and measured this branch \
              against BOTH {parent_branch} and origin/{parent_branch}, so a \
              merge that has landed on either one is already counted — running \
              `git fetch` again will not change this number, and a stale local \
@@ -6918,7 +6918,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              supervisor may instead close with `negative_result=true \
              negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
              negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
-             CAS validates all three receipts and logs the decision. If the supervisor \
+             Cassy validates all three receipts and logs the decision. If the supervisor \
              declines an actual delivery for rework instead, the supervisor runs \
              `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
@@ -7256,7 +7256,7 @@ pub(crate) fn commit_receipt_repo_binding_error(
         "⚠️ RECEIPT NOT FOUND IN THIS REPOSITORY\n\n\
          task close rejected: commit_receipt `{receipt}` does not resolve in the \
          repository this close is bound to ({}): {reason}.\n\n\
-         A receipt is merge evidence, so CAS refuses to record one it cannot \
+         A receipt is merge evidence, so Cassy refuses to record one it cannot \
          verify here — a receipt from another repository would read as proof \
          while proving nothing.\n\n\
          To resolve:\n\
@@ -7772,7 +7772,7 @@ pub(crate) fn git_merge_base(
 
 /// Resolve the git repository that owns `cas_root` for close-time enforcement.
 ///
-/// A CAS root is conventionally `<repo>/.cas`, but custom state layouts may
+/// A Cassy root is conventionally `<repo>/.cas`, but custom state layouts may
 /// place it more deeply inside the checkout. Walking ancestors keeps those
 /// layouts bound to the owning repository while refusing roots that are not
 /// contained in a git checkout at all. A `.git` file is accepted as well as a
@@ -7801,9 +7801,9 @@ fn resolve_close_gate_repo_root(cas_root: &std::path::Path) -> Result<std::path:
 
     Err(format!(
         "⚠️ CLOSE GATE GIT REPOSITORY ERROR\n\n\
-         Cannot resolve a git repository containing CAS root {}. Close-time \
+         Cannot resolve a git repository containing Cassy root {}. Close-time \
          merge enforcement refuses to proceed because git state would be \
-         unknowable. Start CAS from a project checkout or configure CAS_ROOT \
+         unknowable. Start Cassy from a project checkout or configure CAS_ROOT \
          beneath the intended repository, then retry.",
         cas_root.display()
     ))
@@ -9231,7 +9231,7 @@ fn advance_clean_epic_after_child_integration(
             "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
              epic_tip={epic_tip} integration_branch={integration_branch} integration_tip={integration_tip}; \\
              the branches diverge or the epic carries commits absent from its declared integration branch. \\
-             CAS will not auto-merge or overwrite shared epic history. Child close remains valid; \\
+             Cassy will not auto-merge or overwrite shared epic history. Child close remains valid; \\
              supervisor action: inspect and explicitly reconcile `{epic_branch}` with `{integration_branch}`."
         ));
     }
@@ -12576,7 +12576,7 @@ mod additive_only_tests {
     #[test]
     fn branch_check_same_task_wip_is_attributable_by_recorded_commit_id() {
         // The WIP commit message never names the task (a dying worker's
-        // scratch commit), but CAS durably recorded its commit id for this
+        // scratch commit), but Cassy durably recorded its commit id for this
         // task — that is attribution evidence too.
         let (dir, anchor, wip_sha) = init_same_task_wip_repo("wip: partial feature");
         let attributed = check_additive_only_branch_violations(
@@ -15707,7 +15707,7 @@ mod code_review_gate_tests {
         // `format_code_review_required` can produce — a factory worker now gets
         // the "do not run it, go to your supervisor" redirect instead. The role
         // must therefore be pinned rather than inherited: this suite is run by
-        // CAS factory workers, whose sessions export CAS_AGENT_ROLE=worker, and
+        // Cassy factory workers, whose sessions export CAS_AGENT_ROLE=worker, and
         // left ambient this test passes on CI and fails inside the factory.
         let _role = CallerRoleEnv::solo();
         let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
@@ -15907,7 +15907,7 @@ mod code_review_gate_tests {
     ///
     /// Every test that asserts on this gate's TEXT must hold one. cas-62b0 made
     /// the guidance caller-aware, so the ambient environment now decides which
-    /// message is produced — and this suite is routinely run by a CAS factory
+    /// message is produced — and this suite is routinely run by a Cassy factory
     /// worker, whose own session exports `CAS_AGENT_ROLE=worker` and
     /// `CAS_FACTORY_MODE=1`. Left implicit, these tests pass on CI and fail on
     /// the machine of anyone who runs them from inside the factory (which is

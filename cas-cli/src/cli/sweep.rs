@@ -190,10 +190,10 @@ fn format_bytes(bytes: u64) -> String {
 fn find_repo_root(cwd: &std::path::Path) -> Result<PathBuf> {
     // Delegate to the established resolver so we honor CAS_ROOT, factory
     // worktree detection, and git-file parsing exactly like every other
-    // CAS command. Returns the `.cas` directory; the repo root is its parent.
+    // Cassy command. Returns the `.cas` directory; the repo root is its parent.
     let cas_root = crate::store::find_cas_root_from(cwd).map_err(|_| {
         anyhow::anyhow!(
-            "Not inside a CAS-initialized repo. Run `cas init`, \
+            "Not inside a Cassy-initialized repo. Run `cas init`, \
              or pass --all-repos to sweep every known repo."
         )
     })?;

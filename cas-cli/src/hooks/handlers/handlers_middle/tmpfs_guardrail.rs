@@ -272,7 +272,7 @@ fn format_warning(
         });
 
     format!(
-        "WARNING: This session has written or grown tmpfs/ramfs-backed storage at `{}` by {} bytes, crossing the configured threshold of {} bytes. tmpfs/ramfs consumes system memory and can wedge the host when large artifacts are staged there. {} This is a warning only; CAS did not deny the tool.",
+        "WARNING: This session has written or grown tmpfs/ramfs-backed storage at `{}` by {} bytes, crossing the configured threshold of {} bytes. tmpfs/ramfs consumes system memory and can wedge the host when large artifacts are staged there. {} This is a warning only; Cassy did not deny the tool.",
         mount_point.display(),
         total_bytes,
         threshold_bytes,

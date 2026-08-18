@@ -695,7 +695,7 @@ fn test_fetch_branch_bounded_times_out_fast_on_hung_remote() {
     );
 }
 
-// --- cas-006c: classify_dirty_status (blocking vs warning vs CAS-excluded) --
+// --- cas-006c: classify_dirty_status (blocking vs warning vs Cassy-excluded) --
 
 #[test]
 fn test_classify_dirty_status_clean_repo_is_empty() {
@@ -749,7 +749,7 @@ fn test_classify_dirty_status_husky_underscore_artifact_is_excluded_entirely() {
     );
     assert!(
         status.warnings.is_empty(),
-        "husky artifact must not even warn — it's CAS's own droppings: {:?}",
+        "husky artifact must not even warn — it's Cassy's own droppings: {:?}",
         status.warnings
     );
     assert!(!status.is_blocked());
@@ -782,7 +782,7 @@ fn test_classify_dirty_status_untracked_non_cas_path_warns_not_blocks() {
 
     assert!(
         !status.is_blocked(),
-        "untracked non-CAS paths must not block a merge/removal"
+        "untracked non-Cassy paths must not block a merge/removal"
     );
     assert_eq!(status.warnings.len(), 1);
     assert_eq!(status.warnings[0].path, "scratch.txt");
@@ -795,7 +795,7 @@ fn test_classify_dirty_status_mixed_only_tracked_change_blocks() {
     let git = GitOperations::new(repo_path.clone());
     commit_tracked_husky_dir(&repo_path);
 
-    // Real modified work, an unrelated untracked scratch file, AND the CAS
+    // Real modified work, an unrelated untracked scratch file, AND the Cassy
     // husky artifact all at once — only the modified file should block.
     std::fs::write(repo_path.join("README.md"), "# Modified").unwrap();
     std::fs::write(repo_path.join("scratch.txt"), "draft").unwrap();

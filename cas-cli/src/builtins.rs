@@ -1,9 +1,9 @@
-//! Built-in CAS content that gets synced to .claude/ or .codex/ directories
+//! Built-in Cassy content that gets synced to .claude/ or .codex/ directories
 //!
-//! These definitions are managed by CAS and regenerated on `cas update`.
+//! These definitions are managed by Cassy and regenerated on `cas update`.
 //! Files with `managed_by: cas` in frontmatter are overwritten on update.
 //! References beneath a managed builtin skill inherit directory ownership and
-//! use a last-synced hash to propagate CAS changes without clobbering local edits.
+//! use a last-synced hash to propagate Cassy changes without clobbering local edits.
 //!
 //! All content uses MCP tools (`mcp__cas__*`).
 //!
@@ -28,7 +28,7 @@ pub const MEMORY_GUIDE: &str = include_str!("builtins/skills/cas-memory-manageme
 pub const SEARCH_GUIDE: &str = include_str!("builtins/skills/cas-search.md");
 pub const CHECKLIST_GUIDE: &str = include_str!("builtins/skills/cas-supervisor-checklist.md");
 
-/// A built-in file that CAS manages
+/// A built-in file that Cassy manages
 #[derive(Clone, Copy)]
 pub struct BuiltinFile {
     /// Relative path within .claude/ (e.g., "agents/task-verifier.md")
@@ -37,7 +37,7 @@ pub struct BuiltinFile {
     pub content: &'static str,
 }
 
-/// All built-in agents managed by CAS
+/// All built-in agents managed by Cassy
 pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
@@ -78,7 +78,7 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
     },
 ];
 
-/// All built-in agents managed by CAS for Codex
+/// All built-in agents managed by Cassy for Codex
 pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
@@ -121,7 +121,7 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
     },
 ];
 
-/// All built-in skills managed by CAS
+/// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
@@ -327,7 +327,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     // project-overview skill (EPIC cas-19a2b): generates
     // docs/PRODUCT_OVERVIEW.md for any project and writes a thin memory
-    // pointer so CAS search surfaces the doc.
+    // pointer so Cassy search surfaces the doc.
     BuiltinFile {
         path: "skills/project-overview/SKILL.md",
         content: include_str!("builtins/skills/project-overview/SKILL.md"),
@@ -478,7 +478,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
 ///
 /// Workflow scripts are machine-generated JS files with no user-customizable
 /// frontmatter. Unlike skills/agents (which use the `managed_by: cas` gate),
-/// workflows are always force-written on sync — they are pure CAS-managed
+/// workflows are always force-written on sync — they are pure Cassy-managed
 /// artifacts and should never be hand-edited by users. The `sync_workflows`
 /// function handles this unconditional write.
 ///
@@ -493,7 +493,7 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
     },
 ];
 
-/// All built-in skills managed by CAS for Codex
+/// All built-in skills managed by Cassy for Codex
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
@@ -836,7 +836,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
 ];
 
-/// All built-in agents managed by CAS for Grok (EPIC cas-8888, Phase 5 /
+/// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
 /// cas-6f46). Derived from the Claude set (`BUILTIN_AGENTS`), not the Codex
 /// one: Grok's capability tier matches Claude's (hooks + subagents +
 /// textbox-submit all supported), so the Claude agent prompts are the
@@ -881,12 +881,12 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
     },
 ];
 
-/// All built-in skills managed by CAS for Grok (EPIC cas-8888, Phase 5 /
+/// All built-in skills managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
 /// cas-6f46; required-capability parity closed by cas-cc8c, full general-skill
 /// parity closed by cas-20f2).
 ///
 /// Covers every factory-critical required capability (see
-/// `REQUIRED_FACTORY_CAPABILITIES`) AND every general CAS skill Claude/Codex
+/// `REQUIRED_FACTORY_CAPABILITIES`) AND every general Cassy skill Claude/Codex
 /// expose (see `GENERAL_PARITY_CAPABILITIES`: session-learn, codemap,
 /// project-overview, fallow, cas-nuxt-playwright, cas-codex-exec) in its OWN
 /// right. A Grok session MUST NOT depend on implicitly inheriting `~/.claude`
@@ -1099,7 +1099,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         ),
     },
     // cas-20f2: full GENERAL-skill parity — Grok now owns twins for every
-    // general CAS skill Claude/Codex expose (session-learn, codemap,
+    // general Cassy skill Claude/Codex expose (session-learn, codemap,
     // project-overview, fallow, cas-nuxt-playwright, cas-codex-exec), so a Grok
     // session never has to fall back to `~/.claude`. Twins are the Claude
     // sources with the `mcp__cas__` → `cas__` swap; fallow/cas-nuxt-playwright/
@@ -1346,7 +1346,7 @@ pub const REQUIRED_FACTORY_CAPABILITIES: &[RequiredCapability] = &[
     },
 ];
 
-/// General (non-factory-critical) CAS skills that must still reach FULL parity
+/// General (non-factory-critical) Cassy skills that must still reach FULL parity
 /// across all three harnesses (cas-20f2 — operator-requested full parity beyond
 /// the minimal factory roles). Every one of these is a general-purpose skill
 /// already exposed to Claude/Codex; Grok now owns a `cas__`-prefixed twin of
@@ -1514,7 +1514,7 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
     }
 }
 
-/// Check if a file is managed by CAS (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
 pub fn is_managed_by_cas(content: &str) -> bool {
     // Check frontmatter for managed_by: cas
     if let Some(stripped) = content.strip_prefix("---") {
@@ -1539,7 +1539,7 @@ pub fn preview_builtin(
     if target.exists() {
         let existing = std::fs::read_to_string(&target)?;
 
-        // Only update if managed by CAS
+        // Only update if managed by Cassy
         if !is_managed_by_cas(&existing) && !is_managed_by_cas(content) {
             return Ok(None);
         }
@@ -1579,7 +1579,7 @@ pub enum SyncOutcome {
     /// the caller should surface it in CLI output.
     SkippedNotManaged,
     /// The file is a reference owned by a managed builtin skill, but its
-    /// destination does not match the last content CAS synced. Preserve the
+    /// destination does not match the last content Cassy synced. Preserve the
     /// local content and surface the conflict instead of silently clobbering
     /// an intentional customization.
     SkippedModifiedReference,
@@ -1615,7 +1615,7 @@ pub fn sync_builtin_detailed(
     if target.exists() {
         let existing = std::fs::read_to_string(&target)?;
 
-        // Only overwrite if it's managed by CAS
+        // Only overwrite if it's managed by Cassy
         if !is_managed_by_cas(&existing) && !is_managed_by_cas(content) {
             // Neither version is managed — don't overwrite user content.
             // Distinguish "content actually differs" (the silent-staleness
@@ -1684,7 +1684,7 @@ fn builtin_reference_state_path(target_dir: &Path) -> std::path::PathBuf {
 struct BuiltinReferenceState {
     /// Schema version for forward-compatible state migrations.
     version: u8,
-    /// SHA-256 of the source content CAS last installed at each reference path.
+    /// SHA-256 of the source content Cassy last installed at each reference path.
     files: BTreeMap<String, String>,
     /// References the user deleted before project sync. Database skill sync
     /// may rehydrate an old copy before builtin sync runs, so retain deletion
@@ -1692,7 +1692,7 @@ struct BuiltinReferenceState {
     #[serde(default)]
     replace_on_next_sync: BTreeSet<String>,
     /// References the most recent sync refused to update because their content
-    /// matches neither the recorded baseline nor any version CAS has shipped
+    /// matches neither the recorded baseline nor any version Cassy has shipped
     /// (cas-0c0a). Persisted so SessionStart can surface the skip where
     /// operators actually look — a `tracing::warn` inside an unattended
     /// `cas update --sync` is seen by nobody.
@@ -1740,7 +1740,7 @@ impl BuiltinReferenceState {
 /// Remember body-owned references that are absent before database skill sync.
 /// The database layer can rehydrate an older copy before builtin sync runs;
 /// this one-shot marker preserves deletion as explicit acceptance of the
-/// current embedded CAS version.
+/// current embedded Cassy version.
 pub fn mark_missing_owned_references_for_replacement(
     harness: SupervisorCli,
     target_dir: &Path,
@@ -1776,10 +1776,10 @@ fn builtin_content_hash(content: &str) -> String {
 /// (cas-0c0a). Regenerated by `scripts/gen-builtin-reference-history.sh`.
 ///
 /// Without this, a destination installed before the baseline ledger existed
-/// (Jul 2026) had no recorded baseline, so pristine-but-old CAS content was
+/// (Jul 2026) had no recorded baseline, so pristine-but-old Cassy content was
 /// indistinguishable from a local customization and was preserved — silently,
 /// forever. Matching the destination against known shipped hashes recovers the
-/// distinction: a known hash is an old CAS version (safe to replace), an
+/// distinction: a known hash is an old Cassy version (safe to replace), an
 /// unknown one is a real local edit (must be preserved).
 const BUILTIN_REFERENCE_HISTORY_JSON: &str = include_str!("builtins/reference-history.json");
 
@@ -1805,8 +1805,8 @@ fn builtin_reference_history() -> &'static BuiltinReferenceHistory {
     })
 }
 
-/// True when `content_hash` matches a version of `path` that CAS itself
-/// shipped at some point — i.e. the destination is provably stale CAS content
+/// True when `content_hash` matches a version of `path` that Cassy itself
+/// shipped at some point — i.e. the destination is provably stale Cassy content
 /// rather than a local edit.
 fn is_shipped_builtin_reference_version(path: &str, content_hash: &str) -> bool {
     #[cfg(test)]
@@ -1869,18 +1869,18 @@ fn sync_owned_reference(
                     .get(builtin.path)
                     .is_some_and(|baseline| baseline == &destination_hash);
             // cas-0c0a: no baseline is not evidence of a local edit. If the
-            // destination content is a version CAS previously shipped, it is
-            // stale CAS content and must be upgraded — otherwise every
+            // destination content is a version Cassy previously shipped, it is
+            // stale Cassy content and must be upgraded — otherwise every
             // pre-ledger install keeps its Jun-2026 copy forever.
             let is_stale_shipped_version = !matches_baseline
                 && is_shipped_builtin_reference_version(builtin.path, &destination_hash);
             if !matches_baseline && !is_stale_shipped_version {
                 tracing::warn!(
                     path = %builtin.path,
-                    "builtin skill reference differs from its last CAS-synced content and from \
-                     every version CAS has shipped; preserving the destination as a local \
+                    "builtin skill reference differs from its last Cassy-synced content and from \
+                     every version Cassy has shipped; preserving the destination as a local \
                      customization. Review it, then delete the destination and rerun \
-                     `cas update --sync` to accept the CAS version."
+                     `cas update --sync` to accept the Cassy version."
                 );
                 state
                     .skipped_references
@@ -1891,7 +1891,7 @@ fn sync_owned_reference(
                 tracing::info!(
                     path = %builtin.path,
                     "builtin skill reference had no recorded baseline but matches a previously \
-                     shipped CAS version; upgrading and baselining it (cas-0c0a)."
+                     shipped Cassy version; upgrading and baselining it (cas-0c0a)."
                 );
             }
 
@@ -2070,7 +2070,7 @@ pub fn sync_all_builtins_for_harness(
 /// Collect the set of skill directory names (`cas-foo`) owned by a builtins
 /// slice. Builtin skill paths look like `skills/<dir>/SKILL.md` (or a nested
 /// `references/...`); we extract `<dir>` so the prune below can recognize the
-/// dirs CAS just wrote and never remove them.
+/// dirs Cassy just wrote and never remove them.
 fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
     skills
         .iter()
@@ -2179,7 +2179,7 @@ pub struct SyncResult {
     /// destination already match.
     pub skipped_files: Vec<String>,
     /// Body-owned builtin references whose destination differs from the
-    /// last CAS-synced baseline. These are preserved as possible intentional
+    /// last Cassy-synced baseline. These are preserved as possible intentional
     /// local customizations and must be surfaced to the user.
     pub modified_reference_files: Vec<String>,
 }
@@ -2445,11 +2445,11 @@ This is the body content."#;
         );
         // task-tracking/memory/search are autonomous skills, not bundled.
         assert!(
-            !guide.contains("CAS Task Tracking"),
+            !guide.contains("Cassy Task Tracking"),
             "should NOT bundle task-tracking — loads on demand"
         );
         assert!(
-            !guide.contains("CAS Memory Management"),
+            !guide.contains("Cassy Memory Management"),
             "should NOT bundle memory — loads on demand"
         );
     }
@@ -2620,7 +2620,7 @@ This is the body content."#;
         );
         // task-tracking/memory/search are autonomous skills, not bundled.
         assert!(
-            !guide.contains("CAS Task Tracking"),
+            !guide.contains("Cassy Task Tracking"),
             "should NOT bundle task-tracking — loads on demand"
         );
     }
@@ -3529,7 +3529,7 @@ This is the body content."#;
                     .unwrap_or_else(|| panic!("{path} missing from {label} catalog")).content
             };
             let skill = get(FILES[0]);
-            assert!(is_managed_by_cas(skill), "{label} cas-dataviz must be managed by CAS");
+            assert!(is_managed_by_cas(skill), "{label} cas-dataviz must be managed by Cassy");
             let description = skill.lines().find_map(|line| line.strip_prefix("description: "))
                 .expect("cas-dataviz needs a description");
             assert!(description.len() <= 360, "{label} trigger description exceeds 360 bytes");
@@ -3688,7 +3688,7 @@ This is the body content."#;
                 "## Do's & Don'ts",
                 // Regeneration must not destroy hand edits.
                 "<!-- keep -->",
-                // Thin pointer so CAS search surfaces the doc.
+                // Thin pointer so Cassy search surfaces the doc.
                 "project_<slug>_designmd",
             ] {
                 assert!(
@@ -3936,7 +3936,7 @@ This is the body content."#;
     }
 
     /// Extract the `description:` value from a SKILL.md frontmatter block.
-    /// CAS skill descriptions are single-line YAML scalars (long, but a
+    /// Cassy skill descriptions are single-line YAML scalars (long, but a
     /// single physical line terminated by `\n`). Panics if the field is
     /// missing — every builtin SKILL.md is required to have one.
     #[cfg(test)]
@@ -3954,7 +3954,7 @@ This is the body content."#;
         // Regression for cas-ec8f. The skill's frontmatter description is
         // the FIRST thing the LLM sees when listing skills — when it
         // disagrees with the body, the description wins in practice. The
-        // prior framing said "the pre-close quality gate for CAS factory
+        // prior framing said "the pre-close quality gate for Cassy factory
         // workers" and called `autofix` at `task.close` "the primary
         // path", which caused workers to self-dispatch personas at close
         // even under the v2.13.0+ default `[code_review] owner =
@@ -4042,7 +4042,7 @@ This is the body content."#;
     fn test_session_learn_skill_covers_seven_signal_taxonomy() {
         // cas-39f5 AC: the skill body documents the 7-signal taxonomy
         // (concept, entity, correction, pattern, idea, decision, gap)
-        // with each signal mapped to a CAS entry_type. The taxonomy is the
+        // with each signal mapped to a Cassy entry_type. The taxonomy is the
         // contract the Rust handler will encode in v2 — if a signal name
         // disappears from the skill body, the handler's JSON-schema parse
         // path silently drops findings of that type. Pin every signal name
@@ -4435,7 +4435,7 @@ This is the body content."#;
         );
         assert!(
             task_verifier.content.contains("managed_by: cas"),
-            "task-verifier must be marked as managed by CAS"
+            "task-verifier must be marked as managed by Cassy"
         );
         assert!(
             task_verifier.content.contains("description:"),
@@ -4489,11 +4489,11 @@ This is the body content."#;
             .expect("planning.md must be registered in BUILTIN_SKILLS")
             .content;
 
-        // Stage 1: model a reference installed by an older CAS version:
+        // Stage 1: model a reference installed by an older Cassy version:
         // destination content and the last-synced ledger both carry the old
         // source hash. This is deliberately distinct from a local edit, where
         // the destination would diverge from the ledger and must be preserved.
-        let stale_marker = "STALE CAS-4900 SENTINEL — should be overwritten on next sync";
+        let stale_marker = "STALE Cassy-4900 SENTINEL — should be overwritten on next sync";
         let stale_content =
             format!("---\nname: planning\nmanaged_by: cas\n---\n\n{stale_marker}\n");
         std::fs::write(&planning_path, &stale_content).unwrap();
@@ -4718,7 +4718,7 @@ This is the body content."#;
         assert_eq!(
             std::fs::read_to_string(&target_reference).unwrap(),
             REFERENCE_V3,
-            "delete-and-resync remediation must install and baseline the current CAS reference"
+            "delete-and-resync remediation must install and baseline the current Cassy reference"
         );
         assert!(
             remediated.modified_reference_files.is_empty(),
@@ -4727,7 +4727,7 @@ This is the body content."#;
     }
 
     /// cas-0c0a: a destination with no recorded baseline whose content is a
-    /// version CAS previously shipped is stale CAS content, not a local edit.
+    /// version Cassy previously shipped is stale Cassy content, not a local edit.
     /// Before this, every pre-ledger install kept its old copy forever while
     /// `cas update --sync` reported success.
     #[test]
@@ -4815,7 +4815,7 @@ This is the body content."#;
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             LOCAL_EDIT,
-            "content matching no shipped CAS version must still be preserved"
+            "content matching no shipped Cassy version must still be preserved"
         );
         assert_eq!(
             result.modified_reference_files,
@@ -5997,7 +5997,7 @@ This is the body content."#;
                 "ask the operator",
                 "MCP reconnect/restart control",
                 "Do not use `pkill`",
-                "CAS tool list is restored",
+                "Cassy tool list is restored",
                 "rerun this checklist from step 0",
             ] {
                 assert!(

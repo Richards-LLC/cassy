@@ -4,7 +4,7 @@ managed_by: cas
 
 # Memory Overlap Detection
 
-Run this workflow **before** creating a new memory via `mcp__cas__memory action=remember`. It catches the case where the agent is about to write a second memory about a problem CAS already has captured — the silent drift cause that the refresh workflow has to clean up later.
+Run this workflow **before** creating a new memory via `mcp__cas__memory action=remember`. It catches the case where the agent is about to write a second memory about a problem Cassy already has captured — the silent drift cause that the refresh workflow has to clean up later.
 
 The cheapest fix is to never write the duplicate. The next cheapest is to write it with an explicit cross-reference. Both are this workflow's job.
 

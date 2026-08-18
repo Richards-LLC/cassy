@@ -8,7 +8,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub(crate) enum TaskLifecycleGateError {
     #[error(
-        "Epic {epic_id} is owned by epic_verification_owner={owner}; caller identity is unknown — refusing close (fail closed, cas-9fff). Present CAS agent id / CAS_AGENT_NAME / CAS_SESSION_ID matching the owner, or transfer epic_verification_owner first."
+        "Epic {epic_id} is owned by epic_verification_owner={owner}; caller identity is unknown — refusing close (fail closed, cas-9fff). Present Cassy agent id / CAS_AGENT_NAME / CAS_SESSION_ID matching the owner, or transfer epic_verification_owner first."
     )]
     OwnerIdentityUnknown { epic_id: String, owner: String },
     #[error(
@@ -81,7 +81,7 @@ pub(crate) fn resolve_factory_epic_owner(
         .or_else(|| trim_nonempty(session_id))
         .ok_or_else(|| {
             "Factory epic create requires a resolvable agent identity for \
-             epic_verification_owner (CAS agent id / CAS_AGENT_NAME / CAS_SESSION_ID). \
+             epic_verification_owner (Cassy agent id / CAS_AGENT_NAME / CAS_SESSION_ID). \
              Refusing ownerless factory epic (cas-9fff)."
                 .to_string()
         })
@@ -613,7 +613,7 @@ impl CasCore {
                             if created && push_enabled {
                                 if let Err(e) = git_ops.push_branch(&branch_name) {
                                     eprintln!(
-                                        "[CAS] Warning: Failed to push epic branch to origin: {e}"
+                                        "[Cassy] Warning: Failed to push epic branch to origin: {e}"
                                     );
                                 }
                             }
@@ -842,7 +842,7 @@ impl CasCore {
                          `mcp__cas__task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
                          a worker cannot self-reject or start a clean parked delivery. If \
                          that merge fails with a genuine \
-                         git conflict, CAS marks the parked task conflicted and its assigned \
+                         git conflict, Cassy marks the parked task conflicted and its assigned \
                          worker can then start task {} to resolve it.",
                         req.id, req.id
                     ),
@@ -1692,7 +1692,7 @@ mod related_recall_response_tests {
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "test@cas.test"]);
-        git(&["config", "user.name", "CAS Test"]);
+        git(&["config", "user.name", "Cassy Test"]);
         git(&[
             "remote",
             "add",

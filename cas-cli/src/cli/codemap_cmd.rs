@@ -31,7 +31,7 @@ pub fn execute(cmd: &CodemapCommands, _cli: &Cli, cas_root: &Path) -> anyhow::Re
 fn execute_status(cas_root: &Path) -> anyhow::Result<()> {
     let project_root = cas_root
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from CAS directory"))?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from Cassy directory"))?;
 
     let codemap_path = project_root.join(".claude/CODEMAP.md");
     let pending_path = cas_root.join(CODEMAP_PENDING_FILE);
@@ -85,7 +85,7 @@ fn execute_status(cas_root: &Path) -> anyhow::Result<()> {
 fn execute_pending(cas_root: &Path) -> anyhow::Result<()> {
     let project_root = cas_root
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from CAS directory"))?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from Cassy directory"))?;
 
     let codemap_path = project_root.join(".claude/CODEMAP.md");
     let pending_path = cas_root.join(CODEMAP_PENDING_FILE);

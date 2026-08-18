@@ -131,9 +131,9 @@ impl PorcelainEntry {
     }
 }
 
-/// Resolve the main repo root for this CAS installation.
+/// Resolve the main repo root for this Cassy installation.
 ///
-/// By convention, the CAS root sits at `<repo>/.cas`, so the main
+/// By convention, the Cassy root sits at `<repo>/.cas`, so the main
 /// worktree is its parent directory. Returns `None` if the layout is
 /// unexpected.
 pub fn main_worktree_path(cas_root: &Path) -> Option<PathBuf> {
@@ -309,7 +309,7 @@ pub fn write_current_state_snapshot(cas_root: &Path) -> Result<(), String> {
 
     let mut body = format!(
         "# Current State\n\n\
-This page is regenerated automatically at SessionEnd from local CAS data; it is not a manual handoff.\n\n\
+This page is regenerated automatically at SessionEnd from local Cassy data; it is not a manual handoff.\n\n\
 ## Runtime and HEAD\n\n\
 - Runtime version: v{}\n\
 - HEAD: {head}\n\
@@ -654,7 +654,7 @@ const ORPHAN_BANNER_MAX_ENTRIES: usize = 10;
 ///
 /// A new session used to inherit the previous one's orphans silently and
 /// discover them as an `EADDRINUSE` failure several minutes later, with no
-/// hint that the squatter was CAS's own leftover. Stating them up front turns
+/// hint that the squatter was Cassy's own leftover. Stating them up front turns
 /// that into an explicit "adopt or kill" decision at the one moment the
 /// supervisor is deciding what this session will do.
 ///
@@ -671,7 +671,7 @@ pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
 /// Full + compact renderings of the stale-builtin-reference banner (cas-0c0a).
 ///
 /// `cas update --sync` refuses to overwrite a skill reference whose content
-/// matches neither its recorded baseline nor any version CAS shipped, and says
+/// matches neither its recorded baseline nor any version Cassy shipped, and says
 /// so only in CLI output that scripted/unattended syncs discard. Eight
 /// supervisor/worker reference files sat six weeks stale that way, including
 /// worker-recovery guidance whose absence can strand live workers. This
@@ -696,14 +696,14 @@ pub(crate) fn render_stale_reference_banner(
     let total: usize = skipped.values().map(Vec::len).sum();
     let compact = format!(
         "⚠ {total} builtin skill reference file(s) are NOT being updated by `cas update --sync` \
-         — they differ from every version CAS shipped and are preserved as local edits. \
-         Run `cas update --sync` for the path list; to accept the CAS version, delete the file \
+         — they differ from every version Cassy shipped and are preserved as local edits. \
+         Run `cas update --sync` for the path list; to accept the Cassy version, delete the file \
          and rerun the sync.\n"
     );
 
     let mut full = format!(
         "⚠ {total} builtin skill reference file(s) are NOT being updated by `cas update --sync`: \
-         their content matches neither the last synced baseline nor any version CAS shipped, so \
+         their content matches neither the last synced baseline nor any version Cassy shipped, so \
          sync preserves them as local customizations. Until resolved these files stay stale \
          forever.\n"
     );
@@ -713,7 +713,7 @@ pub(crate) fn render_stale_reference_banner(
         }
     }
     full.push_str(
-        "  Review each file; to accept the CAS version, delete it and rerun `cas update --sync`.\n",
+        "  Review each file; to accept the Cassy version, delete it and rerun `cas update --sync`.\n",
     );
 
     SessionStartBanner { full, compact }
@@ -804,7 +804,7 @@ pub(crate) fn render_unfiled_reports_banner(staged: &[String]) -> SessionStartBa
 /// the durable-fallback path and silently accumulates. Fires only when the
 /// project shows it wants the flow (a `docs/requests/` directory exists), and
 /// deliberately never proposes a value: `origin` in a downstream project is the
-/// consumer's own repo, and guessing routes CAS bugs into the wrong tracker
+/// consumer's own repo, and guessing routes Cassy bugs into the wrong tracker
 /// (filing-cas-bugs.md rule).
 pub fn build_session_start_issues_target_banner_sized(
     cas_root: &Path,
@@ -1331,7 +1331,7 @@ mod tests {
             Some("cas-a9ab".to_string())
         );
         assert_eq!(
-            extract_task_id("CAS-4181 uppercase"),
+            extract_task_id("Cassy-4181 uppercase"),
             Some("cas-4181".to_string())
         );
         assert_eq!(

@@ -1,15 +1,15 @@
 # Commander fleet setup runbook
 
-This is the per-machine operating procedure for the Commander hub. Repeat it on every machine that will appear in the browser catalog. Commander traffic stays direct over the tailnet; CAS Cloud discovery is optional and supplies untrusted endpoint hints only.
+This is the per-machine operating procedure for the Commander hub. Repeat it on every machine that will appear in the browser catalog. Commander traffic stays direct over the tailnet; Cassy Cloud discovery is optional and supplies untrusted endpoint hints only.
 
 ## Preconditions
 
 - Install the same published `cas` version on every machine and put the binary at a stable absolute path.
 - Install Tailscale, join every machine and browser device to the same tailnet, enable MagicDNS and HTTPS certificates for the tailnet, and confirm `tailscale status` reports `Running`.
-- On Linux, authorize the account that runs the hub to operate Tailscale without sudo: `sudo tailscale set --operator="$USER"`. Verify it with `sudo tailscale debug prefs`; `OperatorUser` must equal that account. Without this one-time host setting, CAS reports `permission-denied` and keeps the hub loopback-only.
+- On Linux, authorize the account that runs the hub to operate Tailscale without sudo: `sudo tailscale set --operator="$USER"`. Verify it with `sudo tailscale debug prefs`; `OperatorUser` must equal that account. Without this one-time host setting, Cassy reports `permission-denied` and keeps the hub loopback-only.
 - Choose one machine URL as the browser profile's controller origin. Pair every other machine to that exact origin; changing it requires re-pairing.
 - The default controller origin is a paired hub. The hosted static origin is `https://hub.petrastella.io`, an optional explicit trust grant: before using it, verify the pinned `hub-web/dist` commit/digest and WASM hashes, then create new invitations with `cas hub pair --origin https://hub.petrastella.io` on every target. Revoke old-origin devices and re-pair; never copy browser storage or credentials between origins.
-- Do not expose port 4173 on a LAN interface. The CAS hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
+- Do not expose port 4173 on a LAN interface. The Cassy hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
 
 ## Start and verify one machine
 
@@ -27,7 +27,7 @@ curl --fail --silent --show-error https://MACHINE.TAILNET.ts.net/v1/health
 
 `cas hub --tailscale-serve` prints the stable HTTPS URL. The health response is intentionally minimal: `schema_version` and `ready`. The private files `~/.cas/hub/tailscale-serve.json` and `~/.cas/hub/tailscale-serve-teardown.json` preserve exact before/after Serve status receipts with mode 0600.
 
-If Tailscale is absent, logged out, lacks Serve permission, or the requested HTTPS port already has another handler, startup prints a refusal and the local hub remains available at `http://127.0.0.1:4173`. CAS never runs `tailscale serve reset` and never replaces an unrelated handler.
+If Tailscale is absent, logged out, lacks Serve permission, or the requested HTTPS port already has another handler, startup prints a refusal and the local hub remains available at `http://127.0.0.1:4173`. Cassy never runs `tailscale serve reset` and never replaces an unrelated handler.
 
 Use a non-default port only when 443 is deliberately assigned elsewhere:
 
@@ -60,7 +60,7 @@ Use the port flag when the existing Tailscale HTTPS port is deliberately not
 cas hub service install --tailscale-serve --tailscale-serve-port 8443
 ```
 
-Do not install from `.cas/worktrees/`; worktrees are disposable and CAS refuses
+Do not install from `.cas/worktrees/`; worktrees are disposable and Cassy refuses
 that path. The service supervises the exact installed binary used for
 `install`. After upgrading that binary, `cas hub restart` or restarting the
 service manager picks up the new version; `cas hub service status` reports the
@@ -92,7 +92,7 @@ Open the printed fragment URL in the browser on device A and complete the pairin
 4. reconnecting consumes a new ticket and replaying the prior ticket fails; and
 5. terminal output arrives from machine B while machine A remains the controller origin.
 
-Repeat the command on every target. Discovery suggestions from CAS Cloud never pair, trust, proxy, or add a machine automatically.
+Repeat the command on every target. Discovery suggestions from Cassy Cloud never pair, trust, proxy, or add a machine automatically.
 
 Alternatively, choose **Create pairing code** in Commander, then run the shown
 `cas hub authorize CODE` command on the target. In both the embedded-controller
@@ -119,9 +119,9 @@ cas hub service uninstall
 tailscale serve status --json
 ```
 
-The foreground hub tears down only its recorded CAS-owned Serve mapping during
+The foreground hub tears down only its recorded Cassy-owned Serve mapping during
 the manager stop. If the live Serve status no longer exactly matches the
-recorded CAS target, CAS refuses teardown and leaves it untouched for manual
+recorded Cassy target, Cassy refuses teardown and leaves it untouched for manual
 review.
 
 For an upgrade, replace the binary atomically, compare `cas --version`, then

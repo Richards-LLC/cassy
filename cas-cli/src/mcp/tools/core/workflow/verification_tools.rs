@@ -113,7 +113,7 @@ impl CasCore {
         let caller = agent_store.get(&caller_id).map_err(|_| McpError {
             code: ErrorCode::INVALID_REQUEST,
             message: Cow::from(
-                "Verification requires an authenticated registered CAS session. Anonymous or orphan callers cannot add verification records.",
+                "Verification requires an authenticated registered Cassy session. Anonymous or orphan callers cannot add verification records.",
             ),
             data: None,
         })?;
@@ -121,7 +121,7 @@ impl CasCore {
             return Err(McpError {
                 code: ErrorCode::INVALID_REQUEST,
                 message: Cow::from(
-                    "Verification caller is not an active registered CAS session. Re-register before retrying.",
+                    "Verification caller is not an active registered Cassy session. Re-register before retrying.",
                 ),
                 data: None,
             });
@@ -145,7 +145,7 @@ impl CasCore {
                 message: Cow::from(format!(
                     "Verification authority rejected for task {}: workers and standard sessions cannot attest their own work.\n\n\
                      Legitimate paths:\n\
-                       - Spawn a distinct registered task-verifier child; CAS binds one sealed server-side handoff to its official child identity.\n\
+                       - Spawn a distinct registered task-verifier child; Cassy binds one sealed server-side handoff to its official child identity.\n\
                        - Ask a registered supervisor to verify directly.\n\n\
                      Task ownership, assignee/orphan state, harness/model labels, verification_type, and confidence do not grant authority.",
                     req.task_id
@@ -559,7 +559,7 @@ impl CasCore {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(
-                            "Verifier capability rejected: caller is not the distinct registered task-verifier child bound by CAS.",
+                            "Verifier capability rejected: caller is not the distinct registered task-verifier child bound by Cassy.",
                         ),
                         data: None,
                     });
@@ -600,7 +600,7 @@ impl CasCore {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(
-                            "Verifier handoff rejected: caller is not the distinct registered task-verifier child bound by CAS.",
+                            "Verifier handoff rejected: caller is not the distinct registered task-verifier child bound by Cassy.",
                         ),
                         data: None,
                     });

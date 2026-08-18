@@ -42,7 +42,7 @@ observed no recurrence across adequate exposure" are different statements, and
 only the second licenses ageing a memory out. Unobserved data produces a queue
 entry that explains itself and proposes nothing.
 
-The second row came from the live store. CAS memories are session notes, not
+The second row came from the live store. Cassy memories are session notes, not
 single claims: `2026-08-15-12` catalogues five separate defects, of which this
 fix resolves one. An end date applies to the whole memory, so it may only be
 proposed when the whole memory is the claim that was measured; otherwise the
@@ -140,7 +140,7 @@ produced on this machine.
    close path never got the equivalent fix*. That claim is now false, and the
    fix has been observed clean. The queue proposes `opinion_weaken` — not
    `set_valid_until`, because the memory's other two claims (measure before
-   running a destructive remediation; treat CAS's own assertions as claims to
+   running a destructive remediation; treat Cassy's own assertions as claims to
    verify) are untouched by this fix and would have been retired with it.
 7. **The refusals.** Dry-run on the queue as built: one item, refused, "not
    approved", exit 1. Approved by a named approver: the `mcp__cas__memory`

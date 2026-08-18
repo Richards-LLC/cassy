@@ -5,7 +5,7 @@
 
 ## Problem
 
-CAS Cloud identity behavior is inconsistent across short entry and task IDs
+Cassy Cloud identity behavior is inconsistent across short entry and task IDs
 even when pulls and pushes are project-scoped. A push can resolve the correct
 canonical project and still return HTTP 200 with `skipped: 1` because another
 project already owns the same short ID. Direct entry lookup is also global,
@@ -50,9 +50,9 @@ an independently reproducible safety case rather than a historical residual:
   tracing-only, so the team response plus unchanged queue is the observable
   client evidence that the server rejected both scopes.
 - Read-only comparison against `gabber-studio` found two concrete different
-  owners for queued IDs: `cas-2627` is the CAS delivery-state task locally but
+  owners for queued IDs: `cas-2627` is the Cassy delivery-state task locally but
   is “Follow-up cleanup from cas-8d1e — dead Array.isArray guard + mount-test
-  infra gap” in gabber-studio; `cas-ed01` is CAS cloud-pull work locally but
+  infra gap” in gabber-studio; `cas-ed01` is Cassy cloud-pull work locally but
   is “Iterate chat shows user message twice — remove double-append” there.
 
 These are genuine current local updates, including `cas-4fa4`, `cas-bfee`,

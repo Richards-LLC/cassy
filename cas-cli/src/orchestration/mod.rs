@@ -1,4 +1,4 @@
-//! Orchestration module for multi-agent CAS sessions
+//! Orchestration module for multi-agent Cassy sessions
 //!
 //! This module provides:
 //! - Name generation for agents

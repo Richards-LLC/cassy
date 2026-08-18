@@ -17,7 +17,7 @@
 
 ## Overview
 
-A Rust crate for PTY-driven TUI testing that enables deterministic end-to-end tests for terminal applications. Primary target is CAS Factory TUI, but designed for reuse across Rust terminal apps.
+A Rust crate for PTY-driven TUI testing that enables deterministic end-to-end tests for terminal applications. Primary target is Cassy Factory TUI, but designed for reuse across Rust terminal apps.
 
 ## Design Principles
 
@@ -695,4 +695,4 @@ All open questions resolved (see Decisions table at top):
 4. [ ] Implement input DSL
 5. [ ] Implement assertions
 6. [ ] Implement snapshot testing
-7. [ ] Integration tests with CAS Factory TUI
+7. [ ] Integration tests with Cassy Factory TUI

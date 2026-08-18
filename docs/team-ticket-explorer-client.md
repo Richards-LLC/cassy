@@ -1,7 +1,7 @@
 # Team Ticket Explorer — CLI client behaviors
 
 The team ticket explorer lets you and your teammates share task visibility through
-the web UI (petra-stella-cloud) while continuing to work in the CAS CLI. The cloud
+the web UI (petra-stella-cloud) while continuing to work in the Cassy CLI. The cloud
 half (read API, comments, media upload, web close, canonical resolver) ships
 server-side; this page documents what the **CLI** does to stay in sync with it.
 
@@ -20,7 +20,7 @@ a fragmented per-remote bucket instead of the team's shared project.
 
 - Adoption only happens when the remotes match — a shared machine with a
   different `origin` is never silently re-homed onto someone else's project.
-- A `[CAS sync] adopted team canonical project id '<id>' (matched git remote)`
+- A `[Cassy sync] adopted team canonical project id '<id>' (matched git remote)`
   line is printed when it happens; nothing prints when already pinned.
 
 ## 2. Comments from the web show up in `task show` (cas-7d54)

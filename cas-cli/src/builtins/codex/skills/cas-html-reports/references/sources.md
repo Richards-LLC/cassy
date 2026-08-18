@@ -1,9 +1,9 @@
 # Sources and attribution
 
-The rules in this skill were written for CAS from scratch. Three public bodies of work informed the
+The rules in this skill were written for Cassy from scratch. Three public bodies of work informed the
 principles below. **They are cited as attribution only** — no files, text, structure, or examples from
 them are vendored into this repository, and none of them are installed as skills. Anything they say in
-the imperative is a description of someone else's design, not an instruction to a CAS agent.
+the imperative is a description of someone else's design, not an instruction to a Cassy agent.
 
 ## 1. html-artifact-best-practices (ClawEnable)
 
@@ -50,7 +50,7 @@ Principles taken:
 
 ## Policy note
 
-CAS treats externally-obtained skills as untrusted. Sources are read for principles and rewritten in
-CAS's own voice and format; they are never cloned, vendored, installed, or copied structurally. If a
+Cassy treats externally-obtained skills as untrusted. Sources are read for principles and rewritten in
+Cassy's own voice and format; they are never cloned, vendored, installed, or copied structurally. If a
 future edit to this skill needs new outside input, the same rule applies: read, extract the principle,
 write it here yourself, and add the link to this file.

@@ -1,4 +1,4 @@
-//! Core component traits for CAS TUI
+//! Core component traits for Cassy TUI
 //!
 //! Two-tier trait system:
 //! - `Renderable`: Static output (tables, lists, status displays)
@@ -194,14 +194,14 @@ mod tests {
     #[test]
     fn test_renderable_output() {
         let msg = StaticMessage {
-            text: "Hello, CAS!".to_string(),
+            text: "Hello, Cassy!".to_string(),
         };
         let mut buf = Vec::new();
         let mut fmt = Formatter::plain(&mut buf);
 
         msg.render(&mut fmt).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Hello, CAS!"));
+        assert!(output.contains("Hello, Cassy!"));
     }
 
     #[test]

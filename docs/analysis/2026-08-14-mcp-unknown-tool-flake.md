@@ -46,17 +46,17 @@ repetitions; only host resources such as the kernel and scheduler are shared.
 After initialization the test sends one `tools/call` request for
 `nonexistent_tool`. In `rmcp` 0.14.0, `ToolRouter::call` performs an immutable
 `HashMap::get` and immediately returns `invalid_params("tool not found")` on a
-miss. CAS wraps that future in the existing 55-second handler timeout. There is
+miss. Cassy wraps that future in the existing 55-second handler timeout. There is
 no alternate unknown-tool handler or state-dependent branch to select.
 
 Upstream `rmcp` issue
 [modelcontextprotocol/rust-sdk#941](https://github.com/modelcontextprotocol/rust-sdk/issues/941)
 describes the same outward symptom, but its mechanism does not apply. That bug
 was introduced after 0.14.0 when the transport replaced `FramedRead` with a
-`read_until` buffer that was cleared after cancellation. CAS's pinned 0.14.0
+`read_until` buffer that was cleared after cancellation. Cassy's pinned 0.14.0
 uses `FramedRead` plus a codec-owned persistent buffer. The upstream fix
 ([#947](https://github.com/modelcontextprotocol/rust-sdk/pull/947)) therefore
-cannot explain the August 7 CAS run.
+cannot explain the August 7 Cassy run.
 
 ## Provoking experiment
 
@@ -89,4 +89,4 @@ Preserve the bounded-read protection, correct the unsupported causal wording,
 and make no production change. A future occurrence is actionable only if it
 captures a phase or process stack in addition to the request id and child
 status. Without that new observation, attributing the one historical event to
-CAS, `rmcp`, SQLite, the kernel, or runner scheduling would be guesswork.
+Cassy, `rmcp`, SQLite, the kernel, or runner scheduling would be guesswork.

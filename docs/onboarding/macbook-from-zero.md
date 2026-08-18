@@ -1,6 +1,6 @@
-# MacBook from zero to CAS
+# MacBook from zero to Cassy
 
-End-to-end setup for installing CAS on a Mac **from `Richards-LLC/cassy`**, built from source. Assumes you are comfortable with a terminal but have never installed CAS or Claude Code before.
+End-to-end setup for installing Cassy on a Mac **from `Richards-LLC/cassy`**, built from source. Assumes you are comfortable with a terminal but have never installed Cassy or Claude Code before.
 
 > **What this is not.** This guide does not use the legacy public `install.sh` or Homebrew paths, which distributed **v1.0** (2026-03-12) and **v0.2.1** respectively — months behind the development tip at the time. It intentionally builds from the current source repository instead.
 
@@ -13,7 +13,7 @@ End-to-end setup for installing CAS on a Mac **from `Richards-LLC/cassy`**, buil
 - `cas` binary built from your fork at `~/.local/bin/cas`
 - Claude Code installed and configured to talk to `cas` over MCP
 - A project initialized with `cas init`
-- The CAS factory TUI launching successfully
+- The Cassy factory TUI launching successfully
 - A one-liner upgrade workflow (`git pull && cargo build && install …`)
 
 Total time: **~30–45 minutes** end-to-end on a fresh machine (first `cargo build` is the long pole at ~5–15 minutes).
@@ -105,7 +105,7 @@ zig version    # expect: 0.14.x or 0.15.x — both work
 npm install -g @anthropic-ai/claude-code
 ```
 
-> **No pin required as of 2026-05-04.** Versions 2.1.117 – 2.1.125 shipped a React-Ink rendering regression that crashed Claude Code with `<Box> can't be nested inside <Text>` in agent-teams (factory) mode. **Anthropic fixed it in 2.1.126**, and CAS v2.14.0 integrates upstream changelog entries through **2.1.139** (`CLAUDE_PROJECT_DIR` for stdio MCP, exec-form hook args, `skillOverrides`, etc.). Anything **≥ 2.1.126** is safe.
+> **No pin required as of 2026-05-04.** Versions 2.1.117 – 2.1.125 shipped a React-Ink rendering regression that crashed Claude Code with `<Box> can't be nested inside <Text>` in agent-teams (factory) mode. **Anthropic fixed it in 2.1.126**, and Cassy v2.14.0 integrates upstream changelog entries through **2.1.139** (`CLAUDE_PROJECT_DIR` for stdio MCP, exec-form hook args, `skillOverrides`, etc.). Anything **≥ 2.1.126** is safe.
 
 If npm complains about permissions when writing to a global path:
 
@@ -188,13 +188,13 @@ which cas           # expect: /Users/you/.local/bin/cas
 cas doctor          # diagnostics; should report all green
 ```
 
-> **Why `release-fast`, not `release`:** the `release-fast` profile uses thin LTO + 16 codegen units and strips debuginfo only — first build is ~30% faster than full `release`, and the runtime difference for CAS is negligible. Use `--release` if you want the smaller binary.
+> **Why `release-fast`, not `release`:** the `release-fast` profile uses thin LTO + 16 codegen units and strips debuginfo only — first build is ~30% faster than full `release`, and the runtime difference for Cassy is negligible. Use `--release` if you want the smaller binary.
 
 ---
 
-## Step 8 — Wire CAS into Claude Code (MCP)
+## Step 8 — Wire Cassy into Claude Code (MCP)
 
-CAS exposes its memory/task/skill APIs to Claude Code over MCP (stdio). Two scopes; pick one:
+Cassy exposes its memory/task/skill APIs to Claude Code over MCP (stdio). Two scopes; pick one:
 
 - **Project scope** (recommended for getting started): write the config to `<your-project>/.mcp.json`. Claude Code picks it up only when run from that project. Travels with the repo if checked in.
 - **User scope** (cross-project): write it to `~/.claude.json`. If `~/.claude.json` doesn't exist, run `claude mcp list` once to let Claude Code scaffold it.
@@ -220,7 +220,7 @@ Then in Claude Code, run `/mcp` — `cas` should appear and connect within ~1 se
 
 ---
 
-## Step 9 — Initialize CAS in a project
+## Step 9 — Initialize Cassy in a project
 
 ```bash
 cd /path/to/your/repo
@@ -280,8 +280,8 @@ Subsequent rebuilds are seconds (incremental cargo), unless `vendor/ghostty` cha
 | Source checkout | `~/code/cas/` (wherever you cloned) |
 | Build artifacts | `~/code/cas/target/release-fast/` |
 | Vendored Zig (if you ran `./scripts/bootstrap-zig.sh`) | `~/code/cas/.context/zig/zig` (gitignored) |
-| Global CAS data | `~/.config/cas/` (XDG-style, even on Mac — CAS doesn't use `~/Library/Application Support`) |
-| Per-project CAS data | `<project>/.cas/` |
+| Global Cassy data | `~/.config/cas/` (XDG-style, even on Mac — Cassy doesn't use `~/Library/Application Support`) |
+| Per-project Cassy data | `<project>/.cas/` |
 | Per-project Claude config | `<project>/.claude/` |
 | MCP config (project) | `<project>/.mcp.json` |
 | MCP config (user) | `~/.claude.json` |
@@ -348,7 +348,7 @@ You're on a custom Cargo profile that overrides `panic`. The MCP panic catcher r
 ## What this guide does NOT cover
 
 - **Legacy public install paths** (`install.sh`, Homebrew). They ship a much older binary; use this repository's build instead.
-- **CAS Cloud sync setup beyond the basics** — `cas login` + `cas cloud sync` are packaged commands; team scope auto-resolves from your `/api/me` membership. Logging in is once per machine (the credential lives in `~/.cas/cloud.json`, so later projects are already signed in), and `cas login --token <API-TOKEN>` works from any directory. See the [README Team Memories section](../../README.md#team-memories-optional) for the full flow (`cas cloud team default <slug>` if you want to pin a team override).
+- **Cassy Cloud sync setup beyond the basics** — `cas login` + `cas cloud sync` are packaged commands; team scope auto-resolves from your `/api/me` membership. Logging in is once per machine (the credential lives in `~/.cas/cloud.json`, so later projects are already signed in), and `cas login --token <API-TOKEN>` works from any directory. See the [README Team Memories section](../../README.md#team-memories-optional) for the full flow (`cas cloud team default <slug>` if you want to pin a team override).
 - **`cas-update` / `cas-refresh` orchestrator scripts** — author-specific wrappers in `~/.local/bin/`. See `docs/ideation/2026-04-30-cas-shell-helpers-distribution-ideation.md`.
 - **Multi-user setups**, shared `cas.db`, team collaboration patterns.
 - **Custom skill / agent authoring**.

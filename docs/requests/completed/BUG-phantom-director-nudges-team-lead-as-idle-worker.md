@@ -57,12 +57,12 @@ No `director` process exists. No tmux server is even running (`tmux ls` → no s
 ```
 Both inboxes (`inboxes/director.json`, `inboxes/supervisor.json`) are 2 bytes (empty).
 
-**CAS registry vs team layer disagree on who this agent is:**
+**Cassy registry vs team layer disagree on who this agent is:**
 - `coordination whoami` / `agent_list` → `zen-hawk-97 (primary/supervisor) [active]`
 - team `config.json` → `supervisor@... (team-lead, green)`
 - the `director` message → addresses it as **"Worker zen-hawk-97"**
 
-So the *same single process* is simultaneously a CAS **primary/supervisor**, a team **team-lead**, and — per the nudge — a **worker** to be assigned to. The director collapsed all three into "idle worker."
+So the *same single process* is simultaneously a Cassy **primary/supervisor**, a team **team-lead**, and — per the nudge — a **worker** to be assigned to. The director collapsed all three into "idle worker."
 
 **No live workers exist to assign to anyway** — every other agent in `agent_list` is `[shutdown]` (golden-gopher-43, mason, scout, a re-registered Primary). The "assign 14 ready tasks" instruction has no valid target even in principle.
 

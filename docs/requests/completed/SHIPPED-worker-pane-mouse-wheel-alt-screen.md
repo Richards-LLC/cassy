@@ -18,7 +18,7 @@ Shipped in two commits:
 1. **`53a7bf4` (cas-d5fa, 2026-05-07)** — added alt-screen detection on `Pane::feed` and a wheel-event PTY-forwarding path in `cas-cli/src/ui/factory/app/sidecar_and_selection.rs::alt_screen_scroll_input`. Initially forwarded `ESC[A` × 3 (arrow keys), which did NOT fix the user-visible symptom — arrow keys land in Claude Code's prompt-input box and cycle previous-prompt history, not the transcript.
 2. **`678f75b` (cas-f93a, 2026-06-01)** — swapped the wheel payload to `ESC[5~` / `ESC[6~` (PgUp / PgDn). Empirical A/B by the user confirmed PgUp/PgDn correctly scrolls Claude Code's transcript. Wheel now rides the same byte payload as the existing PgUp/PgDn forwarding path.
 
-Effective from cas builds containing `678f75b` (post-v2.17.3 dev / next tagged release). Penguinz-side note: previously-referenced phantom task `cas-c08d` did not exist in the cas-src CAS instance and has been removed from frontmatter.
+Effective from cas builds containing `678f75b` (post-v2.17.3 dev / next tagged release). Penguinz-side note: previously-referenced phantom task `cas-c08d` did not exist in the cas-src Cassy instance and has been removed from frontmatter.
 
 ## Affected version
 
@@ -35,7 +35,7 @@ Clicking on a worker pane focuses it (correct), but **mouse wheel on desktop and
 1. `cas` (factory mode), focus a worker pane running Claude Code.
 2. Click the worker pane — focus indicator changes (confirms click is captured).
 3. Try to scroll up:
-   - **Desktop (Konsole):** mouse wheel. Profile already has `Allow terminal applications to handle clicks and drags` and `Enable Alternate Screen buffer scrolling` enabled — Konsole IS forwarding wheel events to CAS as SGR mouse events.
+   - **Desktop (Konsole):** mouse wheel. Profile already has `Allow terminal applications to handle clicks and drags` and `Enable Alternate Screen buffer scrolling` enabled — Konsole IS forwarding wheel events to Cassy as SGR mouse events.
    - **Termux (SSH from Android):** two-finger swipe (Termux maps this to wheel in mouse-mode apps).
 4. Result: nothing visibly scrolls. Same on PgUp/PgDn.
 
@@ -43,7 +43,7 @@ Identical behavior in two unrelated terminal environments → not a terminal-con
 
 ## What's already ruled out
 
-- **Terminal isn't forwarding events** — works in both Konsole (with the right profile flags shown above) and Termux. Mouse capture is enabled in CAS (`crossterm::event::EnableMouseCapture` symbol present in binary).
+- **Terminal isn't forwarding events** — works in both Konsole (with the right profile flags shown above) and Termux. Mouse capture is enabled in Cassy (`crossterm::event::EnableMouseCapture` symbol present in binary).
 - **Click landed on the wrong pane** — focus indicator confirms click registers; `handle_mouse_click` runs.
 - **Help text is just lying** — the binary contains real handler symbols `handle_scroll_up`, `handle_scroll_down`, `scroll_focused_pane`, `mc_scroll_up`, `mc_scroll_down`, `Pane::scroll`, plus error strings like `Failed to scroll focused pane:` and `Failed to scroll terminal: code` — meaning code paths exist and fail at runtime.
 
@@ -73,13 +73,13 @@ Identical behavior in two unrelated terminal environments → not a terminal-con
 
 ## Single most likely root cause
 
-The worker pane runs Claude Code, which is a **fullscreen TUI in alt-screen mode**. Alt-screen has no scrollback. When wheel events arrive at the focused worker pane and CAS routes them to `Pane::scroll → ghostty_vt::scroll_viewport`, there is nothing above the visible region to scroll into — the call no-ops (or trips the `Failed to scroll terminal: code …` path). The user sees nothing.
+The worker pane runs Claude Code, which is a **fullscreen TUI in alt-screen mode**. Alt-screen has no scrollback. When wheel events arrive at the focused worker pane and Cassy routes them to `Pane::scroll → ghostty_vt::scroll_viewport`, there is nothing above the visible region to scroll into — the call no-ops (or trips the `Failed to scroll terminal: code …` path). The user sees nothing.
 
 This is the well-known alt-screen scroll trap. Tmux faced the same call ([tmux#3705](https://github.com/tmux/tmux/issues/3705)) and Konsole's `Enable Alternate Screen buffer scrolling` is its workaround — it translates wheel events to up/down arrow keys when the inner app is in alt-screen so the inner app paginates itself. Mosh has a long-standing issue on the same topic ([mobile-shell/mosh#2](https://github.com/mobile-shell/mosh/issues/2)).
 
-**Right behavior for CAS:** when the focused worker pane's inner process is in alt-screen mode, **forward wheel events to the inner process as `MouseEvent::ScrollUp/ScrollDown`** (Claude Code consumes these and scrolls its own transcript), instead of consuming them for `Pane::scroll`.
+**Right behavior for Cassy:** when the focused worker pane's inner process is in alt-screen mode, **forward wheel events to the inner process as `MouseEvent::ScrollUp/ScrollDown`** (Claude Code consumes these and scrolls its own transcript), instead of consuming them for `Pane::scroll`.
 
-CAS already has a forwarding path for keyboard input (`ClientMessage::Input`); this is plumbing the existing path for mouse-wheel events when the inner TTY has alt-screen active.
+Cassy already has a forwarding path for keyboard input (`ClientMessage::Input`); this is plumbing the existing path for mouse-wheel events when the inner TTY has alt-screen active.
 
 ### Concrete fix prescription
 
@@ -111,7 +111,7 @@ Two changes, in order:
 
 ### Secondary issue (don't lose track)
 
-Even when scrolling CAS's own pane scrollback (e.g., shell panes, no alt-screen), the `Failed to scroll focused pane: …` log line implies `Pane::scroll` returns errors in some conditions — probably a `cas_mux` plumbing bug where the daemon → client `request_scrollback` round-trip doesn't deliver fresh content to the renderer, so the user sees no visual change even when ghostty's viewport offset moved. Worth confirming under tracing.
+Even when scrolling Cassy's own pane scrollback (e.g., shell panes, no alt-screen), the `Failed to scroll focused pane: …` log line implies `Pane::scroll` returns errors in some conditions — probably a `cas_mux` plumbing bug where the daemon → client `request_scrollback` round-trip doesn't deliver fresh content to the renderer, so the user sees no visual change even when ghostty's viewport offset moved. Worth confirming under tracing.
 
 ## Diagnostic recipe
 
@@ -135,8 +135,8 @@ If `scroll delta=` is logged but `offset=` doesn't change → confirms the alt-s
 ## Acceptance criteria
 
 1. **Worker pane (Claude Code, alt-screen TUI), focused, mouse wheel up:** Claude's transcript scrolls up. Same on PgUp.
-2. **Worker pane, two-finger swipe in Termux over SSH:** same as #1 (Termux delivers wheel events, CAS forwards them to Claude).
-3. **Shell pane (no alt-screen), mouse wheel up:** CAS pane scrollback scrolls up (existing behavior, must not regress).
+2. **Worker pane, two-finger swipe in Termux over SSH:** same as #1 (Termux delivers wheel events, Cassy forwards them to Claude).
+3. **Shell pane (no alt-screen), mouse wheel up:** Cassy pane scrollback scrolls up (existing behavior, must not regress).
 4. **Sidecar pane, j/k:** existing sidecar scroll continues to work (must not regress).
 5. **No `Failed to scroll focused pane:` or `Failed to scroll terminal: code …` log lines** under the above repros at `RUST_LOG=info`.
 6. **F1 help text** continues to match observed behavior — current text "Click pane → Focus pane / Scroll → Scroll focused pane" is fine; just make it true.

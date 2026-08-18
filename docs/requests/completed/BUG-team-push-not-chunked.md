@@ -128,7 +128,7 @@ The "what to do on partial failure" policy (continue other entity types vs. abor
 
 ## Demo statement (Definition of Done)
 
-Starting from a CAS instance with several MB of pending team-scope upserts in the sync queue, `cas cloud sync` completes the team-push leg in multiple smaller HTTP requests, returns "Push complete" with the full sentinel counts, and **no `413 Payload too large` line appears** in the output.
+Starting from a Cassy instance with several MB of pending team-scope upserts in the sync queue, `cas cloud sync` completes the team-push leg in multiple smaller HTTP requests, returns "Push complete" with the full sentinel counts, and **no `413 Payload too large` line appears** in the output.
 
 ## What the cloud side is doing in parallel
 

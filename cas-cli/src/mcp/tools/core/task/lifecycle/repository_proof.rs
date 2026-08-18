@@ -38,7 +38,7 @@ pub(crate) fn is_git_worktree(path: &Path) -> bool {
 
 /// Capture the exact Git/worktree state a legacy task verifier is asked to inspect.
 ///
-/// CAS metadata is excluded because verifier lifecycle writes update `.cas/cas.db`
+/// Cassy metadata is excluded because verifier lifecycle writes update `.cas/cas.db`
 /// themselves. Tracked changes (staged and unstaged) and untracked file contents
 /// are all included, so any operator-authored repository mutation changes the proof.
 pub(crate) fn capture_repository_proof(

@@ -29,7 +29,7 @@ pub enum DeviceCommands {
     /// Show current device info
     Info,
 
-    /// Register this device with CAS Cloud
+    /// Register this device with Cassy Cloud
     Register,
 }
 
@@ -360,7 +360,7 @@ fn execute_info(cli: &Cli) -> anyhow::Result<()> {
     kv = kv
         .add("OS", DeviceConfig::os())
         .add("Arch", DeviceConfig::arch())
-        .add("CAS Version", DeviceConfig::cas_version());
+        .add("Cassy Version", DeviceConfig::cas_version());
     kv.render(&mut fmt)?;
 
     Ok(())

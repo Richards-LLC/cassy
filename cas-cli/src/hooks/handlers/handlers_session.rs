@@ -8,7 +8,7 @@ fn registered_role_mismatch_banner(
     let (configured, registered) = configured_role.zip(registered_role)?;
     (configured != registered).then(|| {
         format!(
-            "\u{26a0}\u{fe0f} CAS AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. CAS attempted to repair the row; run `mcp__cs__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
+            "\u{26a0}\u{fe0f} Cassy AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. Cassy attempted to repair the row; run `mcp__cs__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
         )
     })
 }
@@ -197,7 +197,7 @@ pub fn handle_session_start(
     // register a compact summary alongside their full rendering so an
     // over-budget payload degrades to counts + remediation command instead of
     // being silently truncated by the harness at ~10KB. The base context
-    // (role guidance + CAS header + memories/tasks) is protected.
+    // (role guidance + Cassy header + memories/tasks) is protected.
     let mut assembler = SessionContextAssembler::new(context);
 
     if let Some(warning) = registration_role_warning {
@@ -298,7 +298,7 @@ pub fn handle_session_start(
     }
 
     // (2) No issue target configured in a project that stages requests. Never
-    // suggests a value — guessing from `origin` routes CAS bugs into a
+    // suggests a value — guessing from `origin` routes Cassy bugs into a
     // consumer's own tracker (filing-cas-bugs.md).
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_issues_target_banner_sized(
@@ -311,7 +311,7 @@ pub fn handle_session_start(
     // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
     // running in worktrees and stale server registrations. Surfaced here
     // because a new session otherwise inherits them invisibly and meets them
-    // as an EADDRINUSE failure with no hint that the squatter is CAS's own.
+    // as an EADDRINUSE failure with no hint that the squatter is Cassy's own.
     // Visibility only: this banner never signals anything.
     if is_supervisor {
         if let Some(banner) =
@@ -439,7 +439,7 @@ fn active_peer_supervisor_banner(cas_root: &Path, current_name: Option<&str>) ->
         .collect();
     (!peers.is_empty()).then(|| {
         format!(
-            "⚠️ CONCURRENT SUPERVISORS ACTIVE: {}\nPlanning under a shared epic can race. Review existing children before creating tasks; CAS will require confirmation for recent competing plans and duplicate titles.",
+            "⚠️ CONCURRENT SUPERVISORS ACTIVE: {}\nPlanning under a shared epic can race. Review existing children before creating tasks; Cassy will require confirmation for recent competing plans and duplicate titles.",
             peers.join(", ")
         )
     })
@@ -578,7 +578,7 @@ mod large_artifact_staging_tests {
         let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
 
         assert!(
-            context.contains("CAS AGENT ROLE MISMATCH"),
+            context.contains("Cassy AGENT ROLE MISMATCH"),
             "session start must expose the env/row disagreement: {context}"
         );
         assert!(context.contains("CAS_AGENT_ROLE=supervisor"));
@@ -619,7 +619,7 @@ mod large_artifact_staging_tests {
     }
 
     /// Production-shape regression for cas-066a: the real worker guidance,
-    /// CAS task/memory/search reminder, factory identity, and host/runtime
+    /// Cassy task/memory/search reminder, factory identity, and host/runtime
     /// banners must fit below the 12 KiB harness boundary with enough margin
     /// for representative identifier growth. Optional listings may degrade;
     /// these protected semantics may not.
@@ -658,7 +658,7 @@ mod large_artifact_staging_tests {
 
         let prefix = crate::harness_policy::own_tool_prefix();
         for required in [
-            "## 📋 CAS Context",
+            "## 📋 Cassy Context",
             &format!("`{prefix}task`"),
             &format!("`{prefix}memory`"),
             &format!("`{prefix}search`"),

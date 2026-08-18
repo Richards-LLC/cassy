@@ -56,7 +56,7 @@ scoping decision is derived from that one identity (their §Q1). So `team_id` an
 ### 1.2 What the client enforces on itself
 
 - **Pull fails closed without a project scope.** `build_scoped_pull_url_with` returns
-  `Err("Cannot pull: not inside a CAS project directory")` when the canonical id is
+  `Err("Cannot pull: not inside a Cassy project directory")` when the canonical id is
   unresolvable (`pull.rs:55-57`), and `project_id=` is appended unconditionally
   (`pull.rs:59`, `/`→`%2F`). There is no code path that issues an unscoped
   `/api/sync/pull`. `PULL_PATH` is deliberately the only place the literal is written

@@ -6,7 +6,7 @@ pub const MIGRATION: Migration = Migration {
     id: 173,
     name: "recording_events_create_table",
     subsystem: Subsystem::Recordings,
-    description: "Create recording_events table for CAS entity correlation",
+    description: "Create recording_events table for Cassy entity correlation",
     up: &["CREATE TABLE IF NOT EXISTS recording_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             recording_id TEXT NOT NULL,

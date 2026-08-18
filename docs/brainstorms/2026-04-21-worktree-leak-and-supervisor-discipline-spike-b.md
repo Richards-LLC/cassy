@@ -42,7 +42,7 @@ Documented PreToolUse input:
 
 The docs table lists `prompt`, `description`, `subagent_type`, `model` as documented fields. They do **not** explicitly list `isolation`, but `tool_input` is the raw JSON the model emits — any parameter defined in the Agent tool's JSONSchema (including `isolation: "worktree"`) flows through. The docs are incomplete, not the schema.
 
-### Evidence 2 — CAS already relies on structured `tool_input` today
+### Evidence 2 — Cassy already relies on structured `tool_input` today
 
 `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs:91-114` (CODEMAP freshness gate) reads `input.tool_input.get("action").as_str()` for `mcp__cas__task` and `mcp__cas__coordination`, and returns `permission_decision: "deny"` when stale. That gate is live and working, confirming `tool_input` is a fully-preserved `serde_json::Value` in `HookInput`:
 
@@ -185,7 +185,7 @@ Three lines, all actionable. Matches the tone of the existing factory-mode SendM
 
 ## Open questions for EPIC owner
 
-- **Error-message tone:** emoji vs no emoji. Existing CAS hook messages use emoji (`🚫`, `🗺️`). Kept consistent here; flip if project prefers plain text.
+- **Error-message tone:** emoji vs no emoji. Existing Cassy hook messages use emoji (`🚫`, `🗺️`). Kept consistent here; flip if project prefers plain text.
 - **Breadth of block:** as noted in checklist item 6, does this gate apply to `Agent(...)` without `isolation` too? Spike assumes worktree-only per EPIC framing.
 - **Supervisor-authored tests:** `CAS_AGENT_ROLE` tests need `#[serial]` guards — confirm this is acceptable in the existing test suite's parallelism model. (`cargo test` default is parallel.)
 

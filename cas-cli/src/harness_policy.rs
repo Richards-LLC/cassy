@@ -313,7 +313,7 @@ pub fn own_harness_from_env() -> SupervisorCli {
 /// problems: (1) it was 2-way only, so Grok agents were always told
 /// Claude's `mcp__cas__` prefix — a call they cannot make; (2) `source` is
 /// not a harness signal at all in general (it's Claude Code's own SessionStart
-/// "why did this session start" field) — CAS's Codex-manual-registration path
+/// "why did this session start" field) — Cassy's Codex-manual-registration path
 /// (`cas_agent_session_start`, "Codex-friendly" session bootstrap) happens to
 /// hardcode `source: Some("codex")` on every call regardless of the *actual*
 /// invoking harness, so relying on it is fragile by construction, not just

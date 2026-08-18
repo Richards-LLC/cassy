@@ -4,7 +4,7 @@
 //!
 //! # Two-Tier Architecture
 //!
-//! CAS uses a two-tier storage architecture:
+//! Cassy uses a two-tier storage architecture:
 //! - **Global rules** (`~/.config/cas/`) sync to a user-wide Claude Code rules directory
 //! - **Project rules** (`./.cas/`) sync to project's `.claude/rules/cas/`
 //!
@@ -96,7 +96,7 @@ impl Syncer {
     /// Create a syncer for two-tier architecture
     ///
     /// # Arguments
-    /// * `global_root` - Optional global CAS root (~/.config/cas/)
+    /// * `global_root` - Optional global Cassy root (~/.config/cas/)
     /// * `project_root` - Project root directory
     pub fn for_two_tier(global_root: Option<&Path>, project_root: &Path) -> Self {
         Self {

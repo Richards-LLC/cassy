@@ -16,7 +16,7 @@ decision: team-memories-filter-policy.md
 
 ## TL;DR
 
-The team-memories pipeline is "shipped" end-to-end on paper, but in production it generates **zero team-scoped data**. After ~1 month of daily CAS use by the project owner (Daniel), the cloud DB contained:
+The team-memories pipeline is "shipped" end-to-end on paper, but in production it generates **zero team-scoped data**. After ~1 month of daily Cassy use by the project owner (Daniel), the cloud DB contained:
 
 - **392** personal-scope entries (`team_id IS NULL`)
 - **0** team-scope entries (`team_id = <petra-stella>`)
@@ -50,7 +50,7 @@ The `--team` variant is never invoked in normal operation. There's no:
 
 Net effect: the team-push code path exists but has no trigger in the user's normal workflow, so team data never accumulates.
 
-Additionally, the in-memory `data.scope` field on entries (which CAS sets to `"project"`, `"personal"`, etc.) is **not consumed** by the cloud sync layer — the cloud only looks at the row-level `team_id` / `project_id` columns. The CLI's own scope concept is decoupled from cloud scoping.
+Additionally, the in-memory `data.scope` field on entries (which Cassy sets to `"project"`, `"personal"`, etc.) is **not consumed** by the cloud sync layer — the cloud only looks at the row-level `team_id` / `project_id` columns. The CLI's own scope concept is decoupled from cloud scoping.
 
 ## Cross-check on the cloud server
 

@@ -29,9 +29,9 @@ soundwave's `/tmp` is a **32GB tmpfs**. Consequences:
    stage large files on /mnt/datacube or /home" had already been learned and stored —
    in the *Penguinz* project's memory. The ozer session never surfaced it. Machine-level
    facts (mount semantics, disk budgets, staging conventions) are per-host, not
-   per-project, but CAS memory recall is project-scoped by default and nothing promotes
+   per-project, but Cassy memory recall is project-scoped by default and nothing promotes
    or injects host-level constraints across projects on the same machine.
-2. **No write guardrail.** Nothing in CAS (hooks, rules, worker prompts) warns or
+2. **No write guardrail.** Nothing in Cassy (hooks, rules, worker prompts) warns or
    blocks when a session writes multi-GB files to a tmpfs-backed mount — a silent,
    cumulative failure mode whose blast radius is the host, not the project.
 
@@ -39,7 +39,7 @@ soundwave's `/tmp` is a **32GB tmpfs**. Consequences:
 
 1. **Host-scoped memory class:** a `host`/`machine` scope (or convention + auto-tag)
    whose entries are injected into session context for *every* project running on that
-   hostname. Mitigation applied meanwhile: a global-scoped CAS memory entry
+   hostname. Mitigation applied meanwhile: a global-scoped Cassy memory entry
    (2026-07-22-4) documenting the constraint.
 2. **tmpfs write guardrail:** PreToolUse-style check (or worker rule): before/after
    large writes, if the target path resolves to a tmpfs/ramfs mount (`findmnt -T`) and

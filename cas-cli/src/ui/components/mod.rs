@@ -1,4 +1,4 @@
-//! Component system for CAS CLI output
+//! Component system for Cassy CLI output
 //!
 //! Two-tier architecture:
 //! - **Renderable**: Static output (tables, lists, status displays)

@@ -269,7 +269,7 @@ only.
 
 The correct resolver already exists and documents this exact inconsistency:
 `host_cas_dir()` (`cas-cli/src/store/known_repos.rs:36`), whose comment at
-`:17-23` states that `global_cas_dir()` "is **not** where the live host CAS state
+`:17-23` states that `global_cas_dir()` "is **not** where the live host Cassy state
 actually lives" and that reconciling it was deferred.
 
 **Decision: fix the harness to resolve the global tier via `host_cas_dir()`, and

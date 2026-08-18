@@ -390,7 +390,7 @@ pub(crate) fn start(cas_root: &Path, spec: &ServerSpec) -> io::Result<Registered
     let _launch_file_guard = ScopedFile(launch_file.clone());
 
     // The launcher first publishes its own pid and waits. That barrier is
-    // load-bearing: CAS moves the launcher into the server's dedicated cgroup
+    // load-bearing: Cassy moves the launcher into the server's dedicated cgroup
     // before it may fork the real command, so PTY wrappers that immediately
     // call setsid cannot escape containment in the gap between spawn and
     // add_pid. Once released, `$!` is the server itself; the launcher publishes

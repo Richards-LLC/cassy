@@ -1,4 +1,4 @@
-//! `cas codex` — launch the CAS factory with a Codex supervisor on an
+//! `cas codex` — launch the Cassy factory with a Codex supervisor on an
 //! explicitly selected ChatGPT account profile.
 //!
 //! The Claude sibling of this launcher is `cas claude` (cas-cli/src/cli/claude.rs);
@@ -89,7 +89,7 @@ pub struct CodexArgs {
     #[arg(long = "list-profiles")]
     pub list_profiles: bool,
 
-    /// Launch plain Codex on this profile instead of the CAS factory.
+    /// Launch plain Codex on this profile instead of the Cassy factory.
     #[arg(long = "bare")]
     pub bare: bool,
 
@@ -471,7 +471,7 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
     }
 }
 
-/// Plain codex launch. On Unix this replaces the CAS process with codex.
+/// Plain codex launch. On Unix this replaces the Cassy process with codex.
 fn execute_bare(args: &CodexArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
     let profile = match args.profile() {

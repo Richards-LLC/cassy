@@ -138,7 +138,7 @@ impl KnowledgePageRecord {
         let mut page = KnowledgePage::new(self.id, self.page_type, self.title);
         // Trust the sender's canonical path rather than recomputing it: a
         // future change to the slug rules must not silently fork a page into
-        // two rel_paths across machines running different CAS versions.
+        // two rel_paths across machines running different Cassy versions.
         page.rel_path = self.rel_path;
         page.snippet = self.snippet;
         page.locked = self.locked;
@@ -800,7 +800,7 @@ mod tests {
             "id": id,
             "deleted_at": "2026-08-08T12:00:00Z",
             "project_canonical_id": get_project_canonical_id()
-                .expect("knowledge pull tests run from a CAS project"),
+                .expect("knowledge pull tests run from a Cassy project"),
         })
     }
 

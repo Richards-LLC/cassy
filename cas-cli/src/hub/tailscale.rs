@@ -1,7 +1,7 @@
 //! Lifecycle-safe Tailscale Serve integration for Commander.
 //!
 //! Design-port of the command/status shape in pingdotgg/t3code's
-//! `packages/tailscale/src/tailscale.ts` (MIT). CAS keeps its own ownership
+//! `packages/tailscale/src/tailscale.ts` (MIT). Cassy keeps its own ownership
 //! receipt and never resets or replaces an unrelated Serve configuration.
 
 use std::ffi::{OsStr, OsString};
@@ -117,7 +117,7 @@ impl TailscaleServeManager {
             anyhow::ensure!(
                 handlers_on_port(&after, https_port)
                     == vec![("/".to_owned(), local_target.clone())],
-                "tailscale Serve did not install the requested CAS proxy"
+                "tailscale Serve did not install the requested Cassy proxy"
             );
             let receipt = TailscaleServeReceipt {
                 schema_version: 1,
@@ -167,13 +167,13 @@ impl TailscaleServeManager {
         ])?;
         anyhow::ensure!(
             handlers_on_port(&self.serve_status()?, https_port).is_empty(),
-            "Tailscale Serve rollback did not remove the CAS mapping"
+            "Tailscale Serve rollback did not remove the Cassy mapping"
         );
         remove_receipt_if_present(&self.state_dir.join(RECEIPT_FILE))?;
         Ok(())
     }
 
-    /// Disable only a mapping CAS created and only while it is still unchanged.
+    /// Disable only a mapping Cassy created and only while it is still unchanged.
     pub fn disable_owned(&self) -> Result<Option<TailscaleServeReceipt>> {
         let path = self.state_dir.join(RECEIPT_FILE);
         let Some(receipt) = self.owned_receipt()? else {
@@ -183,7 +183,7 @@ impl TailscaleServeManager {
         anyhow::ensure!(
             handlers_on_port(&before, receipt.https_port)
                 == vec![("/".to_owned(), receipt.local_target.clone())],
-            "Tailscale Serve mapping changed since CAS created it; leaving it untouched"
+            "Tailscale Serve mapping changed since Cassy created it; leaving it untouched"
         );
         self.run(&[
             "serve".into(),
@@ -193,7 +193,7 @@ impl TailscaleServeManager {
         let after = self.serve_status()?;
         anyhow::ensure!(
             handlers_on_port(&after, receipt.https_port).is_empty(),
-            "tailscale Serve did not remove the CAS mapping"
+            "tailscale Serve did not remove the Cassy mapping"
         );
         let teardown = TailscaleTeardownReceipt {
             schema_version: 1,
@@ -209,17 +209,17 @@ impl TailscaleServeManager {
         Ok(Some(receipt))
     }
 
-    /// Load CAS's current ownership receipt, if there is one.
+    /// Load Cassy's current ownership receipt, if there is one.
     pub fn owned_receipt(&self) -> Result<Option<TailscaleServeReceipt>> {
         let path = self.state_dir.join(RECEIPT_FILE);
         let receipt: TailscaleServeReceipt = match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid CAS Tailscale receipt")?,
+            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid Cassy Tailscale receipt")?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         anyhow::ensure!(
             receipt.created_by_cas,
-            "CAS does not own this Tailscale mapping"
+            "Cassy does not own this Tailscale mapping"
         );
         Ok(Some(receipt))
     }

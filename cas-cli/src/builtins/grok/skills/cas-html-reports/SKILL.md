@@ -121,4 +121,4 @@ their source:
 ## Sources
 
 The principles here are drawn from three public bodies of work, cited as attribution only — no content,
-structure, or file layout from them is vendored into CAS. See `references/sources.md`.
+structure, or file layout from them is vendored into Cassy. See `references/sources.md`.

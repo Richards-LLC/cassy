@@ -1,7 +1,7 @@
 //! Low-level git operations for worktree management
 //!
 //! This module provides a safe wrapper around git commands for worktree operations.
-//! It's independent of CAS storage - purely git operations.
+//! It's independent of Cassy storage - purely git operations.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -195,7 +195,7 @@ impl DirtyClassification {
     }
 }
 
-/// True for paths CAS itself generates inside every worktree that must
+/// True for paths Cassy itself generates inside every worktree that must
 /// never gate a dirty check — currently just the `.husky/_` git-hooks shim
 /// the worker startup hook creates (cas-006c). Matches the directory itself
 /// and anything nested under it, with or without a trailing slash.
@@ -763,10 +763,10 @@ impl GitOperations {
                 stderr
             );
             eprintln!(
-                "[CAS] Warning: Failed to initialize git submodules in worktree.\n\
-                 [CAS] If you need to build components that depend on vendor/ghostty,\n\
-                 [CAS] run: git submodule update --init --recursive\n\
-                 [CAS] Error: {}",
+                "[Cassy] Warning: Failed to initialize git submodules in worktree.\n\
+                 [Cassy] If you need to build components that depend on vendor/ghostty,\n\
+                 [Cassy] run: git submodule update --init --recursive\n\
+                 [Cassy] Error: {}",
                 stderr.trim()
             );
         } else {
@@ -1220,7 +1220,7 @@ impl GitOperations {
     /// - residue in the shared checkout cannot block or contaminate the
     ///   merge;
     /// - a concurrent writer that moved the target branch is never
-    ///   clobbered (the CAS declines instead).
+    ///   clobbered (the Cassy declines instead).
     ///
     /// Detaching at the resolved SHA (rather than checking out the branch in
     /// the temp worktree) also means this works when the target branch is
@@ -1356,7 +1356,7 @@ impl GitOperations {
     ///   a merge, and a stray untracked file is not lost work, so these are
     ///   surfaced but must never block.
     ///
-    /// CAS-generated artifacts (currently the `.husky/_` git-hooks shim the
+    /// Cassy-generated artifacts (currently the `.husky/_` git-hooks shim the
     /// worker startup hook creates in every worktree) are excluded from
     /// *both* buckets — the tool that creates that artifact must not refuse
     /// to merge or remove because of it.

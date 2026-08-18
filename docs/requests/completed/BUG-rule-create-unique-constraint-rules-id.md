@@ -7,7 +7,7 @@ Fixed in `cas-6064`. The current repro was an existing `rules` table with rows l
 `crates/cas-store/src/sqlite/rule_store_trait.rs` now checks whether the generated `rule-NNN` already exists. On collision it computes the current max numeric `rule-*` suffix from the `rules` table, fast-forwards the `id_sequences` entry for `rule`, and retries before returning an ID. The regression test `test_sqlite_rule_generate_id_skips_existing_rules_without_sequence_seed` covers the old pre-sequence database shape by adding `rule-001`, generating a new ID, and inserting the new rule successfully.
 
 **Reported:** 2026-06-26 (gabber-studio project)
-**Severity:** High — the rule store is unwritable; users cannot create new CAS rules.
+**Severity:** High — the rule store is unwritable; users cannot create new Cassy rules.
 
 ## Symptom
 Every `mcp__cas__rule` `create` call returns:
@@ -26,7 +26,7 @@ Reproduced 3× with different content/tags/length. Deterministic, not flaky.
 The `rules.id` generator appears to derive the next id from a counter/max that is **out of sync** with existing rows (e.g. computes `rule-0NN` that already exists, or a sequence not advanced past manually/duplicate-inserted rows). The many duplicate draft rows suggest prior partial inserts left the id allocator inconsistent.
 
 ## Impact
-Users cannot persist rules via CAS. Workaround used in gabber-studio: stored the intended rule as a file-based auto-memory (`feedback_feature_flag_env_parity`) + a `.claude/rules/feature-flag-env-parity.md` file. The rule should be re-created properly via `mcp__cas__rule` once this is fixed.
+Users cannot persist rules via Cassy. Workaround used in gabber-studio: stored the intended rule as a file-based auto-memory (`feedback_feature_flag_env_parity`) + a `.claude/rules/feature-flag-env-parity.md` file. The rule should be re-created properly via `mcp__cas__rule` once this is fixed.
 
 ## Suggested fix
 - Make `rules.id` allocation collision-proof (UUID, or `MAX(id)+1` computed from the table at insert time inside the transaction, or rely on an autoincrement/sequence).

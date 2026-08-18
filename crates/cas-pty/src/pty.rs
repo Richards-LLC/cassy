@@ -341,6 +341,73 @@ fn push_claude_config_dir_env(
 }
 
 #[cfg(test)]
+mod codex_home_contract_tests {
+    use super::*;
+
+    fn worker_config() -> PtyConfig {
+        PtyConfig {
+            env: vec![("CAS_AGENT_ROLE".to_string(), "worker".to_string())],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explicit_account_home_is_pushed_with_its_source_marker() {
+        let mut config = worker_config();
+        config.apply_codex_home(Some("/home/op/.codex-alt"), Some("explicit"));
+
+        assert!(
+            config
+                .env
+                .iter()
+                .any(|(k, v)| k == "CODEX_HOME" && v == "/home/op/.codex-alt")
+        );
+        assert!(
+            config
+                .env
+                .iter()
+                .any(|(k, v)| k == "CAS_FACTORY_CODEX_HOME_SOURCE" && v == "explicit")
+        );
+    }
+
+    #[test]
+    fn tilde_paths_are_expanded_like_the_claude_side() {
+        let mut config = worker_config();
+        config.apply_codex_home(Some("~/.codex-work"), Some("supervisor"));
+
+        let value = config
+            .env
+            .iter()
+            .find_map(|(k, v)| (k == "CODEX_HOME").then_some(v.as_str()))
+            .expect("CODEX_HOME was not pushed");
+        assert!(!value.starts_with('~'), "tilde was not expanded: {value}");
+        assert!(value.ends_with("/.codex-work"));
+    }
+
+    #[test]
+    fn omitting_the_account_home_leaves_inheritance_untouched() {
+        let mut config = worker_config();
+        config.apply_codex_home(None, Some("supervisor"));
+
+        assert!(!config.env.iter().any(|(k, _)| k == "CODEX_HOME"));
+        assert!(
+            !config
+                .env
+                .iter()
+                .any(|(k, _)| k == "CAS_FACTORY_CODEX_HOME_SOURCE")
+        );
+    }
+
+    #[test]
+    fn supervisor_panes_never_receive_a_worker_account_home() {
+        let mut env = vec![("CAS_AGENT_ROLE".to_string(), "supervisor".to_string())];
+        push_codex_home_env(&mut env, "supervisor", Some("/home/op/.codex-alt"));
+
+        assert!(!env.iter().any(|(k, _)| k == "CODEX_HOME"));
+    }
+}
+
+#[cfg(test)]
 mod claude_config_dir_contract_tests {
     use super::*;
 
@@ -441,7 +508,48 @@ impl Default for PtyConfig {
     }
 }
 
+/// Add an explicit Codex account home to a worker.
+///
+/// The Codex analog of `push_claude_config_dir_env`: `CODEX_HOME` scopes a
+/// codex account's config, credentials and session state (verified against
+/// codex-cli 0.147.0 in cas-9cc3). Like the Claude version this deliberately
+/// does nothing for omitted values, so ordinary inheritance is untouched.
+fn push_codex_home_env(env: &mut Vec<(String, String)>, role: &str, config_dir: Option<&str>) {
+    if role != "worker" {
+        return;
+    }
+    let Some(config_dir) = config_dir else {
+        return;
+    };
+
+    let expanded = config_dir.strip_prefix('~').map_or_else(
+        || config_dir.to_string(),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| format!("{}{}", home.display(), suffix))
+                .unwrap_or_else(|| config_dir.to_string())
+        },
+    );
+    env.push(("CODEX_HOME".to_string(), expanded));
+}
+
 impl PtyConfig {
+    /// Apply the Codex account home override to this worker config.
+    ///
+    /// `Pty::spawn` detects the resulting marker and removes inherited API keys
+    /// from the child command, so the selected ChatGPT account actually wins.
+    pub fn apply_codex_home(&mut self, config_dir: Option<&str>, source: Option<&str>) {
+        push_codex_home_env(&mut self.env, "worker", config_dir);
+        if config_dir.is_some() {
+            if let Some(source) = source {
+                self.env.push((
+                    "CAS_FACTORY_CODEX_HOME_SOURCE".to_string(),
+                    source.to_string(),
+                ));
+            }
+        }
+    }
+
     /// Apply the Claude-only account directory override to this worker config.
     ///
     /// `Pty::spawn` detects the resulting environment entry and removes
@@ -1468,6 +1576,18 @@ impl Pty {
             cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
             cmd.env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
             cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR");
+        }
+
+        // Same contract on the Codex side: a resolved CODEX_HOME selects a
+        // ChatGPT account, and an inherited API key would silently override it.
+        if config
+            .env
+            .iter()
+            .any(|(key, _)| key == "CAS_FACTORY_CODEX_HOME_SOURCE")
+        {
+            cmd.env_remove("OPENAI_API_KEY");
+            cmd.env_remove("CODEX_API_KEY");
+            cmd.env_remove("CODEX_ACCESS_TOKEN");
         }
 
         if config

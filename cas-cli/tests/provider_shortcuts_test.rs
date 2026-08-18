@@ -20,6 +20,10 @@ fn cas_cmd() -> Command {
 
 // ── Help / parse-level tests ──────────────────────────────────────────────────
 
+/// `cas codex --help` documents the launcher itself. Since cas-9cc3 it also owns
+/// an account profile, so factory flags such as `--default` moved behind the
+/// passthrough (asserted by `test_codex_accepts_factory_flags`) rather than
+/// being listed here.
 #[test]
 fn test_codex_help_shows_shortcut_description() {
     cas_cmd()
@@ -27,7 +31,8 @@ fn test_codex_help_shows_shortcut_description() {
         .assert()
         .success()
         .stdout(predicate::str::contains("supervisor"))
-        .stdout(predicate::str::contains("--default"));
+        .stdout(predicate::str::contains("--list-profiles"))
+        .stdout(predicate::str::contains("`cas factory` flags pass through"));
 }
 
 #[test]
@@ -52,12 +57,25 @@ fn test_default_help() {
         .stdout(predicate::str::contains("grok"));
 }
 
+/// A leading factory flag with no profile must keep working: `cas codex
+/// --workers 3` predates the account picker and is still the common spelling.
 #[test]
 fn test_codex_accepts_factory_flags() {
     cas_cmd()
         .args(["codex", "--workers", "0", "--help"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("--default"));
+}
+
+/// The profile-first spelling reaches the same factory arg parser.
+#[test]
+fn test_codex_accepts_profile_then_factory_flags() {
+    cas_cmd()
+        .args(["codex", "main", "--workers", "0", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--default"));
 }
 
 #[test]

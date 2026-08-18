@@ -42,6 +42,8 @@ cas codex             # Codex as the supervisor
 cas grok              # Grok as the supervisor
 cas claude alt        # Claude supervisor signed in as the ~/.claude-alt account
 cas claude login alt  # sign in only the alt profile without changing main
+cas codex alt         # Codex supervisor signed in as the ~/.codex-alt account
+cas codex login work  # sign in only the work profile without changing main
 ```
 
 A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges the branches. Workers claim one task at a time, work in an isolated checkout under `.cas/worktrees/`, and report back through the shared database. The TUI shows every agent side by side (or `--tabbed`), plus a sidecar with the active epic, the task list, the live diff and an activity feed.
@@ -50,7 +52,7 @@ A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges 
 |---|---|
 | **Worktree isolation** | Each worker gets its own worktree + branch. `--no-worktrees` shares one directory, `--worktree-root` relocates them |
 | **Mixed harnesses** | `--supervisor-cli` / `--worker-cli`, or per-slot `--worker-spec '{"name":"alice","cli":"codex","effort":"high"}'` |
-| **Account selection** | `cas claude login <profile>` signs in one isolated Claude profile; `cas claude <profile>` launches it and spawned workers inherit the same config and credential store. `cas claude --list-profiles` asks Claude Code for each profile's real auth state |
+| **Account selection** | `cas claude login <profile>` signs in one isolated Claude profile; `cas claude <profile>` launches it and spawned workers inherit the same config and credential store. `cas claude --list-profiles` asks Claude Code for each profile's real auth state. The same three commands exist for Codex (`cas codex login/…/--list-profiles`), scoped by `CODEX_HOME` |
 | **No silent downgrades** | `--strict-cli` refuses to quietly reroute a Codex worker to Claude when Codex is unavailable |
 | **Task coordination** | Tasks carry dependencies, priorities, leases and close gates — a close is refused when the branch is unmerged or the tree is unverifiable |
 | **Session control** | `cas list`, `cas attach`, `cas kill`, `cas kill-all`; `--notify` for desktop alerts, `--record` for replayable sessions |
@@ -71,6 +73,42 @@ claude() { command cas claude --bare "$@"; }
 With two or more logged-in Claude profiles, bare `claude` now offers a picker.
 The picker is intentionally bypassed for non-interactive invocations, so
 scripts keep Claude Code's normal argument and input behavior.
+
+### Codex account profiles
+
+Codex accounts follow the same convention: `main` is `~/.codex`, any other name
+is `~/.codex-<name>`, and selecting one exports `CODEX_HOME` so the supervisor
+pane and every Codex worker it spawns land on that account.
+
+```bash
+cas codex --list-profiles   # detected accounts and their real login state
+cas codex login work        # create ~/.codex-work, seed it, run `codex login` there
+cas codex work              # factory with Codex supervising on that account
+cas codex work --workers 3  # factory flags still pass through, with or without a profile
+cas codex --bare work       # plain Codex on that account instead of the factory
+```
+
+`cas codex` with more than one detected account, run in an interactive terminal,
+stops and asks which account to use — it never silently loads a default. An
+account whose login state cannot be determined is shown as unknown and stays
+selectable rather than being hidden. The last entry in the picker is **new
+login**: it asks for an email, creates `~/.codex-<email>`, seeds it, runs
+`codex login` there, and launches on that account once it reports signed in.
+Explicit `cas codex <profile>` and every non-interactive invocation skip the
+prompt.
+
+`cas codex login <name>` seeds a new profile home by symlinking the shared
+configuration surface from `~/.codex` — `config.toml`, `AGENTS.md`, `agents/`,
+`skills/`, `plugins/`, `hooks.json` — so a new account is immediately equipped.
+Credentials are never shared: `auth.json` stays a real per-profile file, and the
+seeder refuses it even if asked. Seeding is idempotent and never overwrites a
+file you have since diverged. Because the shared entries are links, editing
+config through one profile edits it for all of them by design (CAS' own Codex
+config writer resolves links before writing, so a managed link survives).
+
+Selecting an account also scrubs inherited `OPENAI_API_KEY`, `CODEX_API_KEY` and
+`CODEX_ACCESS_TOKEN`, so a key left in the environment cannot quietly override
+the account you picked.
 
 ## Context System
 
@@ -195,6 +233,7 @@ cas                   # launch the factory TUI
 cas -w 3              # ...with 3 workers
 cas claude|codex|grok # choose the supervisor harness (all factory flags pass through)
 cas claude login alt  # isolate login to ~/.claude-alt (main stays untouched)
+cas codex login alt   # isolate login to ~/.codex-alt (main stays untouched)
 cas open              # interactive project picker
 cas init              # initialize CAS in the current project
 cas serve             # run the MCP server

@@ -68,6 +68,10 @@ managed_by: cas
 
 ## During Coordination
 
+**Reporting style:** facts, not narration — assignments, verdicts and merge state, not a
+recap of what a worker just said. Brevity never trims evidence: findings, rejection
+reasons, measurements and merge receipts stay in full. See the `cas-supervisor` skill.
+
 Record decisions as you go:
 ```
 mcp__cas__memory action=remember title="..." content="..." tags="decision"

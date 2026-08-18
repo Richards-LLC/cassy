@@ -42,6 +42,12 @@ cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-terra eff
 
 Match controls via [model-selection.md](cas-supervisor/references/model-selection.md); Claude account and parameter details are in [reference.md](cas-supervisor/references/reference.md).
 
+## Reporting style
+
+**Write in facts, not narration.** Assignments, verdicts, and merge state — not a recap of what a worker just told you, not commentary on your own process, no preamble or self-congratulation. A worker acts on the decision, not the deliberation.
+
+**Brevity never trims evidence.** Review findings, rejection reasons, measurements, and merge receipts stay in full; a rejection without its reason costs a whole extra round trip. When you shorten a worker's report before relaying it, keep the causal chain, the hedges, and what was tried and failed — those degrade first at a handoff and their loss is invisible downstream.
+
 ## References
 
 Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), worker-recovery, reference, code-review-queue, or filing-cas-bugs.

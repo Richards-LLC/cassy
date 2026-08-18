@@ -281,3 +281,52 @@ Prefer many small pushed commits over one large uncommitted WIP. Commit and push
 logical unit, not at the end. The cost of any checkpoint, kill, respawn or crash is exactly
 the work since your last push — keep that measured in minutes, not hours. Small commits also
 make the supervisor's merges reviewable and let a replacement worker see where you got to.
+
+## Part 3 — Report in facts, not narration
+
+Measured on a real delivery cycle (cas-e948, 16 worker notes, 887 words): classic filler was
+0%, verbatim restatement across notes 1.2%. The waste is not adjectives — it is narrated
+intent, ritual fields, and prose that would read the same in any other task. That is what this
+part targets, and only that.
+
+### Cut
+
+- **Preamble and recap.** Do not restate the brief, announce what you are about to do, or
+  summarize what you just said. A note records what is now true and what it cost.
+- **Tool-call narration.** The supervisor can see the calls.
+- **Forward-looking intent.** "I will next…" / "awaiting…" is stale by your next note. Report
+  the state, and report the blocker if you are actually blocked.
+- **Self-congratulation and hedging filler.** If a sentence would read identically in a
+  different task, it carries no information — cut it.
+- **Ritual fields.** Headroom is a number (`~70%`). *Ample* and *adequate* are unactionable and
+  were 4.9% of that sampled corpus.
+
+### Keep in full — brevity never trims evidence
+
+These are the first things a naive "be terse" rule destroys, and their loss is invisible
+downstream because the next worker cannot know what was dropped:
+
+- Commit SHAs, PR numbers, run IDs, `file:line` root causes, exit codes, measured numbers.
+- **Approaches you tried that failed.** A note that omits a dead end makes the next worker
+  repeat it. This is the single highest-value thing you can record.
+- **Uncertainty, marked as uncertainty.** "Probably X, verify before relying on it" must not
+  flatten into "X" — two handoffs later it will be cited as fact.
+- Why a decision was made, not only what was decided.
+
+### Worked pair (observed)
+
+Bad — 46 words, three of them load-bearing:
+
+> Checkpoint pushed: e44b5250 ci(cas-e948): short-circuit required lanes and shard suite. Static
+> tier policy contract passes 151 assertions. I am awaiting cas-aa27's cache measurement only to
+> confirm no late change to the strategy; current branch is clean and ready for PR once
+> rechecked/rebased. Context headroom: ample.
+
+Good — 31 words, same evidence, no intent narration and an actionable headroom number:
+
+> Checkpoint e44b5250 (short-circuit + shard suite). Tier contract: 151 assertions pass. Branch
+> clean, PR-ready after rebase. cas-aa27's cache measurement would only change strategy if it
+> lands before the PR. Headroom ~85%.
+
+Rewriting four real notes this way: 183 → 129 words, a 29.5% reduction with every SHA, run ID
+and timing retained.

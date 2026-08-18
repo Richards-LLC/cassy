@@ -593,6 +593,13 @@ fn nonempty_to_empty_restart_clears_public_proxy_state_without_a_live_engine() {
         assert_eq!(health["servers"].as_array().unwrap().len(), 1);
         assert_eq!(health["servers"][0]["name"], public_name);
     }
+    assert!(
+        !sandbox
+            .xdg_config_home()
+            .join("code-mode-mcp/config.toml")
+            .exists(),
+        "an explicit project proxy configuration must not install the managed user default"
+    );
 
     let populated_catalog = std::fs::read(sandbox.cas_root().join("proxy_catalog.json")).unwrap();
     let populated_health = std::fs::read(sandbox.cas_root().join("proxy_health.json")).unwrap();

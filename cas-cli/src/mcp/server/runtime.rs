@@ -307,11 +307,17 @@ async fn run_server_impl() -> anyhow::Result<()> {
         }
     }
 
-    // Refresh the credential-free, user-scoped Viktor default before loading
-    // proxy configuration. A project .cas/proxy.toml remains authoritative for
-    // dispatch policy, so it can intentionally opt out of this default.
     #[cfg(feature = "mcp-proxy")]
-    if let Ok(path) = cmcp_core::config::Scope::User.config_path()
+    let project_proxy_path = cas_root.join("proxy.toml");
+
+    // Refresh the credential-free, user-scoped Viktor default before loading
+    // proxy configuration. An explicit project .cas/proxy.toml is an opt-out:
+    // loading it still inherits user server definitions, so refreshing the
+    // managed default here would otherwise make a project-selected proxy
+    // surface connect to Viktor unexpectedly.
+    #[cfg(feature = "mcp-proxy")]
+    if !project_proxy_path.exists()
+        && let Ok(path) = cmcp_core::config::Scope::User.config_path()
         && let Err(error) = cmcp_core::config::Config::refresh_viktor_managed_default(&path)
     {
         eprintln!("[Cassy] Failed to refresh managed Viktor proxy config: {error}");
@@ -320,9 +326,8 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // Load MCP proxy config from .cas/proxy.toml (project) and ~/.config/code-mode-mcp/config.toml (user)
     #[cfg(feature = "mcp-proxy")]
     let proxy = {
-        let proxy_path = cas_root.join("proxy.toml");
-        let cfg = cmcp_core::config::Config::load_merged(if proxy_path.exists() {
-            Some(&proxy_path)
+        let cfg = cmcp_core::config::Config::load_merged(if project_proxy_path.exists() {
+            Some(&project_proxy_path)
         } else {
             None
         });

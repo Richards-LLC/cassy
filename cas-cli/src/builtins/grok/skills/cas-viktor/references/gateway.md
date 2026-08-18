@@ -7,15 +7,15 @@
 `VIKTOR_API_KEY` is present, never its value. On the managed host, load the canonical
 credential file into the `cas serve` process; do not copy it to project configuration.
 
-At `cas serve` startup, Cassy refreshes the user-scoped `viktor` upstream at
-`https://api.viktor.com/mcp` with the credential reference `env:VIKTOR_API_KEY`. The managed
-policy admits exactly these conversation tools:
+At `cas serve` startup without `.cas/proxy.toml`, Cassy refreshes the user-scoped `viktor`
+upstream at `https://api.viktor.com/mcp` with the credential reference `env:VIKTOR_API_KEY`.
+The managed policy admits exactly these conversation tools:
 
 `ask_viktor`, `create_thread`, `send_message`, `wait_for_run`, `get_run`,
 `get_run_result`, `list_threads`, `list_messages`, and `whoami`.
 
-If `.cas/proxy.toml` exists, its policy replaces the user policy. It must explicitly configure
-the required Viktor server and routes; the managed user allowlist never widens a project.
+If `.cas/proxy.toml` exists, it opts out of the managed default. It must explicitly configure
+the required Viktor server and routes; the managed user configuration never widens a project.
 
 ## Conversation flow
 

@@ -40,8 +40,8 @@ pub fn execute(_args: &ViktorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow
         credential_present: std::env::var_os("VIKTOR_API_KEY").is_some(),
         user_config,
         project_config,
-        project_policy: "an existing .cas/proxy.toml replaces the managed allowlist; explicitly add the sanctioned Viktor routes before direct calls",
-        startup_action: "run cas serve; startup refreshes the credential-reference-only managed Viktor upstream",
+        project_policy: "an existing .cas/proxy.toml opts out of the managed Viktor default; explicitly configure the sanctioned Viktor server and routes before direct calls",
+        startup_action: "run cas serve without a project proxy config; startup refreshes the credential-reference-only managed Viktor upstream",
         reply_delivery: "run-starting calls are watched by CAS; replies arrive as inbound notifications (origin=viktor), so agents must not poll",
     };
 

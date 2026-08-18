@@ -271,11 +271,12 @@ Cassy ships builtin skills (`cas-code-review`, `cas-worker`, `cas-github-issues`
 `cas init` installs the `cas-viktor` skill in the Claude, Codex, and Grok mirrors. For a
 credential-safe setup check, run `cas viktor`: it reports whether `VIKTOR_API_KEY` is available
 without reading or printing it, identifies the managed user configuration, and explains any
-project policy override. Start `cas serve` to refresh the managed Viktor upstream; it keeps only
-the `env:VIKTOR_API_KEY` reference and an exact conversation allowlist. Agents use the proxy's
-`mcp_search`/`mcp_execute` surface, and CAS delivers completed answers as inbound notifications
-instead of requiring agent-side polling. A committed `.cas/proxy.toml` replaces the managed
-allowlist, so it must explicitly opt in to the required Viktor routes.
+project policy override. Start `cas serve` without `.cas/proxy.toml` to refresh the managed
+Viktor upstream; it keeps only the `env:VIKTOR_API_KEY` reference and an exact conversation
+allowlist. Agents use the proxy's `mcp_search`/`mcp_execute` surface, and CAS delivers completed
+answers as inbound notifications instead of requiring agent-side polling. A committed
+`.cas/proxy.toml` opts out of the managed default, so it must explicitly configure the required
+Viktor server and routes.
 
 ## Diagnostics
 

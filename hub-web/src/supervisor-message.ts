@@ -10,7 +10,7 @@ export function supervisorMessage(target: string, text: string): Record<string, 
     SendMessage: {
       target,
       text,
-      summary: "Commander message",
+      summary: "Cassy Commander message",
       urgent: false,
       attribution: {
         device_id: null,

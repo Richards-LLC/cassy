@@ -13,7 +13,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("binding Commander browser invariants", () => {
+describe("binding Cassy Commander browser invariants", () => {
   it("H4-CATALOG-01 consumes pairing fragments synchronously and preserves no capability in the URL", () => {
     const token = "A".repeat(43);
     let replacement = "";
@@ -33,9 +33,10 @@ describe("binding Commander browser invariants", () => {
     expect(source).toContain('pairingCreateInFlight ? "Creating…" : "Create pairing code"');
     expect(source).toContain("const relayAction = relayOrigin");
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
+    expect(html).toContain("<title>Cassy Commander</title>");
   });
 
-  it("declares the Commander favicon from the static web source", async () => {
+  it("declares the Cassy Commander favicon from the static web source", async () => {
     const [html, favicon] = await Promise.all([
       readFile(new URL("../index.html", import.meta.url), "utf8"),
       readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
@@ -48,7 +49,8 @@ describe("binding Commander browser invariants", () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
     expect(source).toContain("cas hub pair --origin ${location.origin}");
-    expect(source).toContain("Pairings are specific to each Commander origin.");
+    expect(source).toContain("Pairings are specific to each Cassy Commander origin.");
+    expect(source).toContain("<dt>Cassy Commander origin</dt>");
     expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
     expect(source).toContain('class="control-disabled-reason"');
     // A phone cannot hover, so an unavailable control keeps its reason in the DOM
@@ -133,18 +135,18 @@ describe("binding Commander browser invariants", () => {
     expect(main).toContain('openMachines.onclick = () => { machineDrawerOpen = true; render(); }');
     expect(main).toContain('emptyTitle.textContent = "No panes in this session yet"');
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
-    // Commander has no pane drag-and-drop, so the empty slot must not promise one.
+    // Cassy Commander has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
     expect(attentionView).toContain('message.textContent = "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
-  it("distinguishes a loading catalog from an unpaired Commander drawer", async () => {
+  it("distinguishes a loading catalog from an unpaired Cassy Commander drawer", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("let machineCatalogLoaded = false;");
     expect(source).toContain("machineCatalogLoaded = true;");
     expect(source).toContain('"Loading paired machines…"');
-    // An unpaired Commander offers pairing instead of naming a glyph, and the
+    // An unpaired Cassy Commander offers pairing instead of naming a glyph, and the
     // machine being paired is the one running the sessions, not this device.
     expect(source).toContain('"No machines paired yet. Pair the machine your sessions run on."');
     expect(source).toContain('pair.textContent = "Pair a machine";');
@@ -413,7 +415,7 @@ describe("binding Commander browser invariants", () => {
     expect(surface).not.toContain('"italic 700"');
   });
 
-  it("encodes the supervisor-first Commander shell at desktop and phone widths", async () => {
+  it("encodes the supervisor-first Cassy Commander shell at desktop and phone widths", async () => {
     const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
     expect(main).toContain('id="pair-toggle" class="rail-control pair-machine"');
@@ -498,7 +500,7 @@ describe("binding Commander browser invariants", () => {
     await vi.waitFor(() => {
       expect(callbacks.onAuthFailure).toHaveBeenCalledWith(
         "needs-pairing",
-        "Hub is reachable but this Commander is no longer paired. Re-pair to continue.",
+        "Hub is reachable but this Cassy Commander is no longer paired. Re-pair to continue.",
       );
     });
     expect(supervisor.snapshot()).toMatchObject({

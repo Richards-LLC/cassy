@@ -1,7 +1,7 @@
 import type { PairingRelayDelivery, PendingInvitation, PendingRelayRequest } from "./pending-pairing";
 import type { Scope } from "./types";
 
-// The relay may only request these Commander scopes. The machine-side
+// The relay may only request these Cassy Commander scopes. The machine-side
 // `cas hub authorize` prompt is the consent boundary: it displays the origin
 // and requested/granted scopes and may narrow, but never elevate, this set.
 export const DEFAULT_PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -101,7 +101,7 @@ function relayError(status: number, code: unknown): PairingRelayError {
 
 export async function createPairingRequest(fetcher: Fetcher, relayOrigin: string, controllerOrigin: string, requestedScopes: Scope[] = DEFAULT_PAIRING_SCOPES, email?: string, signal?: AbortSignal): Promise<PendingRelayRequest> {
   if (!requestedScopes.length || new Set(requestedScopes).size !== requestedScopes.length || requestedScopes.some((scope) => !DEFAULT_PAIRING_SCOPES.includes(scope))) {
-    throw new PairingRelayError("unsupported_scope", "Page-initiated pairing requested an unsupported Commander scope.");
+    throw new PairingRelayError("unsupported_scope", "Page-initiated pairing requested an unsupported Cassy Commander scope.");
   }
   const body: Record<string, unknown> = { wire_version: 1, controller_origin: controllerOrigin, requested_scopes: requestedScopes };
   if (email) body.email = email;

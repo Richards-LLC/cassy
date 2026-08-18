@@ -43,7 +43,7 @@ breakpoints:
 
 ## Overview
 
-Commander is a dense, dark-only mission-control console built with plain TypeScript and CSS.
+Cassy Commander is a dense, dark-only mission-control console built with plain TypeScript and CSS.
 Its sole application token source is `hub-web/src/styles.css`; component rules consume those custom properties rather than declaring colours or type sizes.
 Cool graphite surfaces make the terminal canvas recede, while saturated colour communicates health, severity, focus, or connection state only.
 Desktop and compact layouts share the same 4px rhythm; the compact surface keeps one readable terminal primary rather than shrinking the desktop grid.

@@ -106,7 +106,7 @@ describe("wire-v1 reverse pairing", () => {
     expect((fixtures[5].invitation as Record<string, unknown>).scopes).toEqual(["machine-read", "session-read", "pane-read"]);
   });
 
-  it("requests Commander control scopes through the relay while continuing to accept narrowed invitations", () => {
+  it("requests Cassy Commander control scopes through the relay while continuing to accept narrowed invitations", () => {
     expect(DEFAULT_PAIRING_SCOPES).toEqual([
       "machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt",
     ]);
@@ -637,7 +637,7 @@ describe("wire-v1 reverse pairing", () => {
     const afterBackgroundRender = updatePairingDraft(captured, []);
 
     expect(afterBackgroundRender).toEqual(captured);
-    expect(afterBackgroundRender.deviceLabel).not.toBe("Commander browser");
+    expect(afterBackgroundRender.deviceLabel).not.toBe("Cassy Commander browser");
   });
 
   it.each([

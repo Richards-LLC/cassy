@@ -45,7 +45,7 @@ function ensureCurrent(options: ExchangeOptions): void {
 export async function exchangePendingPairing(options: ExchangeOptions): Promise<StoredMachine> {
   const { invitation } = options;
   if (invitation.controllerOrigin && invitation.controllerOrigin !== options.controllerOrigin) {
-    throw new PairingExchangeError("This pairing invitation belongs to a different Commander origin.");
+    throw new PairingExchangeError("This pairing invitation belongs to a different Cassy Commander origin.");
   }
   const baseUrl = invitation.hubUrl ?? (options.legacyHubUrl ? new URL(options.legacyHubUrl).origin : undefined);
   if (!baseUrl) throw new PairingExchangeError("The pairing invitation does not identify a reachable hub.");

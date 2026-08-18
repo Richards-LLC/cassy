@@ -12,8 +12,8 @@ use crate::cli::cloud::{
     select_cached_team_after_login,
 };
 use crate::cloud::{
-    CloudConfig, FetchTeamsOutcome, default_endpoint, fetch_and_cache_teams, is_acceptable_endpoint,
-    maybe_apply_team_backfill,
+    CloudConfig, FetchTeamsOutcome, clear_login_credentials, default_endpoint, fetch_and_cache_teams,
+    is_acceptable_endpoint, maybe_apply_team_backfill, store_login_credentials,
 };
 use crate::ui::components::{
     Component, Formatter, Spinner, SpinnerMsg, clear_inline, render_inline_view, rerender_inline,
@@ -78,10 +78,315 @@ fn parse_endpoint(s: &str) -> Result<String, String> {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEVICE-FLOW PURE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build the URL that opens the device-authorization page in a browser.
+///
+/// The `/device/code` response may already carry the user code — either as
+/// RFC 8628's `verification_uri_complete`, or (as CAS Cloud does today) baked
+/// into `verification_uri` itself. Appending `?code=` unconditionally produced
+/// `…/device?code=FEUE-NMWQ?code=FEUE-NMWQ`, and the page then read the whole
+/// blob as the code and failed (cas-046d).
+///
+/// Rules, in order:
+///  1. an explicit `verification_uri_complete` is used verbatim;
+///  2. a `verification_uri` that already has a `code` query parameter is left
+///     alone;
+///  3. otherwise the code is appended with the correct separator and
+///     percent-encoded.
+pub(crate) fn build_verification_url(
+    verification_uri: &str,
+    verification_uri_complete: Option<&str>,
+    user_code: &str,
+) -> String {
+    if let Some(complete) = verification_uri_complete
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return complete.to_string();
+    }
+
+    let base = verification_uri.trim();
+    if user_code.is_empty() || has_code_param(base) {
+        return base.to_string();
+    }
+
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!(
+        "{base}{separator}code={}",
+        urlencoding::encode(user_code.trim())
+    )
+}
+
+/// True when `url`'s query string already contains a `code` parameter.
+fn has_code_param(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').any(|pair| {
+        let name = pair.split_once('=').map(|(name, _)| name).unwrap_or(pair);
+        name.eq_ignore_ascii_case("code")
+    })
+}
+
+/// What the CLI should do after one `/device/token` poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PollDecision {
+    /// Nobody has approved the code yet — keep waiting at the current cadence.
+    Pending,
+    /// The server asked us to slow down: RFC 8628 `slow_down`, or HTTP 429.
+    SlowDown { retry_after: Option<u64> },
+    /// Transient failure (5xx, timeout, dropped connection) — retry, backed off.
+    Transient,
+    /// The user rejected the request.
+    Denied,
+    /// The device code is no longer valid.
+    Expired,
+    /// Unrecoverable: stop and report the HTTP status.
+    Fatal { http_status: u16 },
+}
+
+/// Map one poll result to the next action.
+///
+/// `body_status` is the `status` (or `error`) field of the response body;
+/// `retry_after` is the parsed `Retry-After` header, when the server sent one.
+///
+/// The rate-limit case is the point of this function: a 429 during ordinary
+/// login polling used to abort the whole login with "Server error (429)"
+/// (cas-046d / Ben #7). It is a throttle, not a failure.
+pub(crate) fn classify_poll_status(
+    http_status: u16,
+    body_status: &str,
+    retry_after: Option<u64>,
+) -> PollDecision {
+    match body_status {
+        "authorization_pending" | "pending" => return PollDecision::Pending,
+        "slow_down" => return PollDecision::SlowDown { retry_after },
+        "access_denied" => return PollDecision::Denied,
+        "expired_token" | "expired" => return PollDecision::Expired,
+        _ => {}
+    }
+
+    match http_status {
+        429 => PollDecision::SlowDown { retry_after },
+        200 | 202 => PollDecision::Pending,
+        408 | 425 | 500..=599 => PollDecision::Transient,
+        other => PollDecision::Fatal { http_status: other },
+    }
+}
+
+/// Longest gap the client will wait between polls, however hard the server
+/// throttles. Keeps a slow-down storm from silently parking the login.
+const MAX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Next polling interval after a throttle or transient failure.
+///
+/// `Retry-After` (delta-seconds) wins when the server sent one; otherwise the
+/// interval grows by 5 seconds, per RFC 8628 §3.5. The result never shrinks
+/// below the current interval and never exceeds [`MAX_POLL_INTERVAL`].
+pub(crate) fn backoff_interval(
+    current: std::time::Duration,
+    retry_after: Option<u64>,
+) -> std::time::Duration {
+    use std::time::Duration;
+
+    let proposed = match retry_after {
+        Some(secs) if secs > 0 => Duration::from_secs(secs),
+        _ => current.saturating_add(Duration::from_secs(5)),
+    };
+    let floor = current.min(MAX_POLL_INTERVAL);
+    proposed.max(floor).min(MAX_POLL_INTERVAL)
+}
+
+/// Parse a `Retry-After` header value expressed in delta-seconds.
+///
+/// The HTTP-date form is deliberately unsupported: it returns `None`, and the
+/// caller falls back to the RFC 8628 `+5s` rule rather than guessing a clock
+/// skew.
+pub(crate) fn parse_retry_after(header: Option<&str>) -> Option<u64> {
+    let value = header.map(str::trim).filter(|value| !value.is_empty())?;
+    value.parse::<u64>().ok().filter(|secs| *secs > 0)
+}
+
+/// The status field of a device-token response, tolerating both the CAS Cloud
+/// `status` spelling and RFC 8628's `error`.
+fn body_status(body: &serde_json::Value) -> &str {
+    body["status"]
+        .as_str()
+        .or_else(|| body["error"].as_str())
+        .unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
+    use std::time::Duration;
+
+    #[test]
+    fn verification_url_does_not_double_append_code() {
+        // The exact shape Ben hit: the server's verification_uri already
+        // carries the code, so appending another one broke the page.
+        let url = build_verification_url(
+            "https://petra-stella-cloud.vercel.app/device?code=FEUE-NMWQ",
+            None,
+            "FEUE-NMWQ",
+        );
+        assert_eq!(
+            url, "https://petra-stella-cloud.vercel.app/device?code=FEUE-NMWQ",
+            "a verification_uri that already carries the code must be used as-is"
+        );
+        assert_eq!(url.matches("code=").count(), 1, "exactly one code parameter");
+    }
+
+    #[test]
+    fn verification_url_appends_code_when_absent() {
+        assert_eq!(
+            build_verification_url("https://cloud.example/device", None, "ABCD-EFGH"),
+            "https://cloud.example/device?code=ABCD-EFGH"
+        );
+    }
+
+    #[test]
+    fn verification_url_uses_ampersand_with_existing_query() {
+        let url = build_verification_url("https://cloud.example/device?next=/home", None, "AB-CD");
+        assert_eq!(url, "https://cloud.example/device?next=/home&code=AB-CD");
+        assert_eq!(url.matches("code=").count(), 1);
+    }
+
+    #[test]
+    fn verification_url_prefers_uri_complete() {
+        let url = build_verification_url(
+            "https://cloud.example/device",
+            Some("https://cloud.example/device?user_code=AB-CD&code=AB-CD"),
+            "AB-CD",
+        );
+        assert_eq!(
+            url, "https://cloud.example/device?user_code=AB-CD&code=AB-CD",
+            "RFC 8628 verification_uri_complete wins verbatim"
+        );
+    }
+
+    #[test]
+    fn verification_url_percent_encodes_the_code() {
+        let url = build_verification_url("https://cloud.example/device", None, "A B&C");
+        assert_eq!(url, "https://cloud.example/device?code=A%20B%26C");
+    }
+
+    #[test]
+    fn verification_url_ignores_a_code_prefixed_param() {
+        // `codex=` must not be mistaken for `code=`.
+        let url = build_verification_url("https://cloud.example/device?codex=1", None, "AB-CD");
+        assert_eq!(url, "https://cloud.example/device?codex=1&code=AB-CD");
+    }
+
+    #[test]
+    fn rate_limit_backs_off_instead_of_aborting_login() {
+        assert_eq!(
+            classify_poll_status(429, "", None),
+            PollDecision::SlowDown { retry_after: None },
+            "429 during ordinary polling is a throttle, not a login failure"
+        );
+        assert_eq!(
+            classify_poll_status(429, "", Some(30)),
+            PollDecision::SlowDown {
+                retry_after: Some(30)
+            }
+        );
+    }
+
+    #[test]
+    fn poll_classification_covers_the_device_flow_states() {
+        assert_eq!(
+            classify_poll_status(400, "authorization_pending", None),
+            PollDecision::Pending
+        );
+        assert_eq!(
+            classify_poll_status(400, "slow_down", None),
+            PollDecision::SlowDown { retry_after: None }
+        );
+        assert_eq!(
+            classify_poll_status(400, "access_denied", None),
+            PollDecision::Denied
+        );
+        assert_eq!(
+            classify_poll_status(400, "expired_token", None),
+            PollDecision::Expired
+        );
+        assert_eq!(classify_poll_status(502, "", None), PollDecision::Transient);
+        assert_eq!(
+            classify_poll_status(403, "", None),
+            PollDecision::Fatal { http_status: 403 }
+        );
+        assert_eq!(classify_poll_status(200, "", None), PollDecision::Pending);
+    }
+
+    #[test]
+    fn backoff_grows_by_five_seconds_without_retry_after() {
+        assert_eq!(
+            backoff_interval(Duration::from_secs(5), None),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            backoff_interval(Duration::from_secs(10), None),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn backoff_honours_retry_after_and_never_speeds_up() {
+        assert_eq!(
+            backoff_interval(Duration::from_secs(5), Some(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            backoff_interval(Duration::from_secs(20), Some(2)),
+            Duration::from_secs(20),
+            "a shorter Retry-After must not make the client poll faster"
+        );
+    }
+
+    #[test]
+    fn backoff_is_capped() {
+        assert_eq!(
+            backoff_interval(Duration::from_secs(58), None),
+            MAX_POLL_INTERVAL
+        );
+        assert_eq!(
+            backoff_interval(Duration::from_secs(30), Some(3600)),
+            MAX_POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds_only() {
+        assert_eq!(parse_retry_after(Some("30")), Some(30));
+        assert_eq!(parse_retry_after(Some("  30 ")), Some(30));
+        assert_eq!(parse_retry_after(Some("0")), None);
+        assert_eq!(parse_retry_after(Some("")), None);
+        assert_eq!(parse_retry_after(None), None);
+        assert_eq!(
+            parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None,
+            "HTTP-date form falls back to the RFC 8628 +5s rule"
+        );
+    }
+
+    #[test]
+    fn body_status_accepts_both_spellings() {
+        assert_eq!(
+            body_status(&serde_json::json!({"status": "slow_down"})),
+            "slow_down"
+        );
+        assert_eq!(
+            body_status(&serde_json::json!({"error": "authorization_pending"})),
+            "authorization_pending"
+        );
+        assert_eq!(body_status(&serde_json::json!({})), "");
+    }
 
     #[test]
     fn login_args_default_uses_default_endpoint() {
@@ -160,8 +465,10 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
 
     use crate::cloud::CloudConfig;
 
-    // Check if already logged in
-    if let Ok(config) = CloudConfig::load() {
+    // Check if already logged in. `load_effective` so a machine-wide login is
+    // recognised from any project — and from outside a project entirely.
+    {
+        let config = CloudConfig::load_effective();
         if config.is_logged_in() {
             if cli.json {
                 let output = serde_json::json!({
@@ -231,25 +538,28 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
     let verification_uri = device_response["verification_uri"]
         .as_str()
         .unwrap_or(&default_verification_uri);
+    let verification_uri_complete = device_response["verification_uri_complete"].as_str();
     let expires_in = device_response["expires_in"].as_u64().unwrap_or(900);
     let interval = device_response["interval"].as_u64().unwrap_or(5);
 
+    // One code parameter, whether the server pre-baked it or not (cas-046d).
+    let browser_url = build_verification_url(verification_uri, verification_uri_complete, user_code);
+
     if cli.json {
         println!(
-            r#"{{"status":"pending","user_code":"{user_code}","verification_uri":"{verification_uri}"}}"#
+            r#"{{"status":"pending","user_code":"{user_code}","verification_uri":"{browser_url}"}}"#
         );
     } else {
         let mut out = io::stdout();
         let theme = ActiveTheme::default();
         let mut fmt = Formatter::stdout(&mut out, theme);
 
-        // Display the code prominently
-        print_device_code(&mut fmt, user_code, verification_uri)?;
+        // Display the code prominently — the same URL the browser will open.
+        print_device_code(&mut fmt, user_code, &browser_url)?;
 
         // Open browser if not disabled
         if !args.no_browser {
-            let url_with_code = format!("{verification_uri}?code={user_code}");
-            if open_browser(&url_with_code).is_ok() {
+            if open_browser(&browser_url).is_ok() {
                 fmt.write_raw("  ")?;
                 fmt.write_accent(&format!("{} ", Icons::ARROW_RIGHT))?;
                 fmt.write_raw("Opening browser...")?;
@@ -269,12 +579,25 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
             fmt.newline()?;
             fmt.newline()?;
         }
+
+        print_token_fallback_hint(&mut fmt)?;
     }
 
-    // Step 2: Poll for authorization
+    // Step 2: Poll for authorization.
+    //
+    // Cadence is server-driven (cas-046d / Ben #7): the interval starts at the
+    // server's advertised value and only ever grows — on `slow_down`, on HTTP
+    // 429 (honouring `Retry-After`), and on transient 5xx/network errors. The
+    // loop is bounded by the code's own expiry rather than a precomputed
+    // attempt count, so backing off shortens the number of requests instead of
+    // extending the wait past `expires_in`.
     let token_url = format!("{}/device/token", args.endpoint);
-    let poll_interval = Duration::from_secs(interval);
-    let max_attempts = (expires_in / interval) as usize;
+    let mut poll_interval = Duration::from_secs(interval.clamp(1, MAX_POLL_INTERVAL.as_secs()));
+    let deadline = std::time::Instant::now() + Duration::from_secs(expires_in);
+    let mut consecutive_transient: u32 = 0;
+    let mut last_transport_error: Option<String> = None;
+    /// Consecutive transport/5xx failures tolerated before giving up.
+    const MAX_CONSECUTIVE_TRANSIENT: u32 = 5;
     let theme = ActiveTheme::default();
 
     let mut spinner = Spinner::new("Waiting for authorization...");
@@ -284,18 +607,24 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
         0
     };
 
-    for attempt in 0..max_attempts {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let wait = poll_interval.min(remaining);
+
         // Animate spinner during sleep interval
         if !cli.json {
             let tick_interval = Duration::from_millis(80);
-            let num_ticks = poll_interval.as_millis() / tick_interval.as_millis();
-            for _ in 0..num_ticks {
+            let wait_started = std::time::Instant::now();
+            while wait_started.elapsed() < wait {
                 spinner.update(SpinnerMsg::Tick);
                 prev_lines = rerender_inline(&spinner, prev_lines, &theme)?;
                 std::thread::sleep(tick_interval);
             }
         } else {
-            std::thread::sleep(poll_interval);
+            std::thread::sleep(wait);
         }
 
         let poll_response = ureq::post(&token_url)
@@ -304,188 +633,159 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                 "device_code": device_code
             }));
 
-        match poll_response {
+        let decision = match poll_response {
             Ok(resp) => {
                 let body: serde_json::Value = resp.into_json()?;
-                let status = body["status"].as_str().unwrap_or("");
+                let status = body_status(&body).to_string();
 
-                match status {
-                    "authorized" => {
-                        if !cli.json {
-                            clear_inline(prev_lines)?;
-                        }
-
-                        let access_token = body["access_token"]
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("No access token in response"))?;
-                        let email = body["user"]["email"].as_str();
-                        let plan = body["user"]["plan"].as_str();
-
-                        // Save config
-                        {
-                            let mut config = CloudConfig::load().unwrap_or_default();
-                            config.endpoint = args.endpoint.clone();
-                            config.token = Some(access_token.to_string());
-                            config.email = email.map(String::from);
-                            config.plan = plan.map(String::from);
-                            config.save()?;
-                        }
-
-                        // Best-effort: fetch team membership from /api/me and
-                        // cache into ~/.cas/cloud.json so T3's resolution chain
-                        // works offline immediately after login.
-                        let membership_outcome =
-                            fetch_and_cache_teams(&args.endpoint, access_token);
-                        match &membership_outcome {
-                            FetchTeamsOutcome::Updated { team_count } => {
-                                tracing::debug!(
-                                    team_count,
-                                    "fetched and cached team membership from /api/me"
-                                );
-                            }
-                            FetchTeamsOutcome::Empty => {
-                                tracing::debug!("logged in but /api/me returned zero team memberships");
-                            }
-                            FetchTeamsOutcome::AuthFailed => {
-                                eprintln!(
-                                    "warning: could not fetch team membership (/api/me returned 401). \
-                                     Run `cas cloud login` again to refresh."
-                                );
-                            }
-                            FetchTeamsOutcome::NetworkError(msg) => {
-                                eprintln!(
-                                    "warning: could not fetch team membership: {msg}. \
-                                     Team auto-scope will work after the next `cas cloud sync`."
-                                );
-                            }
-                        }
-
-                        if matches!(
-                            membership_outcome,
-                            FetchTeamsOutcome::Updated { .. } | FetchTeamsOutcome::Empty
-                        ) {
-                            apply_login_team_selection(cli);
-                        }
-
-                        // T6: first-run backfill — auto-promote to team scope on first
-                        // login when the user has exactly one team (or the server already
-                        // set a default).  Best-effort; errors in the write are ignored.
-                        let backfill_outcome = maybe_apply_team_backfill();
-                        print_backfill_notice(cli, &backfill_outcome);
-
-                        if cli.json {
-                            println!(r#"{{"status":"ok","email":"{}"}}"#, email.unwrap_or(""));
-                        } else {
-                            let mut out = io::stdout();
-                            let mut fmt = Formatter::stdout(&mut out, theme.clone());
-                            print_login_success(&mut fmt, email)?;
-                        }
-
-                        return Ok(());
+                if status == "authorized" {
+                    if !cli.json {
+                        clear_inline(prev_lines)?;
                     }
-                    "authorization_pending" => {
-                        if !cli.json {
-                            let remaining = expires_in - (attempt as u64 * interval);
-                            spinner.update(SpinnerMsg::SetMessage(format!(
-                                "Waiting for authorization... ({remaining}s remaining)"
-                            )));
-                        }
+
+                    let access_token = body["access_token"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("No access token in response"))?;
+                    let email = body["user"]["email"].as_str();
+                    let plan = body["user"]["plan"].as_str();
+
+                    // Credentials are user-level: one login serves every
+                    // project on the machine (cas-046d).
+                    store_login_credentials(&args.endpoint, access_token, email, plan)?;
+
+                    // Best-effort: fetch team membership from /api/me and
+                    // cache into ~/.cas/cloud.json so T3's resolution chain
+                    // works offline immediately after login.
+                    let membership_outcome = fetch_and_cache_teams(&args.endpoint, access_token);
+                    report_membership_outcome(&membership_outcome);
+
+                    if matches!(
+                        membership_outcome,
+                        FetchTeamsOutcome::Updated { .. } | FetchTeamsOutcome::Empty
+                    ) {
+                        apply_login_team_selection(cli);
                     }
-                    "access_denied" => {
-                        if !cli.json {
-                            clear_inline(prev_lines)?;
-                        }
-                        if cli.json {
-                            println!(r#"{{"status":"denied","message":"Authorization denied"}}"#);
-                        } else {
-                            let mut err = io::stderr();
-                            let mut fmt = Formatter::stdout(&mut err, theme.clone());
-                            fmt.newline()?;
-                            fmt.write_raw("  ")?;
-                            fmt.error("Authorization denied")?;
-                        }
-                        return Ok(());
+
+                    // T6: first-run backfill — auto-promote to team scope on first
+                    // login when the user has exactly one team (or the server already
+                    // set a default).  Best-effort; errors in the write are ignored.
+                    let backfill_outcome = maybe_apply_team_backfill();
+                    print_backfill_notice(cli, &backfill_outcome);
+
+                    if cli.json {
+                        println!(r#"{{"status":"ok","email":"{}"}}"#, email.unwrap_or(""));
+                    } else {
+                        let mut out = io::stdout();
+                        let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                        print_login_success(&mut fmt, email)?;
                     }
-                    "expired_token" => {
-                        if !cli.json {
-                            clear_inline(prev_lines)?;
-                        }
-                        if cli.json {
-                            println!(r#"{{"status":"expired","message":"Code expired"}}"#);
-                        } else {
-                            let mut err = io::stderr();
-                            let mut fmt = Formatter::stdout(&mut err, theme.clone());
-                            fmt.newline()?;
-                            fmt.write_raw("  ")?;
-                            fmt.error("Code expired. Please try again.")?;
-                        }
-                        return Ok(());
-                    }
-                    _ => {}
+
+                    return Ok(());
                 }
+
+                classify_poll_status(200, &status, None)
             }
-            Err(ureq::Error::Status(202, _)) => {
-                // Still pending, continue
-            }
+            Err(ureq::Error::Status(202, _)) => PollDecision::Pending,
             Err(ureq::Error::Status(code, resp)) => {
-                if !cli.json {
-                    clear_inline(prev_lines)?;
-                }
+                let retry_after = parse_retry_after(resp.header("Retry-After"));
                 let body: serde_json::Value = resp.into_json().unwrap_or_default();
-                let status = body["status"].as_str().unwrap_or("");
+                classify_poll_status(code, body_status(&body), retry_after)
+            }
+            Err(error) => {
+                last_transport_error = Some(error.to_string());
+                PollDecision::Transient
+            }
+        };
 
-                match status {
-                    "authorization_pending" => continue,
-                    "access_denied" => {
-                        if cli.json {
-                            println!(r#"{{"status":"denied"}}"#);
-                        } else {
-                            let mut err = io::stderr();
-                            let mut fmt = Formatter::stdout(&mut err, theme.clone());
-                            fmt.newline()?;
-                            fmt.write_raw("  ")?;
-                            fmt.error("Authorization denied")?;
-                        }
-                        return Ok(());
-                    }
-                    "expired_token" => {
-                        if cli.json {
-                            println!(r#"{{"status":"expired"}}"#);
-                        } else {
-                            let mut err = io::stderr();
-                            let mut fmt = Formatter::stdout(&mut err, theme.clone());
-                            fmt.newline()?;
-                            fmt.write_raw("  ")?;
-                            fmt.error("Code expired")?;
-                        }
-                        return Ok(());
-                    }
-                    _ => {
-                        if cli.json {
-                            println!(r#"{{"status":"error","code":{code}}}"#);
-                        } else {
-                            let mut err = io::stderr();
-                            let mut fmt = Formatter::stdout(&mut err, theme.clone());
-                            fmt.newline()?;
-                            fmt.write_raw("  ")?;
-                            fmt.error(&format!("Server error ({code})"))?;
-                        }
-                        return Ok(());
-                    }
+        let remaining_secs = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs();
+
+        match decision {
+            PollDecision::Pending => {
+                consecutive_transient = 0;
+                if !cli.json {
+                    spinner.update(SpinnerMsg::SetMessage(format!(
+                        "Waiting for authorization... ({remaining_secs}s remaining)"
+                    )));
                 }
             }
-            Err(e) => {
+            PollDecision::SlowDown { retry_after } => {
+                consecutive_transient = 0;
+                poll_interval = backoff_interval(poll_interval, retry_after);
+                if !cli.json {
+                    spinner.update(SpinnerMsg::SetMessage(format!(
+                        "Waiting for authorization... (server busy; retrying every {}s, {remaining_secs}s remaining)",
+                        poll_interval.as_secs()
+                    )));
+                }
+            }
+            PollDecision::Transient => {
+                consecutive_transient += 1;
+                if consecutive_transient >= MAX_CONSECUTIVE_TRANSIENT {
+                    if !cli.json {
+                        clear_inline(prev_lines)?;
+                    }
+                    let detail = last_transport_error
+                        .clone()
+                        .unwrap_or_else(|| "the server is not responding".to_string());
+                    if cli.json {
+                        println!(r#"{{"status":"error","message":"Connection lost"}}"#);
+                    } else {
+                        let mut err = io::stderr();
+                        let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                        fmt.newline()?;
+                        fmt.write_raw("  ")?;
+                        fmt.error(&format!("Connection lost: {detail}"))?;
+                    }
+                    return Ok(());
+                }
+                poll_interval = backoff_interval(poll_interval, None);
+            }
+            PollDecision::Denied => {
                 if !cli.json {
                     clear_inline(prev_lines)?;
                 }
                 if cli.json {
-                    println!(r#"{{"status":"error","message":"Connection lost"}}"#);
+                    println!(r#"{{"status":"denied","message":"Authorization denied"}}"#);
                 } else {
                     let mut err = io::stderr();
                     let mut fmt = Formatter::stdout(&mut err, theme.clone());
                     fmt.newline()?;
                     fmt.write_raw("  ")?;
-                    fmt.error(&format!("Connection lost: {e}"))?;
+                    fmt.error("Authorization denied")?;
+                }
+                return Ok(());
+            }
+            PollDecision::Expired => {
+                if !cli.json {
+                    clear_inline(prev_lines)?;
+                }
+                if cli.json {
+                    println!(r#"{{"status":"expired","message":"Code expired"}}"#);
+                } else {
+                    let mut err = io::stderr();
+                    let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                    fmt.newline()?;
+                    fmt.write_raw("  ")?;
+                    fmt.error("Code expired. Please try again.")?;
+                }
+                return Ok(());
+            }
+            PollDecision::Fatal { http_status } => {
+                if !cli.json {
+                    clear_inline(prev_lines)?;
+                }
+                if cli.json {
+                    println!(r#"{{"status":"error","code":{http_status}}}"#);
+                } else {
+                    let mut err = io::stderr();
+                    let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                    fmt.newline()?;
+                    fmt.write_raw("  ")?;
+                    fmt.error(&format!("Server error ({http_status})"))?;
+                    fmt.newline()?;
+                    print_token_fallback_hint(&mut fmt)?;
                 }
                 return Ok(());
             }
@@ -534,15 +834,10 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
         }
     }
 
-    // Save config
-    {
-        use crate::cloud::CloudConfig;
-
-        let mut config = CloudConfig::load().unwrap_or_default();
-        config.endpoint = endpoint.to_string();
-        config.token = Some(token.to_string());
-        config.save()?;
-    }
+    // Credentials live at user level (`~/.cas/cloud.json`), so this works from
+    // any directory — including outside a CAS project — and logs the whole
+    // machine in once (cas-046d / Ben #3, #4).
+    store_login_credentials(endpoint, token, None, None)?;
 
     // Best-effort: fetch team membership from /api/me and cache into
     // ~/.cas/cloud.json so T3's resolution chain works immediately.
@@ -590,6 +885,51 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
     Ok(())
 }
 
+/// Report the best-effort `/api/me` membership refresh that follows a login.
+fn report_membership_outcome(outcome: &FetchTeamsOutcome) {
+    match outcome {
+        FetchTeamsOutcome::Updated { team_count } => {
+            tracing::debug!(
+                team_count,
+                "fetched and cached team membership from /api/me"
+            );
+        }
+        FetchTeamsOutcome::Empty => {
+            tracing::debug!("logged in but /api/me returned zero team memberships");
+        }
+        FetchTeamsOutcome::AuthFailed => {
+            eprintln!(
+                "warning: could not fetch team membership (/api/me returned 401). \
+                 Run `cas login` again to refresh."
+            );
+        }
+        FetchTeamsOutcome::NetworkError(msg) => {
+            eprintln!(
+                "warning: could not fetch team membership: {msg}. \
+                 Team auto-scope will work after the next `cas cloud sync`."
+            );
+        }
+    }
+}
+
+/// Point at the token path, which does not depend on the device-approval page.
+///
+/// The hosted `/device` page currently rejects an otherwise valid code with
+/// "Missing or invalid Authorization header" even for a signed-in session
+/// (cas-046d, server-side; see `docs/reports/2026-08-18-cloud-device-login-server-defect.md`).
+/// Until that is fixed, browser approval can fail through no fault of the CLI,
+/// so every device-flow screen names the working alternative.
+fn print_token_fallback_hint(fmt: &mut Formatter) -> io::Result<()> {
+    fmt.write_muted("  If the approval page reports an authorization error, use a token instead:")?;
+    fmt.newline()?;
+    fmt.write_raw("    ")?;
+    fmt.write_accent("cas login --token <API-TOKEN>")?;
+    fmt.newline()?;
+    fmt.write_muted("  It works from any directory and logs in every project on this machine.")?;
+    fmt.newline()?;
+    fmt.newline()
+}
+
 /// Use the cached-membership resolver behind `cas cloud team set` to make a
 /// sole team membership active for the project that just logged in. Failures
 /// remain non-fatal, matching the surrounding best-effort membership refresh.
@@ -626,7 +966,9 @@ fn execute_logout(cli: &Cli) -> anyhow::Result<()> {
     {
         use crate::cloud::CloudConfig;
 
-        let mut config = CloudConfig::load().unwrap_or_default();
+        // `load_effective` + `clear_login_credentials`: logging out is a
+        // machine-wide act, and it must work from outside a project too.
+        let config = CloudConfig::load_effective();
 
         if !config.is_logged_in() {
             if cli.json {
@@ -646,8 +988,7 @@ fn execute_logout(cli: &Cli) -> anyhow::Result<()> {
         }
 
         let email = config.email.clone().unwrap_or_else(|| "user".to_string());
-        config.logout();
-        config.save()?;
+        clear_login_credentials()?;
 
         if cli.json {
             let output = serde_json::json!({
@@ -674,7 +1015,9 @@ fn execute_whoami(cli: &Cli) -> anyhow::Result<()> {
     {
         use crate::cloud::CloudConfig;
 
-        let config = CloudConfig::load().unwrap_or_default();
+        // Machine-wide credentials, so `cas whoami` answers the same question
+        // in every directory (cas-046d).
+        let config = CloudConfig::load_effective();
 
         if config.is_logged_in() {
             if cli.json {

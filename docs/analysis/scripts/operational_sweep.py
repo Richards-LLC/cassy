@@ -390,7 +390,11 @@ def proposals(findings: Sequence[dict[str, Any]], cards: dict[str, dict[str, Any
     for finding in findings:
         if not finding["evidence_card_ids"]:
             continue
-        card = cards[finding["evidence_card_ids"][0]]
+        candidate_cards = [cards[item] for item in finding["evidence_card_ids"]]
+        card = next(
+            (item for item in candidate_cards if item.get("epoch_class") == "clean-post" and item.get("excerpt")),
+            next((item for item in candidate_cards if item.get("excerpt")), candidate_cards[0]),
+        )
         drafts.append({
             "proposal_id": f"proposal:{finding['id']}",
             "status": "draft-human-review-required",
@@ -411,12 +415,18 @@ def proposals(findings: Sequence[dict[str, Any]], cards: dict[str, dict[str, Any
 
 def add_m3_m4_claims(
     verdicts: dict[str, Any], contradictions: dict[str, Any], cards: dict[str, dict[str, Any]], claims: list[dict[str, Any]],
-) -> None:
+) -> list[dict[str, Any]]:
+    proposal_findings = []
     for verdict in verdicts.get("verdicts", []):
         evidence_ids = []
         for item in verdict.get("evidence_cards", []):
             card_id = f"m3:{verdict['id']}:{item.get('evidence_id')}"
-            cards[card_id] = {"card_id": card_id, "kind": "recurrence_evidence", **item}
+            cards[card_id] = {
+                "card_id": card_id,
+                "kind": "recurrence_evidence",
+                **{key: value for key, value in item.items() if key != "excerpt"},
+                "excerpt": compact(item.get("excerpt", "")),
+            }
             evidence_ids.append(card_id)
         epoch_id = f"epoch:{verdict['id']}"
         cards[epoch_id] = {
@@ -430,6 +440,18 @@ def add_m3_m4_claims(
             "statement": f"{verdict['id']} is {verdict['state']}: {verdict['reason']}",
             "evidence_card_ids": [epoch_id, *evidence_ids],
         })
+        if verdict.get("state") == "recurred" and evidence_ids:
+            proposal_findings.append({
+                "id": f"recurrence-{verdict['id']}",
+                "section": "recurrence_verdicts",
+                "title": f"Possible recurrence: {verdict.get('title') or verdict['id']}",
+                "statement": f"{verdict['id']} has clean-post symptom evidence: {verdict['reason']}",
+                "expected": (
+                    "After the fix is observed in the deployed binary, the fixed symptom should not appear "
+                    "in the clean-post window; a human must confirm the evidence is the same symptom."
+                ),
+                "evidence_card_ids": [epoch_id, *evidence_ids],
+            })
     for index, item in enumerate(contradictions.get("items", [])):
         memory = item.get("memory", {})
         verdict = item.get("verdict", {})
@@ -451,6 +473,16 @@ def add_m3_m4_claims(
             ),
             "evidence_card_ids": [card_id],
         })
+        if item.get("suggested_action"):
+            proposal_findings.append({
+                "id": f"memory-{memory.get('id', index)}-{verdict.get('id', index)}",
+                "section": "contradiction_queue",
+                "title": f"Review observed contradiction for memory {memory.get('id', 'unknown')}",
+                "statement": f"M4 suggests {item['suggested_action']} after a human reviews the memory-to-evidence link.",
+                "expected": "The memory should agree with behavior observed after the deployed-binary boundary.",
+                "evidence_card_ids": [card_id],
+            })
+    return proposal_findings
 
 
 def render_report(payload: dict[str, Any]) -> str:
@@ -461,10 +493,9 @@ def render_report(payload: dict[str, Any]) -> str:
         "## Corpus and watermark status", "",
         f"M1 source status: **{payload['backlog']['status']}**; estimated remaining cursor units/bytes: "
         f"{payload['backlog'].get('remaining_total', 'unknown')}. This is reported separately from new evidence since the prior sweep.", "",
-        f"New current evidence units since `{payload['run']['since'] or 'first run'}`: "
-        f"{payload['new_evidence']['metadata']['new_units_total']} (showing {payload['new_evidence']['metadata']['returned']}).", "",
     ]
     sections = (
+        ("new_evidence", "New evidence since the previous run"),
         ("recurring_failure", "Top recurring failure narratives"),
         ("instruction_drift", "Instruction-drift clusters"),
         ("recurrence_verdicts", "Deployed-binary recurrence verdicts"),
@@ -568,7 +599,24 @@ def run(config: dict[str, Any], argv: Sequence[str]) -> Path:
             runner, python, m2_script, index, units_db, probes, int(config.get("top", 5))
         )
         cards.update({card["card_id"]: card for card in new_cards})
+        watermark_card_id = f"m1-watermark:{run_id}"
+        cards[watermark_card_id] = {
+            "card_id": watermark_card_id,
+            "kind": "m1_watermark_receipt",
+            "since": since,
+            "new_evidence": new_metadata,
+            "backlog": backlog,
+        }
         claims = [
+            {
+                "section": "new_evidence",
+                "statement": (
+                    f"M1 contains {new_metadata['new_units_total']} current unit(s) first observed since "
+                    f"{since or 'the first sweep'}; {new_metadata['returned']} review card(s) are included."
+                ),
+                "evidence_card_ids": [watermark_card_id, *[card["card_id"] for card in new_cards[:10]]],
+            }
+        ] + [
             {
                 "section": finding["section"],
                 "statement": finding["statement"],
@@ -603,9 +651,9 @@ def run(config: dict[str, Any], argv: Sequence[str]) -> Path:
             [contradiction_path],
         )
         contradictions = json.loads(contradiction_path.read_text())
-        add_m3_m4_claims(verdicts, contradictions, cards, claims)
+        followup_findings = add_m3_m4_claims(verdicts, contradictions, cards, claims)
         invocation = " ".join(shlex.quote(part) for part in argv)
-        drafts = proposals(findings, cards, invocation)
+        drafts = proposals([*followup_findings, *findings], cards, invocation)
         report_json = run_dir / "report.json"
         report_md = run_dir / "report.md"
         payload = {

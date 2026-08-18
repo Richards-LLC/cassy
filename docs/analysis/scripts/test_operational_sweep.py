@@ -118,6 +118,24 @@ class EvidenceTest(unittest.TestCase):
         self.assertNotIn("gh issue create", source)
         self.assertNotIn("mcp__cs__task", source)
 
+    def test_recurrence_verdict_becomes_a_human_reviewed_draft(self) -> None:
+        cards = {}
+        claims = []
+        followups = sweep.add_m3_m4_claims(
+            {"verdicts": [{
+                "id": "cas-fix", "title": "fixed symptom", "state": "recurred", "reason": "clean-post match",
+                "epoch_evidence": {"clean_post_from": "2026-08-12T00:00:00Z"},
+                "exposure": {"clean_post": 100},
+                "evidence_cards": [{"evidence_id": "9", "excerpt": "x" * 400}],
+            }]},
+            {"items": []}, cards, claims,
+        )
+        self.assertEqual(followups[0]["id"], "recurrence-cas-fix")
+        self.assertLessEqual(len(cards["m3:cas-fix:9"]["excerpt"]), 280)
+        self.assertTrue(claims[0]["evidence_card_ids"])
+        draft = sweep.proposals(followups, cards, "sweep")[0]
+        self.assertIn("x" * 20, draft["issue_body"])
+
 
 class EndToEndTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -147,6 +165,7 @@ class EndToEndTest(unittest.TestCase):
         payload = json.loads(report.with_name("report.json").read_text())
         self.assertTrue(payload["claims"])
         self.assertTrue(all(claim["evidence_card_ids"] for claim in payload["claims"]))
+        self.assertIn("new_evidence", {claim["section"] for claim in payload["claims"]})
         self.assertEqual(payload["run"]["cost"]["model_turns"], 0)
         self.assertEqual(payload["run"]["cost"]["m2_queries"], 1)
         self.assertGreater(payload["run"]["latency_ms"], 0)

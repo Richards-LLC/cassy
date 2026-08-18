@@ -712,6 +712,25 @@ fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &s
     }
 }
 
+/// Render the existing omitted model/effort notice for every resolved worker
+/// spec. A multi-worker request may resolve to different harnesses, so keeping
+/// this per-spec prevents the receipt from silently dropping the policy
+/// fallback that the legacy single-spec response exposed.
+fn spawn_specs_warning(
+    model_explicit: bool,
+    effort_explicit: bool,
+    specs: &[cas_mux::WorkerSpec],
+) -> String {
+    specs
+        .iter()
+        .map(|spec| {
+            let spec_json = serde_json::to_string(spec)
+                .expect("WorkerSpec must serialize after queue payload serialization");
+            spawn_spec_warning(model_explicit, effort_explicit, &spec_json)
+        })
+        .collect()
+}
+
 fn current_factory_session() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION")
         .ok()
@@ -1434,7 +1453,16 @@ impl CasService {
         let config_dir_notice = (!config_dir_warnings.is_empty())
             .then(|| format!("\nWarning: {}", config_dir_warnings.join("\nWarning: ")))
             .unwrap_or_default();
-        let spec_json_owned = if slots == 1 && req.workers.is_none() {
+        // Keep the legacy single-WorkerSpec queue payload for a uniform batch
+        // that did not request MCP per-worker overrides. Besides preserving
+        // existing consumers, this lets the daemon retain its inexpensive
+        // clone-at-launch path. A project `[[factory.workers]]` difference
+        // (including a configured name/account) requires the resolved vector.
+        let legacy_single_spec_payload = req.workers.is_none()
+            && specs
+                .first()
+                .is_some_and(|first| specs.iter().all(|spec| spec == first));
+        let spec_json_owned = if legacy_single_spec_payload {
             serde_json::to_string(&specs[0])
         } else {
             serde_json::to_string(&specs)
@@ -1447,10 +1475,10 @@ impl CasService {
         })?;
 
         let spec_summary = spawn_specs_summary(&specs, &worker_names);
-        let spec_warning = if specs.len() == 1 {
+        let spec_warning = if legacy_single_spec_payload {
             spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned)
         } else {
-            String::new()
+            spawn_specs_warning(req.model.is_some(), req.effort.is_some(), &specs)
         };
         let isolation_warning = if isolate {
             String::new()
@@ -8791,6 +8819,26 @@ mod tests {
         );
         assert!(
             warning.contains("pass model=/effort= explicitly to tier the spawn"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn omitted_fields_warning_survives_multi_worker_specs() {
+        let _home = TestEnvGuard::temp_home();
+        let specs = [
+            decoded_spawn_spec(&build_spawn_spec_json(None, None, None).unwrap()),
+            decoded_spawn_spec(&build_spawn_spec_json(Some("claude"), None, None).unwrap()),
+        ];
+
+        let warning = spawn_specs_warning(false, false, &specs);
+
+        assert!(
+            warning.contains("policy default codex/gpt-5.6-terra/high"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("policy default claude/sonnet/high"),
             "{warning}"
         );
     }

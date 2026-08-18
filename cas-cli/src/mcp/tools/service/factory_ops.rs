@@ -66,6 +66,60 @@ fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve and validate an explicit Codex account directory (a `CODEX_HOME`
+/// override) before its spawn request reaches the daemon (cas-4a5e).
+///
+/// The Codex analog of [`preflight_claude_config_dir`], but deliberately a
+/// SEPARATE, harder failure than [`cas_factory::apply_codex_fallback`]'s
+/// generic "codex isn't available anywhere, fall back to claude" path: an
+/// explicit `config_dir` is the caller naming ONE specific account, not
+/// asking "is codex usable at all" — a typo'd or wrong directory must fail
+/// here, by name, rather than being silently absorbed into a rewrite to
+/// `claude`. Before this existed, that silent rewrite is exactly how the
+/// original incident produced a triply misleading error: a codex account
+/// directory surviving onto a claude-rewritten spec, checked by
+/// [`preflight_claude_config_dir`] against files (`settings.json`,
+/// `.credentials.json`) a codex directory never has — wrong provider, wrong
+/// file, wrong cause. Call this BEFORE `apply_codex_fallback` so a bad
+/// explicit codex dir is rejected outright instead of ever reaching that
+/// rewrite.
+///
+/// Only checks `auth.json` directly under the (tilde-expanded) directory —
+/// the `CODEX_HOME` layout `push_codex_home_env` (cas-pty) actually spawns
+/// with, NOT the `~/.codex` default-home layout.
+fn preflight_codex_config_dir(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("config_dir is empty; expected a Codex CODEX_HOME directory".to_string());
+    }
+    let path = trimmed.strip_prefix('~').map_or_else(
+        || std::path::PathBuf::from(trimmed),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| home.join(suffix.trim_start_matches('/')))
+                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
+        },
+    );
+    let auth_path = path.join("auth.json");
+    // `File::open` on a plain directory succeeds on Linux (you can open a
+    // directory fd read-only) — an explicit `is_file()` metadata check is
+    // required here, matching `codex_auth_present_at`'s probe semantics, or
+    // a directory literally named `auth.json` would misread as "logged in".
+    match std::fs::metadata(&auth_path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "config_dir preflight failed: {} exists but is not a file (expected Codex's auth.json)",
+            auth_path.display()
+        )),
+        Err(error) => Err(format!(
+            "config_dir preflight failed: missing or unreadable auth.json at {}: {error} \
+             (expected a Codex CODEX_HOME directory — run `codex login` under this \
+             CODEX_HOME, or check for a typo in config_dir)",
+            auth_path.display()
+        )),
+    }
+}
+
 /// Heartbeat age at which a worker is considered **stale** and becomes
 /// eligible for the opportunistic prune in `factory_worker_status`.
 ///
@@ -1231,6 +1285,31 @@ impl CasService {
         let mut codex_fallback_notice = String::new();
         let mut config_dir_notice = String::new();
         if let Ok(mut spec) = serde_json::from_str::<cas_mux::WorkerSpec>(&spec_json_owned) {
+            // cas-4a5e: `config_dir`/`requester_config_dir` MUST be on the
+            // spec before `apply_codex_fallback` runs below — that fallback's
+            // auth probe reads them to decide whether THIS account is
+            // logged in, not just the `~/.codex` default. Assigning them
+            // after the fallback call (the previous ordering) left the probe
+            // blind to an explicit profile: a fully logged-in
+            // `config_dir` got silently rewritten to `claude` because only
+            // `~/.codex` was ever checked.
+            spec.config_dir = req.config_dir.clone();
+            spec.requester_config_dir = requester_account_dir(spec.cli);
+
+            // Explicit codex account dirs are validated BEFORE the fallback
+            // runs: naming a specific account and having it be wrong (typo,
+            // never logged in) is a caller error that must fail loudly and
+            // by name here, not get silently absorbed into a claude rewrite
+            // — see `preflight_codex_config_dir`'s doc comment for why that
+            // silent path is exactly how the original incident's misleading
+            // error happened.
+            if spec.cli == cas_mux::SupervisorCli::Codex {
+                if let Some(config_dir) = spec.config_dir.as_deref() {
+                    preflight_codex_config_dir(config_dir)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                }
+            }
+
             let strict_cli =
                 strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
             let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
@@ -1247,9 +1326,12 @@ impl CasService {
                 codex_fallback_notice = format!("\nWarning: {}", notices.join("\nWarning: "));
                 // The fallback rewrote `cli` (and possibly `model`) — the
                 // queued spec and the summary shown back to the caller must
-                // reflect what will ACTUALLY spawn, not the pre-fallback request.
+                // reflect what will ACTUALLY spawn, not the pre-fallback
+                // request. It also drops a codex-only `config_dir`/
+                // `requester_config_dir` when it rewrites `cli`, so the
+                // Claude preflight below never runs against a codex
+                // directory.
             }
-            spec.config_dir = req.config_dir.clone();
             if spec.cli == cas_mux::SupervisorCli::Claude {
                 if let Some(config_dir) = spec.config_dir.as_deref() {
                     preflight_claude_config_dir(config_dir)
@@ -8048,6 +8130,56 @@ mod tests {
             let error = preflight_claude_config_dir(profile.to_str().unwrap()).unwrap_err();
             assert!(error.contains(expected), "expected {expected} in {error}");
         }
+    }
+
+    /// cas-4a5e: a codex config_dir whose `auth.json` is present must pass.
+    #[test]
+    fn codex_config_dir_preflight_passes_when_auth_json_present() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("auth.json"), "{}").unwrap();
+        preflight_codex_config_dir(temp.path().to_str().unwrap()).unwrap();
+    }
+
+    /// cas-4a5e: a typo'd/missing codex config_dir must fail with a message
+    /// naming the exact `auth.json` path that was checked — not a generic
+    /// error and not the Claude-shaped wording.
+    #[test]
+    fn codex_config_dir_preflight_names_the_checked_auth_json_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_dir = temp.path().join("no-such-account");
+        let error = preflight_codex_config_dir(missing_dir.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.contains(&missing_dir.join("auth.json").display().to_string()),
+            "error must name the checked auth.json path — got: {error}"
+        );
+        assert!(
+            !error.contains("settings.json") && !error.contains(".credentials.json"),
+            "codex preflight must not use claude-shaped wording — got: {error}"
+        );
+    }
+
+    /// A codex config_dir whose `auth.json` is actually a directory (not a
+    /// file) must fail the same way as missing — plain `File::open` would
+    /// succeed on a directory on Linux, so the preflight must check
+    /// `is_file()` explicitly.
+    #[test]
+    fn codex_config_dir_preflight_fails_when_auth_json_is_a_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("auth.json")).unwrap();
+        let error = preflight_codex_config_dir(temp.path().to_str().unwrap()).unwrap_err();
+        assert!(error.contains("auth.json"), "{error}");
+    }
+
+    /// An explicit codex config_dir does NOT nest a `.codex/` subdirectory —
+    /// it IS the CODEX_HOME. A `.codex/auth.json` nested one level down must
+    /// not satisfy the preflight (that would be checking the wrong layout).
+    #[test]
+    fn codex_config_dir_preflight_rejects_nested_dot_codex_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join(".codex");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("auth.json"), "{}").unwrap();
+        assert!(preflight_codex_config_dir(temp.path().to_str().unwrap()).is_err());
     }
 
     #[test]

@@ -148,7 +148,7 @@ fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
 /// `extra_params` are appended verbatim (already `key=value` encoded); the
 /// `project_id=` parameter is always appended by this function. If
 /// `get_project_canonical_id()` returns `None` — i.e. the caller is not inside
-/// a Cassy project directory, which is the realistic daemon / cwd-independent
+/// a CAS project directory, which is the realistic daemon / cwd-independent
 /// case — no URL is produced at all and the pull aborts. Omitting the scope
 /// would ask the server for *every* project's rows, which is exactly the
 /// cross-project contamination this path exists to prevent.
@@ -173,7 +173,7 @@ pub(crate) fn build_scoped_pull_url_with(
     resolve_project_id: impl FnOnce() -> Option<String>,
 ) -> Result<(String, String), CasError> {
     let project_id = resolve_project_id().ok_or_else(|| {
-        CasError::Other("Cannot pull: not inside a Cassy project directory".to_string())
+        CasError::Other("Cannot pull: not inside a CAS project directory".to_string())
     })?;
     let mut params: Vec<String> = extra_params.to_vec();
     params.push(format!("project_id={}", project_id.replace('/', "%2F")));
@@ -1633,7 +1633,7 @@ mod tests {
             .expect_err("an unresolvable project scope must abort the pull, not drop the scope");
         let message = err.to_string();
         assert!(
-            message.contains("not inside a Cassy project directory"),
+            message.contains("not inside a CAS project directory"),
             "unexpected error message: {message}"
         );
     }

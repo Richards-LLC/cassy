@@ -170,7 +170,7 @@ fn help_piped_no_ansi() {
         "Help output contains ANSI escape codes:\n{stdout}"
     );
     assert!(
-        stdout.contains("\nCassy\n"),
+        stdout.starts_with("Cassy\n"),
         "Piped help must fall back to the plain Cassy wordmark:\n{stdout}"
     );
     assert!(

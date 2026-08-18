@@ -33,7 +33,7 @@ impl ServerHandler for CasService {
                 website_url: None,
             },
             instructions: Some(
-                "Cassy provides unified memory, tasks, rules, and skills."
+                "CAS (Coding Agent System) provides unified memory, tasks, rules, and skills."
                     .to_string(),
             ),
         }

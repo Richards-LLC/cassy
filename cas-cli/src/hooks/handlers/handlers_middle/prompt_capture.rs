@@ -153,7 +153,7 @@ fn handle_user_prompt_submit_capture(
     // prompts do not earn a durable context entry merely by containing a
     // question word or being very long.
     // Machine relay metadata reaches this hook as a typed HookInput field, not
-    // by re-parsing a rendered `Cassy provenance:` prefix.  Absence is the
+    // by re-parsing a rendered `CAS provenance:` prefix.  Absence is the
     // explicit operator case: a factory worker's genuine instruction must be
     // retained while every relay origin stays out of durable Context.
     let operator_submitted = matches!(

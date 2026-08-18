@@ -49,7 +49,7 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
         "first-delivery"
     };
     format!(
-        "Cassy provenance: notification_id={} origin={} queued_at={} delivery={}",
+        "CAS provenance: notification_id={} origin={} queued_at={} delivery={}",
         message.id,
         origin,
         message.created_at.to_rfc3339(),
@@ -643,7 +643,7 @@ impl CasService {
                 ));
             }
             message = format!(
-                "[Cassy reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
+                "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
             );
         }
 

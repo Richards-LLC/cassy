@@ -112,7 +112,7 @@ pub fn supervisor_owned_at(cas_root: Option<&std::path::Path>) -> bool {
         .unwrap_or_else(|| crate::config::CodeReviewConfig::default().supervisor_owned())
 }
 
-/// Harness-native tools that reach the review pipeline WITHOUT touching Cassy
+/// Harness-native tools that reach the review pipeline WITHOUT touching CAS
 /// MCP (cas-bcfb / GH #125).
 ///
 /// This is the gap that made the cas-4fef gate a no-op in practice: it was
@@ -262,7 +262,7 @@ mod tests {
         for id in [
             "cas-code-review",
             "/cas-code-review",
-            "Cassy-Code-Review",
+            "CAS-Code-Review",
             "  cas-code-review  ",
             "cas_code_review",
         ] {

@@ -1331,7 +1331,7 @@ mod tests {
             Some("cas-a9ab".to_string())
         );
         assert_eq!(
-            extract_task_id("Cassy-4181 uppercase"),
+            extract_task_id("CAS-4181 uppercase"),
             Some("cas-4181".to_string())
         );
         assert_eq!(

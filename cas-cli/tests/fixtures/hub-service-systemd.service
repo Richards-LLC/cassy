@@ -1,5 +1,5 @@
 [Unit]
-Description=CAS Commander hub
+Description=Cassy Commander hub
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

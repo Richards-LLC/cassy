@@ -308,7 +308,7 @@ fn test_remove_single_worker() {
 #[test]
 fn test_slugify_title() {
     assert_eq!(slugify_title("Add User Auth"), "add-user-auth");
-    assert_eq!(slugify_title("Cassy v1"), "cas-v1");
+    assert_eq!(slugify_title("Cassy v1"), "cassy-v1");
     assert_eq!(slugify_title("Fix bug #123"), "fix-bug-123");
     assert_eq!(slugify_title("  Multiple   Spaces  "), "multiple-spaces");
     assert_eq!(

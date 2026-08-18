@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(remaining, "search for rust programming");
 
         // Case insensitive
-        let (ids, _) = extract_id_patterns("Cassy-ABCD cas-1234");
+        let (ids, _) = extract_id_patterns("CAS-ABCD cas-1234");
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"cas-abcd".to_string()));
         assert!(ids.contains(&"cas-1234".to_string()));

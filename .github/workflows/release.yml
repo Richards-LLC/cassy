@@ -66,6 +66,12 @@ jobs:
       - name: Fail fast on release inputs
         run: ./scripts/check-release-preflight.sh "${GITHUB_REF_NAME}"
 
+      # Same compiler cache contract as ci.yml: every compiling lane publishes
+      # its hit rate. Observability only — this step can never fail a release.
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Verify Release Inputs"
+
   build:
     name: Build Linux x86_64
     runs-on: ubuntu-latest
@@ -145,6 +151,10 @@ jobs:
           name: cas-x86_64-unknown-linux-gnu
           path: cas-x86_64-unknown-linux-gnu.tar.gz
 
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Build Linux x86_64"
+
   build-macos:
     name: Build macOS ARM64
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
@@ -207,6 +217,10 @@ jobs:
         with:
           name: cas-aarch64-apple-darwin
           path: cas-aarch64-apple-darwin.tar.gz
+
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Build macOS ARM64"
 
   release:
     name: Create Release

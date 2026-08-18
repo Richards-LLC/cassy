@@ -10,6 +10,19 @@ name: CI
 # jobs below are deliberately fanned out rather than chained inside one job.
 # The four release/benchmark workloads used to run in series in a single job
 # and cost ~51m; they are independent and now run concurrently.
+#
+# COMPILER CACHE CONTRACT (cas-67a2). Every job here that compiles Rust must:
+#   1. configure the GitHub cache-v2 sccache backend — the workflow-level env
+#      below does that for all of them, and only `build-benchmark` opts out; and
+#   2. end with a `Report sccache stats` step calling
+#      scripts/ci-sccache-summary.sh, so each job's hit rate is visible in its
+#      job summary instead of buried in a log nobody greps.
+# Warm lanes measured 90-92% hits while pre-cache-v2 lanes measured 0-6%; that
+# difference is worth minutes per run and used to be invisible. The stats step
+# is observability only — it always exits 0 and can never redden a lane.
+# `build-benchmark` is the one deliberately uncached compiling job: it measures
+# a cold compiler, so it gets neither the backend nor a stats step (see below).
+# scripts/test-ci-test-tiers.sh pins all of this.
 
 on:
   pull_request:
@@ -72,6 +85,10 @@ jobs:
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
+
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Scoped Validation"
 
   # Required checks always start: path selection happens in steps, never with
   # job-level `paths` filters, so their exact ruleset contexts keep reporting.
@@ -138,6 +155,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
 
+      - name: Report sccache stats
+        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: ./scripts/ci-sccache-summary.sh "Fast Validation — preflight"
+
   # Compile the workspace test graph once. The archive contains the binaries
   # and nextest metadata needed by the shard jobs below, avoiding three cold
   # runners rebuilding the same graph before their disjoint test partitions.
@@ -199,6 +220,12 @@ jobs:
             fast-validation-suite-runner.tar.gz
           retention-days: 1
           compression-level: 0
+
+      # This lane compiles the whole workspace test graph, so its hit rate is
+      # the single best predictor of the required critical path.
+      - name: Report sccache stats
+        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: ./scripts/ci-sccache-summary.sh "Fast Validation — suite archive build"
 
   fast-validation-suite-shards:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
@@ -327,6 +354,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --doc
 
+      - name: Report sccache stats
+        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: ./scripts/ci-sccache-summary.sh "Fast Validation — doctests"
+
   # The repository ruleset requires this exact check name. It reports success
   # only after preflight, all exhaustive nextest shards, and doctests pass.
   # Queue (rather than cancel) matching head-SHA checks per cas-9eaf; because
@@ -396,6 +427,10 @@ jobs:
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo clippy -p cas --all-targets
+
+      - name: Report sccache stats
+        if: always() && steps.tree-dedupe.outputs.run-heavy != 'false'
+        run: ./scripts/ci-sccache-summary.sh "Clippy"
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
@@ -491,6 +526,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas --no-default-features
 
+      - name: Report sccache stats
+        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: ./scripts/ci-sccache-summary.sh "macOS Check"
+
   # A receipt is trustworthy only after every per-tree PR lane passes. The
   # artifact name is the checked-out Git tree, so a merge commit with identical
   # contents can reuse it even though the commit SHA changed.
@@ -577,6 +616,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --no-run
 
+      - name: Report sccache stats
+        if: always() && steps.tree-dedupe.outputs.run-heavy != 'false'
+        run: ./scripts/ci-sccache-summary.sh "Test Compile Guard"
+
   # EPIC cas-c351 / cas-9e02: run the A2/A3/B3 panic-isolation tests under the
   # release profiles to catch any future profile change that silently
   # re-introduces panic=abort, or any release-mode codegen that breaks the
@@ -612,6 +655,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: make -C cas-cli test-release-panic-release
 
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Panic Isolation — release profile"
+
   panic-isolation-release-fast:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
     if: >-
@@ -634,6 +681,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: make -C cas-cli test-release-panic-release-fast
 
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "Panic Isolation — release-fast profile"
+
   # Build-time measurement only. This job executes no tests.
   #
   # save-cache: false is load-bearing. scripts/benchmark-build.sh starts with
@@ -647,9 +698,14 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # This job measures a genuinely cold compiler. Letting the repaired remote
-    # sccache serve objects after `cargo clean` would turn the benchmark into a
-    # cache benchmark and make its historical regression threshold meaningless.
+    # DELIBERATELY UNCACHED — the one compiling job exempt from the compiler
+    # cache contract at the top of this file. It measures a genuinely cold
+    # compiler; letting the remote sccache serve objects after `cargo clean`
+    # would turn the benchmark into a cache benchmark and make its historical
+    # regression threshold meaningless. Both overrides below are load-bearing,
+    # and this job intentionally has no `Report sccache stats` step: there is no
+    # cache to report on, and a 0% summary here would read as a regression.
+    # Do not "fix" this lane by enabling the cache.
     env:
       RUSTC_WRAPPER: ""
       SCCACHE_GHA_ENABLED: "false"

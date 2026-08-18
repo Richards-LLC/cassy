@@ -91,8 +91,11 @@ cas codex --bare work       # plain Codex on that account instead of the factory
 `cas codex` with more than one detected account, run in an interactive terminal,
 stops and asks which account to use — it never silently loads a default. An
 account whose login state cannot be determined is shown as unknown and stays
-selectable rather than being hidden. Explicit `cas codex <profile>` and every
-non-interactive invocation skip the prompt.
+selectable rather than being hidden. The last entry in the picker is **new
+login**: it asks for an email, creates `~/.codex-<email>`, seeds it, runs
+`codex login` there, and launches on that account once it reports signed in.
+Explicit `cas codex <profile>` and every non-interactive invocation skip the
+prompt.
 
 `cas codex login <name>` seeds a new profile home by symlinking the shared
 configuration surface from `~/.codex` — `config.toml`, `AGENTS.md`, `agents/`,

@@ -379,23 +379,112 @@ fn should_prompt_for_profile(
         && profiles.len() > 1
 }
 
+/// The label of the picker's trailing "add an account" entry.
+const NEW_LOGIN_LABEL: &str = "+ new login (sign in another ChatGPT account)…";
+
+/// What the operator picked.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ProfileChoice {
+    Existing(String),
+    NewLogin,
+}
+
+/// Match a picker selection back to a choice.
+///
+/// Split out from the interactive prompt so the mapping is testable without a
+/// TTY — the prompt itself is just `inquire` plumbing around this.
+fn choice_for_label(labels: &[String], profiles: &[Profile], selected: &str) -> Option<ProfileChoice> {
+    if selected == NEW_LOGIN_LABEL {
+        return Some(ProfileChoice::NewLogin);
+    }
+    labels
+        .iter()
+        .position(|label| label == selected)
+        .and_then(|index| profiles.get(index))
+        .map(|profile| ProfileChoice::Existing(profile.name.clone()))
+}
+
 /// Present the account picker for codex profiles.
 ///
 /// Every detected profile is offered, annotated with its login state; `Unknown`
-/// is selectable and marked rather than hidden.
-fn prompt_for_profile(profiles: &[Profile]) -> Result<String> {
+/// is selectable and marked rather than hidden. The last entry adds a brand new
+/// account (operator amendment, 2026-08-18).
+fn prompt_for_choice(profiles: &[Profile]) -> Result<ProfileChoice> {
     let labels: Vec<String> = profiles.iter().map(profile_choice_label).collect();
+    let mut options = labels.clone();
+    options.push(NEW_LOGIN_LABEL.to_string());
 
-    let choice = inquire::Select::new("Choose Codex account", labels.clone())
+    let selected = inquire::Select::new("Choose Codex account", options)
         .with_help_message("This selection applies only to this Codex session")
         .prompt()
         .context("Codex account selection cancelled")?;
 
-    let index = labels
-        .iter()
-        .position(|label| label == &choice)
-        .context("selected Codex account no longer resolves")?;
-    Ok(profiles[index].name.clone())
+    choice_for_label(&labels, profiles, &selected)
+        .context("selected Codex account no longer resolves")
+}
+
+/// Resolve the picker to a profile name, running a new login when asked.
+fn prompt_for_profile(home: &Path, profiles: &[Profile]) -> Result<String> {
+    match prompt_for_choice(profiles)? {
+        ProfileChoice::Existing(name) => Ok(name),
+        ProfileChoice::NewLogin => new_login(home),
+    }
+}
+
+/// Validate the email an operator typed into the new-login prompt.
+///
+/// The value becomes a directory name (`~/.codex-<email>`, matching the existing
+/// `~/.claude-<email>` dirs), so anything that could escape the home directory or
+/// collide with the main profile is refused rather than sanitised into something
+/// the operator did not ask for.
+fn validate_new_profile_name(raw: &str) -> Result<String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        anyhow::bail!("an account name or email is required");
+    }
+    if name == "main" {
+        anyhow::bail!("`main` is the existing ~/.codex account; choose it from the list instead");
+    }
+    if name.contains(['/', '\\', '\0']) || name.starts_with('.') || name.starts_with('-') {
+        anyhow::bail!("`{name}` cannot be used as a profile directory name");
+    }
+    Ok(name.to_string())
+}
+
+/// Create, seed and sign in a brand new codex account, then return its profile
+/// name so the caller can launch on it immediately.
+fn new_login(home: &Path) -> Result<String> {
+    let entered = inquire::Text::new("Email for the new ChatGPT account:")
+        .with_help_message("creates ~/.codex-<email> and runs `codex login` there")
+        .prompt()
+        .context("new Codex login cancelled")?;
+    let profile = validate_new_profile_name(&entered)?;
+    let profile_dir = resolve_profile_dir(home, &profile);
+
+    let report = seed_profile_dir(&home.join(".codex"), &profile_dir, SHARED_PROFILE_ENTRIES)
+        .with_context(|| format!("could not seed Codex profile {}", profile_dir.display()))?;
+    report_seeding(&report);
+    eprintln!("Signing in Codex account home: {}", profile_dir.display());
+
+    // Deliberately `status()` rather than `exec()`: this runs inside the launch
+    // path, so the process must survive the login and go on to start the factory
+    // on the account that was just created.
+    let status = build_codex_command(&profile, &profile_dir, &[OsString::from("login")])
+        .status()
+        .context("could not run `codex login`; install the Codex CLI or add it to PATH")?;
+    if !status.success() {
+        anyhow::bail!(
+            "`codex login` did not complete for {}; the account was not added",
+            profile_dir.display()
+        );
+    }
+    if probe_login_state(&profile, &profile_dir) == LoginState::LoggedOut {
+        anyhow::bail!(
+            "{} still reports `Not logged in` after the login flow",
+            profile_dir.display()
+        );
+    }
+    Ok(profile)
 }
 
 fn profile_choice_label(profile: &Profile) -> String {
@@ -499,7 +588,7 @@ pub fn execute(args: &CodexArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<(
         let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
         let profiles = scan_profiles(&home, active_dir.as_deref())?;
         if should_prompt_for_profile(None, &profiles, true, true) {
-            let profile = prompt_for_profile(&profiles)?;
+            let profile = prompt_for_profile(&home, &profiles)?;
             let profile_dir = resolve_profile_dir(&home, &profile);
             eprintln!("Using Codex account home: {}", profile_dir.display());
             set_profile_env(&profile, &profile_dir);
@@ -539,7 +628,7 @@ fn execute_bare(args: &CodexArgs) -> Result<()> {
             let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
             let profiles = scan_profiles(&home, active_dir.as_deref())?;
             if should_prompt_for_profile(None, &profiles, true, true) {
-                prompt_for_profile(&profiles)?
+                prompt_for_profile(home.as_path(), &profiles)?
             } else {
                 "main".to_string()
             }
@@ -848,6 +937,51 @@ mod tests {
             std::fs::read_to_string(profile.join("config.toml")).unwrap(),
             "model = \"mine\"\n"
         );
+    }
+
+    #[test]
+    fn picker_offers_a_new_login_entry_alongside_every_detected_account() {
+        let profiles = vec![
+            Profile {
+                name: "main".to_string(),
+                directory: PathBuf::from("/tmp/.codex"),
+                login_state: LoginState::LoggedIn,
+                active: true,
+            },
+            Profile {
+                name: "alt".to_string(),
+                directory: PathBuf::from("/tmp/.codex-alt"),
+                login_state: LoginState::Unknown,
+                active: false,
+            },
+        ];
+        let labels: Vec<String> = profiles.iter().map(profile_choice_label).collect();
+
+        assert_eq!(
+            choice_for_label(&labels, &profiles, &labels[1]),
+            Some(ProfileChoice::Existing("alt".to_string())),
+            "an unknown-state account must still be selectable"
+        );
+        assert_eq!(
+            choice_for_label(&labels, &profiles, NEW_LOGIN_LABEL),
+            Some(ProfileChoice::NewLogin)
+        );
+        assert_eq!(choice_for_label(&labels, &profiles, "gone"), None);
+    }
+
+    #[test]
+    fn new_profile_names_that_would_escape_the_home_directory_are_refused() {
+        assert_eq!(
+            validate_new_profile_name("  work@example.com  ").unwrap(),
+            "work@example.com"
+        );
+
+        for bad in ["", "   ", "main", "../escape", "a/b", ".hidden", "-flag"] {
+            assert!(
+                validate_new_profile_name(bad).is_err(),
+                "{bad:?} should be refused as a profile directory name"
+            );
+        }
     }
 
     #[test]

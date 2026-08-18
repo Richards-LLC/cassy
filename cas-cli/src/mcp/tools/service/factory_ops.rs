@@ -459,6 +459,28 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     effort: Option<&str>,
     project_config: Option<std::path::PathBuf>,
 ) -> Result<String, String> {
+    let mut specs =
+        build_spawn_specs_with_project_config(1, cli, model, effort, None, None, project_config)?;
+    let spec = specs
+        .pop()
+        .ok_or_else(|| "failed to resolve worker spec: no worker slots returned".to_string())?;
+    serde_json::to_string(&spec).map_err(|e| format!("failed to serialize WorkerSpec: {e}"))
+}
+
+/// Resolve one worker spec per spawn slot, applying the batch fields as
+/// defaults and the optional `workers=[{...}]` entries as the final cascade
+/// layer. This deliberately reuses `cas_factory::resolve_specs` rather than
+/// introducing an MCP-only interpretation of worker configuration.
+fn build_spawn_specs_with_project_config(
+    slots: usize,
+    cli: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    config_dir: Option<&str>,
+    workers_json: Option<&str>,
+    project_config: Option<std::path::PathBuf>,
+) -> Result<Vec<cas_mux::WorkerSpec>, String> {
+    let worker_spec_jsons = parse_spawn_worker_specs(workers_json, slots)?;
     let parsed_cli = parse_spawn_cli(cli)?;
     let parsed_effort = parse_spawn_effort(effort)?;
 
@@ -474,54 +496,117 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
         cli_flag: parsed_cli,
         model_flag: model.map(String::from),
         effort_flag: parsed_effort,
+        config_dir_flag: config_dir.map(String::from),
+        worker_spec_jsons: worker_spec_jsons.clone(),
         ..Default::default()
     };
-    let configured_cli = cas_factory::worker_slot_cli_configured(0, &sources)
-        .map_err(|e| format!("failed to inspect worker cli config: {e}"))?;
-    let configured_effort = cas_factory::worker_slot_effort_configured(0, &sources)
-        .map_err(|e| format!("failed to inspect worker effort config: {e}"))?;
-    let mut spec = cas_factory::resolve_specs(1, sources)
-        .map_err(|e| format!("failed to resolve worker spec: {e}"))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "failed to resolve worker spec: no worker slots returned".to_string())?;
+    let configured: Vec<(bool, bool)> = (0..slots)
+        .map(|slot| {
+            Ok((
+                cas_factory::worker_slot_cli_configured(slot, &sources)
+                    .map_err(|e| format!("failed to inspect worker cli config: {e}"))?,
+                cas_factory::worker_slot_effort_configured(slot, &sources)
+                    .map_err(|e| format!("failed to inspect worker effort config: {e}"))?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    let mut specs = cas_factory::resolve_specs(slots, sources)
+        .map_err(|e| format!("failed to resolve worker spec: {e}"))?;
 
     // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited, left AS-IS
     // per the task's own guidance: this default-cli auto-upgrade only ever
     // fires when the resolved default happens to be Claude (never Grok, since
     // nothing defaults TO Grok yet — it isn't a stock/default CLI at this
     // phase), so no Grok arm is needed here.
-    if cli.is_none() && !configured_cli && spec.cli == cas_mux::SupervisorCli::Claude {
-        spec.cli = cas_mux::SupervisorCli::Codex;
-    }
-    // cas-28a4 (GH #71): with no explicit `cli=`, an unambiguous model slug is
-    // the strongest statement of intent the caller made — it decides the
-    // harness rather than being dragged onto whatever the default resolved to
-    // (the live report: `model=claude-opus-4-5` spawned on Codex).
-    if cli.is_none() {
-        if let Some(model_cli) = model.and_then(cli_for_model_slug) {
-            if model_cli != spec.cli {
-                tracing::info!(
-                    target: "cas::factory",
-                    requested_model = %model.unwrap_or_default(),
-                    resolved_cli = %spec.cli.backend().name(),
-                    model_cli = %model_cli.backend().name(),
-                    "cas-28a4: explicit model slug overrides the resolved default cli"
-                );
-                spec.cli = model_cli;
+    for (slot, spec) in specs.iter_mut().enumerate() {
+        let override_value = worker_spec_jsons
+            .get(slot)
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+        let override_has = |field| {
+            override_value
+                .as_ref()
+                .and_then(|value| value.get(field))
+                .is_some()
+        };
+        let cli_explicit = cli.is_some() || override_has("cli");
+        let model_explicit = model.is_some() || override_has("model");
+        let effort_explicit = effort.is_some() || override_has("effort");
+        let (configured_cli, configured_effort) = configured[slot];
+
+        if !cli_explicit && !configured_cli && spec.cli == cas_mux::SupervisorCli::Claude {
+            spec.cli = cas_mux::SupervisorCli::Codex;
+        }
+        // cas-28a4 (GH #71): an unambiguous per-worker model slug is the
+        // strongest per-slot statement of intent when cli was omitted.
+        let requested_model = override_value
+            .as_ref()
+            .and_then(|value| value.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .or(model);
+        if !cli_explicit {
+            if let Some(model_cli) = requested_model.and_then(cli_for_model_slug) {
+                if model_cli != spec.cli {
+                    tracing::info!(
+                        target: "cas::factory",
+                        requested_model = %requested_model.unwrap_or_default(),
+                        resolved_cli = %spec.cli.backend().name(),
+                        model_cli = %model_cli.backend().name(),
+                        slot = slot + 1,
+                        "cas-28a4: explicit model slug overrides the resolved default cli"
+                    );
+                    spec.cli = model_cli;
+                }
             }
         }
+        if !model_explicit && spec.model.is_none() {
+            spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
+        }
+        if !effort_explicit && !configured_effort && spec.effort == Some(cas_mux::Effort::High) {
+            spec.effort = Some(default_worker_effort_for_cli(spec.cli));
+        }
+        if let Some(model) = spec.model.as_deref() {
+            validate_model_matches_cli(spec.cli, model)?;
+        }
     }
-    if model.is_none() && spec.model.is_none() {
-        spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
-    }
-    if effort.is_none() && !configured_effort && spec.effort == Some(cas_mux::Effort::High) {
-        spec.effort = Some(default_worker_effort_for_cli(spec.cli));
-    }
+    Ok(specs)
+}
 
-    let json =
-        serde_json::to_string(&spec).map_err(|e| format!("failed to serialize WorkerSpec: {e}"))?;
-    Ok(json)
+/// Decode MCP's JSON-array field while keeping the shared resolver responsible
+/// for the actual WorkerSpec field schema and validation.
+fn parse_spawn_worker_specs(raw: Option<&str>, slots: usize) -> Result<Vec<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let values: Vec<serde_json::Value> = serde_json::from_str(raw).map_err(|error| {
+        format!("invalid workers JSON: expected an array of worker specs: {error}")
+    })?;
+    if values.len() > slots {
+        return Err(format!(
+            "workers has {} entries but this spawn has only {slots} worker slot(s)",
+            values.len()
+        ));
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            if !value.is_object() {
+                return Err("invalid workers JSON: every entry must be an object".to_string());
+            }
+            serde_json::to_string(&value)
+                .map_err(|error| format!("failed to serialize worker override: {error}"))
+        })
+        .collect()
+}
+
+fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    let values: Vec<serde_json::Value> = serde_json::from_str(raw).map_err(|error| {
+        format!("invalid workers JSON: expected an array of worker specs: {error}")
+    })?;
+    if values.is_empty() {
+        return Err("workers must contain at least one worker spec".to_string());
+    }
+    Ok(Some(values.len()))
 }
 
 /// `[factory] strict_cli` lookup for the cas-7199 / cas-a487 Codex-fallback
@@ -552,16 +637,30 @@ fn strict_cli_from_project_config(project_config: Option<&std::path::Path>) -> b
         .unwrap_or(false)
 }
 
-fn spawn_spec_summary(spec_json: &str) -> String {
-    match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
-        Ok(spec) => format!(
-            "{} model={} effort={}",
-            spec.cli.backend().name(),
-            spec.model.as_deref().unwrap_or("(backend default)"),
-            format_effort(spec.effort)
-        ),
-        Err(_) => "unparseable worker spec".to_string(),
-    }
+fn spawn_specs_summary(specs: &[cas_mux::WorkerSpec], worker_names: &[String]) -> String {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(slot, spec)| {
+            let name = spec
+                .name
+                .as_deref()
+                .or_else(|| worker_names.get(slot).map(String::as_str))
+                .map_or_else(|| format!("slot {}", slot + 1), str::to_string);
+            let account = spec
+                .config_dir
+                .as_deref()
+                .or(spec.requester_config_dir.as_deref())
+                .unwrap_or("(default/inherited)");
+            format!(
+                "{name}: {} model={} effort={} account={account}",
+                spec.cli.backend().name(),
+                spec.model.as_deref().unwrap_or("(backend default)"),
+                format_effort(spec.effort),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &str) -> String {
@@ -1039,9 +1138,11 @@ impl CasService {
             )
         })?;
 
-        let count = req.count.unwrap_or(1);
+        let workers_len = spawn_worker_entries_len(req.workers.as_deref())
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        let count = req.count.unwrap_or_else(|| workers_len.unwrap_or(1) as i32);
         let isolate = req.isolate.unwrap_or(false);
-        let worker_names: Vec<String> = req
+        let mut worker_names: Vec<String> = req
             .worker_names
             .as_ref()
             .map(|names| {
@@ -1260,106 +1361,97 @@ impl CasService {
             }
         }
 
-        // Resolve a concrete WorkerSpec for every queued spawn. Omitting model
-        // or effort must never inherit the supervisor session's frontier-tier
-        // defaults by accident.
-        let mut spec_json_owned: String = build_spawn_spec_json_with_project_config(
+        let slots = if worker_names.is_empty() {
+            count as usize
+        } else {
+            worker_names.len()
+        };
+        // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
+        // remain the resolver defaults; `workers=[{...}]` is its final,
+        // per-slot layer.
+        let mut specs = build_spawn_specs_with_project_config(
+            slots,
             req.cli.as_deref(),
             req.model.as_deref(),
             req.effort.as_deref(),
+            req.config_dir.as_deref(),
+            req.workers.as_deref(),
             Some(self.inner.cas_root.join("config.toml")),
         )
         .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
 
-        // cas-7199 / cas-a487: this is the mid-session `spawn_workers` MCP
-        // path — the one the original incident actually hit (a worker
-        // whose resolved spec requested Codex on a host without it, queued
-        // and only failing much later as a raw PTY spawn error). Applied
-        // HERE — the "about to actually queue this" checkpoint — rather
-        // than inside `build_spawn_spec_json_with_project_config`, so the
-        // pure-resolution unit tests for that function stay independent of
-        // real host Codex install/login state (see
-        // `strict_cli_from_project_config`'s doc comment for why that
-        // matters). Mirrors exactly where `cli/factory/mod.rs` applies the
-        // same fallback: after cascade resolution, not inside it.
-        let mut codex_fallback_notice = String::new();
-        let mut config_dir_notice = String::new();
-        if let Ok(mut spec) = serde_json::from_str::<cas_mux::WorkerSpec>(&spec_json_owned) {
-            // cas-4a5e: `config_dir`/`requester_config_dir` MUST be on the
-            // spec before `apply_codex_fallback` runs below — that fallback's
-            // auth probe reads them to decide whether THIS account is
-            // logged in, not just the `~/.codex` default. Assigning them
-            // after the fallback call (the previous ordering) left the probe
-            // blind to an explicit profile: a fully logged-in
-            // `config_dir` got silently rewritten to `claude` because only
-            // `~/.codex` was ever checked.
-            spec.config_dir = req.config_dir.clone();
-            spec.requester_config_dir = requester_account_dir(spec.cli);
-
-            // Explicit codex account dirs are validated BEFORE the fallback
-            // runs: naming a specific account and having it be wrong (typo,
-            // never logged in) is a caller error that must fail loudly and
-            // by name here, not get silently absorbed into a claude rewrite
-            // — see `preflight_codex_config_dir`'s doc comment for why that
-            // silent path is exactly how the original incident's misleading
-            // error happened.
-            if spec.cli == cas_mux::SupervisorCli::Codex {
-                if let Some(config_dir) = spec.config_dir.as_deref() {
-                    preflight_codex_config_dir(config_dir)
-                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-                }
-            }
-
-            let strict_cli =
-                strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
-            let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
-            let notices = cas_factory::apply_codex_fallback(
-                std::slice::from_mut(&mut spec),
-                strict_cli,
-                Some(claude_default_model),
-            )
-            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
-            if !notices.is_empty() {
-                for notice in &notices {
-                    tracing::warn!(target: "cas::factory", "{notice}");
-                }
-                codex_fallback_notice = format!("\nWarning: {}", notices.join("\nWarning: "));
-                // The fallback rewrote `cli` (and possibly `model`) — the
-                // queued spec and the summary shown back to the caller must
-                // reflect what will ACTUALLY spawn, not the pre-fallback
-                // request. It also drops a codex-only `config_dir`/
-                // `requester_config_dir` when it rewrites `cli`, so the
-                // Claude preflight below never runs against a codex
-                // directory.
-            }
-            if spec.cli == cas_mux::SupervisorCli::Claude {
-                if let Some(config_dir) = spec.config_dir.as_deref() {
-                    preflight_claude_config_dir(config_dir)
-                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-                }
-            }
-            let requester_config_dir = requester_account_dir(spec.cli);
-            if (spec.config_dir.is_some() || requester_config_dir.is_some())
-                && !account_dir_supported(spec.cli)
-            {
-                let warning = format!(
-                    "config_dir has no account plumbing for {}; the resolved worker will not receive an account directory",
-                    spec.cli.backend().name()
-                );
-                tracing::warn!(target: "cas::factory", "{warning}");
-                config_dir_notice = format!("\nWarning: {warning}");
-            }
-            spec_json_owned = serde_json::to_string(&spec).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("failed to serialize worker spec with config_dir: {e}"),
-                )
-            })?;
+        // `workers[].name` is optional, but when every slot names itself it
+        // is equivalent to worker_names= and must become the actual visible
+        // worker identity rather than merely receipt decoration.
+        if worker_names.is_empty() && specs.iter().all(|spec| spec.name.is_some()) {
+            worker_names = specs.iter().filter_map(|spec| spec.name.clone()).collect();
         }
 
-        let spec_summary = spawn_spec_summary(&spec_json_owned);
-        let spec_warning =
-            spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned);
+        // Capture the requesting account separately for each resolved
+        // harness; a Claude supervisor's profile must never become a Codex
+        // worker's CODEX_HOME (or vice versa).
+        for spec in &mut specs {
+            spec.requester_config_dir = requester_account_dir(spec.cli);
+            if spec.cli == cas_mux::SupervisorCli::Codex
+                && let Some(config_dir) = spec.config_dir.as_deref()
+            {
+                preflight_codex_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
+        }
+
+        let strict_cli =
+            strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
+        let notices = cas_factory::apply_codex_fallback(
+            &mut specs,
+            strict_cli,
+            Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
+        )
+        .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+        let mut config_dir_warnings = Vec::new();
+        for spec in &specs {
+            if spec.cli == cas_mux::SupervisorCli::Claude
+                && let Some(config_dir) = spec.config_dir.as_deref()
+            {
+                preflight_claude_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
+            if (spec.config_dir.is_some() || spec.requester_config_dir.is_some())
+                && !account_dir_supported(spec.cli)
+            {
+                config_dir_warnings.push(format!(
+                    "config_dir has no account plumbing for {}; the resolved worker will not receive an account directory",
+                    spec.cli.backend().name()
+                ));
+            }
+        }
+        for notice in notices.iter().chain(config_dir_warnings.iter()) {
+            tracing::warn!(target: "cas::factory", "{notice}");
+        }
+        let codex_fallback_notice = (!notices.is_empty())
+            .then(|| format!("\nWarning: {}", notices.join("\nWarning: ")))
+            .unwrap_or_default();
+        let config_dir_notice = (!config_dir_warnings.is_empty())
+            .then(|| format!("\nWarning: {}", config_dir_warnings.join("\nWarning: ")))
+            .unwrap_or_default();
+        let spec_json_owned = if slots == 1 && req.workers.is_none() {
+            serde_json::to_string(&specs[0])
+        } else {
+            serde_json::to_string(&specs)
+        }
+        .map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("failed to serialize worker specs: {e}"),
+            )
+        })?;
+
+        let spec_summary = spawn_specs_summary(&specs, &worker_names);
+        let spec_warning = if specs.len() == 1 {
+            spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned)
+        } else {
+            String::new()
+        };
         let isolation_warning = if isolate {
             String::new()
         } else {
@@ -1367,19 +1459,12 @@ impl CasService {
         };
 
         let factory_session = current_factory_session();
-        // Capture the requesting supervisor's account now. The daemon may run
-        // under a different environment by the time it consumes this queue row.
-        //
-        // Provider-aware since cas-9cc3: the codex backend now applies this
-        // value as CODEX_HOME, so capturing CLAUDE_CONFIG_DIR for a codex
-        // worker would point codex at a `.claude-*` directory.
-        // The serialized spec is authoritative for what will actually spawn; an
-        // unparseable spec falls back to Claude, matching the previous
-        // unconditional CLAUDE_CONFIG_DIR capture.
-        let resolved_cli = serde_json::from_str::<cas_mux::WorkerSpec>(&spec_json_owned)
-            .map(|resolved| resolved.cli)
-            .unwrap_or(cas_mux::SupervisorCli::Claude);
-        let requester_config_dir = requester_account_dir(resolved_cli);
+        // Legacy rows carry one requester directory in their own column. New
+        // multi-worker rows persist the provider-correct account on every
+        // WorkerSpec, so the daemon never flattens distinct accounts again.
+        let requester_config_dir = (specs.len() == 1)
+            .then(|| specs[0].requester_config_dir.as_deref())
+            .flatten();
         let request_id = queue
             .enqueue_spawn_with_requester_config_dir(
                 count,
@@ -1388,7 +1473,7 @@ impl CasService {
                 Some(spec_json_owned.as_str()),
                 factory_session.as_deref(),
                 req.task_id.as_deref(),
-                requester_config_dir.as_deref(),
+                requester_config_dir,
             )
             .map_err(|e| {
                 Self::error(
@@ -2040,23 +2125,24 @@ impl CasService {
         // rendered even when no agents are registered — the whole failure mode
         // being fixed is that a lost relay left no trace anywhere, so the
         // fleet read silence as "nothing is waiting on me".
-        let (undelivered_relays, undelivered_total) = crate::store::open_prompt_queue_store(&self.inner.cas_root)
-            .ok()
-            .map(|queue| {
-                // A terminal task is positive evidence that the lifecycle
-                // relay's requested supervisor action is moot. Reconcile it
-                // durably (while retaining the forensic prompt row) before
-                // sampling the remaining actionable backlog.
-                let _ = queue.reconcile_terminal_lifecycle_relays();
-                let total = queue.undelivered_lifecycle_relay_count().unwrap_or(0);
-                let rows = queue.list_undelivered_lifecycle_relays(10).unwrap_or_default();
-                (rows, total)
-            })
-            .unwrap_or_default();
-        let undelivered_section = format_undelivered_relay_section(
-            &undelivered_relays,
-            undelivered_total,
-        );
+        let (undelivered_relays, undelivered_total) =
+            crate::store::open_prompt_queue_store(&self.inner.cas_root)
+                .ok()
+                .map(|queue| {
+                    // A terminal task is positive evidence that the lifecycle
+                    // relay's requested supervisor action is moot. Reconcile it
+                    // durably (while retaining the forensic prompt row) before
+                    // sampling the remaining actionable backlog.
+                    let _ = queue.reconcile_terminal_lifecycle_relays();
+                    let total = queue.undelivered_lifecycle_relay_count().unwrap_or(0);
+                    let rows = queue
+                        .list_undelivered_lifecycle_relays(10)
+                        .unwrap_or_default();
+                    (rows, total)
+                })
+                .unwrap_or_default();
+        let undelivered_section =
+            format_undelivered_relay_section(&undelivered_relays, undelivered_total);
 
         if agents.is_empty() {
             let mut msg = String::from(
@@ -2417,6 +2503,10 @@ impl CasService {
                     (None, Some(effort)) => format!("\n    model: unknown\n    effort: {effort}"),
                     (None, None) => String::new(),
                 };
+                let account_info = agent.metadata.get("worker_account_dir").map_or_else(
+                    || "\n    account: default/inherited".to_string(),
+                    |account| format!("\n    account: {account}"),
+                );
                 // Context usage (cas-573c): cheap tail-read of the session
                 // transcript to surface a coarse band so the supervisor can
                 // proactively preserve work before compaction. Falls back
@@ -2681,7 +2771,7 @@ impl CasService {
                     }),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -2690,6 +2780,7 @@ impl CasService {
                     git_info,
                     transcript_info,
                     model_info,
+                    account_info,
                     context_info,
                     compaction_info,
                     activity_info,
@@ -8482,6 +8573,49 @@ mod tests {
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn spawn_specs_keep_per_worker_harness_and_account_overrides() {
+        let specs = build_spawn_specs_with_project_config(
+            2,
+            Some("claude"),
+            None,
+            Some("high"),
+            Some("/accounts/batch"),
+            Some(
+                r#"[
+                    {"name":"codex-research","cli":"codex","model":"gpt-5.6","config_dir":"/accounts/codex"},
+                    {"name":"claude-review","config_dir":"/accounts/claude"}
+                ]"#,
+            ),
+            None,
+        )
+        .expect("per-worker specs resolve");
+
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name.as_deref(), Some("codex-research"));
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Codex);
+        assert_eq!(specs[0].config_dir.as_deref(), Some("/accounts/codex"));
+        assert_eq!(specs[1].name.as_deref(), Some("claude-review"));
+        assert_eq!(specs[1].cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(specs[1].config_dir.as_deref(), Some("/accounts/claude"));
+        assert_eq!(specs[1].effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn spawn_specs_reject_more_worker_entries_than_spawn_slots() {
+        let err = build_spawn_specs_with_project_config(
+            1,
+            None,
+            None,
+            None,
+            None,
+            Some(r#"[{"cli":"claude"},{"cli":"codex"}]"#),
+            None,
+        )
+        .expect_err("excess worker entries must not be silently ignored");
+        assert!(err.contains("only 1 worker slot"), "{err}");
     }
 
     #[test]

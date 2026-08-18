@@ -41,7 +41,12 @@ impl Backend for Grok {
             launch.effort,
             launch.teams,
         );
-        finish_worker_config(&mut config, launch.supervisor_cli, launch.active_workers);
+        finish_worker_config(
+            &mut config,
+            launch.supervisor_cli,
+            launch.active_workers,
+            None,
+        );
         config
     }
 

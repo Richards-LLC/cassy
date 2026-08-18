@@ -18,7 +18,9 @@ nothing more:
   that key: 7,826 of M1's 32,773 units are also M2 events on this machine).
   The result is a *review* artifact, not a verdict input.
 * ``semantic`` — converts human-approved labels over that candidate pool into
-  M3's ``{fix_id: {evidence_id: score}}`` map.
+  M3's declared-evaluation map, which records *that* a fix was reviewed
+  separately from *what* the review found, so "reviewed, nothing matched" is
+  expressible instead of collapsing into "nobody looked".
 
 Why the candidate pool is not fed to M3 directly: M2's hybrid scores are
 retrieval scores (~0.03 on a real query), not similarities on the 0–1 scale the
@@ -206,6 +208,7 @@ def build_candidates(
                     "label": None,
                     "label_confidence": None,
                     "labelled_by": None,
+                    "labelled_at": None,
                 }
             )
         pools.append(
@@ -222,8 +225,10 @@ def build_candidates(
     return {
         "note": (
             "Human review required. `label` must be set to true (symptom recurrence) or false "
-            "(not this symptom) with a 0-1 `label_confidence` before these become M3 semantic "
-            "evidence. Retrieval scores are NOT similarities and must not be used as thresholds."
+            "(not this symptom) with a 0-1 `label_confidence` and a `labelled_by` reviewer before "
+            "these become M3 semantic evidence. Labelling every candidate false is a real, "
+            "publishable result — it is recorded as an evaluation with zero positives, not as "
+            "silence. Retrieval scores are NOT similarities and must not be used as thresholds."
         ),
         "index": str(index),
         "units_db": str(units_db),
@@ -233,40 +238,77 @@ def build_candidates(
     }
 
 
-def semantic_from_labels(labels: dict[str, Any]) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
-    """Approved labels → M3's ``{fix_id: {evidence_id: score}}``.
+def semantic_from_labels(labels: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Approved labels → M3's declared-evaluation map.
+
+    Each pool with at least one reviewed candidate emits
+    ``{"evaluated": true, "candidates_reviewed": n, "reviewer": ..., "scores": {...}}``.
+    Emitting the envelope even when ``scores`` is empty is the point: a review
+    that rejected every candidate is a real result, and the bare map shape
+    could only report it as silence, which M3 must read as "nobody looked".
 
     Only ``label is True`` contributes a score, and only when the candidate
-    actually maps to an evidence id — a score M3 cannot attach to an evidence
-    unit is worse than no score, because a non-empty map is what releases M3's
-    "semantic evidence has not been evaluated" guard.
+    maps to an evidence id. A fix with a positive label M3 cannot attach to an
+    evidence unit is withheld entirely rather than published as "evaluated,
+    nothing matched" — that would state the opposite of what the reviewer found.
     """
-    semantic: dict[str, dict[str, float]] = {}
+    reviewed: dict[str, dict[str, Any]] = {}
     positives = negatives = unlabelled = unmapped = 0
+    withheld: list[str] = []
+
     for pool in labels.get("pools", []):
         fix_id = str(pool["fix_id"])
+        entry = reviewed.setdefault(fix_id, {"scores": {}, "reviewers": set(), "reviewed": 0, "reviewed_at": None})
         for candidate in pool.get("candidates", []):
             label = candidate.get("label")
             if label is None:
                 unlabelled += 1
                 continue
+            reviewer = str(candidate.get("labelled_by") or "").strip()
+            if not reviewer:
+                raise ValueError(
+                    f"{fix_id}: candidate {candidate.get('event_id')} is labelled without `labelled_by`"
+                )
+            entry["reviewers"].add(reviewer)
+            entry["reviewed"] += 1
+            entry["reviewed_at"] = max(
+                filter(None, [entry["reviewed_at"], str(candidate.get("labelled_at") or "") or None]),
+                default=None,
+            )
             if not label:
                 negatives += 1
                 continue
             evidence_id = candidate.get("evidence_id")
-            if not evidence_id:
-                unmapped += 1
-                continue
             confidence = candidate.get("label_confidence")
             if confidence is None:
                 raise ValueError(
                     f"{fix_id}: candidate {candidate.get('event_id')} is labelled true without a confidence"
                 )
+            if not evidence_id:
+                unmapped += 1
+                if fix_id not in withheld:
+                    withheld.append(fix_id)
+                continue
             positives += 1
-            semantic.setdefault(fix_id, {})[str(evidence_id)] = float(confidence)
+            entry["scores"][str(evidence_id)] = float(confidence)
+
+    semantic: dict[str, dict[str, Any]] = {}
+    for fix_id, entry in reviewed.items():
+        if not entry["reviewed"] or fix_id in withheld:
+            continue
+        semantic[fix_id] = {
+            "evaluated": True,
+            "candidates_reviewed": entry["reviewed"],
+            "reviewer": ", ".join(sorted(entry["reviewers"])),
+            "reviewed_at": entry["reviewed_at"],
+            "scores": entry["scores"],
+        }
 
     report = {
-        "fixes_with_semantic_evidence": len(semantic),
+        "fixes_evaluated": len(semantic),
+        "fixes_with_positive_evidence": sum(1 for entry in semantic.values() if entry["scores"]),
+        "fixes_evaluated_with_zero_positives": sum(1 for entry in semantic.values() if not entry["scores"]),
+        "fixes_withheld_unmappable_positive": withheld,
         "positive_labels": positives,
         "negative_labels": negatives,
         "unlabelled_candidates": unlabelled,

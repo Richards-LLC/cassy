@@ -9,6 +9,13 @@ evidence that the fix was running.
 The inputs are intentionally portable JSON/SQLite artifacts.  This makes a
 historical run reviewable and, importantly, lets the v2.71 seed refresh after a
 normal daemon restart without modifying the evidence source or filing issues.
+
+``--semantic-evidence`` accepts either the original ``{fix: {evidence: score}}``
+map or, per fix, a declared evaluation
+(``{"evaluated": true, "candidates_reviewed": n, "reviewer": ..., "scores": {}}``).
+The second shape exists because the first cannot distinguish "reviewed every
+candidate and rejected them all" from "nobody looked": both collapse to an empty
+map, and only the former may contribute to a ``fixed`` verdict.
 """
 
 from __future__ import annotations
@@ -79,6 +86,38 @@ class Evidence:
     structured: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SemanticEvaluation:
+    """What M2's reviewers did for one fix — including "looked, found nothing".
+
+    A bare ``{evidence_id: score}`` map cannot express a review that rejected
+    every candidate: it collapses into ``{}``, which is also what "nobody
+    looked" produces.  Those are opposite statements — the first licenses a
+    ``fixed`` verdict, the second must never — so the contract carries the
+    reviewer's own account of the evaluation instead of inferring it from the
+    presence of positives.
+    """
+
+    evaluated: bool
+    scores: dict[str, float]
+    candidates_reviewed: int = 0
+    reviewer: str | None = None
+    reviewed_at: str | None = None
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        return {
+            "evaluated": self.evaluated,
+            "positives": len(self.scores),
+            "candidates_reviewed": self.candidates_reviewed,
+            "reviewer": self.reviewer,
+            "reviewed_at": self.reviewed_at,
+        }
+
+
+NOT_EVALUATED = SemanticEvaluation(False, {})
+
+
 def deployed_boundary(epochs: Iterable[Epoch], fix_built_at: datetime) -> Boundary:
     """Match the conservative Rust ``history::epochs::boundary_for`` rule."""
     rows = list(epochs)
@@ -131,15 +170,55 @@ def load_evidence(path: Path) -> list[Evidence]:
     return result
 
 
-def load_semantic(path: Path | None) -> dict[str, dict[str, float]]:
+def semantic_entry(fix_id: str, value: dict[str, Any]) -> SemanticEvaluation:
+    """One fix's semantic evaluation, in either the bare or the declared shape.
+
+    * ``{evidence_id: score}`` — the original shape.  Non-empty means someone
+      evaluated; empty stays *not evaluated*, because that is all a bare map
+      can honestly say.
+    * ``{"evaluated": true, "candidates_reviewed": n, "reviewer": ..., "scores": {...}}``
+      — a declared evaluation, which may legitimately carry zero positives.
+
+    A declared evaluation must name a reviewer and account for at least as many
+    reviewed candidates as it reports positives: "evaluated" with nothing behind
+    it would release the one guard standing between an unobserved fix and a
+    ``fixed`` verdict, so it is rejected rather than trusted.
+    """
+    declared = "evaluated" in value or "scores" in value
+    if not declared:
+        scores = {str(evidence_id): float(score) for evidence_id, score in value.items()}
+        return SemanticEvaluation(bool(scores), scores, len(scores))
+
+    raw_scores = value.get("scores", {})
+    if not isinstance(raw_scores, dict):
+        raise ValueError(f"{fix_id}: semantic 'scores' must be an evidence-id → score map")
+    scores = {str(evidence_id): float(score) for evidence_id, score in raw_scores.items()}
+    evaluated = bool(value.get("evaluated", False))
+    if not evaluated:
+        if scores:
+            raise ValueError(f"{fix_id}: semantic evidence carries {len(scores)} score(s) but declares evaluated=false")
+        return NOT_EVALUATED
+    reviewed = int(value.get("candidates_reviewed", 0))
+    reviewer = str(value.get("reviewer") or "").strip()
+    if not reviewer:
+        raise ValueError(f"{fix_id}: a declared semantic evaluation must name its reviewer")
+    if reviewed < max(1, len(scores)):
+        raise ValueError(
+            f"{fix_id}: declared semantic evaluation reviewed {reviewed} candidate(s) but reports "
+            f"{len(scores)} positive(s); an evaluation of nothing is not an evaluation"
+        )
+    return SemanticEvaluation(True, scores, reviewed, reviewer, str(value.get("reviewed_at") or "") or None)
+
+
+def load_semantic(path: Path | None) -> dict[str, SemanticEvaluation]:
     if not path:
         return {}
     raw = json.loads(path.read_text())
     if not isinstance(raw, dict):
         raise ValueError("semantic evidence JSON must map each fix id to its evaluated evidence-id → score map")
     return {
-        str(fix_id): {str(evidence_id): float(score) for evidence_id, score in scores.items()}
-        for fix_id, scores in raw.items() if isinstance(scores, dict)
+        str(fix_id): semantic_entry(str(fix_id), value)
+        for fix_id, value in raw.items() if isinstance(value, dict)
     }
 
 
@@ -155,7 +234,7 @@ def render_card(evidence: Evidence, epoch_class: str, channels: list[str], score
     }
 
 
-def verdict_for(fix: dict[str, Any], epochs: list[Epoch], evidence: list[Evidence], semantic: dict[str, dict[str, float]]) -> dict[str, Any]:
+def verdict_for(fix: dict[str, Any], epochs: list[Epoch], evidence: list[Evidence], semantic: dict[str, SemanticEvaluation | dict[str, Any]]) -> dict[str, Any]:
     built_at = parse_time(str(fix["fix_built_at"]))
     if not built_at:
         raise ValueError(f"{fix['id']}: fix_built_at must be RFC3339")
@@ -164,7 +243,10 @@ def verdict_for(fix: dict[str, Any], epochs: list[Epoch], evidence: list[Evidenc
     structured = [term.lower() for term in fix.get("structured_terms", [])]
     semantic_threshold = float(fix.get("semantic_threshold", 0.0))
     threshold = int(fix.get("sample_threshold", DEFAULT_THRESHOLD))
-    semantic_scores = semantic.get(str(fix["id"]), {})
+    evaluation = semantic.get(str(fix["id"]), NOT_EVALUATED)
+    if isinstance(evaluation, dict):  # a caller handing us the raw JSON shape
+        evaluation = semantic_entry(str(fix["id"]), evaluation)
+    semantic_scores = evaluation.scores
     cards: list[dict[str, Any]] = []
     exposure = Counter()
     for item in evidence:
@@ -184,7 +266,7 @@ def verdict_for(fix: dict[str, Any], epochs: list[Epoch], evidence: list[Evidenc
         state, reason = "insufficient-post-fix-data", "no deployed binary epoch contains the fix"
     elif post_cards:
         state, reason = "recurred", "matching symptom evidence occurred in the clean-post window"
-    elif not semantic_scores:
+    elif not evaluation.evaluated:
         state, reason = "insufficient-post-fix-data", "M2 semantic evidence has not been evaluated for this fix"
     elif exposure["clean-post"] >= threshold:
         state, reason = "fixed", "no symptom match in sufficient clean-post exposure"
@@ -210,7 +292,11 @@ def verdict_for(fix: dict[str, Any], epochs: list[Epoch], evidence: list[Evidenc
             "epochs_without_binary_identity": boundary.epochs_without_binary_identity,
         },
         "exposure": dict(clean_pre=exposure["clean-pre"], mixed=exposure["mixed"], clean_post=exposure["clean-post"], threshold=threshold),
-        "matching": {"structured_terms": structured, "lexical_terms": lexical, "semantic_scores_supplied": bool(semantic_scores), "semantic_threshold": semantic_threshold},
+        "matching": {
+            "structured_terms": structured, "lexical_terms": lexical,
+            "semantic_scores_supplied": bool(semantic_scores), "semantic_threshold": semantic_threshold,
+            "semantic_evaluation": evaluation.summary,
+        },
         "evidence_cards": cards,
         "proposal_draft": proposal,
     }

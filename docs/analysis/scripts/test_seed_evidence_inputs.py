@@ -106,36 +106,51 @@ class SemanticFromLabelsTest(unittest.TestCase):
     def labels(self, **candidate) -> dict:
         base = {
             "event_id": 7, "evidence_id": "42", "label": True,
-            "label_confidence": 0.9, "text": "t",
+            "label_confidence": 0.9, "text": "t", "labelled_by": "reviewer",
+            "labelled_at": "2026-08-18T15:00:00Z",
         }
         base.update(candidate)
         return {"pools": [{"fix_id": "cas-aa2b", "candidates": [base]}]}
 
     def test_positive_label_becomes_a_score_on_its_evidence_id(self) -> None:
         semantic, report = sei.semantic_from_labels(self.labels())
-        self.assertEqual(semantic, {"cas-aa2b": {"42": 0.9}})
+        self.assertEqual(semantic["cas-aa2b"]["scores"], {"42": 0.9})
+        self.assertTrue(semantic["cas-aa2b"]["evaluated"])
+        self.assertEqual(semantic["cas-aa2b"]["candidates_reviewed"], 1)
+        self.assertEqual(semantic["cas-aa2b"]["reviewer"], "reviewer")
         self.assertEqual(report["positive_labels"], 1)
 
-    def test_rejected_candidate_contributes_nothing(self) -> None:
+    def test_rejected_candidate_is_an_evaluation_with_zero_positives(self) -> None:
+        # The whole point of the declared shape: "we looked and found nothing"
+        # is a result M3 may act on, and it must not read as "nobody looked".
         semantic, report = sei.semantic_from_labels(self.labels(label=False))
-        self.assertEqual(semantic, {})
+        self.assertEqual(semantic["cas-aa2b"]["scores"], {})
+        self.assertTrue(semantic["cas-aa2b"]["evaluated"])
+        self.assertEqual(semantic["cas-aa2b"]["candidates_reviewed"], 1)
         self.assertEqual(report["negative_labels"], 1)
+        self.assertEqual(report["fixes_evaluated_with_zero_positives"], 1)
 
     def test_unlabelled_candidate_contributes_nothing(self) -> None:
         semantic, report = sei.semantic_from_labels(self.labels(label=None))
         self.assertEqual(semantic, {})
         self.assertEqual(report["unlabelled_candidates"], 1)
 
-    def test_positive_label_without_an_evidence_id_is_refused(self) -> None:
-        # M3 looks scores up by evidence id; a score it cannot attach would
-        # still flip its "not evaluated" guard. That must not happen.
+    def test_positive_label_without_an_evidence_id_withholds_the_whole_fix(self) -> None:
+        # M3 looks scores up by evidence id. A positive it cannot attach must
+        # not be published as "evaluated, nothing matched" — that would state
+        # the opposite of what the reviewer found.
         semantic, report = sei.semantic_from_labels(self.labels(evidence_id=None))
         self.assertEqual(semantic, {})
         self.assertEqual(report["positive_but_unmapped"], 1)
+        self.assertEqual(report["fixes_withheld_unmappable_positive"], ["cas-aa2b"])
 
     def test_positive_label_without_confidence_is_an_error(self) -> None:
         with self.assertRaises(ValueError):
             sei.semantic_from_labels(self.labels(label_confidence=None))
+
+    def test_label_without_a_named_reviewer_is_an_error(self) -> None:
+        with self.assertRaises(ValueError):
+            sei.semantic_from_labels(self.labels(labelled_by=None))
 
 
 class LoadSeedsTest(unittest.TestCase):

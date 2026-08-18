@@ -1,545 +1,59 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="color-scheme" content="light" />
-<title>Ben's onboarding — CAS on Hetzner</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Ben’s Cassy setup</title>
 <style>
-  :root {
-    --bg: #fbf9f4;
-    --panel: #ffffff;
-    --ink: #1b1d20;
-    --ink-soft: #4a4e56;
-    --ink-faint: #7a7f88;
-    --rule: #eee6d4;
-    --rule-strong: #e0d6bd;
-    --accent: #b8541a;
-    --accent-soft: #f5e2d1;
-    --code-bg: #1f2024;
-    --code-ink: #f3ede0;
-    --code-accent: #ffb980;
-    --ok: #2f7a4b;
-    --warn: #a8590c;
-    --shadow: 0 1px 0 rgba(17,17,17,0.03), 0 12px 32px -24px rgba(17,17,17,0.18);
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-    background: var(--bg);
-    color: var(--ink);
-    line-height: 1.55;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-  }
-  .wrap {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 48px 24px 96px;
-  }
-  @media (max-width: 520px) {
-    .wrap { padding: 28px 18px 72px; }
-  }
-
-  header.hero {
-    margin-bottom: 40px;
-  }
-  .eyebrow {
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    font-size: 12px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--accent);
-    font-weight: 600;
-    margin-bottom: 10px;
-  }
-  h1 {
-    font-size: clamp(30px, 6vw, 44px);
-    line-height: 1.1;
-    margin: 0 0 14px;
-    letter-spacing: -0.015em;
-    font-weight: 600;
-  }
-  .lede {
-    font-size: clamp(17px, 2.2vw, 19px);
-    color: var(--ink-soft);
-    max-width: 56ch;
-    margin: 0;
-  }
-
-  .toc {
-    margin: 36px 0 48px;
-    padding: 18px 20px;
-    background: var(--panel);
-    border: 1px solid var(--rule);
-    border-radius: 14px;
-    box-shadow: var(--shadow);
-    font-family: ui-sans-serif, system-ui, sans-serif;
-    font-size: 14px;
-  }
-  .toc-title {
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--ink-faint);
-    margin-bottom: 10px;
-  }
-  .toc ol {
-    margin: 0;
-    padding-left: 20px;
-    color: var(--ink-soft);
-  }
-  .toc a { color: var(--ink); text-decoration: none; }
-  .toc a:hover { color: var(--accent); }
-
-  section.step {
-    background: var(--panel);
-    border: 1px solid var(--rule);
-    border-radius: 16px;
-    padding: 28px;
-    margin: 0 0 22px;
-    box-shadow: var(--shadow);
-    position: relative;
-  }
-  @media (max-width: 520px) {
-    section.step { padding: 22px 20px; border-radius: 14px; }
-  }
-  .step-num {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px; height: 30px;
-    border-radius: 50%;
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-family: ui-sans-serif, system-ui, sans-serif;
-    font-weight: 700;
-    font-size: 14px;
-    margin-bottom: 14px;
-  }
-  section.step h2 {
-    font-size: clamp(22px, 3.4vw, 26px);
-    margin: 0 0 10px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-  }
-  section.step p {
-    color: var(--ink-soft);
-    margin: 0 0 14px;
-  }
-  section.step p:last-child { margin-bottom: 0; }
-  section.step ul, section.step ol {
-    color: var(--ink-soft);
-    padding-left: 22px;
-  }
-  section.step li { margin: 4px 0; }
-  section.step strong { color: var(--ink); font-weight: 600; }
-
-  pre, code {
-    font-family: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-  }
-  code {
-    background: #f1ead8;
-    color: var(--ink);
-    padding: 2px 6px;
-    border-radius: 5px;
-    font-size: 0.88em;
-  }
-  pre {
-    background: var(--code-bg);
-    color: var(--code-ink);
-    padding: 16px 64px 16px 18px;
-    border-radius: 10px;
-    overflow-x: auto;
-    font-size: 13.5px;
-    line-height: 1.55;
-    margin: 14px 0;
-    position: relative;
-    -webkit-overflow-scrolling: touch;
-  }
-  .copy-btn {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    font-size: 10.5px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    font-weight: 600;
-    color: #a39a85;
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 6px;
-    padding: 5px 10px;
-    cursor: pointer;
-    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
-    -webkit-tap-highlight-color: transparent;
-    z-index: 2;
-  }
-  .copy-btn:hover {
-    color: #fff;
-    background: rgba(255,255,255,0.12);
-    border-color: rgba(255,255,255,0.2);
-  }
-  .copy-btn:active { transform: translateY(1px); }
-  .copy-btn.copied {
-    color: #9fe4b5;
-    background: rgba(127,209,154,0.12);
-    border-color: rgba(127,209,154,0.35);
-  }
-  @media (max-width: 520px) {
-    pre { padding-right: 58px; font-size: 12.5px; }
-    .copy-btn { font-size: 10px; padding: 4px 8px; }
-  }
-  pre code {
-    background: transparent;
-    color: inherit;
-    padding: 0;
-    border-radius: 0;
-    font-size: inherit;
-  }
-  pre .c { color: #a39a85; } /* comment */
-  pre .k { color: var(--code-accent); } /* highlight */
-
-  .callout {
-    border: 1px solid var(--rule-strong);
-    background: #fff7e9;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin: 16px 0 0;
-    font-size: 14.5px;
-    color: var(--ink-soft);
-  }
-  .callout.info {
-    background: #eef4fb;
-    border-color: #d6e3f1;
-  }
-  .callout.warn {
-    background: #fdeee4;
-    border-color: #f2c9a9;
-  }
-  .callout strong { color: var(--ink); }
-  .callout-label {
-    display: inline-block;
-    font-family: ui-sans-serif, system-ui, sans-serif;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-weight: 700;
-    margin-bottom: 4px;
-    color: var(--warn);
-  }
-  .callout.info .callout-label { color: #2e5da6; }
-
-  hr {
-    border: 0;
-    border-top: 1px solid var(--rule);
-    margin: 36px 0;
-  }
-
-  footer {
-    margin-top: 48px;
-    color: var(--ink-faint);
-    font-family: ui-sans-serif, system-ui, sans-serif;
-    font-size: 13px;
-    text-align: center;
-  }
-
-  a { color: var(--accent); }
-  a:hover { text-decoration: underline; }
-
-  .kbd {
-    font-family: ui-sans-serif, system-ui, sans-serif;
-    display: inline-block;
-    border: 1px solid var(--rule-strong);
-    background: #fff;
-    color: var(--ink);
-    padding: 1px 7px;
-    border-radius: 5px;
-    font-size: 12.5px;
-    box-shadow: 0 1px 0 var(--rule-strong);
-    line-height: 1.4;
-  }
+:root{--bg:#fbf9f4;--panel:#fff;--ink:#1b1d20;--soft:#4a4e56;--faint:#747a83;--rule:#e9e1cf;--accent:#b8541a;--accentbg:#f5e2d1;--green:#276749;--code:#202226}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.58 Georgia,"Iowan Old Style",serif}.wrap{max-width:780px;margin:auto;padding:48px 24px 80px}header{padding:8px 0 26px}.eyebrow,.label{font:600 12px/1.2 system-ui,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}h1{font-size:clamp(2.2rem,7vw,4rem);line-height:1.03;letter-spacing:-.035em;margin:.2em 0}.lede{font-size:1.25rem;color:var(--soft);max-width:53ch}.card{background:var(--panel);border:1px solid var(--rule);border-radius:16px;padding:28px;margin:20px 0;box-shadow:0 12px 28px -26px #333}.card h2{font-size:1.55rem;line-height:1.15;margin:0 0 .45em}.number{display:inline-grid;place-items:center;width:30px;height:30px;margin:0 0 12px;border-radius:50%;background:var(--accentbg);color:var(--accent);font:700 14px system-ui}.notice{border-left:4px solid var(--accent);background:#fff5e8;padding:14px 16px;margin:18px 0;color:var(--soft)}.good{border-color:var(--green);background:#f0f8f2}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}code{background:#f2ead9;padding:2px 5px;border-radius:4px;font-size:.9em}pre{background:var(--code);color:#f6f1e8;border-radius:10px;padding:16px;overflow:auto;font-size:.82em;line-height:1.55}pre code{background:none;padding:0;color:inherit}a{color:#994510}table{width:100%;border-collapse:collapse;font-size:.94em}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid var(--rule)}th{font-family:system-ui,sans-serif;font-size:.78em;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}li{margin:.35em 0}footer{font:13px/1.5 system-ui,sans-serif;color:var(--faint);padding-top:22px}@media(max-width:560px){.wrap{padding:28px 16px 56px}.card{padding:22px}body{font-size:16px}}@media print{@page{margin:14mm}.wrap{max-width:none;padding:0}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]::after{content:" (" attr(href) ")";font-size:.75em;color:#666}pre{white-space:pre-wrap}}
 </style>
 </head>
-<body>
-<div class="wrap">
+<body><main class="wrap">
+<header><div class="eyebrow">Mac completion guide · 18 August 2026</div><h1>Ben’s Cassy setup</h1><p class="lede">A clean path from a new Mac to a working Cassy workspace, Commander connection, and an easy update routine.</p></header>
+<section class="card"><div class="label">What is better now</div><h2>The setup problems from the first pass are fixed.</h2><ul><li><strong>Cloud sign-in is dependable:</strong> use the token Daniel gives you; no broken browser approval step and no repeated rate-limit polling.</li><li><strong>Team setup is honest:</strong> a failure is reported rather than hidden, and a clear default team is adopted automatically for a new project.</li><li><strong>The Mac instructions paste cleanly:</strong> they no longer replace your shell halfway through a block.</li><li><strong><code>cas init</code> protects your home folder:</strong> it stops you from creating a project in <code>~</code> by mistake.</li><li><strong>CAS is now Cassy:</strong> the name changed in version 3.0.0; the command stays <code>cas</code>.</li></ul></section>
+<section class="card"><div class="number">1</div><h2>Put the basics in place</h2><p>On an Apple Silicon Mac, install Homebrew, Git, Node, and Claude Code if they are not already present. Keep executable paths in <code>~/.zprofile</code>: it runs once for each login shell, while <code>~/.zshrc</code> runs for every interactive shell.</p><pre><code>brew install git node
+npm install -g @anthropic-ai/claude-code
 
-  <header class="hero">
-    <div class="eyebrow">Onboarding · CAS on Hetzner</div>
-    <h1>Welcome, bossman.</h1>
-    <p class="lede">
-      This is a short, opinionated walkthrough for getting you set up on the Hetzner
-      box so you can run CAS and Claude Code in a terminal, without the Slack bridge.
-      Your user is already created — you just need to wire up a few credentials and
-      clone whatever you want to work on.
-    </p>
-  </header>
+grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+eval "$(/opt/homebrew/bin/brew shellenv)"
+grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zprofile 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zprofile
+export PATH="$HOME/.local/bin:$PATH"</code></pre></section>
+<section class="card"><div class="number">2</div><h2>Install Cassy</h2><pre><code>mkdir -p ~/.local/bin && cd "$(mktemp -d)"
+curl -fsSL -o cas.tar.gz https://github.com/Richards-LLC/cassy/releases/latest/download/cas-aarch64-apple-darwin.tar.gz
+tar -xzf cas.tar.gz
+mv cas ~/.local/bin/cas && chmod +x ~/.local/bin/cas
+xattr -d com.apple.quarantine ~/.local/bin/cas 2>/dev/null || true
+cas --version
+mkdir -p ~/.claude
+cas update --user</code></pre><p><code>cas update --user</code> refreshes Cassy’s built-ins for AI tools that are already installed; it does not install Claude, Codex, or Grok for you.</p></section>
+<section class="card"><div class="number">3</div><h2>Sign in to Cassy Cloud once</h2><p>Ask Daniel for your personal Cloud API key. This is machine setup, not project setup.</p><pre><code>cas login --token &lt;YOUR-PERSONAL-API-KEY&gt;
+cas whoami</code></pre><p>Cassy stores this sign-in at <code>~/.cas/cloud.json</code>. Every new project can inherit it. Keep the key out of repositories and screenshots.</p><div class="notice good"><strong>Use the token command.</strong> It is the reliable path; you do not need the browser approval page.</div></section>
+<section class="card"><div class="number">4</div><h2>Initialize the actual project</h2><pre><code>mkdir -p ~/code && cd ~/code
+git clone &lt;YOUR-REPOSITORY-URL&gt;
+cd &lt;repository&gt;
+cas init
+cas doctor
+cas cloud team show
+cas cloud status</code></pre><p>Do not run <code>cas init</code> in <code>~</code>. If it refuses there, that is the safeguard working. If the team is not visible, confirm Daniel has added your Cloud account, then use <code>cas cloud team set &lt;uuid&gt;</code> or <code>cas cloud team auto on</code>.</p></section>
+<section class="card"><div class="number">5</div><h2>Connect the Mac to Commander</h2><p>The hub is a small loopback service that <a href="https://hub.petrastella.io">hub.petrastella.io</a> pairs with. Tailscale Serve is optional and gives the Petra Stella tailnet an HTTPS path to it.</p><pre><code># Optional: tailnet HTTPS
+brew install --cask tailscale
+open -a Tailscale
 
-  <div class="callout info" style="margin-bottom: 32px;">
-    <div class="callout-label">Already wired for you</div>
-    <strong>AWS</strong>, <strong>gcloud</strong>, <strong>Vercel</strong>, and
-    <strong>GitHub</strong> are all pre-authed — <code>aws</code>, <code>gcloud</code>,
-    <code>vercel</code>, and <code>gh</code> will just work. Your GitHub PAT is sourced
-    into every shell via <code>~/.zsh_secrets</code> (as <code>GH_TOKEN</code> /
-    <code>GITHUB_TOKEN</code>), so <code>git clone</code> over HTTPS, <code>gh</code>
-    commands, and anything else that reads those env vars are ready to go. Installed
-    CLIs include <code>cas</code>, <code>claude</code>, <code>gh</code>, <code>vercel</code>,
-    <code>aws</code>, <code>gcloud</code>, <code>docker</code>, <code>psql</code>,
-    <code>node</code>/<code>pnpm</code>/<code>yarn</code>, <code>cargo</code>,
-    <code>rg</code>, <code>jq</code>, <code>fzf</code>, <code>tmux</code>, and
-    <code>screen</code>. The only thing you need to personally auth is
-    <strong>Claude</strong>.
-  </div>
-
-  <nav class="toc">
-    <div class="toc-title">Contents</div>
-    <ol>
-      <li><a href="#connect">Connect to the box</a></li>
-      <li><a href="#claude">Log into Claude Code</a></li>
-      <li><a href="#github">Hook up GitHub</a></li>
-      <li><a href="#git">Set your git identity</a></li>
-      <li><a href="#clone">Clone a project</a></li>
-      <li><a href="#cas">Launch CAS</a></li>
-      <li><a href="#persist">Keep sessions alive</a></li>
-      <li><a href="#help">When something breaks</a></li>
-    </ol>
-  </nav>
-
-  <section class="step" id="connect">
-    <div class="step-num">1</div>
-    <h2>Connect to the box</h2>
-    <p>
-      Your user is <strong>ben</strong> on a Hetzner server at <code>87.99.156.244</code>
-      (nickname: <strong>starscream</strong>). Your SSH public key is already in
-      <code>authorized_keys</code>, so from your laptop:
-    </p>
-<pre><code>ssh ben@87.99.156.244</code></pre>
-    <p>
-      On your Mac, any terminal will do — Terminal.app, iTerm2, or Ghostty — SSH is
-      built in. Once you're connected, you land in zsh with oh-my-zsh. From here on out,
-      every command in this guide runs <strong>inside that SSH session</strong>, not on
-      your laptop.
-    </p>
-    <div class="callout info">
-      <div class="callout-label">Tip</div>
-      The box is also reachable as <strong>starscream</strong>. Add this to
-      <code>~/.ssh/config</code> on your laptop and you can just type
-      <code>ssh ben@starscream</code>:
-<pre><code>Host starscream
-  HostName 87.99.156.244
-  ServerAliveInterval 60</code></pre>
-      (No <code>User</code> line — that way <code>ssh ben@starscream</code> and
-      <code>ssh daniel@starscream</code> both work.)
-    </div>
-  </section>
-
-  <section class="step" id="claude">
-    <div class="step-num">2</div>
-    <h2>Log into Claude Code</h2>
-    <p>
-      <code>claude</code> is already installed at <code>/usr/bin/claude</code> (version 2.1.100).
-      You need to log in with <strong>your own Claude account</strong> — ours is currently
-      banned, which is exactly why the Slack bridge is off.
-    </p>
-    <p>
-      Start Claude once. It'll print a login URL — open it on your phone or laptop,
-      approve, and the CLI picks up the session.
-    </p>
-<pre><code>claude</code></pre>
-    <p>
-      When it finishes, quit with <span class="kbd">Ctrl</span>+<span class="kbd">C</span> twice,
-      or type <code>/exit</code>. You won't usually talk to Claude directly — CAS will
-      spawn it for you. We just need the credentials on disk.
-    </p>
-    <div class="callout warn">
-      <div class="callout-label">Heads up</div>
-      If you don't already have a Claude Code subscription, sign up at
-      <a href="https://claude.ai">claude.ai</a> first and pick a plan that includes
-      Claude Code (Max or Pro). Free tier won't cut it.
-    </div>
-  </section>
-
-  <section class="step" id="github">
-    <div class="step-num">3</div>
-    <h2>GitHub (already authed)</h2>
-    <p>
-      A fine-grained PAT for your account is already loaded into every shell via
-      <code>~/.zsh_secrets</code> — exported as <code>GH_TOKEN</code> and
-      <code>GITHUB_TOKEN</code>. <code>gh</code> picks it up automatically, and
-      <code>git</code> uses it for HTTPS clones/pushes. You can confirm with:
-    </p>
-<pre><code>gh auth status
-gh api user --jq .login   <span class="c"># should print: bhriv</span></code></pre>
-    <p>
-      Because HTTPS auth is covered, prefer the HTTPS clone URL (see step 5). If you
-      ever want SSH-based git instead, your keypair is at <code>~/.ssh/id_ed25519</code>
-      and you can register it with:
-    </p>
-<pre><code>gh ssh-key add ~/.ssh/id_ed25519.pub --title "starscream-ben"</code></pre>
-    <div class="callout warn">
-      <div class="callout-label">Don't run</div>
-      <code>gh auth login</code> — it'll fight the env-var auth. If <code>GH_TOKEN</code>
-      is set (and it is, in every new shell), <code>gh</code> is already logged in.
-    </div>
-  </section>
-
-  <section class="step" id="git">
-    <div class="step-num">4</div>
-    <h2>Set your git identity</h2>
-    <p>
-      Commits need a name and email. Use whatever you use on your laptop so the
-      attribution lines up:
-    </p>
-<pre><code>git config --global user.name  "Ben Your-Last-Name"
-git config --global user.email "you@example.com"
-git config --global init.defaultBranch main
-git config --global pull.rebase false</code></pre>
-  </section>
-
-  <section class="step" id="clone">
-    <div class="step-num">5</div>
-    <h2>Clone a project</h2>
-    <p>
-      Your workspace is <code>~/projects</code>. Pick whatever you're working on
-      and clone it there. For example:
-    </p>
-<pre><code>cd ~/projects
-git clone https://github.com/pippenz/cas-src.git
-cd cas-src</code></pre>
-    <p>
-      If you don't have access to a given repo yet, ping me and I'll add you as a
-      collaborator. Then <code>git clone</code> will just work.
-    </p>
-    <div class="callout info">
-      <div class="callout-label">Note</div>
-      CAS keys off the directory you're in, so the repo you want to work on should
-      be the one you <code>cd</code> into before launching CAS.
-    </div>
-  </section>
-
-  <section class="step" id="cas">
-    <div class="step-num">6</div>
-    <h2>Launch CAS</h2>
-    <p>
-      From inside a project directory, just run:
-    </p>
-<pre><code>cas</code></pre>
-    <p>
-      That opens the TUI. You get a task panel on the left, a pane grid on the
-      right, and a command bar at the bottom. Quick orientation:
-    </p>
-    <ul>
-      <li><strong>New Claude session</strong> — press <span class="kbd">n</span> to spawn a pane running <code>claude</code>, scoped to this project.</li>
-      <li><strong>Switch panes</strong> — <span class="kbd">Ctrl</span>+<span class="kbd">←</span>/<span class="kbd">→</span> cycles focus.</li>
-      <li><strong>Scroll a pane</strong> — mouse wheel, or <span class="kbd">PgUp</span>/<span class="kbd">PgDn</span>.</li>
-      <li><strong>Select text</strong> — hold <span class="kbd">Shift</span> and drag to copy with your terminal's native selection.</li>
-      <li><strong>Command palette</strong> — <span class="kbd">:</span> then type a command (try <code>:help</code>).</li>
-      <li><strong>Quit</strong> — <span class="kbd">Ctrl</span>+<span class="kbd">Q</span>.</li>
-    </ul>
-    <p>
-      Your tasks, memories, and search history live in <code>~/.cas/</code>. First
-      launch creates the DB. Everything persists across SSH sessions.
-    </p>
-  </section>
-
-  <section class="step" id="persist">
-    <div class="step-num">7</div>
-    <h2>Keep sessions alive</h2>
-    <p>
-      If your laptop sleeps or your wifi drops, a raw SSH session dies and takes
-      CAS with it. Wrap it in <code>tmux</code> so you can reattach:
-    </p>
-<pre><code><span class="c"># Start or reattach a named session</span>
-tmux new -A -s work
-
-<span class="c"># Inside tmux, launch CAS as normal</span>
-cd ~/projects/cas-src &amp;&amp; cas</code></pre>
-    <p>
-      Detach with <span class="kbd">Ctrl</span>+<span class="kbd">b</span>, then <span class="kbd">d</span>.
-      Next time you SSH in, <code>tmux attach -t work</code> drops you right back where
-      you left off — CAS still running, panes still alive.
-    </p>
-  </section>
-
-  <section class="step" id="help">
-    <div class="step-num">8</div>
-    <h2>When something breaks</h2>
-    <p>
-      A few things to try before pinging me:
-    </p>
-    <ul>
-      <li><strong>CAS won't start or acts weird</strong> — <code>cas --version</code> to confirm the binary is there, then <code>cas doctor</code> for a self-check.</li>
-      <li><strong>Claude sessions fail to authenticate</strong> — re-run <code>claude</code> standalone, log in again, then retry from CAS.</li>
-      <li><strong>Can't clone a repo</strong> — <code>ssh -T git@github.com</code> to confirm your SSH key works; if that's fine, you probably just need collaborator access.</li>
-      <li><strong>TUI rendering looks off</strong> — make sure your terminal is set to a reasonable font and has true-color enabled (iTerm2, Ghostty, WezTerm, Kitty all work well; Terminal.app is fine too).</li>
-    </ul>
-    <p>
-      If none of that works, grab the last few lines of output and send them over.
-      I can SSH in as root and poke around from the other side.
-    </p>
-  </section>
-
-  <hr />
-
-  <footer>
-    You're set. Welcome aboard.
-  </footer>
-
-</div>
-
-<script>
-  (function () {
-    document.querySelectorAll('pre').forEach(function (pre) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'copy-btn';
-      btn.setAttribute('aria-label', 'Copy code to clipboard');
-      btn.textContent = 'Copy';
-      btn.addEventListener('click', function () {
-        var code = pre.querySelector('code');
-        var text = (code ? code.innerText : pre.innerText).replace(/\s+$/, '');
-        var done = function () {
-          btn.textContent = 'Copied';
-          btn.classList.add('copied');
-          setTimeout(function () {
-            btn.textContent = 'Copy';
-            btn.classList.remove('copied');
-          }, 1500);
-        };
-        var fail = function () {
-          btn.textContent = 'Select';
-          setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(done, function () {
-            legacyCopy(text) ? done() : fail();
-          });
-        } else {
-          legacyCopy(text) ? done() : fail();
-        }
-      });
-      pre.appendChild(btn);
-    });
-
-    function legacyCopy(text) {
-      try {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.position = 'absolute';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        var ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        return ok;
-      } catch (e) {
-        return false;
-      }
-    }
-  })();
-</script>
-</body>
-</html>
+cas hub service install --tailscale-serve
+cas hub service status
+cas hub pair</code></pre><p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot. Open Commander, choose <strong>Pair a machine</strong>, then follow the code flow. Use <code>cas hub service install</code> without the flag if you do not want tailnet access. Use <code>cas hub service uninstall</code> to remove the service later without deleting the hub identity or pairings.</p></section>
+<section class="card"><div class="number">6</div><h2>Make source-checkout updates easy</h2><p><code>cas-update</code> is the day-to-day updater when you keep a Cassy source checkout. It builds from source, so it needs Xcode Command Line Tools, Rust, Git, and the repository. It is not required for the release-binary setup above.</p><pre><code>xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+source "$HOME/.cargo/env"
+cd ~/code/cassy
+git submodule update --init --recursive
+contrib/shell-helpers/install.sh
+cas-update --dry-run</code></pre><p>The installer copies the canonical helper to <code>~/.local/bin/cas-update</code>. Plain <code>cas-update</code> pulls/builds, installs, migrates and syncs local projects, then safely turns over processes still using the old binary.</p><pre><code>cas-update --sync-only     # migrate/sync only; no build or process change
+cas-update --no-restart    # build/install/migrate/sync; leave runtimes alone</code></pre></section>
+<section class="card"><div class="number">7</div><h2><code>update-ai</code> is optional</h2><p>This is Daniel’s personal convenience script, not a Cassy requirement. It lives in Daniel’s <code>soundwave-config</code> dotfiles and refreshes Claude Code, Grok, Codex, and Cassy in its documented order. Ask Daniel to provide it if you want it. Its header is the source of truth for its order and failure behavior; do not use it as a replacement for <code>cas-update</code> on a source checkout.</p></section>
+<section class="card"><div class="number">8</div><h2>Where keys go</h2><table><thead><tr><th>What you need</th><th>Correct home</th></tr></thead><tbody><tr><td>Cassy Cloud credential</td><td><code>cas login --token …</code> writes <code>~/.cas/cloud.json</code>.</td></tr><tr><td>Optional shell-supplied AI key</td><td>Export it in <code>~/.zprofile</code> (or use that provider’s normal login).</td></tr></tbody></table><p>Cassy does not read <code>~/.zprofile</code>, <code>~/.zshrc</code>, or <code>~/.zshenv</code> itself. Your login shell provides the environment to programs it starts. Cassy’s optional AI enrichment uses <code>OPENAI_API_KEY</code> by default; semantic-search status also recognizes <code>VOYAGE_API_KEY</code>. When you explicitly choose a Claude or Codex profile, Cassy removes inherited key/token variables so the chosen login cannot be silently overridden.</p><pre><code>printf '%s\n' 'export OPENAI_API_KEY="&lt;key from Daniel&gt;"' >> ~/.zprofile
+source ~/.zprofile</code></pre></section>
+<section class="card"><div class="label">Quick recovery</div><h2>If something feels wrong</h2><ul><li><strong><code>cas</code> is missing:</strong> run <code>source ~/.zprofile</code> or open a new terminal.</li><li><strong>Commander cannot connect:</strong> run <code>cas hub service status</code>; check Tailscale if you enabled it; pair again if asked.</li><li><strong>A project is unhappy:</strong> from its repository run <code>cas doctor</code>.</li><li><strong>Cloud is not connected:</strong> repeat <code>cas login --token …</code>, then <code>cas whoami</code>.</li></ul></section>
+<footer>Verification basis: Cassy onboarding docs; the tracked <code>cas-update</code> installer/helper; hub service and cloud configuration source; init guard; and Claude/Codex environment handling. Checked 18 August 2026.</footer>
+</main></body></html>

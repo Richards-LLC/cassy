@@ -136,6 +136,24 @@ fn logged_out_profile_is_announced_before_launch() {
         .stderr(predicate::str::contains("cas codex login work"));
 }
 
+/// An explicitly named missing account preserves the non-TTY contract: it is
+/// called out, but it never asks a script to answer the interactive login
+/// prompt. The factory error proves launch preparation proceeded normally.
+#[test]
+fn non_tty_missing_named_profile_warns_then_reaches_factory() {
+    let home = home_with_profiles();
+
+    cas_cmd(home.path())
+        .args(["codex", "support"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".codex-support does not exist yet"))
+        .stderr(predicate::str::contains("Using Codex account home:"))
+        .stderr(predicate::str::contains(
+            "Factory mode requires an interactive terminal",
+        ));
+}
+
 /// Factory flags pass through both with and without a profile — `cas codex
 /// --workers 2` predates the picker and must keep working.
 #[test]

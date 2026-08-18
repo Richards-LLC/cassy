@@ -36,6 +36,21 @@ use std::io::IsTerminal;
 pub use lifecycle::{execute_kill, execute_kill_all};
 pub use queries::execute_list;
 
+/// Name the Codex account home at the last decision point before a factory
+/// attaches or starts. The profile shortcut already announces it during early
+/// environment setup, but keeping it next to the session choice prevents that
+/// account fact from being separated from the prompt by preflight output.
+fn codex_account_home_suffix(supervisor_cli: &str) -> String {
+    if supervisor_cli != "codex" {
+        return String::new();
+    }
+    let home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
+    home.map(|home| format!(" (Codex account home: {})", home.display()))
+        .unwrap_or_default()
+}
+
 /// cas-0bf4: bridge the `[factory]` `cargo_build_jobs` + `nice_cargo` config
 /// knobs into process env so that worker PTY spawns (see `cas-pty`
 /// `PtyConfig::{claude,codex}`) read them.
@@ -967,6 +982,13 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             fmt.info(note)?;
         }
     }
+    let codex_home = codex_account_home_suffix(&args.supervisor_cli);
+    if !codex_home.is_empty() {
+        let theme = crate::ui::theme::ActiveTheme::default();
+        let mut stdout = std::io::stdout();
+        let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+        fmt.info(&format!("Resolving factory session{codex_home}"))?;
+    }
 
     // Auto-attach to existing session, or kill it if --new
     if !args.legacy && args.name.is_none() {
@@ -979,7 +1001,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                     let mut stdout = std::io::stdout();
                     let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
                     fmt.info(&format!(
-                        "Found running session: {} (workers: {}, pid: {})",
+                        "Found running session: {} (workers: {}, pid: {}){codex_home}",
                         session.name,
                         session.worker_count(),
                         session.metadata.daemon_pid
@@ -989,7 +1011,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                         true,
                     )? {
                         lifecycle::kill_session_if_running(&session.name)?;
-                        fmt.info("Killed. Starting new session...")?;
+                        fmt.info(&format!("Killed. Starting new session...{codex_home}"))?;
                         fmt.newline()?;
                     } else {
                         fmt.info("Attaching to existing session instead.")?;
@@ -1001,7 +1023,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                     let theme = crate::ui::theme::ActiveTheme::default();
                     let mut stdout = std::io::stdout();
                     let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-                    fmt.info(&format!("Attaching to running session: {}", session.name))?;
+                    fmt.info(&format!(
+                        "Attaching to running session: {}{codex_home}",
+                        session.name
+                    ))?;
                     fmt.newline()?;
                     return attach(Some(session.name));
                 } else {
@@ -1010,7 +1035,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                     let mut stdout = std::io::stdout();
                     let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
                     fmt.info(&format!(
-                        "Found running session: {} (workers: {}, pid: {})",
+                        "Found running session: {} (workers: {}, pid: {}){codex_home}",
                         session.name,
                         session.worker_count(),
                         session.metadata.daemon_pid
@@ -1019,7 +1044,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                         fmt.newline()?;
                         return attach(Some(session.name));
                     } else {
-                        fmt.info("Starting new session... (use --new to skip this prompt)")?;
+                        fmt.info(&format!(
+                            "Starting new session...{codex_home} (use --new to skip this prompt)"
+                        ))?;
                         fmt.newline()?;
                     }
                 }

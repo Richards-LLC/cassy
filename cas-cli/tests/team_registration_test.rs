@@ -22,7 +22,11 @@ mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
 use cas::cli::cloud::{CloudSyncArgs, ensure_team_project_registration, execute_sync};
-use cas::cloud::{CloudConfig, SyncQueue, get_project_canonical_id};
+use cas::cloud::{CloudConfig, SyncQueue, TeamInfo, get_project_canonical_id};
+use cas::store::{
+    open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+    open_rule_store, open_skill_store, open_spec_store, open_store, open_task_store,
+};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -32,29 +36,43 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// one process, and the env var is shared.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-struct CasRootGuard {
+/// Sets one or more env vars for the duration of a test under a single
+/// ENV_LOCK acquisition. One guard for all of them is required, not stylistic:
+/// `std::sync::Mutex` is not reentrant, so two guards that each take ENV_LOCK
+/// would deadlock the moment a test needs both `CAS_ROOT` and
+/// `CAS_USER_CLOUD_JSON`.
+struct ScopedEnv {
     _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<std::ffi::OsString>,
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
-impl CasRootGuard {
-    fn set(cas_root: &Path) -> Self {
+impl ScopedEnv {
+    fn set(vars: &[(&'static str, &str)]) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("CAS_ROOT");
-        // SAFETY: env mutation in an integration-test process, serialized by
-        // ENV_LOCK for the guard's whole lifetime.
-        unsafe { std::env::set_var("CAS_ROOT", cas_root) };
+        let mut prev = Vec::with_capacity(vars.len());
+        for (key, value) in vars {
+            prev.push((*key, std::env::var_os(key)));
+            // SAFETY: env mutation in an integration-test process, serialized
+            // by ENV_LOCK for the guard's whole lifetime.
+            unsafe { std::env::set_var(key, value) };
+        }
         Self { _lock: lock, prev }
+    }
+
+    fn cas_root(cas_root: &Path) -> Self {
+        Self::set(&[("CAS_ROOT", &cas_root.to_string_lossy())])
     }
 }
 
-impl Drop for CasRootGuard {
+impl Drop for ScopedEnv {
     fn drop(&mut self) {
         // SAFETY: ENV_LOCK held for the entire guard lifetime.
         unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var("CAS_ROOT", v),
-                None => std::env::remove_var("CAS_ROOT"),
+            for (key, prev) in &self.prev {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -65,6 +83,20 @@ fn make_cas_root() -> TempDir {
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     tmp
+}
+
+/// Create every SQLite store `execute_sync` opens, so a full-sync test
+/// exercises the sync itself rather than store creation.
+fn init_all_stores_at(cas_root: &Path) {
+    let _ = open_store(cas_root).unwrap();
+    let _ = open_task_store(cas_root).unwrap();
+    let _ = open_rule_store(cas_root).unwrap();
+    let _ = open_skill_store(cas_root).unwrap();
+    let _ = open_spec_store(cas_root).unwrap();
+    let _ = open_event_store(cas_root).unwrap();
+    let _ = open_prompt_store(cas_root).unwrap();
+    let _ = open_file_change_store(cas_root).unwrap();
+    let _ = open_commit_link_store(cas_root).unwrap();
 }
 
 /// The canonical id the production path resolves — the same
@@ -145,7 +177,7 @@ async fn sync_fails_loud_when_server_never_registers_the_project() {
     make_cloud_config(server.uri())
         .save_to_cas_dir(&cas_root)
         .unwrap();
-    let _env = CasRootGuard::set(&cas_root);
+    let _env = ScopedEnv::cas_root(&cas_root);
 
     let expected_id = project_id();
     let args = CloudSyncArgs {
@@ -226,7 +258,7 @@ async fn registration_creates_the_project_when_the_team_does_not_know_it() {
     let cas_root = tmp.path().to_path_buf();
     let config = make_cloud_config(server.uri());
     config.save_to_cas_dir(&cas_root).unwrap();
-    let _env = CasRootGuard::set(&cas_root);
+    let _env = ScopedEnv::cas_root(&cas_root);
 
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -277,7 +309,7 @@ async fn already_registered_project_is_verified_once_then_cached() {
     let cas_root = tmp.path().to_path_buf();
     let config = make_cloud_config(server.uri());
     config.save_to_cas_dir(&cas_root).unwrap();
-    let _env = CasRootGuard::set(&cas_root);
+    let _env = ScopedEnv::cas_root(&cas_root);
 
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -311,7 +343,7 @@ async fn full_sync_reverifies_registration_instead_of_trusting_the_cache() {
     let cas_root = tmp.path().to_path_buf();
     let config = make_cloud_config(server.uri());
     config.save_to_cas_dir(&cas_root).unwrap();
-    let _env = CasRootGuard::set(&cas_root);
+    let _env = ScopedEnv::cas_root(&cas_root);
 
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -342,7 +374,7 @@ async fn expired_session_fails_registration_with_a_login_instruction() {
     let cas_root = tmp.path().to_path_buf();
     let config = make_cloud_config(server.uri());
     config.save_to_cas_dir(&cas_root).unwrap();
-    let _env = CasRootGuard::set(&cas_root);
+    let _env = ScopedEnv::cas_root(&cas_root);
 
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -360,6 +392,219 @@ async fn expired_session_fails_registration_with_a_login_instruction() {
     assert!(
         msg.contains("401"),
         "the failing interaction must carry the status code, got:\n{msg}"
+    );
+}
+
+/// Operator directive (cas-c117 amendment): a logged-in user whose team
+/// identity is already resolvable must NOT have to run `cas cloud team set`
+/// or `cas cloud team auto on` first. `cas cloud sync` adopts the team for the
+/// project and registers it — the whole flow Ben had to drive by hand.
+///
+/// The project config here has no team at all; only the user-level
+/// `cloud.json` knows about the membership, exactly as it does after `cas
+/// login` / the `/api/me` refresh.
+#[tokio::test]
+async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
+    let server = MockServer::start().await;
+    let expected_id = project_id();
+
+    // Registration: unknown first, listed after the registration write.
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_project_list_body()))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(project_list_body(&expected_id)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Registration write + the (empty) team drain later in the same sync.
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(team_push_ok_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "pulled_at": "2026-08-18T00:00:00Z",
+            "team_id": TEST_TEAM,
+            "status": "ok",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "specs": [], "events": [], "prompts": [],
+            "file_changes": [], "commit_links": [],
+            "knowledge_pages": [],
+            "pulled_at": "2026-08-18T00:00:00Z",
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = make_cas_root();
+    let cas_root = tmp.path().to_path_buf();
+    init_all_stores_at(&cas_root);
+
+    // Project config: a fresh clone. NO team of any kind, and — per cas-046d,
+    // where `cas login` stores credentials machine-wide — no token of its own
+    // either. This is Ben's actual starting state.
+    let mut project_cfg = CloudConfig::default();
+    project_cfg.endpoint = server.uri();
+    project_cfg.save_to_cas_dir(&cas_root).unwrap();
+    assert_eq!(project_cfg.team_id, None);
+    assert_eq!(project_cfg.team_auto_promote, None);
+    assert!(!project_cfg.is_logged_in());
+
+    // User config: the machine-wide login plus the membership the CLI already
+    // knows about.
+    let user_dir = TempDir::new().unwrap();
+    let mut user_cfg = CloudConfig::default();
+    user_cfg.endpoint = server.uri();
+    user_cfg.token = Some("test-token".to_string());
+    user_cfg.teams = vec![TeamInfo {
+        id: TEST_TEAM.to_string(),
+        slug: "petra-stella".to_string(),
+        name: "Petra Stella".to_string(),
+        role: "member".to_string(),
+    }];
+    user_cfg.default_team_id = Some(TEST_TEAM.to_string());
+    // Fresh cache + backfill already done, so the sync makes no /api/me call
+    // and this test measures adoption alone.
+    user_cfg.teams_fetched_at = Some(chrono::Utc::now());
+    user_cfg.team_backfill_notified = true;
+    user_cfg.save_to_cas_dir(user_dir.path()).unwrap();
+
+    let _env = ScopedEnv::set(&[
+        ("CAS_ROOT", &cas_root.to_string_lossy()),
+        (
+            "CAS_USER_CLOUD_JSON",
+            &user_dir.path().join("cloud.json").to_string_lossy(),
+        ),
+    ]);
+
+    let args = CloudSyncArgs {
+        dry_run: false,
+        rehome: false,
+        full: false,
+    };
+    let cli = make_cli_json();
+    let cas_root_owned = cas_root.clone();
+    let result = tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_ok(),
+        "sync must adopt the resolvable team and register the project without any \
+         manual team command; got {result:?}"
+    );
+
+    // The project is now team-scoped and stays that way for later commands.
+    let saved = CloudConfig::load_from_cas_dir(&cas_root).unwrap();
+    assert_eq!(
+        saved.team_auto_promote,
+        Some(true),
+        "sync must persist the adopted team scope"
+    );
+    assert_eq!(
+        saved.active_team_id_with_user_config(Some(&user_cfg)).as_deref(),
+        Some(TEST_TEAM),
+        "the adopted scope must resolve to the user's team"
+    );
+
+    // And the registration actually happened for that team — the mocks'
+    // `.expect(1)` on the lookup pair and the registration write assert it on
+    // MockServer drop.
+    let queue = SyncQueue::open(&cas_root).unwrap();
+    assert!(
+        queue
+            .get_metadata(&format!("team_project_registered_{TEST_TEAM}_{expected_id}"))
+            .unwrap()
+            .is_some(),
+        "the adopted team must end the sync with a confirmed registration"
+    );
+}
+
+/// The kill switch outranks adoption: `cas cloud team auto off` keeps a
+/// project personal even when a team resolves, and no team endpoint is hit.
+#[tokio::test]
+async fn team_auto_off_keeps_a_project_personal_despite_a_resolvable_team() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let tmp = make_cas_root();
+    let cas_root = tmp.path().to_path_buf();
+
+    let mut project_cfg = CloudConfig::default();
+    project_cfg.endpoint = server.uri();
+    project_cfg.token = Some("test-token".to_string());
+    project_cfg.team_auto_promote = Some(false); // `cas cloud team auto off`
+    project_cfg.save_to_cas_dir(&cas_root).unwrap();
+
+    let user_dir = TempDir::new().unwrap();
+    let mut user_cfg = CloudConfig::default();
+    user_cfg.teams = vec![TeamInfo {
+        id: TEST_TEAM.to_string(),
+        slug: "petra-stella".to_string(),
+        name: "Petra Stella".to_string(),
+        role: "member".to_string(),
+    }];
+    user_cfg.default_team_id = Some(TEST_TEAM.to_string());
+    user_cfg.teams_fetched_at = Some(chrono::Utc::now());
+    user_cfg.team_backfill_notified = true;
+    user_cfg.save_to_cas_dir(user_dir.path()).unwrap();
+
+    let _env = ScopedEnv::set(&[
+        ("CAS_ROOT", &cas_root.to_string_lossy()),
+        (
+            "CAS_USER_CLOUD_JSON",
+            &user_dir.path().join("cloud.json").to_string_lossy(),
+        ),
+    ]);
+
+    let cli = make_cli_json();
+    let cas_root_owned = cas_root.clone();
+    let config = CloudConfig::load_from_cas_dir(&cas_root).unwrap();
+    tokio::task::spawn_blocking(move || {
+        cas::cloud::maybe_adopt_team_scope(&cas_root_owned).expect("adoption must not error");
+        ensure_team_project_registration(&config, &cas_root_owned, &cli, false)
+            .expect("a personal project must not fail the sync")
+    })
+    .await
+    .unwrap();
+
+    let saved = CloudConfig::load_from_cas_dir(&cas_root).unwrap();
+    assert_eq!(
+        saved.team_auto_promote,
+        Some(false),
+        "adoption must never undo the explicit kill switch"
     );
 }
 
@@ -387,7 +632,7 @@ async fn registration_is_a_no_op_without_a_configured_team() {
     config.endpoint = server.uri();
     config.token = Some("test-token".to_string());
     config.save_to_cas_dir(&cas_root).unwrap();
-    let _env = CasRootGuard::set(&cas_root);
+    let _env = ScopedEnv::cas_root(&cas_root);
 
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();

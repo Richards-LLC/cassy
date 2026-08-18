@@ -746,6 +746,81 @@ pub(crate) fn user_level_cloud_json_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".cas").join("cloud.json"))
 }
 
+/// Compare two config paths for identity, tolerating different spellings of
+/// the same file (`..`, symlinks) when both exist.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Persist a successful login at user level (`~/.cas/cloud.json`) so every
+/// project on the machine is logged in (cas-046d / Ben #3).
+///
+/// The project-level `.cas/cloud.json` is refreshed too when the caller is
+/// inside a project, because the MCP daemon and background syncers read that
+/// file directly; it is a cache of the user-level truth, and the write is
+/// best-effort so `cas login --token` still succeeds from `$HOME` (Ben #4).
+///
+/// Returns the project path that was also updated, if any.
+pub fn store_login_credentials(
+    endpoint: &str,
+    token: &str,
+    email: Option<&str>,
+    plan: Option<&str>,
+) -> Result<Option<PathBuf>, CasError> {
+    let mut user_config = CloudConfig::load_user().unwrap_or_default();
+    user_config.endpoint = endpoint.to_string();
+    user_config.token = Some(token.to_string());
+    user_config.email = email.map(String::from);
+    user_config.plan = plan.map(String::from);
+    user_config.save_user()?;
+
+    let Ok(project_path) = CloudConfig::config_path() else {
+        return Ok(None);
+    };
+    if user_level_cloud_json_path().is_some_and(|user| paths_equal(&user, &project_path)) {
+        return Ok(None);
+    }
+    let mut project_config = CloudConfig::load_from(&project_path).unwrap_or_default();
+    project_config.endpoint = endpoint.to_string();
+    project_config.token = Some(token.to_string());
+    project_config.email = email.map(String::from);
+    project_config.plan = plan.map(String::from);
+    match project_config.save_to(&project_path) {
+        Ok(()) => Ok(Some(project_path)),
+        Err(error) => {
+            tracing::debug!(%error, "logged in, but could not cache credentials in the project cloud.json");
+            Ok(None)
+        }
+    }
+}
+
+/// Clear credentials from `~/.cas/cloud.json` and, when inside a project, from
+/// that project's cached copy. Non-credential state (teams, sync timestamps)
+/// is preserved.
+pub fn clear_login_credentials() -> Result<(), CasError> {
+    let mut user_config = CloudConfig::load_user().unwrap_or_default();
+    user_config.logout();
+    user_config.save_user()?;
+
+    if let Ok(project_path) = CloudConfig::config_path()
+        && !user_level_cloud_json_path().is_some_and(|user| paths_equal(&user, &project_path))
+        && project_path.exists()
+        && let Ok(mut project_config) = CloudConfig::load_from(&project_path)
+    {
+        project_config.logout();
+        if let Err(error) = project_config.save_to(&project_path) {
+            tracing::debug!(%error, "could not clear project-level cloud credentials");
+        }
+    }
+    Ok(())
+}
+
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
@@ -855,13 +930,108 @@ where
     Ok(notice)
 }
 
+/// Outcome of the automatic team-scope adoption `cas cloud sync` performs
+/// (cas-c117, operator directive 2026-08-18).
+///
+/// # Why this exists
+///
+/// The team identity is already known locally — `/api/me` populates
+/// `teams[]` and `maybe_apply_team_backfill` sets `default_team_id` — but
+/// [`CloudConfig::active_team_id_with_user_config`] refuses to use it unless
+/// the project opted in with `cas cloud team set` or `cas cloud team auto on`
+/// (the cas-f8e3 guard). A new clone therefore synced in personal scope and
+/// registered nothing with the team until the user ran a command they had no
+/// reason to know about. Sync now adopts the resolvable team for the project
+/// itself; explicit configuration remains an override, not a prerequisite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamScopeAdoption {
+    /// The project had no team scope and one team resolved — the project is
+    /// now opted in (`team_auto_promote = Some(true)`).
+    Adopted(PersonalScopeNotice),
+    /// The project already resolves a team (explicit `team_id` or a prior
+    /// adoption). Nothing changed.
+    AlreadyScoped { team_id: String },
+    /// `cas cloud team auto off` — the hard kill-switch. Never re-adopted.
+    OptedOut,
+    /// No token in this project's cloud config; nothing can be resolved.
+    NotLoggedIn,
+    /// No single team identity resolves. `membership_count` is 0 (no teams)
+    /// or ≥ 2 with no user-level default (genuinely ambiguous — CAS refuses
+    /// to guess which team a project belongs to).
+    NoResolvableTeam { membership_count: usize },
+}
+
+/// Adopt the user's resolvable team for this project. Pure — mutates
+/// `project_cfg` in memory only, so the decision table is unit-testable.
+///
+/// Precedence, highest first:
+///  1. not logged in → nothing to resolve;
+///  2. `team_auto_promote = Some(false)` → user said personal, forever;
+///  3. project already resolves a team → leave it alone (this is what makes
+///     `cas cloud team set` an override rather than a competitor);
+///  4. exactly one resolvable team (user `default_team_id`, else a sole
+///     membership) → opt the project in;
+///  5. otherwise → stay personal and report why.
+///
+/// "Logged in" is machine-wide (cas-046d): a project whose own `cloud.json`
+/// has no token still counts when `~/.cas/cloud.json` does, because that is
+/// exactly the fresh-clone case this adoption exists for — checking only the
+/// project copy would make adoption miss the users who need it most.
+pub fn adopt_team_scope_for_configs(
+    project_cfg: &mut CloudConfig,
+    user_cfg: &CloudConfig,
+) -> TeamScopeAdoption {
+    if !project_cfg.is_logged_in() && !user_cfg.is_logged_in() {
+        return TeamScopeAdoption::NotLoggedIn;
+    }
+    if matches!(project_cfg.team_auto_promote, Some(false)) {
+        return TeamScopeAdoption::OptedOut;
+    }
+    if let Some(team_id) = project_cfg.active_team_id_with_user_config(Some(user_cfg)) {
+        return TeamScopeAdoption::AlreadyScoped { team_id };
+    }
+
+    match usable_team_from_user_config(user_cfg) {
+        Some(team) => {
+            // The same knob `cas cloud team auto on` sets — so adoption is
+            // indistinguishable from the user having opted in by hand, and
+            // `cas cloud team auto off` reverses it.
+            project_cfg.team_auto_promote = Some(true);
+            TeamScopeAdoption::Adopted(team)
+        }
+        None => TeamScopeAdoption::NoResolvableTeam {
+            membership_count: user_cfg.teams.len(),
+        },
+    }
+}
+
+/// Disk-backed [`adopt_team_scope_for_configs`]: reads the project config at
+/// `cas_root` and the user-level config, and persists the project config only
+/// when adoption actually changed it.
+pub fn maybe_adopt_team_scope(cas_root: &Path) -> Result<TeamScopeAdoption, CasError> {
+    let mut project_cfg = CloudConfig::load_from_cas_dir(cas_root)?;
+    let user_cfg = user_level_cloud_json_path()
+        .and_then(|p| CloudConfig::load_from(&p).ok())
+        .unwrap_or_default();
+
+    let outcome = adopt_team_scope_for_configs(&mut project_cfg, &user_cfg);
+    if matches!(outcome, TeamScopeAdoption::Adopted(_)) {
+        project_cfg.save_to_cas_dir(cas_root)?;
+    }
+    Ok(outcome)
+}
+
 impl CloudConfig {
     /// Return the path to the user-level `~/.cas/cloud.json`.
+    ///
+    /// Delegates to [`user_level_cloud_json_path`] so reads (`load_user`) and
+    /// writes (`save_user`) always agree, including under the
+    /// `CAS_USER_CLOUD_JSON` test seam.
     ///
     /// Returns `None` only when `dirs::home_dir()` fails — practically
     /// unreachable on any supported platform (Linux/macOS).
     pub fn user_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".cas").join("cloud.json"))
+        user_level_cloud_json_path()
     }
 
     /// Load the user-level cloud config from `~/.cas/cloud.json`.
@@ -889,10 +1059,81 @@ impl CloudConfig {
         self.save_to(&path)
     }
 
-    /// Load cloud config from .cas/cloud.json
+    /// Load cloud config from `.cas/cloud.json` for the current project,
+    /// inheriting the machine-wide login from `~/.cas/cloud.json`.
+    ///
+    /// Credentials are user-level (cas-046d): `cas login` stores the token in
+    /// `~/.cas/cloud.json`, so a project that has never been logged in to picks
+    /// it up here instead of reporting "not logged in". When the inheritance
+    /// fires inside a real project the credentials are also written through to
+    /// the project file, so the direct-file readers
+    /// ([`load_from_cas_dir`][Self::load_from_cas_dir] — the MCP daemon and
+    /// background syncers) converge without a second `cas login`. That
+    /// write-through is best-effort: a read-only checkout still returns the
+    /// inherited credentials in memory.
     pub fn load() -> Result<Self, CasError> {
         let path = Self::config_path()?;
-        Self::load_from(&path)
+        let mut config = Self::load_from(&path)?;
+        if config.inherit_credentials_from_user_level(&path) {
+            // Cache fill only — never fatal.
+            if let Err(error) = config.save_to(&path) {
+                tracing::debug!(%error, "could not cache user-level credentials into project cloud.json");
+            }
+        }
+        Ok(config)
+    }
+
+    /// The config governing the current context, never failing.
+    ///
+    /// Inside a CAS project this is [`load`][Self::load]; outside one (for
+    /// example `cas login --token` run from `$HOME`) it is the user-level
+    /// `~/.cas/cloud.json` alone. Auth commands use this so they work
+    /// everywhere: credentials do not live in a project.
+    pub fn load_effective() -> Self {
+        match Self::load() {
+            Ok(config) => config,
+            Err(_) => Self::load_user().unwrap_or_default(),
+        }
+    }
+
+    /// Copy the machine-wide login into this (project) config when the project
+    /// has none of its own. Returns whether anything changed.
+    ///
+    /// `self_path` is the file `self` was read from; when it *is* the
+    /// user-level file there is nothing to inherit.
+    fn inherit_credentials_from_user_level(&mut self, self_path: &Path) -> bool {
+        let Some(user_path) = user_level_cloud_json_path() else {
+            return false;
+        };
+        if paths_equal(&user_path, self_path) {
+            return false;
+        }
+        let Ok(user_config) = Self::load_from(&user_path) else {
+            return false;
+        };
+        self.inherit_credentials_from(&user_config)
+    }
+
+    /// Adopt `user`'s credentials when `self` is not logged in. Returns whether
+    /// anything changed. Pure — unit-testable without touching disk.
+    pub fn inherit_credentials_from(&mut self, user: &Self) -> bool {
+        if self.is_logged_in() || !user.is_logged_in() {
+            return false;
+        }
+        self.token = user.token.clone();
+        if self.email.is_none() {
+            self.email = user.email.clone();
+        }
+        if self.plan.is_none() {
+            self.plan = user.plan.clone();
+        }
+        // Only override an endpoint the project never chose for itself.
+        if (self.endpoint.trim().is_empty() || self.endpoint == default_endpoint())
+            && !user.endpoint.trim().is_empty()
+        {
+            self.endpoint = user.endpoint.clone();
+        }
+        true
     }
 
     /// Load cloud config from a specific path
@@ -1011,6 +1252,19 @@ impl CloudConfig {
         // auto-pick must NOT apply, otherwise personal workspaces would be
         // silently promoted to team scope whenever the user has a team
         // configured for their main project.
+        //
+        // cas-c117 — CONSTRAINT ON THIS GUARD, read before "simplifying" it:
+        // the operator reversed the *default* (a logged-in user's project must
+        // land in their team without them discovering `cas cloud team set`),
+        // but deliberately NOT this guard. `cas cloud sync` calls
+        // [`adopt_team_scope_for_configs`], which writes
+        // `team_auto_promote = Some(true)` into the project config and prints
+        // what it did, so the opt-in still exists as a durable, inspectable,
+        // reversible fact on disk. Do not "fix" the UX by making this function
+        // fall through to the user-level default on its own: that would make
+        // team scope an invisible property of the ambient environment, apply
+        // to every non-sync caller (stores, MCP, daemon) with no notice and no
+        // record, and remove the `team auto off` kill switch's only anchor.
         if !matches!(self.team_auto_promote, Some(true)) {
             return None;
         }
@@ -1140,6 +1394,188 @@ mod tests {
         assert_eq!(loaded.token, Some("test_token".to_string()));
         assert_eq!(loaded.email, Some("test@example.com".to_string()));
         assert!(loaded.is_logged_in());
+    }
+
+    /// Wire up a fake machine: a user-level `~/.cas/cloud.json` (via the
+    /// `CAS_USER_CLOUD_JSON` seam) and a project `.cas/` (via `CAS_ROOT`).
+    /// Returns the guard plus both paths.
+    fn machine_fixture() -> (TestEnvGuard, TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let user_path = temp.path().join("home-cas").join("cloud.json");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        let project_cas = temp.path().join("project-b").join(".cas");
+        std::fs::create_dir_all(&project_cas).unwrap();
+
+        let mut guard = TestEnvGuard::new();
+        guard.set("CAS_USER_CLOUD_JSON", &user_path);
+        guard.set("CAS_ROOT", &project_cas);
+        let project_path = project_cas.join("cloud.json");
+        (guard, temp, user_path, project_path)
+    }
+
+    #[test]
+    fn login_is_machine_wide_so_a_second_project_is_already_logged_in() {
+        // Ben #3 (cas-046d): after `cas login` in one project, a freshly
+        // `cas init`-ed second project reported "not logged in".
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("user-level-token".to_string()),
+            email: Some("ben@example.com".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        assert!(
+            !project_path.exists(),
+            "second project has never been logged in to"
+        );
+
+        let loaded = CloudConfig::load().unwrap();
+
+        assert!(
+            loaded.is_logged_in(),
+            "a machine-wide login must serve every project"
+        );
+        assert_eq!(loaded.token.as_deref(), Some("user-level-token"));
+        assert_eq!(loaded.email.as_deref(), Some("ben@example.com"));
+
+        // Write-through so the direct-file readers (MCP daemon, syncers)
+        // converge without a second login.
+        let cached = CloudConfig::load_from(&project_path).unwrap();
+        assert_eq!(cached.token.as_deref(), Some("user-level-token"));
+    }
+
+    #[test]
+    fn project_credentials_win_over_the_user_level_login() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("user-level-token".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        CloudConfig {
+            token: Some("project-token".to_string()),
+            ..Default::default()
+        }
+        .save_to(&project_path)
+        .unwrap();
+
+        let loaded = CloudConfig::load().unwrap();
+
+        assert_eq!(
+            loaded.token.as_deref(),
+            Some("project-token"),
+            "an explicit project credential must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn inheritance_keeps_an_endpoint_the_project_chose_for_itself() {
+        let mut project = CloudConfig {
+            endpoint: "https://staging.example.com".to_string(),
+            ..Default::default()
+        };
+        let user = CloudConfig {
+            endpoint: "https://petra-stella-cloud.vercel.app".to_string(),
+            token: Some("t".to_string()),
+            ..Default::default()
+        };
+
+        assert!(project.inherit_credentials_from(&user));
+
+        assert_eq!(project.token.as_deref(), Some("t"));
+        assert_eq!(
+            project.endpoint, "https://staging.example.com",
+            "a non-default project endpoint survives credential inheritance"
+        );
+    }
+
+    #[test]
+    fn store_login_credentials_writes_user_level_and_project_cache() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+
+        let cached = store_login_credentials(
+            "https://petra-stella-cloud.vercel.app",
+            "fresh-token",
+            Some("ben@example.com"),
+            Some("pro"),
+        )
+        .unwrap();
+
+        assert_eq!(cached.as_deref(), Some(project_path.as_path()));
+        let user = CloudConfig::load_from(&user_path).unwrap();
+        assert_eq!(
+            user.token.as_deref(),
+            Some("fresh-token"),
+            "the login must land in ~/.cas/cloud.json"
+        );
+        assert_eq!(user.email.as_deref(), Some("ben@example.com"));
+        assert_eq!(user.plan.as_deref(), Some("pro"));
+        let project = CloudConfig::load_from(&project_path).unwrap();
+        assert_eq!(project.token.as_deref(), Some("fresh-token"));
+    }
+
+    #[test]
+    fn store_login_credentials_works_outside_a_project() {
+        // Ben #4 (cas-046d): `cas login --token` from $HOME died with
+        // "CAS not initialized — run cas init".
+        let temp = TempDir::new().unwrap();
+        let user_path = temp.path().join("home-cas").join("cloud.json");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        let outside = temp.path().join("not-a-cas-project");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut guard = TestEnvGuard::new();
+        guard.set("CAS_USER_CLOUD_JSON", &user_path);
+        guard.remove("CAS_ROOT");
+        guard.set_current_dir(&outside);
+
+        let cached = store_login_credentials(
+            "https://petra-stella-cloud.vercel.app",
+            "fresh-token",
+            None,
+            None,
+        )
+        .expect("logging in outside a project must succeed");
+
+        assert!(cached.is_none(), "there is no project cache to write");
+        let user = CloudConfig::load_from(&user_path).unwrap();
+        assert_eq!(user.token.as_deref(), Some("fresh-token"));
+        assert!(CloudConfig::load_effective().is_logged_in());
+    }
+
+    #[test]
+    fn clear_login_credentials_clears_user_level_and_project() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("t".to_string()),
+            team_id: Some("team-123".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        CloudConfig {
+            token: Some("t".to_string()),
+            team_id: Some("team-123".to_string()),
+            ..Default::default()
+        }
+        .save_to(&project_path)
+        .unwrap();
+
+        clear_login_credentials().unwrap();
+
+        let user = CloudConfig::load_from(&user_path).unwrap();
+        assert!(!user.is_logged_in(), "logout is machine-wide");
+        let project = CloudConfig::load_from(&project_path).unwrap();
+        assert!(
+            !project.is_logged_in(),
+            "the project credential cache must not outlive logout"
+        );
+        assert!(
+            !CloudConfig::load().unwrap().is_logged_in(),
+            "nothing re-inherits a cleared credential"
+        );
     }
 
     #[test]
@@ -1321,6 +1757,211 @@ mod tests {
                 .as_deref(),
             Some("solo-team-id"),
         );
+    }
+
+    // ── cas-c117: automatic team-scope adoption ────────────────────────────
+    //
+    // Operator directive: a logged-in user whose team identity is already
+    // resolvable must not have to run `cas cloud team set` / `team auto on`
+    // before their project is team-scoped. These lock the decision table.
+
+    fn logged_in_project() -> CloudConfig {
+        let mut cfg = CloudConfig::default();
+        cfg.token = Some("test-token".to_string());
+        cfg
+    }
+
+    fn user_with_teams(teams: &[(&str, &str, &str)], default_team_id: Option<&str>) -> CloudConfig {
+        let mut cfg = CloudConfig::default();
+        cfg.teams = teams
+            .iter()
+            .map(|(id, slug, name)| TeamInfo {
+                id: (*id).to_string(),
+                slug: (*slug).to_string(),
+                name: (*name).to_string(),
+                role: "member".to_string(),
+            })
+            .collect();
+        cfg.default_team_id = default_team_id.map(ToString::to_string);
+        cfg
+    }
+
+    #[test]
+    fn adoption_opts_a_fresh_project_into_the_sole_team() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo Team")], None);
+
+        let outcome = adopt_team_scope_for_configs(&mut project, &user);
+
+        match outcome {
+            TeamScopeAdoption::Adopted(team) => {
+                assert_eq!(team.team_id, "solo-team-id");
+                assert_eq!(team.team_slug, "solo");
+                assert_eq!(team.team_name, "Solo Team");
+            }
+            other => panic!("expected adoption of the sole membership, got {other:?}"),
+        }
+        assert_eq!(project.team_auto_promote, Some(true));
+        assert_eq!(
+            project
+                .active_team_id_with_user_config(Some(&user))
+                .as_deref(),
+            Some("solo-team-id"),
+            "adoption must make the team actually effective, not just recorded"
+        );
+    }
+
+    #[test]
+    fn adoption_prefers_the_user_default_over_membership_order() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        let user = user_with_teams(
+            &[
+                ("team-a", "alpha", "Alpha"),
+                ("team-b", "beta", "Beta"),
+            ],
+            Some("team-b"),
+        );
+
+        match adopt_team_scope_for_configs(&mut project, &user) {
+            TeamScopeAdoption::Adopted(team) => assert_eq!(team.team_id, "team-b"),
+            other => panic!("expected the user default to be adopted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adoption_never_overrides_an_explicit_team_set() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        project.set_team("pinned-team", "pinned");
+        let user = user_with_teams(&[("other-team", "other", "Other")], Some("other-team"));
+
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &user),
+            TeamScopeAdoption::AlreadyScoped {
+                team_id: "pinned-team".to_string()
+            },
+            "`cas cloud team set` must remain an override, not a competitor"
+        );
+        assert_eq!(project.team_id.as_deref(), Some("pinned-team"));
+    }
+
+    #[test]
+    fn adoption_respects_the_auto_off_kill_switch() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        project.team_auto_promote = Some(false);
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &user),
+            TeamScopeAdoption::OptedOut,
+            "`cas cloud team auto off` must never be undone by adoption"
+        );
+        assert_eq!(project.team_auto_promote, Some(false));
+    }
+
+    #[test]
+    fn adoption_refuses_to_guess_between_several_teams() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        let user = user_with_teams(
+            &[("team-a", "alpha", "Alpha"), ("team-b", "beta", "Beta")],
+            None,
+        );
+
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &user),
+            TeamScopeAdoption::NoResolvableTeam {
+                membership_count: 2
+            }
+        );
+        assert_eq!(project.team_auto_promote, None);
+    }
+
+    #[test]
+    fn adoption_accepts_the_machine_wide_login_of_a_fresh_clone() {
+        let _guard = TestEnvGuard::new();
+        // cas-046d: `cas login` stores the token in `~/.cas/cloud.json`, so a
+        // freshly cloned project has no token of its own. That is precisely
+        // the case adoption exists for — it must not read as "not logged in".
+        let mut project = CloudConfig::default();
+        assert!(!project.is_logged_in());
+        let mut user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        user.token = Some("machine-wide-token".to_string());
+
+        match adopt_team_scope_for_configs(&mut project, &user) {
+            TeamScopeAdoption::Adopted(team) => assert_eq!(team.team_id, "solo-team-id"),
+            other => panic!("a machine-wide login must enable adoption, got {other:?}"),
+        }
+        assert_eq!(project.team_auto_promote, Some(true));
+    }
+
+    #[test]
+    fn adoption_is_inert_without_a_token_or_membership() {
+        let _guard = TestEnvGuard::new();
+        let mut anonymous = CloudConfig::default();
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        assert!(!user.is_logged_in(), "neither config holds a token");
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut anonymous, &user),
+            TeamScopeAdoption::NotLoggedIn
+        );
+        assert_eq!(anonymous.team_auto_promote, None);
+
+        let mut project = logged_in_project();
+        let no_teams = CloudConfig::default();
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &no_teams),
+            TeamScopeAdoption::NoResolvableTeam {
+                membership_count: 0
+            }
+        );
+        assert_eq!(project.team_auto_promote, None);
+    }
+
+    #[test]
+    fn adoption_persists_only_when_it_changed_something() {
+        let _guard = TestEnvGuard::new();
+        let project_dir = TempDir::new().unwrap();
+        let user_dir = TempDir::new().unwrap();
+
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        user.save_to_cas_dir(user_dir.path()).unwrap();
+        // SAFETY: TestEnvGuard serializes env mutation for this test.
+        unsafe {
+            std::env::set_var(
+                "CAS_USER_CLOUD_JSON",
+                user_dir.path().join("cloud.json").to_str().unwrap(),
+            );
+        }
+
+        logged_in_project()
+            .save_to_cas_dir(project_dir.path())
+            .unwrap();
+
+        let first = maybe_adopt_team_scope(project_dir.path()).unwrap();
+        assert!(matches!(first, TeamScopeAdoption::Adopted(_)));
+        let persisted = CloudConfig::load_from_cas_dir(project_dir.path()).unwrap();
+        assert_eq!(
+            persisted.team_auto_promote,
+            Some(true),
+            "adoption must survive the process that made it"
+        );
+
+        // Second run: already scoped, nothing to write.
+        let second = maybe_adopt_team_scope(project_dir.path()).unwrap();
+        assert_eq!(
+            second,
+            TeamScopeAdoption::AlreadyScoped {
+                team_id: "solo-team-id".to_string()
+            }
+        );
+
+        unsafe {
+            std::env::remove_var("CAS_USER_CLOUD_JSON");
+        }
     }
 
     #[test]

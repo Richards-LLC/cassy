@@ -342,6 +342,20 @@ fn spawn_workers_config_dir_survives_coordination_to_factory_mapping() {
 }
 
 #[test]
+fn spawn_workers_per_worker_specs_survive_coordination_to_factory_mapping() {
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"spawn_workers","workers":"[{\"name\":\"research\",\"cli\":\"codex\",\"config_dir\":\"~/.codex-work\"}]"}"#,
+    )
+    .unwrap();
+
+    let factory = req.to_factory_request();
+    assert_eq!(
+        factory.workers.as_deref(),
+        Some(r#"[{"name":"research","cli":"codex","config_dir":"~/.codex-work"}]"#)
+    );
+}
+
+#[test]
 fn test_factory_remind_fields_as_string() {
     let req: FactoryRequest = serde_json::from_str(
         r#"{

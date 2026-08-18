@@ -258,8 +258,7 @@ impl Mux {
         }
     }
 
-    /// Resolve the CLI, model string, and effort string for a named worker
-    /// from a [`MuxConfig`].
+    /// Resolve the launch fields for a named worker from a [`MuxConfig`].
     ///
     /// Checks `config.resolved_worker_specs` first (cascade resolver output),
     /// then falls back to the singular `worker_cli/worker_model/worker_effort`
@@ -268,7 +267,13 @@ impl Mux {
     fn resolve_worker_spec_from_config(
         name: &str,
         config: &MuxConfig,
-    ) -> (SupervisorCli, Option<String>, Option<String>) {
+    ) -> (
+        SupervisorCli,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
         config
             .resolved_worker_specs
             .iter()
@@ -277,13 +282,29 @@ impl Mux {
                 let effort_str = spec
                     .effort
                     .map(|e| spec.cli.backend().effort_arg(e).to_string());
-                (spec.cli, spec.model.clone(), effort_str)
+                let (config_dir, config_dir_source) = match (
+                    spec.config_dir.clone(),
+                    spec.requester_config_dir.clone(),
+                ) {
+                    (Some(dir), _) => (Some(dir), Some("explicit".to_string())),
+                    (None, Some(dir)) => (Some(dir), Some("supervisor".to_string())),
+                    (None, None) => (None, None),
+                };
+                (
+                    spec.cli,
+                    spec.model.clone(),
+                    effort_str,
+                    config_dir,
+                    config_dir_source,
+                )
             })
             .unwrap_or_else(|| {
                 (
                     config.worker_cli,
                     config.worker_model.clone(),
                     config.worker_effort.clone(),
+                    None,
+                    None,
                 )
             })
     }
@@ -311,7 +332,8 @@ impl Mux {
             let teams = config.teams_configs.get(name);
 
             // Resolve per-worker spec via the shared helper.
-            let (cli, model_opt, effort_opt) = Self::resolve_worker_spec_from_config(name, config);
+            let (cli, model_opt, effort_opt, config_dir, config_dir_source) =
+                Self::resolve_worker_spec_from_config(name, config);
 
             let pty_config = Pane::build_worker_config(
                 name,
@@ -322,8 +344,8 @@ impl Mux {
                 cli,
                 model_opt.as_deref(),
                 effort_opt.as_deref(),
-                None,
-                None,
+                config_dir.as_deref(),
+                config_dir_source.as_deref(),
                 teams,
                 // The whole initial fleet is known here, so every worker in it
                 // is derated against the real total rather than the assumed
@@ -425,7 +447,8 @@ impl Mux {
             let teams = config.teams_configs.get(name);
 
             // Resolve per-worker spec via the shared helper.
-            let (cli, model_opt, effort_opt) = Self::resolve_worker_spec_from_config(name, &config);
+            let (cli, model_opt, effort_opt, config_dir, config_dir_source) =
+                Self::resolve_worker_spec_from_config(name, &config);
 
             let pane = Pane::worker(
                 name,
@@ -436,8 +459,8 @@ impl Mux {
                 cli,
                 model_opt.as_deref(),
                 effort_opt.as_deref(),
-                None,
-                None,
+                config_dir.as_deref(),
+                config_dir_source.as_deref(),
                 pane_rows,
                 pane_cols,
                 teams,

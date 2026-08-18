@@ -95,12 +95,19 @@ pub(super) fn finish_worker_config(
     config: &mut PtyConfig,
     supervisor_cli: SupervisorCli,
     active_workers: Option<usize>,
+    account_dir: Option<&str>,
 ) {
     config.apply_worker_build_concurrency(active_workers);
     config.env.push((
         "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
         supervisor_cli.backend().name().to_string(),
     ));
+    if let Some(account_dir) = account_dir {
+        config.env.push((
+            "CAS_FACTORY_WORKER_ACCOUNT_DIR".to_string(),
+            account_dir.to_string(),
+        ));
+    }
 }
 
 pub(super) fn finish_supervisor_config(

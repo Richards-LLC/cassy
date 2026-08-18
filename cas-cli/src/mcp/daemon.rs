@@ -88,6 +88,11 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
     if let Ok(cli) = std::env::var("CAS_FACTORY_WORKER_CLI") {
         agent.metadata.insert("worker_cli".to_string(), cli);
     }
+    if let Ok(account_dir) = std::env::var("CAS_FACTORY_WORKER_ACCOUNT_DIR") {
+        agent
+            .metadata
+            .insert("worker_account_dir".to_string(), account_dir);
+    }
 }
 
 /// Parse the harness-provided durable role hint used by every registration

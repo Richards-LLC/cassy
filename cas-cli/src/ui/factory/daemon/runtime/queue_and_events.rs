@@ -1413,11 +1413,7 @@ impl FactoryDaemon {
                         "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
                         Some(row_id),
                     );
-                    let _ = self
-                        .app
-                        .mux
-                        .inject(&pane, &payload)
-                        .await;
+                    let _ = self.app.mux.inject(&pane, &payload).await;
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
                         probe.nudge_sent_at = Some(now);
                     }
@@ -3296,23 +3292,24 @@ impl FactoryDaemon {
                         // one as "(unknown task)" would bury the one fact the
                         // supervisor needs — which worker is gone.
                         if Self::row_is_supervisor_wake(&queued.source, &queued.prompt) {
-                            let notice = match crate::prompt_revalidation::parse_worker_died_envelope(
-                                &queued.prompt,
-                            ) {
-                                Some(envelope) => {
-                                    crate::prompt_revalidation::undelivered_worker_died_notice(
-                                        &envelope.worker_name,
-                                    )
-                                }
-                                None => crate::prompt_revalidation::undelivered_relay_notice(
-                                    &crate::prompt_revalidation::parse_lifecycle_envelope(
-                                        &queued.prompt,
-                                    )
-                                    .map(|envelope| envelope.task_id)
-                                    .unwrap_or_else(|| "(unknown task)".to_string()),
-                                    queued.summary.as_deref(),
-                                ),
-                            };
+                            let notice =
+                                match crate::prompt_revalidation::parse_worker_died_envelope(
+                                    &queued.prompt,
+                                ) {
+                                    Some(envelope) => {
+                                        crate::prompt_revalidation::undelivered_worker_died_notice(
+                                            &envelope.worker_name,
+                                        )
+                                    }
+                                    None => crate::prompt_revalidation::undelivered_relay_notice(
+                                        &crate::prompt_revalidation::parse_lifecycle_envelope(
+                                            &queued.prompt,
+                                        )
+                                        .map(|envelope| envelope.task_id)
+                                        .unwrap_or_else(|| "(unknown task)".to_string()),
+                                        queued.summary.as_deref(),
+                                    ),
+                                };
                             let _ = queue
                                 .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
                         } else {
@@ -4403,14 +4400,23 @@ impl FactoryDaemon {
                     let request_id = Some(request.id);
                     let count = request.count.unwrap_or(1) as usize;
                     let isolate = request.isolate;
-                    // cas-2992: deserialize the optional WorkerSpec from the queue row.
-                    // Invalid JSON is logged and treated as "no override" so a corrupt row
-                    // does not block all subsequent spawns.
-                    let mut spec: Option<cas_mux::WorkerSpec> = request
+                    // Older queue rows contain one WorkerSpec and retain the
+                    // historical clone-for-every-worker behavior. New rows
+                    // carry an array: one already-resolved spec/account per
+                    // slot, so a heterogeneous batch cannot be flattened by
+                    // the daemon boundary.
+                    #[derive(serde::Deserialize)]
+                    #[serde(untagged)]
+                    enum QueuedSpecs {
+                        One(cas_mux::WorkerSpec),
+                        Many(Vec<cas_mux::WorkerSpec>),
+                    }
+                    let mut specs: Vec<cas_mux::WorkerSpec> = request
                         .worker_spec
                         .as_deref()
-                        .and_then(|json| match serde_json::from_str(json) {
-                            Ok(s) => Some(s),
+                        .and_then(|json| match serde_json::from_str::<QueuedSpecs>(json) {
+                            Ok(QueuedSpecs::One(spec)) => Some(vec![spec]),
+                            Ok(QueuedSpecs::Many(specs)) => Some(specs),
                             Err(e) => {
                                 tracing::warn!(
                                     "spawn queue: invalid worker_spec JSON ({}); using session default",
@@ -4418,10 +4424,20 @@ impl FactoryDaemon {
                                 );
                                 None
                             }
-                        });
-                    if let Some(spec) = spec.as_mut() {
-                        spec.requester_config_dir = request.requester_config_dir.clone();
+                        })
+                        .unwrap_or_default();
+                    for spec in &mut specs {
+                        if spec.requester_config_dir.is_none() {
+                            spec.requester_config_dir = request.requester_config_dir.clone();
+                        }
                     }
+                    let spec_for_slot = |slot: usize| {
+                        if specs.len() == 1 {
+                            specs.first().cloned()
+                        } else {
+                            specs.get(slot).cloned()
+                        }
+                    };
                     // cas-6913: task_id pre-assigns a task to the spawned
                     // worker. The MCP layer (factory_spawn_workers) already
                     // rejects any request where this would be ambiguous
@@ -4434,22 +4450,22 @@ impl FactoryDaemon {
                     let mut task_id = request.task_id;
                     if request.worker_names.is_empty() {
                         self.app.spawning_count += count;
-                        for _ in 0..count {
+                        for slot in 0..count {
                             self.pending_spawns.push_back(PendingSpawn::Anonymous {
                                 request_id,
                                 isolate,
-                                spec: spec.clone(),
+                                spec: spec_for_slot(slot),
                                 task_id: task_id.take(),
                             });
                         }
                     } else {
                         self.app.spawning_count += request.worker_names.len();
-                        for name in request.worker_names {
+                        for (slot, name) in request.worker_names.into_iter().enumerate() {
                             self.pending_spawns.push_back(PendingSpawn::Named {
                                 request_id,
                                 name,
                                 isolate,
-                                spec: spec.clone(),
+                                spec: spec_for_slot(slot),
                                 task_id: task_id.take(),
                             });
                         }
@@ -8537,10 +8553,7 @@ mod tests {
         stale.description = "Write the receipt to /mnt/datacube/staging/proof.json".into();
         task_store.add(&stale).unwrap();
         let mut clean = Task::new("cas-clean-path".into(), "clean artifact path".into());
-        clean.description = format!(
-            "Write build output to {}/proof.json",
-            worktree.display()
-        );
+        clean.description = format!("Write build output to {}/proof.json", worktree.display());
         task_store.add(&clean).unwrap();
 
         deliver_worker_task_brief(
@@ -8572,8 +8585,8 @@ mod tests {
             .iter()
             .find(|prompt| prompt.prompt.contains("cas-clean-path"))
             .expect("clean task brief");
-        let resolved_stale_root = crate::config::resolved_factory_artifacts_root(None)
-            .join("cas-stale-path");
+        let resolved_stale_root =
+            crate::config::resolved_factory_artifacts_root(None).join("cas-stale-path");
         assert!(
             stale_prompt.prompt.contains("Workspace-contract warning"),
             "out-of-contract path must be surfaced before work begins: {}",

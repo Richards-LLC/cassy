@@ -84,6 +84,7 @@ pub(super) fn execute_daemon(
             effort_flag: llm
                 .reasoning_effort_for_role("worker")
                 .and_then(|s| s.parse().ok()),
+            config_dir_flag: None,
             worker_spec_jsons,
             supervisor_spec_json: None,
             user_config: None, // auto-resolve from home dir
@@ -107,6 +108,7 @@ pub(super) fn execute_daemon(
             effort_flag: llm
                 .reasoning_effort_for_role("supervisor")
                 .and_then(|s| s.parse().ok()),
+            config_dir_flag: None,
             worker_spec_jsons: vec![],
             supervisor_spec_json,
             user_config: None, // auto-resolve from home dir

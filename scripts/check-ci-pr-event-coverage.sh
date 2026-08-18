@@ -50,13 +50,14 @@ if ! pulls="$(gh api "repos/$repository/commits/$sha/pulls" \
     exit 0
 fi
 
-# `@tsv` on an empty array yields an empty line, so treat blank as "no cover".
-read -r -a pr_numbers <<<"${pulls//$'\t'/ }"
-for number in "${pr_numbers[@]:-}"; do
+# `@tsv` yields a single blank line for an empty array, and anything that is not
+# a bare pull request number is evidence we do not understand — both fall
+# through to running the lane.
+while IFS= read -r number; do
     [[ "$number" =~ ^[0-9]+$ ]] || continue
     printf 'covered=true\npr-number=%s\n' "$number" >>"$output"
     echo "Pull request #$number has head $sha; its pull request run validates this exact commit, so the duplicate push-event lane stands down."
     exit 0
-done
+done < <(tr '\t' '\n' <<<"$pulls")
 
 echo "No open pull request has head $sha; running the lane."

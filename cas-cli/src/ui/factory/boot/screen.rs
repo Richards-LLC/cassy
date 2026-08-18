@@ -12,12 +12,11 @@ use std::time::Duration;
 mod colors {
     use crossterm::style::Color;
 
-    // Logo colors - bright cyan with glow
-    pub const LOGO: Color = Color::Rgb {
-        r: 0,
-        g: 200,
-        b: 255,
-    };
+    // Semantic 4-bit roles let terminal themes control wordmark contrast.
+    pub const WORDMARK: Color = Color::Cyan;
+    pub const WORDMARK_GLOW: Color = Color::Blue;
+
+    // Existing startup-status glow (the wordmark uses WORDMARK above).
     pub const LOGO_GLOW: Color = Color::Rgb {
         r: 150,
         g: 230,
@@ -97,12 +96,12 @@ mod colors {
 mod minions_colors {
     use crossterm::style::Color;
 
-    // Logo colors - Minion yellow with glow
-    pub const LOGO: Color = Color::Rgb {
-        r: 255,
-        g: 213,
-        b: 0,
-    };
+    // The alternate palette preserves Cassy's identity while respecting the
+    // terminal's standard ANSI-color theme.
+    pub const WORDMARK: Color = Color::Yellow;
+    pub const WORDMARK_GLOW: Color = Color::DarkYellow;
+
+    // Existing startup-status glow (the wordmark uses WORDMARK above).
     pub const LOGO_GLOW: Color = Color::Rgb {
         r: 255,
         g: 235,
@@ -277,8 +276,8 @@ impl BootScreen {
         })
     }
     pub(crate) fn draw_logo(&mut self) -> std::io::Result<u16> {
-        let logo_color = themed!(self, LOGO);
-        let logo_glow = themed!(self, LOGO_GLOW);
+        let logo_color = themed!(self, WORDMARK);
+        let logo_glow = themed!(self, WORDMARK_GLOW);
         let header_color = themed!(self, HEADER);
         let label_color = themed!(self, LABEL);
 

@@ -185,14 +185,13 @@ pub(crate) fn classify_init_dir(cwd: &Path, home: Option<&Path>) -> Option<NonPr
 mod colors {
     use crossterm::style::Color;
 
+    // Standard ANSI colors keep the wordmark readable in terminal themes that
+    // remap the 16-color palette.
+    pub const WORDMARK: Color = Color::Cyan;
+
     pub const CYAN: Color = Color::Rgb {
         r: 0,
         g: 200,
-        b: 255,
-    };
-    pub const CYAN_BRIGHT: Color = Color::Rgb {
-        r: 150,
-        g: 230,
         b: 255,
     };
     pub const GREEN: Color = Color::Rgb {
@@ -247,7 +246,7 @@ fn cassy_wordmark_lines() -> &'static [&'static str] {
 
 fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
     for line in cassy_wordmark_lines() {
-        print_colored(&format!("{indent}{line}\n"), colors::CYAN_BRIGHT)?;
+        print_colored(&format!("{indent}{line}\n"), colors::WORDMARK)?;
     }
     Ok(())
 }
@@ -628,7 +627,7 @@ fn print_welcome() -> anyhow::Result<()> {
     print_colored("│\n", colors::CYAN)?;
     for line in cassy_wordmark_lines() {
         print_colored("  │  ", colors::CYAN)?;
-        print_colored(line, colors::CYAN_BRIGHT)?;
+        print_colored(line, colors::WORDMARK)?;
         print_colored(
             &" ".repeat(INIT_WORDMARK_WIDTH.saturating_sub(line.chars().count())),
             colors::CYAN,

@@ -682,7 +682,7 @@ fn serve_execute() -> anyhow::Result<()> {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{CASSY_WORDMARK, Cli};
 
     #[test]
     fn top_level_help_exposes_cloud_without_internal_migration_language() {

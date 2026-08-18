@@ -105,6 +105,32 @@ fn scan_profiles(home: &Path, active_dir: Option<&Path>) -> io::Result<Vec<Profi
     scan_profiles_with(home, active_dir, probe_login_state)
 }
 
+/// Sibling directories that share the `.claude-` prefix without being accounts.
+///
+/// Lock and scratch directories are created next to a profile by other tooling
+/// (`~/.claude-support@example.com.lock`). Listing one as a selectable account
+/// offers the operator a choice that cannot work.
+const NON_ACCOUNT_SUFFIXES: [&str; 5] = [".lock", ".tmp", ".bak", ".old", ".backup"];
+
+/// Whether a `.claude-<name>` directory names a real account profile.
+fn is_account_profile_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let lowered = name.to_ascii_lowercase();
+    if NON_ACCOUNT_SUFFIXES
+        .iter()
+        .any(|suffix| lowered.ends_with(suffix))
+    {
+        return false;
+    }
+    // Dotted scratch names like `foo.bak.1777306474` are not accounts either,
+    // but `support@petrastella.io` must survive: only reject a marker segment.
+    !lowered
+        .rsplit('.')
+        .any(|segment| matches!(segment, "lock" | "tmp" | "bak" | "old" | "backup"))
+}
+
 fn scan_profiles_with(
     home: &Path,
     active_dir: Option<&Path>,
@@ -134,7 +160,7 @@ fn scan_profiles_with(
             let Some(profile_name) = file_name.strip_prefix(".claude-") else {
                 continue;
             };
-            if profile_name.is_empty() {
+            if !is_account_profile_name(profile_name) {
                 continue;
             }
             profiles.push(profile_for(
@@ -238,34 +264,293 @@ fn configure_profile_command(command: &mut Command, profile: &str, profile_dir: 
 /// A profile explicitly named by the caller always wins. We must also leave
 /// pipe/script launches alone: a prompt there would either hang or consume
 /// caller input that belongs to Claude Code.
+/// Gate on DETECTED accounts, not confirmed-logged-in ones.
+///
+/// Counting only `LoggedIn` made every probe failure silently degrade to
+/// "launch the default account": a missing `claude` binary at probe time, an
+/// auth-output shape change, or a keychain timeout all return `Unknown`, drop
+/// the profile from the count, and skip the prompt with no indication. With
+/// more than one account on disk the operator must be asked regardless of what
+/// the probe could determine.
 fn should_prompt_for_profile(
     explicit_profile: Option<&str>,
     profiles: &[Profile],
     stdin_is_terminal: bool,
     stdout_is_terminal: bool,
 ) -> bool {
-    explicit_profile.is_none()
-        && stdin_is_terminal
-        && stdout_is_terminal
-        && profiles
-            .iter()
-            .filter(|profile| profile.login_state == LoginState::LoggedIn)
-            .count()
-            > 1
+    explicit_profile.is_none() && stdin_is_terminal && stdout_is_terminal && profiles.len() > 1
 }
 
-/// Prompt for one of the logged-in account profiles.
-fn prompt_for_profile(profiles: &[Profile]) -> Result<String> {
-    let choices = profiles
-        .iter()
-        .filter(|profile| profile.login_state == LoginState::LoggedIn)
-        .map(|profile| profile.name.clone())
-        .collect();
+/// One selectable row in the account picker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProfileChoice {
+    Existing { name: String, label: String },
+    NewLogin,
+}
 
-    inquire::Select::new("Choose Claude account", choices)
+impl std::fmt::Display for ProfileChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProfileChoice::Existing { label, .. } => formatter.write_str(label),
+            ProfileChoice::NewLogin => formatter.write_str("+ Log in a new account…"),
+        }
+    }
+}
+
+fn login_state_label(state: LoginState) -> &'static str {
+    match state {
+        LoginState::LoggedIn => "logged in",
+        LoginState::LoggedOut => "not logged in",
+        LoginState::Unknown => "login state unknown",
+    }
+}
+
+/// Build the picker rows: every detected profile, then the new-login entry.
+///
+/// Nothing is filtered out here. A logged-out or unknown account stays
+/// selectable and is labelled as such, so the operator sees the real state of
+/// the box instead of a silently shortened list.
+fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
+    let mut choices: Vec<ProfileChoice> = profiles
+        .iter()
+        .map(|profile| ProfileChoice::Existing {
+            name: profile.name.clone(),
+            label: format!(
+                "{} — {}{}",
+                profile.name,
+                login_state_label(profile.login_state),
+                if profile.active { ", active" } else { "" }
+            ),
+        })
+        .collect();
+    choices.push(ProfileChoice::NewLogin);
+    choices
+}
+
+/// Index of the account the environment currently points at, for cursor start.
+fn active_choice_index(profiles: &[Profile]) -> usize {
+    profiles.iter().position(|profile| profile.active).unwrap_or(0)
+}
+
+/// Show the whole list when it plausibly fits.
+///
+/// inquire's default page is 7. This operator has 7 accounts, which pushed
+/// "log in a new account" below the fold — an option you must scroll to find
+/// is an option most people never discover.
+fn picker_page_size(choice_count: usize) -> usize {
+    choice_count.clamp(7, 20)
+}
+
+/// Prompt for an account. Returns the chosen profile name.
+fn prompt_for_profile(home: &Path, profiles: &[Profile]) -> Result<String> {
+    let choices = profile_choices(profiles);
+    let starting_cursor = active_choice_index(profiles);
+    let page_size = picker_page_size(choices.len());
+
+    let selection = inquire::Select::new("Choose Claude account", choices)
+        .with_starting_cursor(starting_cursor)
+        .with_page_size(page_size)
         .with_help_message("This selection applies only to this Claude session")
         .prompt()
-        .context("Claude account selection cancelled")
+        .context("Claude account selection cancelled")?;
+
+    match selection {
+        ProfileChoice::Existing { name, .. } => Ok(name),
+        ProfileChoice::NewLogin => create_and_log_in_new_profile(home),
+    }
+}
+
+/// Whether an operator-entered account name can become `~/.claude-<name>`.
+fn validate_new_profile_name(name: &str) -> std::result::Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("enter an email address or account name".to_string());
+    }
+    if trimmed == "main" {
+        return Err("`main` is the default ~/.claude profile; pick another name".to_string());
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_whitespace() || c == '/' || c == '\\' || c == '\0')
+    {
+        return Err("account name cannot contain whitespace or path separators".to_string());
+    }
+    if trimmed.starts_with('.') {
+        return Err("account name cannot start with a dot".to_string());
+    }
+    if !is_account_profile_name(trimmed) {
+        return Err("that name is reserved for lock/scratch directories".to_string());
+    }
+    Ok(())
+}
+
+/// Prompt for an email, create the profile, seed shared config, run login.
+///
+/// The login runs as a child process rather than replacing this one, so a
+/// successful login lands the operator straight into the account they just
+/// created instead of making them re-run the command.
+fn create_and_log_in_new_profile(home: &Path) -> Result<String> {
+    let entered = inquire::Text::new("Email for the new Claude account")
+        .with_help_message("creates ~/.claude-<email> and runs the Claude login flow")
+        .with_validator(|input: &str| {
+            Ok(match validate_new_profile_name(input) {
+                Ok(()) => inquire::validator::Validation::Valid,
+                Err(message) => {
+                    inquire::validator::Validation::Invalid(
+                        inquire::validator::ErrorMessage::Custom(message),
+                    )
+                }
+            })
+        })
+        .prompt()
+        .context("new Claude account entry cancelled")?;
+    let profile = entered.trim().to_string();
+    let profile_dir = resolve_profile_dir(home, &profile);
+
+    std::fs::create_dir_all(&profile_dir).with_context(|| {
+        format!(
+            "could not create Claude profile directory {}",
+            profile_dir.display()
+        )
+    })?;
+
+    let seeding = seed_profile_from_main(home, &profile_dir)?;
+    report_seeding(&seeding);
+
+    eprintln!("Logging in Claude account config: {}", profile_dir.display());
+    let mut command = build_claude_command(
+        &profile,
+        &profile_dir,
+        &[OsString::from("auth"), OsString::from("login")],
+    );
+    let status = command
+        .status()
+        .context("failed to run `claude auth login` for the new account")?;
+    if !status.success() {
+        anyhow::bail!(
+            "`claude auth login` did not complete for {}; the profile directory was created and seeded, so `cas claude login {profile}` can finish it",
+            profile_dir.display()
+        );
+    }
+
+    Ok(profile)
+}
+
+/// Shared configuration surface symlinked into a freshly created profile.
+///
+/// These are the files an account needs to be *equipped* — the same set whose
+/// absence produced the "alt profiles lack hooks/skills" reports (cas-5b96),
+/// plus the team directory that has to live under CLAUDE_CONFIG_DIR (cas-3585).
+const SHARED_PROFILE_ENTRIES: [&str; 8] = [
+    "agents",
+    "skills",
+    "commands",
+    "hooks",
+    "workflows",
+    "output-styles",
+    "settings.json",
+    "CLAUDE.md",
+];
+
+/// Never linked or copied: credentials and per-account identity/history state.
+///
+/// Sharing any of these across profiles would defeat the point of separate
+/// accounts. `.credentials.json` and the securestorage scoping are the account
+/// identity itself; `.claude.json`, history, sessions and projects are that
+/// account's own record. `settings.local.json` is deliberately private too --
+/// the `.local` convention means machine/account-specific overrides.
+const PRIVATE_PROFILE_ENTRIES: [&str; 12] = [
+    ".credentials.json",
+    ".claude.json",
+    "settings.local.json",
+    "history.jsonl",
+    "sessions",
+    "projects",
+    "session-env",
+    "shell-snapshots",
+    "statsig",
+    "telemetry",
+    "stats-cache.json",
+    "backups",
+];
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct SeedingReport {
+    linked: Vec<String>,
+    already_linked: Vec<String>,
+    skipped_existing: Vec<String>,
+    missing_in_main: Vec<String>,
+}
+
+/// Idempotently symlink the shared config surface from `~/.claude`.
+///
+/// Re-running is safe and never clobbers: an entry the operator later replaced
+/// with their own real file or a different link is reported and left alone.
+fn seed_profile_from_main(home: &Path, profile_dir: &Path) -> Result<SeedingReport> {
+    let main = home.join(".claude");
+    let mut report = SeedingReport::default();
+    if main == profile_dir || !main.is_dir() {
+        return Ok(report);
+    }
+
+    for entry in SHARED_PROFILE_ENTRIES {
+        debug_assert!(
+            !PRIVATE_PROFILE_ENTRIES.contains(&entry),
+            "credential/identity state must never be shared"
+        );
+        let source = main.join(entry);
+        if !source.exists() {
+            report.missing_in_main.push(entry.to_string());
+            continue;
+        }
+        let target = profile_dir.join(entry);
+        match std::fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                symlink_entry(&source, &target).with_context(|| {
+                    format!("could not link {} into {}", entry, profile_dir.display())
+                })?;
+                report.linked.push(entry.to_string());
+            }
+            Err(error) => return Err(error).context(format!("could not inspect {entry}")),
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    && std::fs::read_link(&target).is_ok_and(|existing| existing == source)
+                {
+                    report.already_linked.push(entry.to_string());
+                } else {
+                    report.skipped_existing.push(entry.to_string());
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(unix)]
+fn symlink_entry(source: &Path, target: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(source, target)
+}
+
+#[cfg(not(unix))]
+fn symlink_entry(source: &Path, target: &Path) -> io::Result<()> {
+    if source.is_dir() {
+        std::os::windows::fs::symlink_dir(source, target)
+    } else {
+        std::os::windows::fs::symlink_file(source, target)
+    }
+}
+
+fn report_seeding(report: &SeedingReport) {
+    if !report.linked.is_empty() {
+        eprintln!("Seeded shared config from ~/.claude: {}", report.linked.join(", "));
+    }
+    if !report.skipped_existing.is_empty() {
+        eprintln!(
+            "Left existing entries untouched: {}",
+            report.skipped_existing.join(", ")
+        );
+    }
+    eprintln!("Credentials and account identity remain private to this profile.");
 }
 
 /// Build the command used for a `--bare` profile launch without executing it.
@@ -322,22 +607,49 @@ fn set_profile_env(profile: &str, profile_dir: &Path) {
 /// factory supervisor pane and every `spawn_workers` request then inherit the
 /// value through ordinary process environment inheritance.
 pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
-    if args.command.is_some() || args.list_profiles || args.bare {
+    if args.command.is_some() || args.list_profiles {
         return Ok(());
     }
-    let Some(profile) = args.profile.as_deref() else {
-        return Ok(());
-    };
 
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-    let profile_dir = resolve_profile_dir(&home, profile);
-    warn_about_profile_state(profile, &profile_dir);
+
+    let profile = match args.profile.as_deref() {
+        // An explicitly named account is the no-prompt fast path.
+        Some(profile) => profile.to_string(),
+        None => {
+            let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+            let profiles = scan_profiles(&home, active_dir.as_deref()).with_context(|| {
+                format!("could not inspect Claude profiles under {}", home.display())
+            })?;
+            if should_prompt_for_profile(
+                None,
+                &profiles,
+                io::stdin().is_terminal(),
+                io::stdout().is_terminal(),
+            ) {
+                prompt_for_profile(&home, &profiles)?
+            } else {
+                // Non-interactive, or only one account exists: leave the
+                // ambient environment exactly as the caller set it.
+                return Ok(());
+            }
+        }
+    };
+
+    let profile_dir = resolve_profile_dir(&home, &profile);
+    warn_about_profile_state(&profile, &profile_dir);
     eprintln!("Using Claude account config: {}", profile_dir.display());
 
-    set_profile_env(profile, &profile_dir);
+    set_profile_env(&profile, &profile_dir);
+    // `execute_bare` runs later in the same process; record the choice so the
+    // operator is asked once, not once per launch path.
+    let _ = SELECTED_PROFILE.set(profile);
 
     Ok(())
 }
+
+/// The account chosen during `apply_profile_env`, for later launch paths.
+static SELECTED_PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Run `cas claude`: factory with a Claude supervisor by default, plain Claude
 /// Code under `--bare`, profile listing under `--list-profiles`.
@@ -386,23 +698,25 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
 /// Plain Claude Code launch. On Unix this replaces the CAS process with Claude.
 fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-    let profile = match args.profile.as_deref() {
-        Some(profile) => profile.to_string(),
-        None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-            let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-            let profiles = scan_profiles(&home, active_dir.as_deref())?;
-            if should_prompt_for_profile(None, &profiles, true, true) {
-                prompt_for_profile(&profiles)?
-            } else {
-                "main".to_string()
-            }
-        }
-        None => "main".to_string(),
+    // `apply_profile_env` already ran the picker for this process; reuse its
+    // answer rather than asking a second time on the way to the same launch.
+    // `apply_profile_env` already resolved and announced the account for both
+    // the explicit and the picked case. Only the silent fallback below — no
+    // explicit profile and no prompt (non-TTY, or a single account) — still
+    // needs its own announcement, which is what it printed before this change.
+    let (profile, already_announced) = match args.profile.as_deref() {
+        Some(profile) => (profile.to_string(), true),
+        None => match SELECTED_PROFILE.get() {
+            Some(picked) => (picked.clone(), true),
+            None => ("main".to_string(), false),
+        },
     };
     let profile_dir = resolve_profile_dir(&home, &profile);
 
-    warn_about_profile_state(&profile, &profile_dir);
-    eprintln!("Using Claude account config: {}", profile_dir.display());
+    if !already_announced {
+        warn_about_profile_state(&profile, &profile_dir);
+        eprintln!("Using Claude account config: {}", profile_dir.display());
+    }
 
     let mut command = build_claude_command(&profile, &profile_dir, &args.args);
     exec_claude(&mut command)
@@ -571,6 +885,210 @@ mod tests {
             true
         ));
         assert!(!should_prompt_for_profile(None, &profiles[..1], true, true));
+    }
+
+    fn profile(name: &str, state: LoginState, active: bool) -> Profile {
+        Profile {
+            name: name.to_string(),
+            directory: PathBuf::from(format!("/tmp/.claude-{name}")),
+            login_state: state,
+            active,
+        }
+    }
+
+    #[test]
+    fn scan_skips_lock_and_scratch_directories_but_keeps_dotted_emails() {
+        let home = TempDir::new().unwrap();
+        for dir in [
+            ".claude",
+            ".claude-support@petrastella.io",
+            ".claude-support@petrastella.io.lock",
+            ".claude-alt.bak",
+            ".claude-work.tmp",
+            ".claude-",
+        ] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+
+        let profiles =
+            scan_profiles_with(home.path(), None, |_, _| LoginState::LoggedIn).unwrap();
+        let names: Vec<_> = profiles.iter().map(|p| p.name.as_str()).collect();
+
+        assert_eq!(names, vec!["main", "support@petrastella.io"]);
+    }
+
+    #[test]
+    fn account_name_predicate_accepts_emails_and_rejects_markers() {
+        assert!(is_account_profile_name("support@petrastella.io"));
+        assert!(is_account_profile_name("daniel@petrastella.io"));
+        assert!(is_account_profile_name("alt"));
+        assert!(!is_account_profile_name(""));
+        assert!(!is_account_profile_name("support@petrastella.io.lock"));
+        assert!(!is_account_profile_name("skills.bak.1777306474"));
+        assert!(!is_account_profile_name("work.TMP"));
+    }
+
+    #[test]
+    fn prompt_fires_on_detected_accounts_even_when_the_probe_could_not_confirm_login() {
+        // The regression that made the operator's picker vanish: probes that
+        // return Unknown or LoggedOut must not silently shrink the count to one.
+        let unknown = vec![
+            profile("main", LoginState::LoggedIn, true),
+            profile("alt", LoginState::Unknown, false),
+        ];
+        let logged_out = vec![
+            profile("main", LoginState::LoggedIn, true),
+            profile("alt", LoginState::LoggedOut, false),
+        ];
+        let all_unknown = vec![
+            profile("main", LoginState::Unknown, true),
+            profile("alt", LoginState::Unknown, false),
+        ];
+
+        assert!(should_prompt_for_profile(None, &unknown, true, true));
+        assert!(should_prompt_for_profile(None, &logged_out, true, true));
+        assert!(should_prompt_for_profile(None, &all_unknown, true, true));
+    }
+
+    #[test]
+    fn explicit_profile_and_non_tty_paths_never_prompt() {
+        let profiles = vec![
+            profile("main", LoginState::LoggedIn, true),
+            profile("alt", LoginState::LoggedIn, false),
+        ];
+
+        assert!(!should_prompt_for_profile(Some("alt"), &profiles, true, true));
+        assert!(!should_prompt_for_profile(None, &profiles, false, true));
+        assert!(!should_prompt_for_profile(None, &profiles, true, false));
+        assert!(!should_prompt_for_profile(None, &profiles, false, false));
+        assert!(!should_prompt_for_profile(None, &profiles[..1], true, true));
+    }
+
+    #[test]
+    fn picker_lists_every_detected_profile_with_state_plus_a_new_login_entry() {
+        let profiles = vec![
+            profile("main", LoginState::LoggedIn, true),
+            profile("alt", LoginState::LoggedOut, false),
+            profile("ghost", LoginState::Unknown, false),
+        ];
+
+        let choices = profile_choices(&profiles);
+        let rendered: Vec<String> = choices.iter().map(ToString::to_string).collect();
+
+        assert_eq!(rendered.len(), 4, "3 accounts plus the new-login entry");
+        assert_eq!(rendered[0], "main — logged in, active");
+        assert_eq!(rendered[1], "alt — not logged in");
+        assert_eq!(rendered[2], "ghost — login state unknown");
+        assert_eq!(rendered[3], "+ Log in a new account…");
+        assert_eq!(choices[3], ProfileChoice::NewLogin);
+        assert_eq!(active_choice_index(&profiles), 0);
+    }
+
+    #[test]
+    fn picker_page_shows_the_whole_list_so_new_login_is_never_below_the_fold() {
+        // 7 accounts + the new-login row is exactly the case that hid the entry
+        // behind a scroll at inquire's default page size of 7.
+        assert_eq!(picker_page_size(8), 8);
+        assert_eq!(picker_page_size(2), 7);
+        assert_eq!(picker_page_size(40), 20);
+    }
+
+    #[test]
+    fn picker_cursor_starts_on_the_environment_active_account() {
+        let profiles = vec![
+            profile("main", LoginState::LoggedIn, false),
+            profile("alt", LoginState::LoggedIn, true),
+        ];
+
+        assert_eq!(active_choice_index(&profiles), 1);
+    }
+
+    fn main_profile_fixture(home: &Path) -> PathBuf {
+        let main = home.join(".claude");
+        std::fs::create_dir_all(main.join("agents")).unwrap();
+        std::fs::create_dir_all(main.join("skills")).unwrap();
+        std::fs::create_dir_all(main.join("sessions")).unwrap();
+        std::fs::write(main.join("settings.json"), "{}").unwrap();
+        std::fs::write(main.join("settings.local.json"), "{\"local\":true}").unwrap();
+        std::fs::write(main.join(".credentials.json"), "SECRET").unwrap();
+        main
+    }
+
+    #[test]
+    fn seeding_links_shared_config_and_never_credentials_or_identity() {
+        let home = TempDir::new().unwrap();
+        main_profile_fixture(home.path());
+        let profile_dir = home.path().join(".claude-new@example.com");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+
+        let report = seed_profile_from_main(home.path(), &profile_dir).unwrap();
+
+        assert!(report.linked.contains(&"agents".to_string()));
+        assert!(report.linked.contains(&"skills".to_string()));
+        assert!(report.linked.contains(&"settings.json".to_string()));
+        assert!(profile_dir.join("skills").is_symlink());
+
+        for private in PRIVATE_PROFILE_ENTRIES {
+            assert!(
+                !profile_dir.join(private).exists(),
+                "{private} must stay private to the profile"
+            );
+        }
+        assert!(!report.linked.contains(&".credentials.json".to_string()));
+        // Entries absent from ~/.claude are reported, not fabricated.
+        assert!(report.missing_in_main.contains(&"hooks".to_string()));
+    }
+
+    #[test]
+    fn seeding_is_idempotent_and_leaves_operator_divergence_alone() {
+        let home = TempDir::new().unwrap();
+        main_profile_fixture(home.path());
+        let profile_dir = home.path().join(".claude-new@example.com");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+
+        let first = seed_profile_from_main(home.path(), &profile_dir).unwrap();
+        assert!(!first.linked.is_empty());
+
+        // Re-running recognises its own links instead of relinking or failing.
+        let second = seed_profile_from_main(home.path(), &profile_dir).unwrap();
+        assert!(second.linked.is_empty());
+        assert_eq!(second.already_linked, first.linked);
+
+        // An entry the operator later replaced with their own file is kept.
+        std::fs::remove_file(profile_dir.join("settings.json")).unwrap();
+        std::fs::write(profile_dir.join("settings.json"), "{\"mine\":true}").unwrap();
+        let third = seed_profile_from_main(home.path(), &profile_dir).unwrap();
+
+        assert!(third.skipped_existing.contains(&"settings.json".to_string()));
+        assert!(!third.linked.contains(&"settings.json".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(profile_dir.join("settings.json")).unwrap(),
+            "{\"mine\":true}"
+        );
+    }
+
+    #[test]
+    fn seeding_never_targets_the_main_profile_itself() {
+        let home = TempDir::new().unwrap();
+        let main = main_profile_fixture(home.path());
+
+        let report = seed_profile_from_main(home.path(), &main).unwrap();
+
+        assert_eq!(report, SeedingReport::default());
+        assert!(!main.join("agents").is_symlink());
+    }
+
+    #[test]
+    fn new_profile_names_reject_reserved_and_unsafe_values() {
+        assert!(validate_new_profile_name("someone@example.com").is_ok());
+        assert!(validate_new_profile_name("  spaced@example.com  ").is_ok());
+        assert!(validate_new_profile_name("").is_err());
+        assert!(validate_new_profile_name("   ").is_err());
+        assert!(validate_new_profile_name("main").is_err());
+        assert!(validate_new_profile_name("has space").is_err());
+        assert!(validate_new_profile_name("a/b").is_err());
+        assert!(validate_new_profile_name(".hidden").is_err());
+        assert!(validate_new_profile_name("thing.lock").is_err());
     }
 
     #[test]

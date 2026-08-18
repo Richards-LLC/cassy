@@ -34,6 +34,14 @@ cargo build --release
 
 See the [README](README.md) for full build instructions.
 
+## Viktor distribution
+
+Viktor changes must keep the Claude, Codex, and Grok builtin skill mirrors in sync, preserve the
+credential-safe `cas viktor` output, and retain the proxy's exact allowlist boundary. Do not add
+credential literals to source, fixtures, docs, or artifacts: `cas serve` receives only the
+`VIKTOR_API_KEY` environment reference. New behavior needs a clean-project `cas init`/command
+assertion and a registry test so every harness receives the managed skill.
+
 ## CI check names are pinned
 
 CI job names are not free text. `docs/branch-protection/main-ruleset.json` lists required

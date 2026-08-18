@@ -358,6 +358,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
+        path: "skills/cas-viktor/SKILL.md",
+        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-viktor/references/gateway.md",
+        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
         content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
@@ -732,6 +740,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
         content: include_str!("builtins/codex/skills/mcp-integration/references/diagnosis.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-viktor/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-viktor/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-viktor/references/gateway.md",
+        content: include_str!("builtins/codex/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
@@ -1129,6 +1145,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
         content: include_str!("builtins/grok/skills/mcp-integration/references/diagnosis.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-viktor/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-viktor/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-viktor/references/gateway.md",
+        content: include_str!("builtins/grok/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",

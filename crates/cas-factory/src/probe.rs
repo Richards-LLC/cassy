@@ -114,6 +114,47 @@ pub fn codex_available() -> bool {
     codex_binary_present() && codex_auth_present()
 }
 
+/// Expand a leading `~` against the real home directory, exactly mirroring
+/// `push_codex_home_env` (cas-pty/src/pty.rs) so a probe answer and the
+/// CODEX_HOME the worker actually spawns with always resolve the same path.
+/// Falls back to the raw string when home cannot be resolved.
+fn expand_tilde(raw: &str) -> PathBuf {
+    raw.strip_prefix('~').map_or_else(
+        || PathBuf::from(raw),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| PathBuf::from(format!("{}{}", home.display(), suffix)))
+                .unwrap_or_else(|| PathBuf::from(raw))
+        },
+    )
+}
+
+/// Returns `true` when `auth.json` exists directly under `codex_home` — the
+/// CODEX_HOME account-directory layout (`{dir}/auth.json`), NOT the
+/// `~/.codex` default-home layout `codex_auth_present_in` checks
+/// (`{home}/.codex/auth.json`). An explicit `config_dir` passed to
+/// `spawn_workers cli=codex` (or a requester's own `CODEX_HOME`) IS a
+/// CODEX_HOME value already — see `push_codex_home_env`, which exports it
+/// verbatim — so checking `{dir}/.codex/auth.json` here would look in the
+/// wrong place entirely.
+fn codex_auth_present_at(codex_home: &str) -> bool {
+    expand_tilde(codex_home).join("auth.json").is_file()
+}
+
+/// Codex auth probe with an explicit account-home override (cas-4a5e).
+///
+/// `home_override` is either an explicit `config_dir` or a requester's
+/// captured `CODEX_HOME` — both name a specific CODEX_HOME directory, so a
+/// present-but-not-logged-in `~/.codex` must not shadow a logged-in account
+/// living elsewhere. `None` (or blank) preserves the original
+/// [`codex_auth_present`] `~/.codex/auth.json` default-home check.
+pub fn codex_auth_present_for(home_override: Option<&str>) -> bool {
+    match home_override {
+        Some(dir) if !dir.trim().is_empty() => codex_auth_present_at(dir),
+        _ => codex_auth_present(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +222,53 @@ mod tests {
         let codex_dir = dir.path().join(".codex");
         std::fs::create_dir_all(codex_dir.join("auth.json")).unwrap();
         assert!(!codex_auth_present_in(dir.path()));
+    }
+
+    /// cas-4a5e: an explicit CODEX_HOME-style directory checks
+    /// `{dir}/auth.json` directly — NOT `{dir}/.codex/auth.json`.
+    #[test]
+    fn codex_auth_present_at_checks_dir_slash_auth_json_directly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("auth.json"), b"{}").unwrap();
+        assert!(codex_auth_present_at(dir.path().to_str().unwrap()));
+    }
+
+    /// A CODEX_HOME dir that merely nests a `.codex/auth.json` (the
+    /// default-home layout, not the CODEX_HOME layout) must not read as
+    /// present — that would be checking the wrong path entirely.
+    #[test]
+    fn codex_auth_present_at_false_for_nested_dot_codex_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join(".codex");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("auth.json"), b"{}").unwrap();
+        assert!(!codex_auth_present_at(dir.path().to_str().unwrap()));
+    }
+
+    /// cas-4a5e: explicit override wins even when it doesn't exist — this
+    /// probe must never silently fall through to the `~/.codex` default once
+    /// an explicit home was named, or a typo'd dir would read as "available"
+    /// via someone else's login.
+    #[test]
+    fn codex_auth_present_for_honors_explicit_override_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!codex_auth_present_for(Some(dir.path().to_str().unwrap())));
+    }
+
+    /// cas-4a5e: explicit override wins when present.
+    #[test]
+    fn codex_auth_present_for_honors_explicit_override_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("auth.json"), b"{}").unwrap();
+        assert!(codex_auth_present_for(Some(dir.path().to_str().unwrap())));
+    }
+
+    /// `None` (and blank string) preserve the original `~/.codex` default
+    /// behavior — cannot assert a specific outcome without mutating the real
+    /// `$HOME`, so this only checks it doesn't panic and returns some bool.
+    #[test]
+    fn codex_auth_present_for_none_delegates_to_default() {
+        let _ = codex_auth_present_for(None);
+        let _ = codex_auth_present_for(Some("   "));
     }
 }

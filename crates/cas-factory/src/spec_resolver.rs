@@ -455,14 +455,19 @@ pub fn resolve_supervisor_spec(sources: ConfigSources) -> Result<WorkerSpec, Spe
 ///
 /// Behavior (cas-e9e9 decision via cas-a487, binding over cas-7199's
 /// original "symmetric fallback" framing — see that ticket's amended AC#2):
-/// - `codex` unavailable (binary absent OR `~/.codex/auth.json` absent —
-///   ChatGPT login only, deliberately no `OPENAI_API_KEY` fallback) and
-///   `strict == false` (default): rewrite `cli` to `Claude`, drop `model`
-///   unless it already looks Claude-compatible (else `default_model`),
-///   keep `effort` (shared vocabulary across harnesses). Returns one
-///   human-readable notice per rewritten spec for the caller to
-///   `tracing::warn!` and surface as an operator-visible banner — this
-///   fallback must never be silent.
+/// - `codex` unavailable (binary absent OR the account's `auth.json`
+///   absent — ChatGPT login only, deliberately no `OPENAI_API_KEY`
+///   fallback) and `strict == false` (default): rewrite `cli` to `Claude`,
+///   drop `model` unless it already looks Claude-compatible (else
+///   `default_model`), keep `effort` (shared vocabulary across harnesses),
+///   and drop `config_dir`/`requester_config_dir` — an account directory
+///   chosen for Codex never applies to the Claude fallback and must not
+///   survive to be checked by a Claude-shaped preflight (cas-4a5e; that
+///   mismatch is exactly how the original incident produced a "wrong
+///   provider, wrong file, wrong cause" error). Returns one human-readable
+///   notice per rewritten spec for the caller to `tracing::warn!` and
+///   surface as an operator-visible banner — this fallback must never be
+///   silent.
 /// - Same, but `strict == true`: returns
 ///   [`SpecResolverError::CodexUnavailableStrict`] on the first affected
 ///   spec instead of rewriting anything.
@@ -470,11 +475,23 @@ pub fn resolve_supervisor_spec(sources: ConfigSources) -> Result<WorkerSpec, Spe
 ///   fallback. A missing `claude` binary is a setup error surfaced
 ///   elsewhere (spawn time), not something this resolver routes around.
 ///
-/// The two `codex_available` probes are subprocess + filesystem calls
-/// (see [`crate::probe`]); this function evaluates them **at most once**
-/// per call (not once per spec) and only when at least one spec actually
+/// Which `auth.json` is checked per spec (cas-4a5e): an explicit
+/// `spec.config_dir` wins, then `spec.requester_config_dir` (the requesting
+/// supervisor's own `CODEX_HOME`), then the `~/.codex` default — the same
+/// precedence [`cas_mux::Mux::add_worker`]/`build_add_worker_config` apply
+/// when they actually pick which directory to export, so the probe's answer
+/// never disagrees with what would actually spawn. Callers MUST populate
+/// `config_dir`/`requester_config_dir` on each spec before calling this, or
+/// the probe silently falls back to checking `~/.codex` (see
+/// `factory_ops.rs`'s spawn handler for the ordering bug this fixed:
+/// `config_dir` was previously assigned to the spec AFTER this ran).
+///
+/// The binary probe is a subprocess call (see [`crate::probe`]) evaluated
+/// **at most once** per call, and only when at least one spec actually
 /// requests Codex, so specs that don't request it — the common case once a
-/// host is properly set up — never pay the probe cost.
+/// host is properly set up — never pay that cost. The auth probe is a
+/// filesystem check evaluated once per Codex spec (not batched), because
+/// different specs can legitimately name different account homes.
 pub fn apply_codex_fallback(
     specs: &mut [WorkerSpec],
     strict: bool,
@@ -486,7 +503,7 @@ pub fn apply_codex_fallback(
         default_model,
         WORKER_LABEL,
         crate::probe::codex_binary_present,
-        crate::probe::codex_auth_present,
+        crate::probe::codex_auth_present_for,
     )
 }
 
@@ -510,7 +527,7 @@ pub fn apply_codex_fallback_for_supervisor(
         default_model,
         SUPERVISOR_LABEL,
         crate::probe::codex_binary_present,
-        crate::probe::codex_auth_present,
+        crate::probe::codex_auth_present_for,
     )
 }
 
@@ -529,28 +546,50 @@ fn apply_codex_fallback_with(
     default_model: Option<&str>,
     role_label: &str,
     binary_present: impl Fn() -> bool,
-    auth_present: impl Fn() -> bool,
+    auth_present: impl Fn(Option<&str>) -> bool,
 ) -> Result<Vec<String>, SpecResolverError> {
     if !specs.iter().any(|s| s.cli == SupervisorCli::Codex) {
         return Ok(Vec::new());
     }
 
+    // Binary presence is host-global — one process spawn regardless of how
+    // many Codex specs are in this batch. Auth presence is NOT global: two
+    // specs can legitimately name two different account homes, so it is
+    // evaluated per spec below (cas-4a5e).
     let binary_ok = binary_present();
-    let auth_ok = auth_present();
-    if binary_ok && auth_ok {
-        return Ok(Vec::new());
-    }
-    let reason = if !binary_ok {
-        "codex binary not found on PATH"
-    } else {
-        "~/.codex/auth.json not found (not logged in — run `codex login`)"
-    };
 
     let mut notices = Vec::new();
     for (slot_index, spec) in specs.iter_mut().enumerate() {
         if spec.cli != SupervisorCli::Codex {
             continue;
         }
+        // cas-4a5e: explicit config_dir first, requester's own CODEX_HOME
+        // second, `~/.codex` default last — mirrors the precedence
+        // `Mux::add_worker`/`build_add_worker_config` apply when they pick
+        // which directory to actually export as CODEX_HOME, so this probe's
+        // verdict never disagrees with what would actually spawn.
+        let home_override = spec
+            .config_dir
+            .as_deref()
+            .or(spec.requester_config_dir.as_deref());
+        let auth_ok = auth_present(home_override);
+        if binary_ok && auth_ok {
+            continue;
+        }
+        let reason = if !binary_ok {
+            "codex binary not found on PATH".to_string()
+        } else {
+            match home_override {
+                Some(dir) => format!(
+                    "{dir}/auth.json not found (not logged in for this account — run \
+                     `codex login` with CODEX_HOME={dir})"
+                ),
+                None => {
+                    "~/.codex/auth.json not found (not logged in — run `codex login`)".to_string()
+                }
+            }
+        };
+
         // Workers get "worker <name>" when the cascade already resolved a
         // name, otherwise the stable one-based spec position identifies the
         // unnamed slot honestly. The supervisor label remains the fixed,
@@ -570,11 +609,22 @@ fn apply_codex_fallback_with(
         if strict {
             return Err(SpecResolverError::CodexUnavailableStrict {
                 worker: label,
-                reason: reason.to_string(),
+                reason,
             });
         }
+        // An account directory chosen for Codex never applies to the Claude
+        // fallback target — surviving here is exactly how the original
+        // incident produced a "wrong provider, wrong file, wrong cause"
+        // error (a codex config_dir checked by the Claude preflight).
+        let dropped_account = spec.config_dir.clone().or_else(|| spec.requester_config_dir.clone());
+        spec.config_dir = None;
+        spec.requester_config_dir = None;
+        let account_clause = dropped_account
+            .as_deref()
+            .map(|dir| format!(" (account selection {dir} does not apply to claude; using default account)"))
+            .unwrap_or_default();
         notices.push(format!(
-            "{label}: codex unavailable ({reason}) — falling back to claude"
+            "{label}: codex unavailable ({reason}) — falling back to claude{account_clause}"
         ));
         spec.cli = SupervisorCli::Claude;
         if !spec
@@ -759,7 +809,7 @@ mod codex_fallback_tests {
     fn codex_missing_falls_back_to_claude_with_notice() {
         let mut specs = vec![codex_spec("alice")];
         let notices =
-            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, || false)
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, |_| false)
                 .unwrap();
         assert_eq!(specs[0].cli, SupervisorCli::Claude);
         assert_eq!(
@@ -787,7 +837,7 @@ mod codex_fallback_tests {
         }];
 
         let notices =
-            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, || false)
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, |_| false)
                 .unwrap();
 
         assert_eq!(
@@ -806,7 +856,7 @@ mod codex_fallback_tests {
     fn codex_binary_present_but_not_logged_in_falls_back_with_auth_specific_reason() {
         let mut specs = vec![codex_spec("bob")];
         let notices =
-            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, || false)
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, |_| false)
                 .unwrap();
         assert_eq!(specs[0].cli, SupervisorCli::Claude);
         assert!(
@@ -822,7 +872,7 @@ mod codex_fallback_tests {
     fn codex_missing_in_strict_mode_errors_without_mutating_spec() {
         let mut specs = vec![codex_spec("carol")];
         let err =
-            apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, || false)
+            apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, |_| false)
                 .expect_err("strict mode must error, not fall back");
         assert!(matches!(
             err,
@@ -849,7 +899,7 @@ mod codex_fallback_tests {
         }];
 
         let err =
-            apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, || false)
+            apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, |_| false)
                 .expect_err("strict mode must identify the unnamed worker slot");
 
         match &err {
@@ -876,7 +926,7 @@ mod codex_fallback_tests {
     fn codex_available_is_a_no_op() {
         let mut specs = vec![codex_spec("dana")];
         let notices =
-            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, || true)
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, |_| true)
                 .unwrap();
         assert!(notices.is_empty());
         assert_eq!(specs[0].cli, SupervisorCli::Codex);
@@ -904,7 +954,7 @@ mod codex_fallback_tests {
         }];
         let before = specs[0].clone();
         let notices =
-            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, || false)
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, |_| false)
                 .unwrap();
         assert!(notices.is_empty());
         assert_eq!(specs[0], before);
@@ -925,7 +975,7 @@ mod codex_fallback_tests {
             Some("sonnet"),
             WORKER_LABEL,
             || false,
-            || false,
+            |_| false,
         )
         .unwrap();
         assert_eq!(specs[0].model.as_deref(), Some("sonnet"));
@@ -945,7 +995,7 @@ mod codex_fallback_tests {
             Some("some-other-model"),
             WORKER_LABEL,
             || false,
-            || false,
+            |_| false,
         )
         .unwrap();
         assert_eq!(specs[0].model.as_deref(), Some("claude-opus-4-5"));
@@ -971,10 +1021,152 @@ mod codex_fallback_tests {
             None,
             WORKER_LABEL,
             || panic!("binary probe must not run when no spec requests codex"),
-            || panic!("auth probe must not run when no spec requests codex"),
+            |_| panic!("auth probe must not run when no spec requests codex"),
         )
         .unwrap();
         assert!(notices.is_empty());
+    }
+
+    // ── cas-4a5e: explicit config_dir / requester_config_dir precedence ────
+
+    /// The core bug: a spec carries an explicit `config_dir` whose account IS
+    /// logged in, but the default `~/.codex` is not. The probe must be
+    /// offered that `config_dir` and must not be rewritten to claude.
+    #[test]
+    fn explicit_config_dir_with_auth_present_is_never_rewritten() {
+        let mut specs = vec![WorkerSpec {
+            config_dir: Some("~/.codex-support@gabber.studio".to_string()),
+            ..codex_spec("ivan")
+        }];
+        let notices = apply_codex_fallback_with(
+            &mut specs,
+            false,
+            None,
+            WORKER_LABEL,
+            || true,
+            |home| home == Some("~/.codex-support@gabber.studio"),
+        )
+        .unwrap();
+        assert!(notices.is_empty(), "must not fall back: {notices:?}");
+        assert_eq!(specs[0].cli, SupervisorCli::Codex);
+        assert_eq!(
+            specs[0].config_dir.as_deref(),
+            Some("~/.codex-support@gabber.studio")
+        );
+    }
+
+    /// The probe must receive the explicit `config_dir`, not silently check
+    /// `~/.codex` instead — proven by an auth closure that only returns true
+    /// for the explicit dir and panics on anything else.
+    #[test]
+    fn explicit_config_dir_is_the_home_offered_to_the_probe() {
+        let mut specs = vec![WorkerSpec {
+            config_dir: Some("/srv/codex-acct".to_string()),
+            requester_config_dir: Some("/srv/should-not-be-used".to_string()),
+            ..codex_spec("judy")
+        }];
+        apply_codex_fallback_with(
+            &mut specs,
+            false,
+            None,
+            WORKER_LABEL,
+            || true,
+            |home| match home {
+                Some("/srv/codex-acct") => true,
+                other => panic!("expected explicit config_dir, got {other:?}"),
+            },
+        )
+        .unwrap();
+        assert_eq!(specs[0].cli, SupervisorCli::Codex);
+    }
+
+    /// No explicit `config_dir`: the requester's own captured `CODEX_HOME`
+    /// is the second priority, ahead of the `~/.codex` default.
+    #[test]
+    fn requester_config_dir_used_when_no_explicit_config_dir() {
+        let mut specs = vec![WorkerSpec {
+            config_dir: None,
+            requester_config_dir: Some("/home/op/.codex-alt".to_string()),
+            ..codex_spec("karl")
+        }];
+        let notices = apply_codex_fallback_with(
+            &mut specs,
+            false,
+            None,
+            WORKER_LABEL,
+            || true,
+            |home| home == Some("/home/op/.codex-alt"),
+        )
+        .unwrap();
+        assert!(notices.is_empty(), "must not fall back: {notices:?}");
+        assert_eq!(specs[0].cli, SupervisorCli::Codex);
+    }
+
+    /// Neither `config_dir` nor `requester_config_dir` set: the probe must
+    /// be offered `None`, preserving the original `~/.codex` default check.
+    #[test]
+    fn default_home_used_when_no_account_dir_at_all() {
+        let mut specs = vec![codex_spec("liam")];
+        let notices = apply_codex_fallback_with(
+            &mut specs,
+            false,
+            None,
+            WORKER_LABEL,
+            || true,
+            |home| home.is_none(),
+        )
+        .unwrap();
+        assert!(notices.is_empty(), "must not fall back: {notices:?}");
+    }
+
+    /// A typo'd/wrong explicit `config_dir` (auth.json genuinely absent
+    /// there) still falls back — but the notice must name the checked path,
+    /// not the generic `~/.codex` wording, and must not leave the
+    /// now-irrelevant codex account dir on the rewritten claude spec (that
+    /// mismatch is exactly what produced the original "wrong provider,
+    /// wrong file, wrong cause" error).
+    #[test]
+    fn explicit_config_dir_without_auth_falls_back_naming_the_checked_path_and_drops_it() {
+        let mut specs = vec![WorkerSpec {
+            config_dir: Some("~/.codex-typo".to_string()),
+            ..codex_spec("mia")
+        }];
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, |_| false)
+                .unwrap();
+        assert_eq!(specs[0].cli, SupervisorCli::Claude);
+        assert_eq!(
+            specs[0].config_dir, None,
+            "a codex-only account dir must not survive onto the claude fallback spec"
+        );
+        assert_eq!(specs[0].requester_config_dir, None);
+        assert!(
+            notices[0].contains("~/.codex-typo"),
+            "notice must name the checked path — got: {}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].contains("~/.codex/auth.json"),
+            "notice must not use the generic default-home wording when an explicit dir was checked — got: {}",
+            notices[0]
+        );
+    }
+
+    /// Existing no-account-dir fallback notice wording must stay unchanged
+    /// (AC: "Existing fallback notices/strict behavior unchanged for specs
+    /// without an account dir").
+    #[test]
+    fn no_account_dir_fallback_notice_wording_is_unchanged() {
+        let mut specs = vec![codex_spec("nora")];
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, |_| false)
+                .unwrap();
+        assert_eq!(
+            notices,
+            vec![
+                "worker nora: codex unavailable (~/.codex/auth.json not found (not logged in — run `codex login`)) — falling back to claude"
+            ]
+        );
     }
 
     #[test]
@@ -1009,7 +1201,7 @@ mod codex_fallback_tests {
             None,
             SUPERVISOR_LABEL,
             || false,
-            || false,
+            |_| false,
         )
         .unwrap();
         assert_eq!(spec.cli, SupervisorCli::Claude);
@@ -1045,7 +1237,7 @@ mod codex_fallback_tests {
             None,
             SUPERVISOR_LABEL,
             || false,
-            || false,
+            |_| false,
         )
         .expect_err("strict mode must error for the supervisor too");
         match err {

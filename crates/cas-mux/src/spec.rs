@@ -81,12 +81,17 @@ pub struct WorkerSpec {
     pub model: Option<String>,
     /// Reasoning effort. `None` = use the backend's own default.
     pub effort: Option<Effort>,
-    /// Explicit Claude account directory for this spawn. `None` preserves
-    /// inherited `CLAUDE_CONFIG_DIR` behavior.
+    /// Explicit account directory for this spawn — `CLAUDE_CONFIG_DIR` when
+    /// `cli == Claude`, `CODEX_HOME` when `cli == Codex` (cas-9cc3). `None`
+    /// preserves inherited env-var behavior. Also consulted by
+    /// `apply_codex_fallback`'s auth probe (cas-4a5e) to check the RIGHT
+    /// account's login state, not just the default `~/.codex`.
     #[serde(default)]
     pub config_dir: Option<String>,
-    /// Requesting supervisor's Claude account directory, captured when the
-    /// spawn request was enqueued. Explicit `config_dir` takes precedence.
+    /// Requesting supervisor's own account directory (same provider-scoped
+    /// meaning as `config_dir` above — `CLAUDE_CONFIG_DIR` or `CODEX_HOME`
+    /// depending on `cli`), captured when the spawn request was enqueued.
+    /// Explicit `config_dir` takes precedence.
     #[serde(default)]
     pub requester_config_dir: Option<String>,
 }

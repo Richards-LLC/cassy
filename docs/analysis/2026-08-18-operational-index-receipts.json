@@ -1,0 +1,473 @@
+{
+  "build_receipt": {
+    "admission_policy": "structured envelopes stripped; JSON payloads, telemetry key=value lines, short or low-prose text rejected; structured metrics stay SQL-derived",
+    "built_at": "2026-08-18T13:10:53.591220+00:00",
+    "counts": {
+      "admitted": 46654,
+      "collapsed_after_envelope_strip": 1343,
+      "considered": 80951,
+      "events_without_vector": 0,
+      "occurrences": 88098,
+      "vectors_inherited": 46654
+    },
+    "isolation": "standalone artifact; not registered with any CAS memory/knowledge/code/history store",
+    "namespace": "operational/v2",
+    "rejections": {
+      "key-value-telemetry": 6998,
+      "low-lexical-variety": 23,
+      "low-prose-density": 3697,
+      "structured-json": 10701,
+      "too-short": 11535
+    },
+    "source_access": "read-only (mode=ro)",
+    "source_corpus": "/home/pippenz/.cas/artifacts/cas-c505/frozen-index/index.sqlite3",
+    "vector_provenance": "inherited from the frozen cas-c505 corpus; no re-embedding, no new provider cost"
+  },
+  "evaluation_receipt": {
+    "authorized_modes": [
+      "hybrid"
+    ],
+    "corpus_fingerprint": "ff4ce923f2b837b3658482517d196cbb1da1268018c18796292349d2f7b2f780",
+    "embedder": "provider:cas-embed-v1",
+    "evaluated_at": "2026-08-18T13:19:14.567690+00:00",
+    "families": {
+      "instruction-drift": {
+        "authorized_modes": [
+          "hybrid"
+        ],
+        "hybrid_beats_lexical_mrr": true,
+        "hybrid_beats_lexical_recall": true,
+        "hybrid_beats_prefix_mrr": true,
+        "hybrid_beats_prefix_recall": true,
+        "hybrid_dominates_both_baselines": true,
+        "hybrid_mrr": 0.381,
+        "hybrid_recall": 0.5,
+        "lexical_mrr": 0.3333,
+        "lexical_recall": 0.1667,
+        "passed": true,
+        "prefix_mrr": 0.1667,
+        "prefix_recall": 0.1667,
+        "vector_beats_lexical_mrr": false,
+        "vector_beats_lexical_recall": true,
+        "vector_beats_prefix_mrr": true,
+        "vector_beats_prefix_recall": true,
+        "vector_mrr": 0.2889,
+        "vector_recall": 0.8333,
+        "vector_recall_beats_both_baselines": true,
+        "vector_strictly_beats_both_baselines": false
+      },
+      "symptom-to-fix": {
+        "authorized_modes": [
+          "vector",
+          "hybrid"
+        ],
+        "hybrid_beats_lexical_mrr": true,
+        "hybrid_beats_lexical_recall": true,
+        "hybrid_beats_prefix_mrr": true,
+        "hybrid_beats_prefix_recall": true,
+        "hybrid_dominates_both_baselines": true,
+        "hybrid_mrr": 0.5695,
+        "hybrid_recall": 0.3541,
+        "lexical_mrr": 0.25,
+        "lexical_recall": 0.2708,
+        "passed": true,
+        "prefix_mrr": 0.3125,
+        "prefix_recall": 0.2708,
+        "vector_beats_lexical_mrr": true,
+        "vector_beats_lexical_recall": true,
+        "vector_beats_prefix_mrr": true,
+        "vector_beats_prefix_recall": true,
+        "vector_mrr": 0.5083,
+        "vector_recall": 0.6667,
+        "vector_recall_beats_both_baselines": true,
+        "vector_strictly_beats_both_baselines": true
+      }
+    },
+    "items": [
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "lexical": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "prefix": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "vector": {
+            "first_hit_rank": 5,
+            "hits": 2,
+            "mrr": 0.2,
+            "recall_at_k": 1.0
+          }
+        },
+        "family": "instruction-drift",
+        "gold_missing": [],
+        "gold_rows": 2,
+        "id": "D1",
+        "latency_ms": 1155.4,
+        "query": "a worker repeatedly failed to follow a standing rule and had to be corrected more than once"
+      },
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": 7,
+            "hits": 2,
+            "mrr": 0.1429,
+            "recall_at_k": 1.0
+          },
+          "lexical": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "prefix": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "vector": {
+            "first_hit_rank": 2,
+            "hits": 2,
+            "mrr": 0.5,
+            "recall_at_k": 1.0
+          }
+        },
+        "family": "instruction-drift",
+        "gold_missing": [],
+        "gold_rows": 2,
+        "id": "D3",
+        "latency_ms": 1289.9,
+        "query": "an agent believed it was allowed to do something the policy forbids and only learned otherwise afterwards"
+      },
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": 1,
+            "hits": 1,
+            "mrr": 1.0,
+            "recall_at_k": 0.5
+          },
+          "lexical": {
+            "first_hit_rank": 1,
+            "hits": 1,
+            "mrr": 1.0,
+            "recall_at_k": 0.5
+          },
+          "prefix": {
+            "first_hit_rank": 2,
+            "hits": 1,
+            "mrr": 0.5,
+            "recall_at_k": 0.5
+          },
+          "vector": {
+            "first_hit_rank": 6,
+            "hits": 1,
+            "mrr": 0.1667,
+            "recall_at_k": 0.5
+          }
+        },
+        "family": "instruction-drift",
+        "gold_missing": [],
+        "gold_rows": 2,
+        "id": "D4",
+        "latency_ms": 1255.5,
+        "query": "the wording was ambiguous enough that the model did roughly the opposite of what the operator intended"
+      },
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": 1,
+            "hits": 1,
+            "mrr": 1.0,
+            "recall_at_k": 0.25
+          },
+          "lexical": {
+            "first_hit_rank": 3,
+            "hits": 2,
+            "mrr": 0.3333,
+            "recall_at_k": 0.5
+          },
+          "prefix": {
+            "first_hit_rank": 1,
+            "hits": 3,
+            "mrr": 1.0,
+            "recall_at_k": 0.75
+          },
+          "vector": {
+            "first_hit_rank": 5,
+            "hits": 1,
+            "mrr": 0.2,
+            "recall_at_k": 0.25
+          }
+        },
+        "family": "symptom-to-fix",
+        "gold_missing": [],
+        "gold_rows": 4,
+        "id": "S1",
+        "latency_ms": 2108.7,
+        "query": "the acknowledgement reported success even though the message never actually reached anyone"
+      },
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": 1,
+            "hits": 1,
+            "mrr": 1.0,
+            "recall_at_k": 0.3333
+          },
+          "lexical": {
+            "first_hit_rank": 2,
+            "hits": 1,
+            "mrr": 0.5,
+            "recall_at_k": 0.3333
+          },
+          "prefix": {
+            "first_hit_rank": 4,
+            "hits": 1,
+            "mrr": 0.25,
+            "recall_at_k": 0.3333
+          },
+          "vector": {
+            "first_hit_rank": 1,
+            "hits": 2,
+            "mrr": 1.0,
+            "recall_at_k": 0.6667
+          }
+        },
+        "family": "symptom-to-fix",
+        "gold_missing": [],
+        "gold_rows": 3,
+        "id": "S2",
+        "latency_ms": 2646.6,
+        "query": "the whole fleet stalled because every participant was waiting for somebody else to move first"
+      },
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": 9,
+            "hits": 1,
+            "mrr": 0.1111,
+            "recall_at_k": 0.3333
+          },
+          "lexical": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "prefix": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "vector": {
+            "first_hit_rank": 2,
+            "hits": 3,
+            "mrr": 0.5,
+            "recall_at_k": 1.0
+          }
+        },
+        "family": "symptom-to-fix",
+        "gold_missing": [],
+        "gold_rows": 3,
+        "id": "S3",
+        "latency_ms": 2682.3,
+        "query": "the running program was an older build, so a landed correction looked like it had not worked"
+      },
+      {
+        "channels": {
+          "hybrid": {
+            "first_hit_rank": 6,
+            "hits": 2,
+            "mrr": 0.1667,
+            "recall_at_k": 0.5
+          },
+          "lexical": {
+            "first_hit_rank": 6,
+            "hits": 1,
+            "mrr": 0.1667,
+            "recall_at_k": 0.25
+          },
+          "prefix": {
+            "first_hit_rank": null,
+            "hits": 0,
+            "mrr": 0.0,
+            "recall_at_k": 0.0
+          },
+          "vector": {
+            "first_hit_rank": 3,
+            "hits": 3,
+            "mrr": 0.3333,
+            "recall_at_k": 0.75
+          }
+        },
+        "family": "symptom-to-fix",
+        "gold_missing": [],
+        "gold_rows": 4,
+        "id": "S4",
+        "latency_ms": 1789.7,
+        "query": "a process quietly disappeared and nothing noticed for a long time afterwards"
+      }
+    ],
+    "labelling_method": "Pooled relevance: for each probe the top 6 results of the prefix, lexical (BM25) and vector channels were pooled and every pooled row was judged by a human on query intent alone, blind to which channel produced it. Gold is a reviewed LOWER BOUND - unpooled relevant rows certainly exist, so recall figures are comparative, not absolute. Probe wording is deliberately paraphrased away from corpus vocabulary for the drift family and left closer to corpus vocabulary for several symptom probes, so the lexical baselines are not structurally doomed.",
+    "labels_file": "docs/analysis/operational-index-labels.json",
+    "labels_revision": "2026-08-18 (cas-2556 M2, first labelling round)",
+    "namespace": "operational/v2",
+    "passed": true,
+    "required_families": [
+      "instruction-drift",
+      "symptom-to-fix"
+    ],
+    "thresholds": {
+      "baselines": [
+        "prefix (FTS5 prefix match, BM25 ordered)",
+        "lexical (FTS5 BM25)"
+      ],
+      "hybrid_mode": "the vector channel must beat both baselines on recall@k, and the surfaced hybrid channel must beat both baselines on recall@k AND MRR, in every required family",
+      "require_all_families": true,
+      "vector_mode": "the raw vector channel must beat BOTH baselines on recall@k AND MRR in every required family"
+    },
+    "top_k": 10
+  },
+  "isolation_verdict": {
+    "checked_at": "2026-08-18T13:19:01.177283+00:00",
+    "checks": [
+      {
+        "check": "artifact_is_not_a_cas_store_or_store_neighbour",
+        "detail": {
+          "index": "/home/pippenz/.cas/artifacts/cas-2556/operational-index/index.sqlite3",
+          "stores": [
+            "/home/pippenz/Petrastella/cas-src/.cas/cas.db",
+            "/home/pippenz/.cas/cas.db"
+          ],
+          "violations": []
+        },
+        "ok": true
+      },
+      {
+        "check": "namespace_not_registered_in_any_cas_store",
+        "detail": [
+          {
+            "operational_tables": [],
+            "path_mentions": [],
+            "store": "project"
+          },
+          {
+            "operational_tables": [],
+            "path_mentions": [],
+            "store": "user"
+          }
+        ],
+        "ok": true
+      },
+      {
+        "check": "no_memory_knowledge_code_tables",
+        "detail": {
+          "foreign": [],
+          "tables": [
+            "op_events",
+            "op_events_fts",
+            "op_events_fts_config",
+            "op_events_fts_data",
+            "op_events_fts_docsize",
+            "op_events_fts_idx",
+            "op_meta",
+            "op_occurrences",
+            "op_rejections",
+            "op_vectors"
+          ]
+        },
+        "ok": true
+      },
+      {
+        "check": "all_rows_namespaced",
+        "detail": {
+          "namespace": "operational/v2",
+          "rows_outside_namespace": 0
+        },
+        "ok": true
+      },
+      {
+        "check": "no_foreign_source_kinds",
+        "detail": {
+          "foreign": [],
+          "kinds": {
+            "claude_transcript": 9736,
+            "codex_transcript": 19159,
+            "daemon_log": 2761,
+            "event": 7722,
+            "grok_transcript": 288,
+            "prompt_queue": 2145,
+            "supervisor_queue": 176,
+            "task": 4667
+          }
+        },
+        "ok": true
+      },
+      {
+        "check": "operational_text_absent_from_memory_knowledge_code",
+        "detail": {
+          "canaries_probed": 25,
+          "leaks": []
+        },
+        "ok": true
+      },
+      {
+        "check": "live_full_text_indexes_return_no_operational_text",
+        "detail": {
+          "hits": [],
+          "indexes_probed": [
+            "history_commits_fts",
+            "knowledge_pages_fts",
+            "recording_text_fts",
+            "recordings_fts"
+          ],
+          "probes": 20
+        },
+        "ok": true
+      },
+      {
+        "check": "memory_knowledge_code_text_absent_from_namespace",
+        "detail": {
+          "canaries_probed": 75,
+          "contamination": []
+        },
+        "ok": true
+      },
+      {
+        "check": "cas_stores_opened_read_only",
+        "detail": [
+          {
+            "error": "attempt to write a readonly database",
+            "rejected": true,
+            "store": "project"
+          },
+          {
+            "error": "attempt to write a readonly database",
+            "rejected": true,
+            "store": "user"
+          }
+        ],
+        "ok": true
+      }
+    ],
+    "failed_checks": [],
+    "index": "/home/pippenz/.cas/artifacts/cas-2556/operational-index/index.sqlite3",
+    "namespace": "operational/v2",
+    "passed": true
+  }
+}

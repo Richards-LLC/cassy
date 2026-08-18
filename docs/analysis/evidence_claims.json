@@ -1,0 +1,52 @@
+{
+  "schema": "cas-b78b/evidence-claims/v1",
+  "purpose": "Registry of operational claims whose truth status is adjudicated by an authority rather than by how often the corpus repeats them. Ingestion tags matching evidence units with the claim key; a claim carrying a withdraws/contradicts/supersedes correction is marked withdrawn, down-ranked at retrieval, and can never be returned without its correction attached.",
+  "authorities": {
+    "current-source": "the claim is refuted by the code that ships today; cite file:line",
+    "task-close-note": "the owning task's close record retired the claim",
+    "supervisor-decision": "a supervisor decision note retired the claim",
+    "corpus": "discovered during ingestion: an evidence unit that names the claim and carries a correction marker"
+  },
+  "claims": [
+    {
+      "claim_key": "cas-9d92/no-reconciliation-code-path",
+      "title": "There is no reconciliation code path for hook-surfaced prompts",
+      "origin_task": "cas-9d92",
+      "patterns": [
+        "no reconciliation code path",
+        "there is no reconciliation",
+        "reconciliation (?:code )?path (?:does not|doesn't) exist",
+        "never reconcil(?:es|ed|iation)\\b.{0,80}hook[- ]surfaced"
+      ],
+      "corrections": [
+        {
+          "relation": "withdraws",
+          "authority": "current-source",
+          "evidence_pointer": "crates/cas-store/src/prompt_queue_store.rs:4493",
+          "recorded_at": "2026-08-17T15:03:00Z",
+          "note": "Current source handles SurfacingSource::HookSurfaced and stamps acked_via='hook_surfaced'. The claim is withdrawn; cas-9d92's own close record and docs/analysis/2026-08-17-historical-operational-vector-index.md carry the correction."
+        }
+      ]
+    },
+    {
+      "claim_key": "cas-9d92/inbox-poll-rows-prove-ack-broken",
+      "title": "Rows obtained through inbox_poll prove acknowledgement is broken",
+      "origin_task": "cas-9d92",
+      "patterns": [
+        "rows? 7924",
+        "rows? 7926",
+        "inbox[_ ]poll.{0,120}prove(?:s)?.{0,40}(?:ack|acknowledge)",
+        "(?:ack|acknowledge\\w*).{0,80}broken.{0,80}inbox[_ ]poll"
+      ],
+      "corrections": [
+        {
+          "relation": "withdraws",
+          "authority": "current-source",
+          "evidence_pointer": "crates/cas-store/src/prompt_queue_store.rs:64,4553,9582",
+          "recorded_at": "2026-08-17T15:03:00Z",
+          "note": "Inbox polling explicitly does not acknowledge; that is the documented contract with a regression test at :9582. Unacked rows reached by inbox_poll are therefore expected, not evidence of a broken ack path."
+        }
+      ]
+    }
+  ]
+}

@@ -178,54 +178,47 @@ mod minions_colors {
     };
 }
 
-/// ASCII art logo for CAS Factory
+/// Compact six-row Cassy wordmark. Its 49-cell widest row fits an 80-column
+/// terminal and keeps the boot screen within the normal 24-row viewport.
 const LOGO: &str = r#"
-   ██████╗ █████╗ ███████╗    ███████╗ █████╗  ██████╗████████╗ ██████╗ ██████╗ ██╗   ██╗
-  ██╔════╝██╔══██╗██╔════╝    ██╔════╝██╔══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗╚██╗ ██╔╝
-  ██║     ███████║███████╗    █████╗  ███████║██║        ██║   ██║   ██║██████╔╝ ╚████╔╝
-  ██║     ██╔══██║╚════██║    ██╔══╝  ██╔══██║██║        ██║   ██║   ██║██╔══██╗  ╚██╔╝
-  ╚██████╗██║  ██║███████║    ██║     ██║  ██║╚██████╗   ██║   ╚██████╔╝██║  ██║   ██║
-   ╚═════╝╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝   ╚═╝
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// Smaller logo for narrow terminals (< 100 cols)
+/// Same Cassy wordmark for narrow terminals; the full design is already safe
+/// at 80 columns, so no abbreviated mark is needed.
 const LOGO_SMALL: &str = r#"
-  ╔═══════════════════════════════════════════════════════╗
-  ║   ▄████▄   ▄▄▄        ██████     █████▒▄▄▄   ▄████▄   ║
-  ║  ▒██▀ ▀█  ▒████▄    ▒██    ▒   ▓██   ▒████▄ ▒██▀ ▀█   ║
-  ║  ▒▓█    ▄ ▒██  ▀█▄  ░ ▓██▄     ▒████ ▒██  ▀▒▓█    ▄   ║
-  ║  ▒▓▓▄ ▄██▒░██▄▄▄▄██   ▒   ██▒  ░▓█▒  ░██▄▄▄▒▓▓▄ ▄██▒  ║
-  ║  ▒ ▓███▀ ░ ▓█   ▓██▒▒██████▒▒  ░▒█░   ▓█   ▒ ▓███▀ ░  ║
-  ╚═══════════════════════════════════════════════════════╝
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// Minion ASCII art logo — pill-shaped body, goggles, overalls
+/// The Minions palette still renders the Cassy wordmark; a theme must not
+/// change the product identity at startup.
 const MINION_LOGO: &str = r#"
-           ▄████████████▄
-         ██              ██
-        ██  ▄██████████▄  ██
-        ██ █  ◉      ◉  █ ██
-        ██ █            █ ██
-        ██  ▀██████████▀  ██
-        ██    ╭──────╮    ██
-     ─┤ ██    │ ╰──╯ │    ██ ├─
-        ██    ╰──────╯    ██
-       ▐█ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄ █▌
-       ▐█ █ B A N A N A █ █▌
-       ▐█ █▄▄▄▄▄▄▄▄▄▄▄▄█ █▌
-        ██                ██
-         ██  ██      ██  ██
-          ▀██▀        ▀██▀
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// Smaller minion for narrow/short terminals
+/// Narrow Minions boot uses the same compact Cassy wordmark.
 const MINION_LOGO_SMALL: &str = r#"
-     ▄██████▄
-    ██ (◉◉) ██
-    ██ ╰──╯ ██
-    █▌▐████▌▐█
-    █▌ │  │ ▐█
-     ▀▀    ▀▀
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
 /// Braille spinner frames for smooth animation
@@ -296,7 +289,7 @@ impl BootScreen {
             )
         } else {
             (
-                "═══  Coding Agent System  ═══",
+                "═══  Cassy Coding Agent System  ═══",
                 format!("Multi-Agent Orchestration  •  v{}", APP_VERSION),
             )
         };
@@ -304,7 +297,7 @@ impl BootScreen {
         let compact_title = if self.minions_theme {
             "Minion Factory Boot"
         } else {
-            "CAS Factory Boot"
+            "Cassy Factory Boot"
         };
 
         let compact_subtitle = if self.minions_theme {
@@ -797,5 +790,19 @@ fn truncate_path(path: &str, max_len: usize) -> String {
         let suffix_len = max_len - 3;
         let suffix: String = path.chars().skip(char_count - suffix_len).collect();
         format!("...{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LOGO, LOGO_SMALL, MINION_LOGO, MINION_LOGO_SMALL};
+
+    #[test]
+    fn cassy_boot_wordmarks_fit_at_80_columns() {
+        for logo in [LOGO, LOGO_SMALL, MINION_LOGO, MINION_LOGO_SMALL] {
+            let rows: Vec<_> = logo.lines().filter(|row| !row.is_empty()).collect();
+            assert_eq!(rows.len(), 6, "the boot splash must remain compact");
+            assert!(rows.iter().all(|row| row.chars().count() <= 80));
+        }
     }
 }

@@ -26,6 +26,7 @@ use crate::cli::Cli;
 use crate::cli::factory_tooling;
 use crate::cli::hook::{configure_claude_hooks, configure_mcp_server, provision_codex_project};
 use crate::cli::interactive;
+use crate::ui::components::OutputMode;
 
 /// Overall timeout for `cas init`. If init is still running past this, the
 /// watchdog aborts the process with a clear error so a hang never consumes
@@ -220,6 +221,35 @@ mod colors {
         g: 70,
         b: 75,
     };
+}
+
+/// Cassy's compact six-row wordmark. The 49-cell widest row leaves room for
+/// the init frame at 80 columns and keeps the wizard's first screen compact.
+const CASSY_WORDMARK: [&str; 6] = [
+    " ██████╗ █████╗ ███████╗███████╗██╗   ██╗",
+    "██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝",
+    "██║     ███████║███████╗███████╗ ╚████╔╝",
+    "██║     ██╔══██║╚════██║╚════██║  ╚██╔╝",
+    "╚██████╗██║  ██║███████║███████║   ██║",
+    " ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝",
+];
+
+const CASSY_PLAIN_WORDMARK: [&str; 1] = ["Cassy"];
+const INIT_WORDMARK_WIDTH: usize = 52;
+
+fn cassy_wordmark_lines() -> &'static [&'static str] {
+    if OutputMode::detect() == OutputMode::Plain {
+        &CASSY_PLAIN_WORDMARK
+    } else {
+        &CASSY_WORDMARK
+    }
+}
+
+fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
+    for line in cassy_wordmark_lines() {
+        print_colored(&format!("{indent}{line}\n"), colors::CYAN_BRIGHT)?;
+    }
+    Ok(())
 }
 
 // Spinner frames (braille pattern)
@@ -512,10 +542,8 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     // Mini header
     println!();
-    print_colored("  █▀▀ ▄▀█ █▀ ", colors::CYAN_BRIGHT)?;
-    print_colored("Init ", colors::WHITE)?;
-    print_colored("(using defaults)\n", colors::GRAY)?;
-    print_colored("  █▄▄ █▀█ ▄█\n\n", colors::CYAN_BRIGHT)?;
+    print_cassy_wordmark("  ")?;
+    print_colored("  Cassy init (using defaults)\n\n", colors::GRAY)?;
 
     let cas_dir = init_cas_dir(cwd)?;
     register_initialized_repo(cwd);
@@ -598,15 +626,15 @@ fn print_welcome() -> anyhow::Result<()> {
         colors::CYAN,
     )?;
     print_colored("│\n", colors::CYAN)?;
-    print_colored("  │  ", colors::CYAN)?;
-    print_colored("█▀▀ ▄▀█ █▀", colors::CYAN_BRIGHT)?;
-    print_colored("  Init", colors::WHITE)?;
-    print_colored("                                     ", colors::CYAN)?;
-    print_colored("│\n", colors::CYAN)?;
-    print_colored("  │  ", colors::CYAN)?;
-    print_colored("█▄▄ █▀█ ▄█", colors::CYAN_BRIGHT)?;
-    print_colored("                                          ", colors::CYAN)?;
-    print_colored("│\n", colors::CYAN)?;
+    for line in cassy_wordmark_lines() {
+        print_colored("  │  ", colors::CYAN)?;
+        print_colored(line, colors::CYAN_BRIGHT)?;
+        print_colored(
+            &" ".repeat(INIT_WORDMARK_WIDTH.saturating_sub(line.chars().count())),
+            colors::CYAN,
+        )?;
+        print_colored("│\n", colors::CYAN)?;
+    }
     print_colored("  │", colors::CYAN)?;
     print_colored(
         "                                                      ",
@@ -1185,6 +1213,10 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
 
 fn print_colored(text: &str, color: Color) -> anyhow::Result<()> {
     let mut stdout = stdout();
+    if OutputMode::detect() == OutputMode::Plain {
+        write!(stdout, "{text}")?;
+        return Ok(());
+    }
     execute!(stdout, SetForegroundColor(color), Print(text))?;
     execute!(stdout, SetForegroundColor(Color::Reset))?;
     Ok(())
@@ -1239,6 +1271,14 @@ pub use crate::cli::init::docs_and_skill::{generate_cas_skill, update_claude_md}
 #[cfg(test)]
 mod integration_flag_tests {
     use super::*;
+
+    #[test]
+    fn cassy_init_wordmark_fits_80_column_wizard() {
+        assert_eq!(CASSY_WORDMARK.len(), 6, "the init splash must remain compact");
+        assert!(CASSY_WORDMARK
+            .iter()
+            .all(|row| row.chars().count() <= INIT_WORDMARK_WIDTH));
+    }
 
     #[test]
     fn integration_flags_from_threads_each_field() {

@@ -64,7 +64,7 @@ pub mod update_transaction;
 
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::store::find_cas_root;
 
@@ -98,20 +98,46 @@ fn build_version() -> String {
     format!("{version} ({git_hash} {build_date})")
 }
 
-const LOGO: &str = r#"
-   ______   ___    _____
-  / ____/  /   |  / ___/
- / /      / /| |  \__ \
-/ /___   / ___ | ___/ /
-\____/  /_/  |_|/____/
+/// Compact Doom-style Cassy wordmark. Its widest row is 53 cells, so it fits
+/// comfortably in an 80-column terminal without wrapping.
+const CASSY_WORDMARK: &str = r#"
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
+
+const CASSY_PLAIN_WORDMARK: &str = "Cassy";
+
+/// Select the wordmark that is safe for the destination before clap renders
+/// help. Piped output and `NO_COLOR` deliberately get a compact text fallback.
+pub fn help_wordmark() -> &'static str {
+    match crate::ui::components::OutputMode::detect() {
+        crate::ui::components::OutputMode::Styled => CASSY_WORDMARK,
+        crate::ui::components::OutputMode::Plain => CASSY_PLAIN_WORDMARK,
+    }
+}
+
+/// Parse with a destination-aware top-level help banner.
+pub fn try_parse_from_with_wordmark<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = Cli::command()
+        .before_help(help_wordmark())
+        .try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
+}
 
 /// CAS - Multi-agent coding factory
 #[derive(Parser)]
 #[command(name = "cas")]
 #[command(about = "Multi-agent coding factory with persistent memory and task coordination")]
 #[command(version = build_version())]
-#[command(before_help = LOGO)]
+#[command(before_help = CASSY_WORDMARK)]
 pub struct Cli {
     /// Output in JSON format
     #[arg(long, global = true)]
@@ -671,6 +697,16 @@ mod tests {
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));
         assert!(!help.contains("EPIC cas-"));
+    }
+
+    #[test]
+    fn cassy_wordmark_stays_compact_for_80_column_terminals() {
+        let rows: Vec<_> = CASSY_WORDMARK
+            .lines()
+            .filter(|row| !row.is_empty())
+            .collect();
+        assert_eq!(rows.len(), 6, "the splash must remain at most eight rows");
+        assert!(rows.iter().all(|row| row.chars().count() <= 80));
     }
 
     #[test]

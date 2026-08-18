@@ -15,8 +15,8 @@ evidence units. Three rules keep it honest:
 * **No automatic mutation, ever.** ``queue`` opens every store read-only.
   ``apply`` is dry-run by default and refuses to execute anything that is not
   explicitly approved by a named approver. The mutation itself goes through the
-  existing ``cas memory`` opinion ops, so the memory system's own audit trail
-  records the outcome rather than this script writing behind its back.
+  existing ``mcp__cas__memory`` opinion ops, so the memory system's own audit
+  trail records the outcome rather than this script writing behind its back.
 * **Silence on unobserved data.** A verdict of ``insufficient-post-fix-data``
   proposes nothing. "We did not observe a recurrence" and "we observed no
   recurrence over adequate exposure" are different statements, and only the
@@ -98,6 +98,19 @@ def claim_sentence(text: str, pattern: re.Pattern[str]) -> str:
     return text[start:end].strip()[:240]
 
 
+BLOCK_SPLIT = re.compile(r"\n\s*\n")
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n")
+
+
+def blocks_containing(text: str, token: str) -> list[str]:
+    """The paragraphs that mention the fix — the reviewer's reading window."""
+    return [block for block in BLOCK_SPLIT.split(text) if token in block.lower()]
+
+
+def sentences(block: str) -> list[str]:
+    return [part.strip() for part in SENTENCE_SPLIT.split(block) if part.strip()]
+
+
 STOPWORDS = {
     "after", "again", "against", "because", "before", "being", "between", "during", "from",
     "into", "over", "such", "than", "that", "them", "then", "there", "these", "this", "those",
@@ -109,28 +122,75 @@ def content_words(text: str) -> set[str]:
     return {word for word in re.findall(r"[a-z][a-z-]{3,}", text.lower()) if word not in STOPWORDS}
 
 
-def is_incidental(claim: str, channels: list[dict[str, str]], seed: dict[str, Any]) -> bool:
-    """Is the fix merely *mentioned* near this claim rather than its subject?
+def subject_words(seed: dict[str, Any]) -> set[str]:
+    """The fix's own subject matter.
 
-    Two conditions, both measured on the live store rather than assumed:
-
-    1. The matched token must appear in the asserting sentence at all — a
-       memory that lists a task id paragraphs away is not about that defect.
-    2. That sentence must also share subject matter with the fix. A note
-       reading "widening CI fails the 10-minute budget (measured while landing
-       cas-32ee)" satisfies (1) by parenthetical accident while making a claim
-       about CI timing, not about the epic close gate; requiring two shared
-       content words with the fix's title/terms separates the two cases.
-
-    Either way the item still reaches the queue — it just never carries an
-    action, because a wrong proposal is the expensive failure here.
+    Deliberately the *title's* words only. A symptom phrase like "delivery is
+    not accounted for" is distinctive as a phrase and useless as words:
+    measured on the live store, counting "delivery" as subject matter made a
+    CI-timing note that mentions "a same-day delivery" look like a claim about
+    the epic close gate. Phrases are matched whole, below.
     """
-    if not any(channel["matched"].lower() in claim.lower() for channel in channels):
+    words = content_words(str(seed.get("title", "")))
+    for term in seed.get("structured_terms", []):
+        words |= content_words(str(term).replace("-", " "))
+    return words
+
+
+def subject_phrases(seed: dict[str, Any]) -> list[str]:
+    return [str(term).lower() for term in seed.get("lexical_terms", []) if len(str(term).split()) > 1]
+
+
+def is_about(sentence: str, seed: dict[str, Any]) -> bool:
+    """Is this sentence making a claim *about* the fix's subject?
+
+    A verbatim symptom phrase settles it. Otherwise the sentence must share at
+    least two of the fix title's content words — one shared word is how a note
+    about something else brushes past the same topic.
+    """
+    lowered = sentence.lower()
+    if any(phrase in lowered for phrase in subject_phrases(seed)):
         return True
-    subject = content_words(str(seed.get("title", "")))
-    for term in seed.get("lexical_terms", []):
-        subject |= content_words(str(term))
-    return len(content_words(claim) & subject) < 2
+    return len(content_words(sentence) & subject_words(seed)) >= 2
+
+
+def claim_for(text: str, channels: list[dict[str, str]], seed: dict[str, Any]) -> tuple[str, str, bool]:
+    """The claim this evidence speaks to, anchored at the link.
+
+    Earlier this took the memory's *first* defect sentence and then asked
+    whether the fix was mentioned in it. On the live store that reads the wrong
+    claim: a five-instance defect-class memory whose title says "defect" gets
+    judged on its title while the sentence that actually names the fix sits
+    four paragraphs down. So: read the paragraphs that mention the fix, and
+    take the first sentence in them that both asserts something and is about
+    the fix's subject. If no such sentence exists the link is incidental — the
+    item still reaches the queue, it just never carries an action, because a
+    wrong proposal is the expensive failure here.
+    """
+    fallback: tuple[str, str] | None = None
+    for channel in channels:
+        token = channel["matched"].lower()
+        for block in blocks_containing(text, token):
+            for sentence in sentences(block):
+                kind = classify_claim(sentence)
+                if fallback is None and token in sentence.lower():
+                    fallback = (sentence, kind)
+                if kind != "other" and is_about(sentence, seed):
+                    return sentence[:240], kind, False
+    if fallback:
+        return fallback[0][:240], fallback[1], True
+    return claim_sentence(text, DEFECT_RE), classify_claim(text), True
+
+
+def independent_claims(text: str) -> int:
+    """How many distinct claim-bearing sentences this memory carries.
+
+    A memory is only "the claim under review" when it makes one. CAS memories
+    are session notes: 2026-08-15-12 catalogues five separate defects, and
+    ending its validity because one of them shipped a fix would retire four
+    claims nobody measured.
+    """
+    return sum(1 for sentence in sentences(text) if classify_claim(sentence) != "other")
 
 
 def load_memories(db: Path) -> list[dict[str, Any]]:
@@ -166,6 +226,16 @@ def link_channels(memory: dict[str, Any], seed: dict[str, Any]) -> list[dict[str
         if candidate in lowered:
             channels.append({"channel": "task_id", "matched": candidate})
 
+    # A memory names the ticket the defect was FILED under, not the commit that
+    # fixed it: on the live store, every memory asserting the epic-close
+    # false-positive cites cas-b192 (the ticket) and none cites cas-32ee (the
+    # fix). Without this channel the fix-side link is empty exactly for the
+    # memories the queue exists to find. `defect_ids` is the seed author's
+    # explicit, auditable statement of which ticket this fix closes out.
+    for defect_id in seed.get("defect_ids", []):
+        if str(defect_id).lower() in lowered:
+            channels.append({"channel": "defect_id", "matched": str(defect_id).lower()})
+
     commit = str(seed.get("fix_commit") or "")
     if len(commit) >= 7 and commit[:7].lower() in lowered:
         channels.append({"channel": "fix_commit", "matched": commit[:7]})
@@ -195,23 +265,23 @@ def build_queue(
             channels = link_channels(memory, seed)
             if not channels:
                 continue
-            text = f"{memory['title']}\n{memory['content']}"
-            claim_kind = classify_claim(text)
-            pattern = {
-                "defect_assertion": DEFECT_RE,
-                "prescription": PRESCRIPTION_RE,
-                "constant": CONSTANT_RE,
-            }.get(claim_kind, DEFECT_RE)
-            claim = claim_sentence(text, pattern)
+            text = f"{memory['title']}\n\n{memory['content']}"
             # A memory that merely lists a task id somewhere is not a memory
             # *about* that defect. Measured on the live store, the task-id
             # channel over-links exactly this way (a CI-timing note that
-            # happens to cite three fix ids). Requiring the matched token to
-            # appear in the asserting sentence keeps the link auditable and is
-            # the difference between a proposal and a guess; incidental links
+            # happens to cite three fix ids). The claim is therefore read at
+            # the link and must be about the fix's subject; incidental links
             # still reach the queue, but never carry an action.
-            incidental = is_incidental(claim, channels, seed)
+            claim, claim_kind, incidental = claim_for(text, channels, seed)
+            claims_in_memory = independent_claims(text)
             action = None if incidental else ACTIONS.get((claim_kind, verdict["state"]))
+            # An end date applies to the whole memory, so it may only be
+            # proposed when the whole memory is the claim that was measured.
+            # A session note carrying five claims gets the weaker, additive
+            # signal instead — the evidence is real, its scope is not the
+            # entire note.
+            if action == "set_valid_until" and claims_in_memory > 1:
+                action = "opinion_weaken"
             if verdict["state"] == "insufficient-post-fix-data":
                 skipped_unobserved += 1
             items.append(
@@ -221,6 +291,7 @@ def build_queue(
                         "title": memory["title"],
                         "claim": claim,
                         "claim_kind": claim_kind,
+                        "independent_claims": claims_in_memory,
                         "created": memory["created"],
                         "importance": memory["importance"],
                         "stability": memory["stability"],
@@ -260,7 +331,7 @@ def build_queue(
                         "No action proposed: the fix is only mentioned in passing, not in the "
                         "sentence that makes the claim."
                         if incidental
-                        else rationale_for(claim_kind, verdict)
+                        else rationale_for(claim_kind, verdict, action, claims_in_memory)
                     ),
                     "approved": False,
                     "approver": None,
@@ -284,16 +355,23 @@ def build_queue(
     }
 
 
-def rationale_for(claim_kind: str, verdict: dict[str, Any]) -> str:
+def rationale_for(claim_kind: str, verdict: dict[str, Any], action: str | None = None, claims: int = 1) -> str:
     state = verdict["state"]
     exposure = verdict.get("exposure", {})
     boundary = verdict.get("epoch_evidence", {}).get("clean_post_from")
     if state == "fixed" and claim_kind == "defect_assertion":
-        return (
+        observed = (
             f"The defect this memory asserts was observed clean across "
             f"{exposure.get('clean_post', 0)} post-fix observations since {boundary} "
-            f"(threshold {exposure.get('threshold')}). The claim likely has an end date."
+            f"(threshold {exposure.get('threshold')})."
         )
+        if action == "opinion_weaken":
+            return (
+                f"{observed} This memory makes {claims} separate claims, so an end date would "
+                f"retire {claims - 1} the evidence says nothing about; weaken the one that was "
+                f"measured instead."
+            )
+        return f"{observed} The claim likely has an end date."
     if state == "recurred":
         return (
             f"Symptom evidence matching this memory's claim occurred after the fix was "
@@ -307,8 +385,20 @@ def rationale_for(claim_kind: str, verdict: dict[str, Any]) -> str:
     return f"No action proposed for a {claim_kind} claim under verdict {state}."
 
 
-def command_for(item: dict[str, Any]) -> list[str]:
-    """The `cas memory` invocation an approved item authorises. One op, one memory."""
+MEMORY_TOOL = "mcp__cas__memory"
+
+
+def operation_for(item: dict[str, Any]) -> dict[str, Any]:
+    """The memory-system call an approved item authorises. One op, one memory.
+
+    This is an ``mcp__cas__memory`` call rather than a shell command, because
+    that is where the ops actually live: measured on cas 2.72.0, the `cas`
+    binary exposes only `memory share` / `memory unshare` — there is no
+    `cas memory update` and no `opinion-*` subcommand. Emitting a shell command
+    would have produced a receipt full of invocations that exit 2, which is
+    exactly the "verification machinery that is not itself verified" failure
+    this queue exists to catch elsewhere.
+    """
     memory_id = item["memory"]["id"]
     action = item["suggested_action"]
     evidence = (
@@ -316,26 +406,29 @@ def command_for(item: dict[str, Any]) -> list[str]:
         f"({item['verdict']['source']}); clean-post from {item['verdict']['clean_post_from']}"
     )
     if action == "set_valid_until":
-        return ["cas", "memory", "update", memory_id, "--valid-until", item["verdict"]["clean_post_from"]]
-    if action == "opinion_reinforce":
-        return ["cas", "memory", "opinion-reinforce", memory_id, "--content", evidence]
-    if action == "opinion_weaken":
-        return ["cas", "memory", "opinion-weaken", memory_id, "--content", evidence]
-    if action == "opinion_contradict":
-        return ["cas", "memory", "opinion-contradict", memory_id, "--content", evidence]
-    raise ValueError(f"{memory_id}: no command for suggested action {action!r}")
+        arguments = {"action": "update", "id": memory_id, "valid_until": item["verdict"]["clean_post_from"]}
+    elif action in {"opinion_reinforce", "opinion_weaken", "opinion_contradict"}:
+        arguments = {"action": action, "id": memory_id, "content": evidence}
+    else:
+        raise ValueError(f"{memory_id}: no memory operation for suggested action {action!r}")
+    return {"tool": MEMORY_TOOL, "arguments": arguments}
 
 
 def apply_queue(
     queue: dict[str, Any],
     execute: bool,
-    runner: Callable[[list[str]], int] | None = None,
+    executor: list[str] | None = None,
+    runner: Callable[[list[str], str], int] | None = None,
 ) -> dict[str, Any]:
     """Dry-run by default; execute only what a named approver approved.
 
-    The two refusals below are the whole safety property: an item with no
-    approval, or an approval with no approver, is never executed and is
-    reported as refused rather than skipped quietly.
+    The refusals below are the whole safety property: an item with no approval,
+    or an approval with no approver, is never executed and is reported as
+    refused rather than skipped quietly. ``--execute`` additionally needs an
+    ``executor`` — a command that can actually reach ``mcp__cas__memory`` and
+    receives one operation as JSON on stdin. Without one this reports the
+    approved operations and executes nothing, rather than claiming a mutation
+    it cannot perform.
     """
     planned: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
@@ -351,52 +444,83 @@ def apply_queue(
         if not item.get("approver"):
             refused.append({"memory_id": memory_id, "reason": "approved without a named approver"})
             continue
-        command = command_for(item)
-        planned.append({"memory_id": memory_id, "command": command, "approver": item["approver"]})
+        planned.append({"memory_id": memory_id, "operation": operation_for(item), "approver": item["approver"]})
 
-    if execute:
-        run = runner or (lambda command: subprocess.run(command, check=False).returncode)
+    mode = "dry-run"
+    if execute and not executor:
+        mode = "no-executor"
         for plan in planned:
-            code = run(plan["command"])
+            refused.append({
+                "memory_id": plan["memory_id"],
+                "reason": f"--execute needs --executor: these ops run through {MEMORY_TOOL}, not a shell",
+            })
+    elif execute:
+        mode = "execute"
+        run = runner or (
+            lambda command, payload: subprocess.run(command, input=payload, text=True, check=False).returncode
+        )
+        for plan in planned:
+            code = run(list(executor or []), json.dumps(plan["operation"], sort_keys=True))
             executed.append({**plan, "exit_code": code})
 
     return {
         "executed": executed,
         "planned": planned,
         "refused": refused,
-        "mode": "execute" if execute else "dry-run",
+        "mode": mode,
     }
 
 
 def evaluate(queue: dict[str, Any], labels: dict[str, str]) -> dict[str, Any]:
     """Precision of the flags on a human-labelled sample.
 
-    Labels map ``"<memory_id>|<fix_id>"`` to ``correct`` / ``incorrect``. Only
-    items carrying a suggested action are scored: the queue's cost is a wrong
-    proposal, not a missing one.
+    Labels map ``"<memory_id>|<fix_id>"`` to ``correct`` / ``incorrect``.
+
+    Two numbers, because the queue makes two kinds of mistake and only one of
+    them is visible in a precision figure. ``precision`` scores the items that
+    carry a proposed action — the expensive failure, a wrong mutation of a
+    memory. ``decision_accuracy`` scores every linked pair including the ones
+    held back, because deciding *not* to propose is also a decision, and a
+    queue that stays silent about everything would otherwise score 100%.
     """
     scored = correct = 0
+    decision_scored = decision_correct = 0
     unlabelled: list[str] = []
+    decision_unlabelled: list[str] = []
     mistakes: list[dict[str, Any]] = []
+    decision_mistakes: list[dict[str, Any]] = []
     for item in queue.get("items", []):
-        if not item["suggested_action"]:
-            continue
         key = f"{item['memory']['id']}|{item['fix']['id']}"
         label = labels.get(key)
+        action = item["suggested_action"]
         if label is None:
-            unlabelled.append(key)
+            decision_unlabelled.append(key)
+            if action:
+                unlabelled.append(key)
+            continue
+        decision_scored += 1
+        if label == "correct":
+            decision_correct += 1
+        else:
+            decision_mistakes.append({"key": key, "suggested_action": action, "label": label})
+        if not action:
             continue
         scored += 1
         if label == "correct":
             correct += 1
         else:
-            mistakes.append({"key": key, "suggested_action": item["suggested_action"], "label": label})
+            mistakes.append({"key": key, "suggested_action": action, "label": label})
     return {
         "scored": scored,
         "correct": correct,
         "precision": round(correct / scored, 4) if scored else None,
         "unlabelled": unlabelled,
         "mistakes": mistakes,
+        "decision_scored": decision_scored,
+        "decision_correct": decision_correct,
+        "decision_accuracy": round(decision_correct / decision_scored, 4) if decision_scored else None,
+        "decision_unlabelled": decision_unlabelled,
+        "decision_mistakes": decision_mistakes,
     }
 
 
@@ -427,7 +551,11 @@ def main(argv: list[str] | None = None) -> int:
 
     apply_cmd = sub.add_parser("apply", help="dry-run (default) or execute approved items")
     apply_cmd.add_argument("--queue", type=Path, required=True)
-    apply_cmd.add_argument("--execute", action="store_true", help="run the approved `cas memory` ops")
+    apply_cmd.add_argument("--execute", action="store_true", help=f"run the approved {MEMORY_TOOL} ops")
+    apply_cmd.add_argument(
+        "--executor", nargs="+",
+        help=f"command that can reach {MEMORY_TOOL}; each approved operation arrives as JSON on stdin",
+    )
     apply_cmd.add_argument("--output-receipt", type=Path)
 
     evaluate_cmd = sub.add_parser("evaluate", help="precision of the flags on a labelled sample")
@@ -449,11 +577,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "apply":
-        result = apply_queue(json.loads(args.queue.read_text()), args.execute)
+        result = apply_queue(json.loads(args.queue.read_text()), args.execute, args.executor)
         if args.output_receipt:
             write_json(args.output_receipt, result)
         print(json.dumps(result, indent=2, sort_keys=True))
         # A run that refused everything it was asked to do must not look like success.
+        if result["mode"] == "no-executor":
+            return 1
         return 0 if not result["refused"] or result["planned"] else 1
 
     result = evaluate(json.loads(args.queue.read_text()), json.loads(args.labels.read_text()))

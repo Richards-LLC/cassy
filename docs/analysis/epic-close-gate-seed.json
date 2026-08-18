@@ -1,0 +1,20 @@
+[
+  {
+    "id": "cas-32ee",
+    "title": "reconcile evolved squash deliveries at the epic close gate",
+    "fix_commit": "6bb11c12",
+    "fix_built_at": "2026-08-15T17:05:24-04:00",
+    "structured_terms": [],
+    "lexical_terms": [
+      "delivery is not accounted for",
+      "epic close blocked"
+    ],
+    "semantic_threshold": 0.8,
+    "defect_ids": [
+      "cas-b192"
+    ],
+    "defect_ids_justification": "The defect was filed as cas-b192 (\"the epic close guard's remediation deletes shipped work\"; root cause recorded as close_ops.rs gating the content check on unmerged_count == 0, leaving DeliveryContentPresence::Superseded unreachable from the unmerged branch). cas-b192's own commits (3efb5544, 6243ba0d, 524924f3, 8d156bab) shipped the direction check, content-based reconciliation and the audited override; 6bb11c12 (cas-32ee) completed it for children whose squash-landed content was later evolved, by re-anchoring the child at the accepted integration commit. cas-32ee is used as the fix anchor because it is the last of those to build, which makes the deployed boundary the conservative one.",
+    "symptom": "The epic close gate counts a child as undelivered when the child's work reached the target as a squash whose original anchor is no longer reachable and whose files were later evolved by other lanes. Observable as an epic close rejection naming a child whose content is demonstrably on the target.",
+    "notes": "structured_terms is empty on purpose: M1 exposes only unit_type and claim_key as structured tags, and no claim_key exists for this defect family, so inventing a token would add a channel that can never match. lexical_terms are strings the close gate itself emits; the family fixes cas-b192 / cas-fe81 / cas-da3f are deliberately not seeded here because their symptom (a guard reaching a wrong verdict) is textually indistinguishable from the same guard behaving correctly - see the M4 writeup."
+  }
+]

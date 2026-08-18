@@ -153,6 +153,33 @@ class SemanticFromLabelsTest(unittest.TestCase):
             sei.semantic_from_labels(self.labels(labelled_by=None))
 
 
+class WindowPoolTest(unittest.TestCase):
+    CORPUS = [
+        {"id": 1, "timestamp": "2026-08-16T10:00:00Z", "text": "epic close blocked before the fix", "source": "log"},
+        {"id": 2, "timestamp": "2026-08-17T14:00:00Z", "text": "epic close blocked again", "source": "log"},
+        {"id": 3, "timestamp": "2026-08-17T15:00:00Z", "text": "unrelated chatter", "source": "log"},
+        {"id": 4, "timestamp": "2026-08-19T15:00:00Z", "text": "epic close blocked after the corpus", "source": "log"},
+    ]
+
+    def pool(self, until=None):
+        return sei.window_pool(self.CORPUS, "cas-32ee", "2026-08-17T13:12:34Z", until, ["epic close blocked"])
+
+    def test_only_the_window_is_reviewed(self) -> None:
+        pool = self.pool(until="2026-08-18T13:10:00Z")
+        self.assertEqual([c["evidence_id"] for c in pool["pools"][0]["candidates"]], ["2"])
+
+    def test_coverage_of_the_filter_is_reported_not_implied(self) -> None:
+        # 2 units in the window, 1 selected: a reviewer must be able to see how
+        # much of the window the term filter actually put in front of them.
+        pool = self.pool(until="2026-08-18T13:10:00Z")
+        self.assertEqual((pool["units_in_window"], pool["selected"]), (2, 1))
+
+    def test_window_candidates_carry_no_retrieval_score(self) -> None:
+        # Selection here is a term filter; presenting it as a similarity is the
+        # scale confusion this join exists to avoid.
+        self.assertIsNone(self.pool()["pools"][0]["candidates"][0]["retrieval_score"])
+
+
 class LoadSeedsTest(unittest.TestCase):
     def test_missing_required_key_is_named(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

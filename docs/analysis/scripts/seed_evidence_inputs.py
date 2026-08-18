@@ -238,6 +238,66 @@ def build_candidates(
     }
 
 
+def window_pool(
+    evidence: list[dict[str, Any]], fix_id: str, since: str, until: str | None, terms: list[str]
+) -> dict[str, Any]:
+    """A review pool drawn from the post-fix window itself.
+
+    M2 ranks candidates over the whole corpus, so a top-N pool is dominated by
+    the period when the defect was *being discussed* — mostly before the fix
+    served.  A ``fixed`` verdict is a claim about the clean-post window, so the
+    reviewer needs that window: every unit in it carrying the symptom's
+    vocabulary, with the counts needed to judge the filter's own coverage
+    (units in window vs selected).  Retrieval score is deliberately absent —
+    selection here is a term filter, not a similarity.
+    """
+    lowered = [term.lower() for term in terms]
+    in_window = [
+        unit for unit in evidence
+        if unit.get("timestamp") and unit["timestamp"] >= since and (not until or unit["timestamp"] < until)
+    ]
+    candidates = []
+    for unit in in_window:
+        matched = [term for term in lowered if term in str(unit.get("text", "")).lower()]
+        if not matched:
+            continue
+        candidates.append(
+            {
+                "event_id": None,
+                "content_hash": None,
+                "evidence_id": str(unit["id"]),
+                "retrieval_score": None,
+                "matched_terms": matched,
+                "text": unit.get("text", ""),
+                "timestamp": unit.get("timestamp", ""),
+                "task_id": "",
+                "epoch": "",
+                "source_path": unit.get("source", ""),
+                "label": None,
+                "label_confidence": None,
+                "labelled_by": None,
+                "labelled_at": None,
+            }
+        )
+    return {
+        "note": (
+            "Post-fix window review pool. Selection is a term filter over the clean-post window, "
+            "not a similarity ranking: `units_in_window` versus `selected` states exactly how much "
+            "of the window a reviewer actually looked at."
+        ),
+        "units_in_window": len(in_window),
+        "selected": len(candidates),
+        "pools": [
+            {
+                "fix_id": fix_id,
+                "query": " | ".join(terms),
+                "window": {"since": since, "until": until},
+                "candidates": candidates,
+            }
+        ],
+    }
+
+
 def semantic_from_labels(labels: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Approved labels → M3's declared-evaluation map.
 
@@ -345,6 +405,14 @@ def main(argv: list[str] | None = None) -> int:
     candidates.add_argument("--mode", default="hybrid", help="must be a mode M2's gate authorises")
     candidates.add_argument("--output", type=Path, required=True)
 
+    window = sub.add_parser("window", help="review pool of clean-post units carrying the symptom vocabulary")
+    window.add_argument("--evidence", type=Path, required=True, help="corpus exported by the `evidence` command")
+    window.add_argument("--fix-id", required=True)
+    window.add_argument("--since", required=True, help="the fix's clean_post_from boundary")
+    window.add_argument("--until", help="upper bound (defaults to the end of the corpus)")
+    window.add_argument("--terms", nargs="+", required=True)
+    window.add_argument("--output", type=Path, required=True)
+
     semantic = sub.add_parser("semantic", help="approved labels → M3's --semantic-evidence map")
     semantic.add_argument("--labels", type=Path, required=True)
     semantic.add_argument("--output", type=Path, required=True)
@@ -376,6 +444,14 @@ def main(argv: list[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+
+    if args.command == "window":
+        pool = window_pool(
+            json.loads(args.evidence.read_text()), args.fix_id, args.since, args.until, args.terms
+        )
+        write_json(args.output, pool)
+        print(json.dumps({"units_in_window": pool["units_in_window"], "selected": pool["selected"]}, indent=2, sort_keys=True))
         return 0
 
     semantic_map, report = semantic_from_labels(json.loads(args.labels.read_text()))

@@ -172,59 +172,73 @@ class ApplyTest(unittest.TestCase):
         return {"items": [base]}
 
     def runner(self):
-        calls: list[list[str]] = []
+        calls: list[tuple[list[str], str]] = []
 
-        def run(command: list[str]) -> int:
-            calls.append(command)
+        def run(command: list[str], payload: str) -> int:
+            calls.append((command, payload))
             return 0
 
         return calls, run
 
+    def approved(self, **overrides):
+        return self.item(approved=True, approver="daniel", **overrides)
+
     def test_unapproved_item_is_never_executed(self) -> None:
         calls, run = self.runner()
-        result = mc.apply_queue(self.item(), execute=True, runner=run)
+        result = mc.apply_queue(self.item(), execute=True, executor=["true"], runner=run)
         self.assertEqual(calls, [])
         self.assertEqual(result["refused"][0]["reason"], "not approved")
 
     def test_approval_without_a_named_approver_is_refused(self) -> None:
         calls, run = self.runner()
-        result = mc.apply_queue(self.item(approved=True), execute=True, runner=run)
+        result = mc.apply_queue(self.item(approved=True), execute=True, executor=["true"], runner=run)
         self.assertEqual(calls, [])
         self.assertEqual(result["refused"][0]["reason"], "approved without a named approver")
 
     def test_dry_run_is_the_default_and_executes_nothing(self) -> None:
         calls, run = self.runner()
-        result = mc.apply_queue(self.item(approved=True, approver="daniel"), execute=False, runner=run)
+        result = mc.apply_queue(self.approved(), execute=False, executor=["true"], runner=run)
         self.assertEqual(calls, [])
         self.assertEqual(result["mode"], "dry-run")
         self.assertEqual(len(result["planned"]), 1)
         self.assertEqual(result["executed"], [])
 
-    def test_approved_item_executes_through_cas_memory(self) -> None:
+    def test_execute_without_an_executor_refuses_rather_than_pretends(self) -> None:
+        # The opinion ops live in mcp__cas__memory, not in the `cas` binary.
+        # Without a route to them, an approved item must be reported as
+        # unexecuted, never counted as applied.
         calls, run = self.runner()
-        result = mc.apply_queue(self.item(approved=True, approver="daniel"), execute=True, runner=run)
+        result = mc.apply_queue(self.approved(), execute=True, runner=run)
+        self.assertEqual(calls, [])
+        self.assertEqual(result["executed"], [])
+        self.assertEqual(result["mode"], "no-executor")
+        self.assertIn(mc.MEMORY_TOOL, result["refused"][0]["reason"])
+
+    def test_approved_item_executes_through_the_memory_tool(self) -> None:
+        calls, run = self.runner()
+        result = mc.apply_queue(self.approved(), execute=True, executor=["cas-memory-op"], runner=run)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][:3], ["cas", "memory", "update"])
-        self.assertIn("--valid-until", calls[0])
+        command, payload = calls[0]
+        self.assertEqual(command, ["cas-memory-op"])
+        self.assertEqual(json.loads(payload)["tool"], mc.MEMORY_TOOL)
+        self.assertEqual(json.loads(payload)["arguments"]["action"], "update")
+        self.assertEqual(json.loads(payload)["arguments"]["valid_until"], "2026-08-17T13:12:34Z")
         self.assertEqual(result["executed"][0]["approver"], "daniel")
 
     def test_items_without_a_suggested_action_are_not_executable(self) -> None:
         calls, run = self.runner()
         result = mc.apply_queue(
-            self.item(approved=True, approver="daniel", suggested_action=None), execute=True, runner=run
+            self.approved(suggested_action=None), execute=True, executor=["true"], runner=run
         )
         self.assertEqual(calls, [])
         self.assertEqual(result["planned"], [])
 
-    def test_each_opinion_op_maps_to_its_own_command(self) -> None:
-        for action, expected in [
-            ("opinion_reinforce", "opinion-reinforce"),
-            ("opinion_weaken", "opinion-weaken"),
-            ("opinion_contradict", "opinion-contradict"),
-        ]:
-            command = mc.command_for(self.item(suggested_action=action)["items"][0])
-            self.assertEqual(command[2], expected)
-            self.assertIn("--content", command)
+    def test_each_opinion_op_maps_to_its_own_memory_action(self) -> None:
+        for action in ("opinion_reinforce", "opinion_weaken", "opinion_contradict"):
+            operation = mc.operation_for(self.item(suggested_action=action)["items"][0])
+            self.assertEqual(operation["tool"], mc.MEMORY_TOOL)
+            self.assertEqual(operation["arguments"]["action"], action)
+            self.assertIn("content", operation["arguments"])
 
 
 class EvaluateTest(unittest.TestCase):
@@ -250,6 +264,15 @@ class EvaluateTest(unittest.TestCase):
 
     def test_precision_is_none_rather_than_one_when_nothing_is_labelled(self) -> None:
         self.assertIsNone(mc.evaluate(self.queue(), {})["precision"])
+
+    def test_held_back_items_are_scored_too(self) -> None:
+        # Silence is a decision. A queue that proposes nothing would otherwise
+        # score a perfect precision by never being wrong out loud.
+        result = mc.evaluate(self.queue(), {"m1|f1": "correct", "m2|f1": "correct", "m3|f1": "incorrect"})
+        self.assertEqual(result["precision"], 1.0)
+        self.assertEqual(result["decision_scored"], 3)
+        self.assertEqual(result["decision_accuracy"], round(2 / 3, 4))
+        self.assertEqual(result["decision_mistakes"][0]["key"], "m3|f1")
 
 
 class ClaimClassificationTest(unittest.TestCase):

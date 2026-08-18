@@ -2,6 +2,7 @@
 //!
 //! Essential commands only. Use MCP tools for memory, tasks, rules, etc.
 
+mod account_picker;
 mod auth;
 pub(crate) mod bridge;
 mod changelog;

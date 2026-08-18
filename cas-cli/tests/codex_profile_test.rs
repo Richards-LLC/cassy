@@ -213,8 +213,12 @@ fn login_creates_seeds_and_scopes_the_profile() {
         "an inherited OPENAI_API_KEY leaked into the login: {stdout}"
     );
     assert!(
-        stderr.contains("Seeded shared Codex configuration"),
+        stderr.contains("Seeded shared config from ~/.codex: config.toml"),
         "seeding was not reported: {stderr}"
+    );
+    assert!(
+        stderr.contains("Credentials and account identity remain private to this profile."),
+        "the private-by-default guarantee was not stated: {stderr}"
     );
 
     // config.toml arrived as a symlink to the main home; auth.json did not arrive at all.

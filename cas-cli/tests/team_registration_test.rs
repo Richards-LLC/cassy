@@ -460,18 +460,22 @@ async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
     let cas_root = tmp.path().to_path_buf();
     init_all_stores_at(&cas_root);
 
-    // Project config: logged in, NO team of any kind.
+    // Project config: a fresh clone. NO team of any kind, and — per cas-046d,
+    // where `cas login` stores credentials machine-wide — no token of its own
+    // either. This is Ben's actual starting state.
     let mut project_cfg = CloudConfig::default();
     project_cfg.endpoint = server.uri();
-    project_cfg.token = Some("test-token".to_string());
     project_cfg.save_to_cas_dir(&cas_root).unwrap();
     assert_eq!(project_cfg.team_id, None);
     assert_eq!(project_cfg.team_auto_promote, None);
+    assert!(!project_cfg.is_logged_in());
 
-    // User config: the membership the CLI already knows about.
+    // User config: the machine-wide login plus the membership the CLI already
+    // knows about.
     let user_dir = TempDir::new().unwrap();
     let mut user_cfg = CloudConfig::default();
     user_cfg.endpoint = server.uri();
+    user_cfg.token = Some("test-token".to_string());
     user_cfg.teams = vec![TeamInfo {
         id: TEST_TEAM.to_string(),
         slug: "petra-stella".to_string(),

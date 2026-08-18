@@ -972,11 +972,16 @@ pub enum TeamScopeAdoption {
 ///  4. exactly one resolvable team (user `default_team_id`, else a sole
 ///     membership) → opt the project in;
 ///  5. otherwise → stay personal and report why.
+///
+/// "Logged in" is machine-wide (cas-046d): a project whose own `cloud.json`
+/// has no token still counts when `~/.cas/cloud.json` does, because that is
+/// exactly the fresh-clone case this adoption exists for — checking only the
+/// project copy would make adoption miss the users who need it most.
 pub fn adopt_team_scope_for_configs(
     project_cfg: &mut CloudConfig,
     user_cfg: &CloudConfig,
 ) -> TeamScopeAdoption {
-    if !project_cfg.is_logged_in() {
+    if !project_cfg.is_logged_in() && !user_cfg.is_logged_in() {
         return TeamScopeAdoption::NotLoggedIn;
     }
     if matches!(project_cfg.team_auto_promote, Some(false)) {
@@ -1247,6 +1252,19 @@ impl CloudConfig {
         // auto-pick must NOT apply, otherwise personal workspaces would be
         // silently promoted to team scope whenever the user has a team
         // configured for their main project.
+        //
+        // cas-c117 — CONSTRAINT ON THIS GUARD, read before "simplifying" it:
+        // the operator reversed the *default* (a logged-in user's project must
+        // land in their team without them discovering `cas cloud team set`),
+        // but deliberately NOT this guard. `cas cloud sync` calls
+        // [`adopt_team_scope_for_configs`], which writes
+        // `team_auto_promote = Some(true)` into the project config and prints
+        // what it did, so the opt-in still exists as a durable, inspectable,
+        // reversible fact on disk. Do not "fix" the UX by making this function
+        // fall through to the user-level default on its own: that would make
+        // team scope an invisible property of the ambient environment, apply
+        // to every non-sync caller (stores, MCP, daemon) with no notice and no
+        // record, and remove the `team auto off` kill switch's only anchor.
         if !matches!(self.team_auto_promote, Some(true)) {
             return None;
         }
@@ -1863,10 +1881,29 @@ mod tests {
     }
 
     #[test]
+    fn adoption_accepts_the_machine_wide_login_of_a_fresh_clone() {
+        let _guard = TestEnvGuard::new();
+        // cas-046d: `cas login` stores the token in `~/.cas/cloud.json`, so a
+        // freshly cloned project has no token of its own. That is precisely
+        // the case adoption exists for — it must not read as "not logged in".
+        let mut project = CloudConfig::default();
+        assert!(!project.is_logged_in());
+        let mut user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        user.token = Some("machine-wide-token".to_string());
+
+        match adopt_team_scope_for_configs(&mut project, &user) {
+            TeamScopeAdoption::Adopted(team) => assert_eq!(team.team_id, "solo-team-id"),
+            other => panic!("a machine-wide login must enable adoption, got {other:?}"),
+        }
+        assert_eq!(project.team_auto_promote, Some(true));
+    }
+
+    #[test]
     fn adoption_is_inert_without_a_token_or_membership() {
         let _guard = TestEnvGuard::new();
         let mut anonymous = CloudConfig::default();
         let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        assert!(!user.is_logged_in(), "neither config holds a token");
         assert_eq!(
             adopt_team_scope_for_configs(&mut anonymous, &user),
             TeamScopeAdoption::NotLoggedIn

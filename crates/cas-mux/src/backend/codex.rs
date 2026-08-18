@@ -44,6 +44,9 @@ impl Backend for Codex {
             launch.effort,
             launch.teams,
         );
+        // cas-9cc3: pin this worker to the requested ChatGPT account. Omitted
+        // config_dir keeps plain inheritance, exactly as before.
+        config.apply_codex_home(launch.config_dir, launch.config_dir_source);
         finish_worker_config(&mut config, launch.supervisor_cli, launch.active_workers);
         config.args.push("-c".to_string());
         config.args.push(format!(

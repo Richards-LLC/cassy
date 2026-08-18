@@ -195,3 +195,23 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
         .stdout(predicate::str::contains("LOGIN_CONFIG=\n"))
         .stdout(predicate::str::contains("LOGIN_SECURE_STORAGE=\n"));
 }
+
+/// `cas claude --workers 0` errored with "unexpected argument" until cas-6dad:
+/// a dedicated `profile` positional made clap reject a leading factory flag.
+/// Both spellings must reach the factory parser.
+#[test]
+fn factory_flags_pass_through_with_and_without_a_profile() {
+    let home = home_with_profiles();
+
+    cas_cmd(home.path())
+        .args(["claude", "--workers", "0", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--default"));
+
+    cas_cmd(home.path())
+        .args(["claude", "main", "--workers", "0", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--default"));
+}

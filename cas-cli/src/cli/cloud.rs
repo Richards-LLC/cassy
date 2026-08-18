@@ -976,6 +976,66 @@ fn print_personal_scope_notice(cli: &Cli, notice: &PersonalScopeNotice) {
     }
 }
 
+/// Report the automatic team-scope adoption (cas-c117).
+///
+/// Adoption promotes this project's memories, tasks, rules and skills from
+/// personal to team scope, so it is never silent: the user is told which team
+/// was adopted and how to undo it. The quiet outcomes (already scoped, opted
+/// out, not logged in) print nothing — routine syncs keep their output.
+fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdoption) {
+    use crate::cloud::TeamScopeAdoption;
+
+    match adoption {
+        TeamScopeAdoption::Adopted(team) => {
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "team_scope_adoption": {
+                            "status": "adopted",
+                            "team_id": team.team_id,
+                            "team_slug": team.team_slug,
+                            "team_name": team.team_name,
+                        }
+                    })
+                );
+            } else {
+                eprintln!(
+                    "  \u{2713} Team scope enabled for this project: {} ({})\n    \
+                     This project's memories, tasks and skills now sync to your team. \
+                     Run `cas cloud team auto off` to keep it personal.",
+                    team.team_name, team.team_slug
+                );
+            }
+        }
+        TeamScopeAdoption::NoResolvableTeam { membership_count } if *membership_count > 1 => {
+            // Genuinely ambiguous: CAS will not guess which of several teams a
+            // project belongs to, and silence here would reproduce exactly the
+            // "why is nothing shared?" confusion this task exists to remove.
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "team_scope_adoption": {
+                            "status": "ambiguous",
+                            "membership_count": membership_count,
+                        }
+                    })
+                );
+            } else {
+                eprintln!(
+                    "  \u{25CF} This project is personal: you belong to {membership_count} teams \
+                     and no default is set.\n    Run `cas cloud team default <slug>` to pick one, \
+                     or `cas cloud team auto off` to silence this."
+                );
+            }
+        }
+        other => {
+            tracing::debug!(outcome = ?other, "team scope adoption made no change");
+        }
+    }
+}
+
 /// Outcome of the eager slug-resolution flow run by `cas cloud team set`
 /// (cas-1ced).
 ///
@@ -1250,6 +1310,13 @@ fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
         } else {
             "No team was configured"
         })?;
+        fmt.newline()?;
+        // cas-c117: sync now adopts a resolvable team automatically, so
+        // clearing alone is not "make this project personal" — say so rather
+        // than letting the next sync silently re-adopt.
+        fmt.write_muted(
+            "  The next sync re-adopts your default team. Run `cas cloud team auto off` to keep this project personal.",
+        )?;
         fmt.newline()?;
     }
     Ok(())
@@ -2429,6 +2496,21 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     if !args.dry_run {
         let outcome = maybe_apply_team_backfill();
         print_backfill_notice(cli, &outcome);
+
+        // cas-c117 (operator directive): the team identity is already known
+        // locally by this point — `/api/me` filled `teams[]` and the backfill
+        // above set `default_team_id` — so a logged-in user must not have to
+        // run `cas cloud team set` / `team auto on` before their project is
+        // scoped to their team. Adopt it here, BEFORE the personal-scope
+        // notice (which then correctly says nothing) and before execute_push
+        // opens the syncing stores that read `active_team_id()`.
+        match crate::cloud::maybe_adopt_team_scope(cas_root) {
+            Ok(adoption) => print_team_scope_adoption(cli, &adoption),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not adopt the resolvable team scope");
+            }
+        }
+
         match maybe_mark_personal_scope_notice(cas_root) {
             Ok(Some(notice)) => print_personal_scope_notice(cli, &notice),
             Ok(None) => {}

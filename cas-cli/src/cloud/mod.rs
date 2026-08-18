@@ -38,9 +38,10 @@ pub mod team_registration;
 pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_backfill_inner};
 pub use config::{
     CanonicalIdCollision, CanonicalIdSource, CloudConfig, LocalRootIdentity, PersonalScopeNotice,
-    TeamInfo, canonical_id_from_cas_root, canonical_id_from_config_toml,
-    derive_canonical_id_from_git_remote, detect_canonical_id_collisions, get_project_canonical_id,
-    invalidate_cached_project_id, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
+    TeamInfo, TeamScopeAdoption, adopt_team_scope_for_configs, canonical_id_from_cas_root,
+    canonical_id_from_config_toml, derive_canonical_id_from_git_remote,
+    detect_canonical_id_collisions, get_project_canonical_id, invalidate_cached_project_id,
+    maybe_adopt_team_scope, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
     normalized_git_remote_for_push, personal_scope_notice_for_configs, resolve_canonical_id,
     resolve_canonical_id_with_source, set_canonical_id_in_config_toml, should_adopt_canonical_id,
 };

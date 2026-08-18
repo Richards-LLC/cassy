@@ -855,6 +855,92 @@ where
     Ok(notice)
 }
 
+/// Outcome of the automatic team-scope adoption `cas cloud sync` performs
+/// (cas-c117, operator directive 2026-08-18).
+///
+/// # Why this exists
+///
+/// The team identity is already known locally — `/api/me` populates
+/// `teams[]` and `maybe_apply_team_backfill` sets `default_team_id` — but
+/// [`CloudConfig::active_team_id_with_user_config`] refuses to use it unless
+/// the project opted in with `cas cloud team set` or `cas cloud team auto on`
+/// (the cas-f8e3 guard). A new clone therefore synced in personal scope and
+/// registered nothing with the team until the user ran a command they had no
+/// reason to know about. Sync now adopts the resolvable team for the project
+/// itself; explicit configuration remains an override, not a prerequisite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamScopeAdoption {
+    /// The project had no team scope and one team resolved — the project is
+    /// now opted in (`team_auto_promote = Some(true)`).
+    Adopted(PersonalScopeNotice),
+    /// The project already resolves a team (explicit `team_id` or a prior
+    /// adoption). Nothing changed.
+    AlreadyScoped { team_id: String },
+    /// `cas cloud team auto off` — the hard kill-switch. Never re-adopted.
+    OptedOut,
+    /// No token in this project's cloud config; nothing can be resolved.
+    NotLoggedIn,
+    /// No single team identity resolves. `membership_count` is 0 (no teams)
+    /// or ≥ 2 with no user-level default (genuinely ambiguous — CAS refuses
+    /// to guess which team a project belongs to).
+    NoResolvableTeam { membership_count: usize },
+}
+
+/// Adopt the user's resolvable team for this project. Pure — mutates
+/// `project_cfg` in memory only, so the decision table is unit-testable.
+///
+/// Precedence, highest first:
+///  1. not logged in → nothing to resolve;
+///  2. `team_auto_promote = Some(false)` → user said personal, forever;
+///  3. project already resolves a team → leave it alone (this is what makes
+///     `cas cloud team set` an override rather than a competitor);
+///  4. exactly one resolvable team (user `default_team_id`, else a sole
+///     membership) → opt the project in;
+///  5. otherwise → stay personal and report why.
+pub fn adopt_team_scope_for_configs(
+    project_cfg: &mut CloudConfig,
+    user_cfg: &CloudConfig,
+) -> TeamScopeAdoption {
+    if !project_cfg.is_logged_in() {
+        return TeamScopeAdoption::NotLoggedIn;
+    }
+    if matches!(project_cfg.team_auto_promote, Some(false)) {
+        return TeamScopeAdoption::OptedOut;
+    }
+    if let Some(team_id) = project_cfg.active_team_id_with_user_config(Some(user_cfg)) {
+        return TeamScopeAdoption::AlreadyScoped { team_id };
+    }
+
+    match usable_team_from_user_config(user_cfg) {
+        Some(team) => {
+            // The same knob `cas cloud team auto on` sets — so adoption is
+            // indistinguishable from the user having opted in by hand, and
+            // `cas cloud team auto off` reverses it.
+            project_cfg.team_auto_promote = Some(true);
+            TeamScopeAdoption::Adopted(team)
+        }
+        None => TeamScopeAdoption::NoResolvableTeam {
+            membership_count: user_cfg.teams.len(),
+        },
+    }
+}
+
+/// Disk-backed [`adopt_team_scope_for_configs`]: reads the project config at
+/// `cas_root` and the user-level config, and persists the project config only
+/// when adoption actually changed it.
+pub fn maybe_adopt_team_scope(cas_root: &Path) -> Result<TeamScopeAdoption, CasError> {
+    let mut project_cfg = CloudConfig::load_from_cas_dir(cas_root)?;
+    let user_cfg = user_level_cloud_json_path()
+        .and_then(|p| CloudConfig::load_from(&p).ok())
+        .unwrap_or_default();
+
+    let outcome = adopt_team_scope_for_configs(&mut project_cfg, &user_cfg);
+    if matches!(outcome, TeamScopeAdoption::Adopted(_)) {
+        project_cfg.save_to_cas_dir(cas_root)?;
+    }
+    Ok(outcome)
+}
+
 impl CloudConfig {
     /// Return the path to the user-level `~/.cas/cloud.json`.
     ///
@@ -1321,6 +1407,192 @@ mod tests {
                 .as_deref(),
             Some("solo-team-id"),
         );
+    }
+
+    // ── cas-c117: automatic team-scope adoption ────────────────────────────
+    //
+    // Operator directive: a logged-in user whose team identity is already
+    // resolvable must not have to run `cas cloud team set` / `team auto on`
+    // before their project is team-scoped. These lock the decision table.
+
+    fn logged_in_project() -> CloudConfig {
+        let mut cfg = CloudConfig::default();
+        cfg.token = Some("test-token".to_string());
+        cfg
+    }
+
+    fn user_with_teams(teams: &[(&str, &str, &str)], default_team_id: Option<&str>) -> CloudConfig {
+        let mut cfg = CloudConfig::default();
+        cfg.teams = teams
+            .iter()
+            .map(|(id, slug, name)| TeamInfo {
+                id: (*id).to_string(),
+                slug: (*slug).to_string(),
+                name: (*name).to_string(),
+                role: "member".to_string(),
+            })
+            .collect();
+        cfg.default_team_id = default_team_id.map(ToString::to_string);
+        cfg
+    }
+
+    #[test]
+    fn adoption_opts_a_fresh_project_into_the_sole_team() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo Team")], None);
+
+        let outcome = adopt_team_scope_for_configs(&mut project, &user);
+
+        match outcome {
+            TeamScopeAdoption::Adopted(team) => {
+                assert_eq!(team.team_id, "solo-team-id");
+                assert_eq!(team.team_slug, "solo");
+                assert_eq!(team.team_name, "Solo Team");
+            }
+            other => panic!("expected adoption of the sole membership, got {other:?}"),
+        }
+        assert_eq!(project.team_auto_promote, Some(true));
+        assert_eq!(
+            project
+                .active_team_id_with_user_config(Some(&user))
+                .as_deref(),
+            Some("solo-team-id"),
+            "adoption must make the team actually effective, not just recorded"
+        );
+    }
+
+    #[test]
+    fn adoption_prefers_the_user_default_over_membership_order() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        let user = user_with_teams(
+            &[
+                ("team-a", "alpha", "Alpha"),
+                ("team-b", "beta", "Beta"),
+            ],
+            Some("team-b"),
+        );
+
+        match adopt_team_scope_for_configs(&mut project, &user) {
+            TeamScopeAdoption::Adopted(team) => assert_eq!(team.team_id, "team-b"),
+            other => panic!("expected the user default to be adopted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adoption_never_overrides_an_explicit_team_set() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        project.set_team("pinned-team", "pinned");
+        let user = user_with_teams(&[("other-team", "other", "Other")], Some("other-team"));
+
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &user),
+            TeamScopeAdoption::AlreadyScoped {
+                team_id: "pinned-team".to_string()
+            },
+            "`cas cloud team set` must remain an override, not a competitor"
+        );
+        assert_eq!(project.team_id.as_deref(), Some("pinned-team"));
+    }
+
+    #[test]
+    fn adoption_respects_the_auto_off_kill_switch() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        project.team_auto_promote = Some(false);
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &user),
+            TeamScopeAdoption::OptedOut,
+            "`cas cloud team auto off` must never be undone by adoption"
+        );
+        assert_eq!(project.team_auto_promote, Some(false));
+    }
+
+    #[test]
+    fn adoption_refuses_to_guess_between_several_teams() {
+        let _guard = TestEnvGuard::new();
+        let mut project = logged_in_project();
+        let user = user_with_teams(
+            &[("team-a", "alpha", "Alpha"), ("team-b", "beta", "Beta")],
+            None,
+        );
+
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &user),
+            TeamScopeAdoption::NoResolvableTeam {
+                membership_count: 2
+            }
+        );
+        assert_eq!(project.team_auto_promote, None);
+    }
+
+    #[test]
+    fn adoption_is_inert_without_a_token_or_membership() {
+        let _guard = TestEnvGuard::new();
+        let mut anonymous = CloudConfig::default();
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut anonymous, &user),
+            TeamScopeAdoption::NotLoggedIn
+        );
+        assert_eq!(anonymous.team_auto_promote, None);
+
+        let mut project = logged_in_project();
+        let no_teams = CloudConfig::default();
+        assert_eq!(
+            adopt_team_scope_for_configs(&mut project, &no_teams),
+            TeamScopeAdoption::NoResolvableTeam {
+                membership_count: 0
+            }
+        );
+        assert_eq!(project.team_auto_promote, None);
+    }
+
+    #[test]
+    fn adoption_persists_only_when_it_changed_something() {
+        let _guard = TestEnvGuard::new();
+        let project_dir = TempDir::new().unwrap();
+        let user_dir = TempDir::new().unwrap();
+
+        let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
+        user.save_to_cas_dir(user_dir.path()).unwrap();
+        // SAFETY: TestEnvGuard serializes env mutation for this test.
+        unsafe {
+            std::env::set_var(
+                "CAS_USER_CLOUD_JSON",
+                user_dir.path().join("cloud.json").to_str().unwrap(),
+            );
+        }
+
+        logged_in_project()
+            .save_to_cas_dir(project_dir.path())
+            .unwrap();
+
+        let first = maybe_adopt_team_scope(project_dir.path()).unwrap();
+        assert!(matches!(first, TeamScopeAdoption::Adopted(_)));
+        let persisted = CloudConfig::load_from_cas_dir(project_dir.path()).unwrap();
+        assert_eq!(
+            persisted.team_auto_promote,
+            Some(true),
+            "adoption must survive the process that made it"
+        );
+
+        // Second run: already scoped, nothing to write.
+        let second = maybe_adopt_team_scope(project_dir.path()).unwrap();
+        assert_eq!(
+            second,
+            TeamScopeAdoption::AlreadyScoped {
+                team_id: "solo-team-id".to_string()
+            }
+        );
+
+        unsafe {
+            std::env::remove_var("CAS_USER_CLOUD_JSON");
+        }
     }
 
     #[test]

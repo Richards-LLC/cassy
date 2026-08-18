@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+- **Your team is picked up automatically — no setup command to discover.** When you are logged in and CAS can tell which team you are on, `cas cloud sync` scopes the project to that team and registers it, instead of syncing in personal scope until you happen to run a team command. It says which team it adopted and how to undo it; `cas cloud team auto off` keeps a project personal for good, `cas cloud team set` still pins a specific team, and if you belong to several teams with no default CAS asks you to pick rather than guessing.
+
 ### Fixed
 - **A successful cloud sync now means your project really is connected to your team.** `cas cloud sync` confirms the project is registered with the active team before reporting success, registers it when it is missing, and stops with the actual reason — including the exact server exchange that failed — instead of printing green checkmarks over a project the team never received. Previously a machine with nothing queued to send registered nothing, so `cas cloud team-memories` answered "this project hasn't been synced to the team yet" right after a clean sync. That message now names the project, team, and endpoint involved instead of repeating the command that just ran.
 - **`cas cloud team show` and `cas cloud team auto` agree on which team you are on.** Both resolve the team slug from your cached memberships, so a team set by UUID no longer displays as `<not resolved>` in one command while the other names it.

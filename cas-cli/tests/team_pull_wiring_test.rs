@@ -69,16 +69,29 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// caveats, which we handle with `ENV_LOCK`.
 struct CasRootGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<std::ffi::OsString>,
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl CasRootGuard {
     fn set(cas_root: &Path) -> Self {
+        Self::set_with(cas_root, &[])
+    }
+
+    /// Set `CAS_ROOT` plus `extra` vars under a SINGLE `ENV_LOCK`
+    /// acquisition. Two separate guards cannot be combined: `std::sync::Mutex`
+    /// is not reentrant, so holding `CasRootGuard` and `ScopedEnvVar` at once
+    /// would deadlock the test thread.
+    fn set_with(cas_root: &Path, extra: &[(&'static str, &str)]) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("CAS_ROOT");
+        let mut prev = vec![("CAS_ROOT", std::env::var_os("CAS_ROOT"))];
         // SAFETY: env mutation on an integration-test process, guarded by
         // ENV_LOCK so no other test can race the var concurrently.
         unsafe { std::env::set_var("CAS_ROOT", cas_root) };
+        for (key, value) in extra {
+            prev.push((*key, std::env::var_os(key)));
+            // SAFETY: as above.
+            unsafe { std::env::set_var(key, value) };
+        }
         Self { _lock: lock, prev }
     }
 }
@@ -87,9 +100,11 @@ impl Drop for CasRootGuard {
     fn drop(&mut self) {
         // SAFETY: same as `set` — ENV_LOCK held for entire guard lifetime.
         unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var("CAS_ROOT", v),
-                None => std::env::remove_var("CAS_ROOT"),
+            for (key, prev) in &self.prev {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -660,7 +675,19 @@ async fn execute_sync_does_not_hit_team_pull_when_no_team_configured() {
     cfg.token = Some("test-token".to_string());
     cfg.save_to_cas_dir(&cas_root).unwrap();
 
-    let _env = CasRootGuard::set(&cas_root);
+    // Isolate from `~/.cas/cloud.json`: since cas-c117, `execute_sync` adopts
+    // a resolvable team automatically, so a developer machine with a real
+    // membership would legitimately turn this "no team anywhere" project into
+    // a team project and hit the endpoints this test asserts are silent.
+    // Pointing the user config at a nonexistent path is what makes "no team
+    // configured" true for the whole resolution chain.
+    let _env = CasRootGuard::set_with(
+        &cas_root,
+        &[(
+            "CAS_USER_CLOUD_JSON",
+            "/nonexistent/cas-test-isolation/cloud.json",
+        )],
+    );
 
     let args = CloudSyncArgs {
         dry_run: false,

@@ -23,7 +23,7 @@ pub const CONTENT_BEGIN: &str = "<<<CAS_SOURCE_CONTENT_BEGIN>>>";
 /// Closing marker for untrusted content.
 pub const CONTENT_END: &str = "<<<CAS_SOURCE_CONTENT_END>>>";
 
-/// Tag names that carry instruction authority somewhere in the CAS/harness
+/// Tag names that carry instruction authority somewhere in the Cassy/harness
 /// stack and must never survive verbatim in quoted content — or in a stored
 /// page, which is later injected into an agent's context unquoted.
 const INSTRUCTION_TAGS: &[&str] = &[

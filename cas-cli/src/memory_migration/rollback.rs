@@ -1,6 +1,6 @@
 //! Ledger-driven rollback (cas-edee / M5 AC1).
 //!
-//! Returns a CAS root to its pre-migration state by undoing exactly what this
+//! Returns a Cassy root to its pre-migration state by undoing exactly what this
 //! migration did, and nothing else.
 //!
 //! # Why this is surgical rather than a database restore

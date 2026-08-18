@@ -6,7 +6,7 @@ managed_by: cas
 
 # Data visualization that makes a point
 
-Claude sessions may also carry a bundled `dataviz` skill; this CAS skill is the canonical cross-harness companion. It keeps the useful color discipline, while fitting CAS’s durable, self-contained HTML report surfaces.
+Claude sessions may also carry a bundled `dataviz` skill; this Cassy skill is the canonical cross-harness companion. It keeps the useful color discipline, while fitting Cassy’s durable, self-contained HTML report surfaces.
 
 ## Start with the message, not the chart
 
@@ -44,9 +44,9 @@ Use small multiples when the comparison is among several similarly shaped series
 8. Add a text alternative and an adjacent data table. In a report, chart sections follow `cas-dataviz`; the report’s own contract remains in `cas-html-reports`.
 9. **Visually verify the rendered artifact — mandatory.** Use headless Chrome to screenshot at a desktop width and a phone-class `390×844` viewport; for a report, also render print/PDF. Look at those renders for label collisions, overflow/clipping, contrast in situ, broken layout, and the 30-second visual-argument test. Grepping HTML for expected strings or tags is **not** visual verification and never satisfies this check: it proves markup exists, not that a human can read it. Follow the H7 acceptance-report precedent: headless Chrome at `390×844` plus PDF render.
 
-## CAS output contexts
+## Cassy output contexts
 
-For durable CAS reports, use static inline SVG and CSS inside one self-contained HTML file: no charting library, CDN, build step, or external asset. This deliberately inverts the bundled skill’s interaction-first default: hover is an optional enhancement (CSS-only tooltips are fine), while static legibility leads because a chart must survive GitHub embeds, PDF, and print. Use real `<table>` markup for the evidence twin, explicit provenance beneath the figure, and `@media print` rules that retain title, annotation, legend, and table without clipping.
+For durable Cassy reports, use static inline SVG and CSS inside one self-contained HTML file: no charting library, CDN, build step, or external asset. This deliberately inverts the bundled skill’s interaction-first default: hover is an optional enhancement (CSS-only tooltips are fine), while static legibility leads because a chart must survive GitHub embeds, PDF, and print. Use real `<table>` markup for the evidence twin, explicit provenance beneath the figure, and `@media print` rules that retain title, annotation, legend, and table without clipping.
 
 This also deliberately inverts two dashboard defaults: use the bundled validator plus a minimal local palette rather than a full reference theme, and document filters when useful but do not make them a default for committed evidence artifacts.
 

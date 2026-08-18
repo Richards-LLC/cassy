@@ -285,7 +285,7 @@ mod tests {
         for args in [
             vec!["init", "-b", "main"],
             vec!["config", "user.email", "test@cas.test"],
-            vec!["config", "user.name", "CAS Test"],
+            vec!["config", "user.name", "Cassy Test"],
         ] {
             Command::new("git")
                 .args(&args)

@@ -19,21 +19,21 @@ mod tests {
     #[test]
     fn heading_plain_80() {
         let mut tf = TestFormatter::plain(80);
-        tf.fmt().heading("CAS Doctor").unwrap();
+        tf.fmt().heading("Cassy Doctor").unwrap();
         insta::assert_snapshot!(tf.output());
     }
 
     #[test]
     fn heading_plain_40() {
         let mut tf = TestFormatter::plain(40);
-        tf.fmt().heading("CAS Doctor").unwrap();
+        tf.fmt().heading("Cassy Doctor").unwrap();
         insta::assert_snapshot!(tf.output());
     }
 
     #[test]
     fn heading_styled_dark() {
         let mut tf = TestFormatter::dark();
-        tf.fmt().heading("CAS Doctor").unwrap();
+        tf.fmt().heading("Cassy Doctor").unwrap();
         insta::assert_snapshot!(tf.output_plain());
     }
 
@@ -358,7 +358,7 @@ mod tests {
         let mut tf = TestFormatter::plain(80);
         {
             let mut fmt = tf.fmt();
-            fmt.heading("CAS Doctor").unwrap();
+            fmt.heading("Cassy Doctor").unwrap();
             fmt.newline().unwrap();
             fmt.subheading("Store").unwrap();
             fmt.field("Database", "/home/user/.cas/store.db").unwrap();
@@ -380,7 +380,7 @@ mod tests {
         let mut tf = TestFormatter::plain(40);
         {
             let mut fmt = tf.fmt();
-            fmt.heading("CAS Doctor").unwrap();
+            fmt.heading("Cassy Doctor").unwrap();
             fmt.newline().unwrap();
             fmt.subheading("Store").unwrap();
             fmt.field("Database", "/home/user/.cas/store.db").unwrap();
@@ -482,14 +482,14 @@ mod tests {
     #[test]
     fn header_h1_plain_80() {
         let mut tf = TestFormatter::plain(80);
-        Header::h1("CAS Doctor").render(&mut tf.fmt()).unwrap();
+        Header::h1("Cassy Doctor").render(&mut tf.fmt()).unwrap();
         insta::assert_snapshot!(tf.output());
     }
 
     #[test]
     fn header_h1_plain_40() {
         let mut tf = TestFormatter::plain(40);
-        Header::h1("CAS Doctor").render(&mut tf.fmt()).unwrap();
+        Header::h1("Cassy Doctor").render(&mut tf.fmt()).unwrap();
         insta::assert_snapshot!(tf.output());
     }
 
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn header_h1_styled_dark() {
         let mut tf = TestFormatter::dark();
-        Header::h1("CAS Doctor").render(&mut tf.fmt()).unwrap();
+        Header::h1("Cassy Doctor").render(&mut tf.fmt()).unwrap();
         insta::assert_snapshot!(tf.output_plain());
     }
 
@@ -631,7 +631,7 @@ mod tests {
     fn key_value_single_entry() {
         let mut tf = TestFormatter::plain(80);
         KeyValue::new()
-            .add("Name", "CAS")
+            .add("Name", "Cassy")
             .render(&mut tf.fmt())
             .unwrap();
         insta::assert_snapshot!(tf.output());
@@ -809,7 +809,7 @@ mod tests {
         let mut tf = TestFormatter::plain(80);
         {
             let mut fmt = tf.fmt();
-            Header::h1("CAS Doctor").render(&mut fmt).unwrap();
+            Header::h1("Cassy Doctor").render(&mut fmt).unwrap();
             fmt.newline().unwrap();
             StatusGroup::new()
                 .push(StatusLine::success("Store connected"))
@@ -863,7 +863,7 @@ mod tests {
         render_all_components(&mut tf);
         let output = tf.output_plain();
         assert!(!output.is_empty());
-        assert!(output.contains("CAS Doctor"));
+        assert!(output.contains("Cassy Doctor"));
         assert!(output.contains("cas-1234"));
     }
 
@@ -873,7 +873,7 @@ mod tests {
         render_all_components(&mut tf);
         let output = tf.output_plain();
         assert!(!output.is_empty());
-        assert!(output.contains("CAS Doctor"));
+        assert!(output.contains("Cassy Doctor"));
     }
 
     #[test]
@@ -882,7 +882,7 @@ mod tests {
         render_all_components(&mut tf);
         let output = tf.output_plain();
         assert!(!output.is_empty());
-        assert!(output.contains("CAS Doctor"));
+        assert!(output.contains("Cassy Doctor"));
     }
 
     #[test]
@@ -896,7 +896,7 @@ mod tests {
                 "Theme {mode:?} produced empty component output"
             );
             assert!(
-                plain.contains("CAS Doctor"),
+                plain.contains("Cassy Doctor"),
                 "Theme {mode:?} missing Header"
             );
             assert!(
@@ -915,7 +915,7 @@ mod tests {
     /// Render every component type for theme parity testing.
     fn render_all_components(tf: &mut TestFormatter) {
         let mut fmt = tf.fmt();
-        Header::h1("CAS Doctor").render(&mut fmt).unwrap();
+        Header::h1("Cassy Doctor").render(&mut fmt).unwrap();
         Header::h2("Section").render(&mut fmt).unwrap();
         Header::h3("Subsection").render(&mut fmt).unwrap();
         StatusLine::success("Store connected")

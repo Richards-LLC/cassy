@@ -62,7 +62,7 @@ Reproduce the list with:
 
 Unit tests already do this correctly — `known_repos.rs:163` uses `TestEnvGuard::run_with_temp_home`. The integration fixtures never adopted it.
 
-Prior art: **cas-66a7** (P2, CLOSED) — *"Make spawned CAS integration sandboxes isolate host HOME and known-repo state."* That is precisely this bug. The fix did not cover these 8 files, or it regressed. Read that ticket before designing.
+Prior art: **cas-66a7** (P2, CLOSED) — *"Make spawned Cassy integration sandboxes isolate host HOME and known-repo state."* That is precisely this bug. The fix did not cover these 8 files, or it regressed. Read that ticket before designing.
 
 ### 3. Parallel `cargo test` → many concurrent writers on one host DB
 
@@ -100,7 +100,7 @@ The lock is the visible symptom. The more serious issue is that **the test suite
 
 1. **Isolate HOME for every spawned `cas` child in tests.** Point the 8 files above at a temp HOME (extend `TestEnvGuard::run_with_temp_home` to the integration fixtures, or set `HOME` in the shared fixture). This is the actual fix.
 2. **Fail loudly if a test ever touches the host `~/.cas`.** A guard that panics when `host_cas_dir()` resolves under a real HOME during tests stops this from silently regressing a third time — cas-66a7 already fixed it once.
-3. **Reap orphaned CAS child processes** on worker/session teardown. Prior art: **cas-82fb** (closed) reaped worker-spawned dev servers but not CAS's own binary.
+3. **Reap orphaned Cassy child processes** on worker/session teardown. Prior art: **cas-82fb** (closed) reaped worker-spawned dev servers but not Cassy's own binary.
 4. **Separate the error classes** at `cas-cli/src/mcp/tools/core/task/repo_context.rs:339`, which maps any registry error to `WORK TARGET REJECTED`. "Registry momentarily unwritable" is not "your repo path is invalid." Compare `factory_preflight.rs:488-503`, which has proper remediation text; this path has none.
 5. **Reconcile the fatal/non-fatal contract.** `known_repos.rs:128-145` documents `register_repo` as *"Non-fatal by design — losing the upsert must not break the primary operation"*, yet `repo_context.rs:339` breaks the primary operation. Pick one and make both honor it.
 6. **Surface orphan processes pinning the host DB in `gc_report`**, which already reports stale agents and orphan worktrees.

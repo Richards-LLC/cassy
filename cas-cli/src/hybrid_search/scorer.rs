@@ -173,7 +173,7 @@ impl ChannelCapabilities {
         temporal: true,
     };
 
-    /// What a purely local CAS can actually do today: no embeddings.
+    /// What a purely local Cassy can actually do today: no embeddings.
     pub const LOCAL: Self = Self {
         bm25: true,
         semantic: false,

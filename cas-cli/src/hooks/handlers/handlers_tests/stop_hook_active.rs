@@ -2,7 +2,7 @@
 //!
 //! Claude Code sets `stop_hook_active: true` on a `Stop` payload when the
 //! session is ALREADY continuing because a previous Stop hook returned
-//! `decision: "block"`. CAS blocks Stop in five places and, until cas-f3e3,
+//! `decision: "block"`. Cassy blocks Stop in five places and, until cas-f3e3,
 //! declared and read the key nowhere — so a blocker the model cannot clear by
 //! continuing had no brake at all.
 //!
@@ -99,7 +99,7 @@ fn stop_hook_active_stops_cas_from_re_blocking_a_continuation() {
 }
 
 /// A harness that does not send the key at all must behave exactly as before
-/// this change — absent means "not re-entrant", so CAS still blocks.
+/// this change — absent means "not re-entrant", so Cassy still blocks.
 #[test]
 fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
     let _g = super::env_lock();
@@ -112,6 +112,6 @@ fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
     assert_eq!(
         decision_of(&out),
         Some("block"),
-        "omitting the key must not silently disable CAS's Stop blockers"
+        "omitting the key must not silently disable Cassy's Stop blockers"
     );
 }

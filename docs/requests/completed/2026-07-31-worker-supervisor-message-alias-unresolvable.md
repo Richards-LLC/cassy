@@ -12,7 +12,7 @@ mcp__cs__coordination action=message target=supervisor summary="ready to merge" 
 
 That literal `target=supervisor` does not resolve to any registered agent, so the handoff never arrives. The worker records the failure and stops:
 
-> "A direct CAS merge request to target `supervisor` was attempted but CAS could not resolve an active supervisor alias; the AwaitingMerge queue and this note provide the durable handoff."
+> "A direct Cassy merge request to target `supervisor` was attempted but Cassy could not resolve an active supervisor alias; the AwaitingMerge queue and this note provide the durable handoff."
 
 > "Literal supervisor ACK failed because no supervisor alias resolves."
 

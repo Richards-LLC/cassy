@@ -27,7 +27,7 @@ and cas-19e6 (T7 docs).
 
 ## Scope vocabulary (the part the BUG spec got loose)
 
-The BUG spec uses "personal" informally. In CAS code the scope enum is binary:
+The BUG spec uses "personal" informally. In Cassy code the scope enum is binary:
 
 - `Scope::Global` — stored under `~/.config/cas/`. User-level preferences,
   cross-project rules, global skills. ID prefix `g` (full IDs like

@@ -1,4 +1,4 @@
-//! MCP Server implementation for CAS
+//! MCP Server implementation for Cassy
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -34,19 +34,19 @@ pub(crate) enum AgentIdentitySource {
     PublicRegistration,
 }
 
-/// Core CAS service - provides store access and helper methods
+/// Core Cassy service - provides store access and helper methods
 ///
 /// Supports two-tier storage architecture:
 /// - Global store (~/.config/cas/) - user preferences, general learnings
 ///
-/// CAS requires a project-scoped `.cas/` directory (created via `cas init`).
+/// Cassy requires a project-scoped `.cas/` directory (created via `cas init`).
 ///
 /// Store instances are cached in `OnceLock` fields so each store type is
 /// opened exactly once per MCP server lifetime, eliminating repeated
 /// connection opens on every tool call.
 #[derive(Clone)]
 pub struct CasCore {
-    /// Project CAS directory (./.cas/)
+    /// Project Cassy directory (./.cas/)
     pub(crate) cas_root: PathBuf,
     /// Activity tracker for idle detection
     pub(crate) activity: Option<Arc<ActivityTracker>>,
@@ -281,7 +281,7 @@ impl CasCore {
     ///
     /// Returns Some(branch) if:
     /// 1. Worktrees are enabled in config
-    /// 2. We're currently in a CAS-managed git worktree
+    /// 2. We're currently in a Cassy-managed git worktree
     ///
     /// This is used to auto-set the branch field on new entries for virtual isolation.
     pub(crate) fn current_worktree_branch(&self) -> Option<String> {
@@ -502,7 +502,7 @@ impl CasCore {
         }
     }
 
-    /// Resolve the authenticated CAS session without registering or reviving
+    /// Resolve the authenticated Cassy session without registering or reviving
     /// it. Security-sensitive proof submission uses this read-only variant so
     /// a dead or unknown caller can be rejected before any durable mutation.
     pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
@@ -524,7 +524,7 @@ impl CasCore {
             agent_store.get(&id).map_err(|_| McpError {
                 code: ErrorCode::INVALID_REQUEST,
                 message: Cow::from(
-                    "Authenticated CAS session is not registered; receipt submission cannot auto-register it.",
+                    "Authenticated Cassy session is not registered; receipt submission cannot auto-register it.",
                 ),
                 data: None,
             })?;
@@ -536,7 +536,7 @@ impl CasCore {
                 .map_err(|error| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
-                        "Failed to resolve registered CAS session read-only: {error}"
+                        "Failed to resolve registered Cassy session read-only: {error}"
                     )),
                     data: None,
                 })?
@@ -544,7 +544,7 @@ impl CasCore {
                 .ok_or_else(|| McpError {
                     code: ErrorCode::INVALID_REQUEST,
                     message: Cow::from(
-                        "Receipt submission requires an already registered authenticated CAS session.",
+                        "Receipt submission requires an already registered authenticated Cassy session.",
                     ),
                     data: None,
                 })?
@@ -641,7 +641,7 @@ impl CasCore {
 
     /// Register an agent with session_id as the canonical identifier
     ///
-    /// This must be called before other CAS tools can be used.
+    /// This must be called before other Cassy tools can be used.
     /// The session_id becomes the agent's unique identifier.
     ///
     /// This server-internal path may bind an already server-created identity.

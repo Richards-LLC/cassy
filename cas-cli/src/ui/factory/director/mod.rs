@@ -1,4 +1,4 @@
-//! Sidecar panels - displays CAS tasks, agents, changes, and activity
+//! Sidecar panels - displays Cassy tasks, agents, changes, and activity
 //!
 //! This module provides native ratatui widgets for the factory TUI sidecar.
 //! The panels are rendered directly without a containing block wrapper,

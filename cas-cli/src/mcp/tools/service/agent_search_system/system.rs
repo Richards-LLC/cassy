@@ -193,7 +193,7 @@ impl CasService {
 {actual}
 
 ## Environment
-- **CAS Version**: {version}
+- **Cassy Version**: {version}
 - **OS**: {os_info}
 - **Arch**: {arch}
 

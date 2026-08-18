@@ -22,7 +22,7 @@ The skill is a **Opus-level inline orchestrator** running inside the supervisor'
 | 5 | Mode-specific output (interactive / autofix / report-only / headless) | Opus orchestrator |
 
 **Always-on personas:** `correctness`, `testing`, `maintainability`, `project-standards`  
-**Conditional:** `security` (auth/input surfaces), `performance` (DB/async), `adversarial` (50+ non-test lines + CAS high-stakes modules)  
+**Conditional:** `security` (auth/input surfaces), `performance` (DB/async), `adversarial` (50+ non-test lines + Cassy high-stakes modules)
 **JS/TS only:** `fallow` (deterministic CLI wrapper; skipped for Rust repos)
 
 Key constraint (R13): orchestrator = Opus, personas = Sonnet. Hard-coded in SKILL.md; not enforced at the framework level, only by the document.
@@ -71,7 +71,7 @@ Key differences from current path:
 - 53,018 chars / ~13,255 tokens (diff text)  
 - 1,071 diff lines, 699 +/- lines (changed)
 
-**Why this diff:** representative CAS feature commit. Touches `pre_tool.rs` (hook system, CAS high-stakes module), test infrastructure, builtin skill content.
+**Why this diff:** representative Cassy feature commit. Touches `pre_tool.rs` (hook system, Cassy high-stakes module), test infrastructure, builtin skill content.
 
 ### Live run results
 
@@ -157,7 +157,7 @@ This demonstrates the Workflow produces **actionable, grounded findings**, not n
 4. **Visible activation audit.** The structured `activation` field explains exactly which personas ran and why. Current skill buries this in Opus's reasoning.
 
 **Where Current Path wins:**
-1. **Mode dispatch and CAS integration** (interactive loop, task notes, pending_supervisor_review routing) — stays in the skill wrapper in the hybrid design.
+1. **Mode dispatch and Cassy integration** (interactive loop, task notes, pending_supervisor_review routing) — stays in the skill wrapper in the hybrid design.
 2. **Wall-clock is similar** on cold runs (16.2 min Workflow vs ~14 min historical current). No regression.
 3. **Compatibility** — current skill is production-tested; prototype is a single validated run.
 
@@ -188,15 +188,15 @@ User authorized live Workflow runs for the #6 validation. Two runs were executed
 │   ├── Phase 1: Setup agents (Sonnet) ← was Opus inline
 │   ├── Phase 2: Persona pipeline (Sonnet × N, schema-validated) ← same
 │   └── Phase 3: Merge (pure JS, 7-step) ← was Opus inline
-└── Post-processing (CAS task integration, interactive loop, report write)
+└── Post-processing (Cassy task integration, interactive loop, report write)
     ← stays in Opus skill, uses Workflow return value
 ```
 
-The skill becomes a ~50-line coordinator. The Workflow owns the expensive dispatch and merge. The skill owns CAS task integration, mode-specific behavior, and the interactive UX.
+The skill becomes a ~50-line coordinator. The Workflow owns the expensive dispatch and merge. The skill owns Cassy task integration, mode-specific behavior, and the interactive UX.
 
 ### Why hybrid, not full migration
 
-- Full migration would require reimplementing CAS task integration in the Workflow script (it's not a good fit — Workflow scripts are stateless, task integration is stateful and CAS-API-dependent).
+- Full migration would require reimplementing Cassy task integration in the Workflow script (it's not a good fit — Workflow scripts are stateless, task integration is stateful and Cassy-API-dependent).
 - The `interactive` mode with human-driven fix loops doesn't compose naturally with the Workflow fire-and-return model.
 - The skill wrapper is the right place for project-level configuration (which personas are activated, `owner=supervisor` routing).
 
@@ -269,4 +269,4 @@ Known gaps vs production skill:
 2. Phase 1 setup agent fetches the diff via `agent()`. In production, pass diff via `args` from the skill caller (avoids model outputting the full diff text as tokens).
 3. Activation via 2 targeted agent calls. In production, combine into one agent call that returns `{activate_security: bool, activate_adversarial: bool, intent_summary: string}` to halve the setup round-trips.
 4. fallow persona omitted (Rust repo). Would require adding a `fallow audit` invocation for JS/TS repos.
-5. No mode dispatch, CAS task integration, fix loop, or report-write. These stay in the skill wrapper.
+5. No mode dispatch, Cassy task integration, fix loop, or report-write. These stay in the skill wrapper.

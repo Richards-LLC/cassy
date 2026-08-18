@@ -3,14 +3,14 @@
 //! Root cause: Claude Code 2.1.116 team-mode escalates any "ask" permission
 //! decision to the team leader via `Mq4()`, gated on a broken self-check
 //! (`UG9()`) that compares the agent's `hP()` to the literal string
-//! `"team-lead"`. CAS agents have `agentId = "<name>@<team>"`, so the check
+//! `"team-lead"`. Cassy agents have `agentId = "<name>@<team>"`, so the check
 //! always fails, every Write/Edit/Bash escalates, and the supervisor ends
 //! up asking itself for approval — self-deadlock.
 //!
 //! Fix: PreToolUse runs before the classifier. Returning
 //! `{permissionDecision:"allow"}` short-circuits the whole decision flow so
 //! `Mq4()` never fires. Scope is deliberately narrow — the same filesystem
-//! tool list CAS ships in the supervisor/worker `--settings` files.
+//! tool list Cassy ships in the supervisor/worker `--settings` files.
 //!
 //! On main, the gate reads role from `CAS_AGENT_ROLE` env (the
 //! `HookInput.agent_role` field landed later on the worktree-leak epic).
@@ -369,11 +369,11 @@ fn set_env_var(key: &'static str, value: &std::ffi::OsStr) -> EnvVarGuard {
 // ============================================================================
 // cas_root=None path — the case the deadlock reporter was hitting.
 //
-// When CAS is not initialized in the supervisor's cwd at hook-dispatch time,
+// When Cassy is not initialized in the supervisor's cwd at hook-dispatch time,
 // `handle_pre_tool_use(&input, None)` is invoked. Prior to cas-7f33 this
 // returned `HookOutput::empty()` immediately, causing Claude Code's classifier
 // to fall through to team-mode leader-escalation (UG9 bug) and self-deadlock.
-// The factory auto-approve must fire even without a CAS root.
+// The factory auto-approve must fire even without a Cassy root.
 // ============================================================================
 
 #[test]
@@ -476,9 +476,9 @@ fn factory_agent_unknown_tool_without_cas_root_is_not_auto_approved() {
 // after cas-7f33:
 //
 //   1. A HOISTED copy above the `cas_root` early return. Fires only when
-//      `cas_root is None` (i.e. CAS not initialized in cwd). This rescues
+//      `cas_root is None` (i.e. Cassy not initialized in cwd). This rescues
 //      the deadlock case the bug reporter hit, where the supervisor
-//      session had no CAS root resolved at hook-dispatch time and the
+//      session had no Cassy root resolved at hook-dispatch time and the
 //      hook was returning empty, letting Claude Code's team-mode
 //      classifier escalate to the non-existent leader.
 //

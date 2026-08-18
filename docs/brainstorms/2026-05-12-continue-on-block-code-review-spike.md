@@ -18,7 +18,7 @@
 | Supervisor interactive review | Supervisor invokes `cas-code-review` skill manually | LLM skill orchestration; no hook involvement |
 | EPIC-merge integration sweep | Supervisor triggers at cherry-pick / epic merge | Same — skill-level orchestration |
 
-### b. CAS PostToolUse hook configuration
+### b. Cassy PostToolUse hook configuration
 
 Registered by `cas init` via `cas-cli/src/cli/hook/config_gen.rs` L~224–241:
 
@@ -81,7 +81,7 @@ Prerequisites for `continueOnBlock` to be meaningful:
 2. The hook matches the tool being called (e.g., its `matcher` covers the tool).
 3. The hook's rejection reason is something Claude can act on to retry successfully.
 
-CAS's current setup fails all three prerequisites for `task.close`:
+Cassy's current setup fails all three prerequisites for `task.close`:
 - The PostToolUse hook is `async: true` (cannot block).
 - The matcher doesn't cover `mcp__cas__task`.
 - Code review outcome is already delivered as MCP tool output — Claude sees it without any hook involvement.
@@ -90,7 +90,7 @@ CAS's current setup fails all three prerequisites for `task.close`:
 
 ## 4. Hypothetical integration design (not recommended)
 
-If CAS were to register a *synchronous* PostToolUse hook matching `mcp__cas__task` with `continueOnBlock: true`:
+If Cassy were to register a *synchronous* PostToolUse hook matching `mcp__cas__task` with `continueOnBlock: true`:
 
 ```json
 {
@@ -138,7 +138,7 @@ No improvement from routing this through a hook instead.
 1. Code review runs inline in the MCP handler, not through PostToolUse hooks. `continueOnBlock` is architecturally mismatched.
 2. Claude already sees code-review outcomes as MCP tool output — the feedback loop is already working.
 3. The `owner=supervisor` default (v2.13.0+) means workers don't hit P0-blocking reviews at close time at all; the use case is vanishingly narrow.
-4. Implementing this would require CAS to register a new synchronous PostToolUse hook on `mcp__cas__task`, duplicating gating logic that already lives in the MCP handler.
+4. Implementing this would require Cassy to register a new synchronous PostToolUse hook on `mcp__cas__task`, duplicating gating logic that already lives in the MCP handler.
 
 **No follow-on feature task filed.** The investigation is closed.
 
@@ -146,5 +146,5 @@ No improvement from routing this through a hook instead.
 
 ## 7. Related context
 
-- `continueOnBlock` is more applicable to CAS's **PreToolUse** hook path, where CAS can block filesystem writes or dangerous Bash commands. If a rejection reason from that hook could guide Claude to rephrase the command, `continueOnBlock` could be valuable. This is a separate, future investigation.
+- `continueOnBlock` is more applicable to Cassy's **PreToolUse** hook path, where Cassy can block filesystem writes or dangerous Bash commands. If a rejection reason from that hook could guide Claude to rephrase the command, `continueOnBlock` could be valuable. This is a separate, future investigation.
 - cas-b51a / cas-cac3 (v2.13.0): switched default to `owner=supervisor`. Workers no longer run the full multi-persona review inline — making the close-time autofix path legacy opt-in only.

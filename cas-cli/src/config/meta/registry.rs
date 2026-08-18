@@ -131,7 +131,7 @@ impl ConfigRegistry {
         let mut md = String::new();
 
         // Header
-        md.push_str("# CAS Configuration Reference\n\n");
+        md.push_str("# Cassy Configuration Reference\n\n");
         md.push_str("Configuration file: `.cas/config.toml`\n\n");
 
         // Table of Contents

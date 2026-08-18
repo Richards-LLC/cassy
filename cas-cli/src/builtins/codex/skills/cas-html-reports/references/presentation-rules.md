@@ -1,6 +1,6 @@
 # Presentation rules — charts, tables, numbers
 
-These rules are derived from the IBCS notation principles (see `sources.md`) and adapted to CAS
+These rules are derived from the IBCS notation principles (see `sources.md`) and adapted to Cassy
 reports. They apply to every report type; the financial and executive types enforce them hardest.
 
 ## The governing principle

@@ -100,8 +100,8 @@ caught because the other project's names appear in their *bodies*.
 | project | `2026-03-30-15` | `Roark` | Roark 2022-2023 Carryforward Verified |
 | project | `2026-03-30-16` | `Roark` | Roark Property Basis and Assessor Splits |
 | project | `2026-04-24-1` | `Roark` | TN franchise tax repeal (Public Chapter 950) — property measure only, not full repeal |
-| project | `2026-04-27-6` | `Roark` | 🟡 Local CAS project layout — 30+ projects across $HOME, identified by .cas/cas.db |
-| project | `2026-04-27-7` | `Roark` | 🟡 CAS Cloud auth env vars + cas-login wrapper |
+| project | `2026-04-27-6` | `Roark` | 🟡 Local Cassy project layout — 30+ projects across $HOME, identified by .cas/cas.db |
+| project | `2026-04-27-7` | `Roark` | 🟡 Cassy Cloud auth env vars + cas-login wrapper |
 | project | `2026-04-28-4` | `Roark` | 🟡 Ben Richards (Roark Realty managing partner) — Slack communication profile |
 
 ## Verification that this fixes the run-1 regression
@@ -122,4 +122,3 @@ wins the 600-token budget:
 
 The two documents the cutover was rolled back for occupied positions 1 and 2.
 They are gone.
-

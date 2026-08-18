@@ -258,7 +258,7 @@ Two paths kept in sync (`recorder.rs:352-573` `list_threads_with_db_fallback`):
 
 2. **SQLite state DB** — `$CODEX_HOME/state.db` (or `$CODEX_SQLITE_HOME`). Indexes `id`, `cwd`, `git_branch`, `git_sha`, `first_user_message`, `created_at`, `updated_at`, `source`. **Read-repairs from filesystem** if missing/stale.
 
-**For a third-party reader (CAS): don't bother with the SQLite DB** — it's reproducible from the JSONL and Codex itself rebuilds it via `metadata::backfill_sessions`. Just glob the rollouts folder and parse heads.
+**For a third-party reader (Cassy): don't bother with the SQLite DB** — it's reproducible from the JSONL and Codex itself rebuilds it via `metadata::backfill_sessions`. Just glob the rollouts folder and parse heads.
 
 **Hard caps in enumerator:** `MAX_SCAN_FILES = 10_000` (`list.rs:105`); per-file head limit `HEAD_RECORD_LIMIT = 10` lines.
 
@@ -274,7 +274,7 @@ Almost every rollout struct has `#[derive(... TS)]` — `RolloutItem`, `RolloutL
 
 `ThreadItemDetails` (`exec_events.rs:104-130`): `agent_message`, `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `collab_tool_call`, `web_search`, `todo_list`, `error`.
 
-**These are NOT the same as on-disk events.** The exec-events stream is a UI-friendly projection. To build a CAS adapter, **parse the rollout schema (sections 2-3), not exec-events**.
+**These are NOT the same as on-disk events.** The exec-events stream is a UI-friendly projection. To build a Cassy adapter, **parse the rollout schema (sections 2-3), not exec-events**.
 
 ## 7. Ephemeral mode
 
@@ -291,7 +291,7 @@ let state_db_fut = async {
 };
 ```
 
-**Effect: zero on-disk artifacts.** CAS will never see ephemeral runs.
+**Effect: zero on-disk artifacts.** Cassy will never see ephemeral runs.
 
 ## 8. Codex vs Claude Code: side-by-side schema
 
@@ -342,7 +342,7 @@ let state_db_fut = async {
    - Sub-agents: `SessionSource::SubAgent::ThreadSpawn { parent_thread_id, .. }`.
    - Resumes: same file, no extra link.
 
-7. **Common message mapping** (Codex → CAS abstract event):
+7. **Common message mapping** (Codex → Cassy abstract event):
    - `ResponseItem::Message{role, content}` → user/assistant/system/developer message (role is freeform string).
    - `ResponseItem::Reasoning` → assistant thinking block.
    - `ResponseItem::FunctionCall` ↔ `ResponseItem::FunctionCallOutput` joined by `call_id` → tool call + result.
@@ -351,7 +351,7 @@ let state_db_fut = async {
    - `EventMsg::ExecCommandEnd` → command-execution event (note truncation in Extended mode).
    - `EventMsg::ItemCompleted` for `TurnItem::Plan` → plan/todo update.
    - `RolloutItem::Compacted` → compaction marker.
-   - `RolloutItem::TurnContext` → metadata-only update (cwd/model/policy changes); CAS may want to surface "model changed mid-session".
+   - `RolloutItem::TurnContext` → metadata-only update (cwd/model/policy changes); Cassy may want to surface "model changed mid-session".
 
 ## 10. Minimum serde structs to vendor (~150 LOC)
 
@@ -371,10 +371,10 @@ Plus the legacy `ghost_snapshot` skip preprocessor (one extra line).
 
 ## 11. Reference implementation: `codex-rs/external-agent-sessions/`
 
-Codex's own crate that **reads Claude Code sessions from `~/.claude/projects/`**. The symmetric problem to what CAS wants. Worth reading end-to-end as a model:
+Codex's own crate that **reads Claude Code sessions from `~/.claude/projects/`**. The symmetric problem to what Cassy wants. Worth reading end-to-end as a model:
 
 - `detect.rs:19-26` — discovery walker pattern.
 - `records.rs:153-168` — Claude session line parser.
 - `ledger.rs` — "import each session only once" tracking.
 
-CAS's `CodexSessionStore` should mirror this structure.
+Cassy's `CodexSessionStore` should mirror this structure.

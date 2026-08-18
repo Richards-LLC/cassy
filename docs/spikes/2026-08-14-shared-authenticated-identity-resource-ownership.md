@@ -3,7 +3,7 @@
 **Status:** Recommendation ready
 **Date:** 2026-08-14
 **Decision owner:** Factory supervisor
-**Scope:** CAS factory workers using a shared authenticated external MCP identity
+**Scope:** Cassy factory workers using a shared authenticated external MCP identity
 
 ## Recommendation
 
@@ -19,17 +19,17 @@ The reported incident involved multiple Claude workers spawned with the same `co
 - The connector returns a draft body only to the session that wrote it. One worker cannot inspect or safely clean up another worker's draft, so the supervisor had to relay draft bodies manually.
 - Direct worker-to-worker collision notice is separately owned by `cas-5068`; even a lower-latency peer channel would be advisory and cannot prevent a protected write.
 
-The decision is needed before another multi-worker sweep uses a shared customer-facing identity. It does not change provider authorization: it adds CAS-local ownership policy in front of provider calls.
+The decision is needed before another multi-worker sweep uses a shared customer-facing identity. It does not change provider authorization: it adds Cassy-local ownership policy in front of provider calls.
 
-## CAS evidence gathered first-hand
+## Cassy evidence gathered first-hand
 
-| Observation | CAS source | What it proves |
+| Observation | Cassy source | What it proves |
 | --- | --- | --- |
 | `spawn_workers` writes the explicit `config_dir` into the resolved worker spec and captures the requesting supervisor's `CLAUDE_CONFIG_DIR` when it enqueues the spawn. | `cas-cli/src/mcp/tools/service/factory_ops.rs:1283-1330` | Multiple workers can be deliberately launched under the same authenticated Claude profile. |
 | The spawn queue persists `requester_config_dir`; `WorkerSpec` defines explicit `config_dir` and requester-derived fallback. | `crates/cas-store/src/spawn_queue_store.rs:180-220`; `crates/cas-mux/src/spec.rs:75-104` | The selected account context survives the supervisor-to-daemon handoff. |
 | The PTY maps the resolved profile to `CLAUDE_CONFIG_DIR` and the related secure-storage path. | `crates/cas-pty/src/pty.rs:303-340`, `1449-1503` | This is credential/identity propagation, not resource partitioning. Worker identity is logged, but not conveyed as resource ownership to an upstream tool. |
-| CAS has exclusive leases only for `task_id` and `worktree_id`. | `crates/cas-store/src/agent_store/mod.rs:91-165` | There is no `external_resource_key`, holder, expiry, history, or authorization query today. |
-| CAS's optional proxy dispatches all configured upstream calls through `mcp_execute` to `ProxyEngine::call_upstream`; the latter resolves server/tool and forwards arguments directly. | `cas-cli/src/mcp/tools/service/mod.rs:1138-1180`; `crates/cas-mcp-proxy/src/lib.rs:578-645` | The proxy is a viable enforcement seam, but currently contains no caller identity, ownership lookup, adapter, or deny policy. Directly exposed connector tools bypass it altogether. |
+| Cassy has exclusive leases only for `task_id` and `worktree_id`. | `crates/cas-store/src/agent_store/mod.rs:91-165` | There is no `external_resource_key`, holder, expiry, history, or authorization query today. |
+| Cassy's optional proxy dispatches all configured upstream calls through `mcp_execute` to `ProxyEngine::call_upstream`; the latter resolves server/tool and forwards arguments directly. | `cas-cli/src/mcp/tools/service/mod.rs:1138-1180`; `crates/cas-mcp-proxy/src/lib.rs:578-645` | The proxy is a viable enforcement seam, but currently contains no caller identity, ownership lookup, adapter, or deny policy. Directly exposed connector tools bypass it altogether. |
 
 ## Options
 
@@ -43,23 +43,23 @@ The decision is needed before another multi-worker sweep uses a shared customer-
 
 The deciding criterion is whether the mechanism can reject the unsafe operation at the moment it becomes side-effecting while preserving the existing shared mailbox. Only an enforcement point adjacent to the tool call meets that criterion without forcing a new identity and sender model.
 
-The resource lease must be **supervisor-declared**, not inferred from task prose or a worker's first write. The declaration makes the intended customer boundary explicit before the worker acts; atomic CAS storage makes the declaration exclusive; the gateway makes it effective. A task lease is not a substitute: one task can cover many customers, and more than one task can legitimately touch the same external resource.
+The resource lease must be **supervisor-declared**, not inferred from task prose or a worker's first write. The declaration makes the intended customer boundary explicit before the worker acts; atomic Cassy storage makes the declaration exclusive; the gateway makes it effective. A task lease is not a substitute: one task can cover many customers, and more than one task can legitimately touch the same external resource.
 
 For Gmail, the canonical protected key should be the authenticated-account namespace plus a normalized thread/conversation ID. The adapter must associate successful draft creation with that canonical key. On update or send, it must authorize the caller against the mapped thread; a bare `draftId` that cannot be mapped to a leased thread must be refused. That closes the precise dispatch path described in the incident instead of only protecting draft creation.
 
 ## Required design constraints
 
-1. **Identity-aware enforcement.** The gateway needs the registered CAS agent ID and factory session for each request; it must not trust a caller-supplied worker name.
+1. **Identity-aware enforcement.** The gateway needs the registered Cassy agent ID and factory session for each request; it must not trust a caller-supplied worker name.
 2. **Canonical scope.** Lease uniqueness is `(factory_session, account_scope, upstream_server, resource_type, canonical_resource_id)`, with task ID only as attribution metadata. Never store OAuth secrets in the lease record.
 3. **Atomic lifecycle.** Claim, renew, release, transfer, expiry, worker death, and supervisor override require the same transactional/audited semantics as task leases. A worker cannot release another worker's live lease.
 4. **Tool-specific resource extraction.** Protected operations must have an adapter that derives the canonical resource key from authoritative arguments/result state. Generic argument-name guessing is not safe enough for writes.
 5. **Deny rather than guess.** For configured protected writes, unreadable lease state, unknown resource identity, and unmapped `draftId` deny with actionable owner/expiry guidance. Read-only calls remain available unless a provider requires broader protection.
-6. **No bypass route.** A protected upstream must be reachable to workers only through the enforcement gateway, or the connector itself must implement the equivalent check. Leaving a native Gmail MCP tool exposed would make CAS policy advisory again.
+6. **No bypass route.** A protected upstream must be reachable to workers only through the enforcement gateway, or the connector itself must implement the equivalent check. Leaving a native Gmail MCP tool exposed would make Cassy policy advisory again.
 7. **Auditability.** Record who declared the lease, holder, task attribution, operation/tool, allow/deny result, and expiry/transfer events. Do not retain message bodies or credentials.
 
 ## What we give up
 
-Per-worker identities are the strongest isolation boundary when the provider and workflow support them. Choosing gateway-enforced resource ownership preserves a shared sender and does not protect a worker that has separate credentials to bypass the gateway. That is an intentional trade: CAS should first make the existing shared mailbox safe without multiplying accounts; per-worker identities remain a later option for workloads that need tenant or sender separation.
+Per-worker identities are the strongest isolation boundary when the provider and workflow support them. Choosing gateway-enforced resource ownership preserves a shared sender and does not protect a worker that has separate credentials to bypass the gateway. That is an intentional trade: Cassy should first make the existing shared mailbox safe without multiplying accounts; per-worker identities remain a later option for workloads that need tenant or sender separation.
 
 ## Reversal cost
 
@@ -82,7 +82,7 @@ The rollout is reversible because protection is opt-in per upstream server/tool.
 
 ## Provenance
 
-Analysis was performed against CAS commit `850679a5de08ad8c7dc6315792dcc9a15b3954c3` on 2026-08-14 UTC. Commands used:
+Analysis was performed against Cassy commit `850679a5de08ad8c7dc6315792dcc9a15b3954c3` on 2026-08-14 UTC. Commands used:
 
 ```text
 rg -n -C 3 'config_dir|requester_config_dir|CLAUDE_CONFIG_DIR|spawn_workers' cas-cli crates --glob '*.rs' --glob '*.sql'
@@ -90,4 +90,4 @@ rg -n -i -C 3 'mcp.?proxy|upstream|tool.*dispatch|dispatch.*tool|proxy.*tool|too
 rg -n -i -C 2 'resource (ownership|lease|claim)|external resource|resource_id|resource_key|resource.*owner' . --glob '!target/**' --glob '!vendor/**'
 ```
 
-Incident facts about the Gmail connector and prior dispatch are supplied by the supervisor/task record; the CAS implementation facts above were inspected directly. The companion review surface is [`2026-08-14-shared-authenticated-identity-resource-ownership.html`](2026-08-14-shared-authenticated-identity-resource-ownership.html).
+Incident facts about the Gmail connector and prior dispatch are supplied by the supervisor/task record; the Cassy implementation facts above were inspected directly. The companion review surface is [`2026-08-14-shared-authenticated-identity-resource-ownership.html`](2026-08-14-shared-authenticated-identity-resource-ownership.html).

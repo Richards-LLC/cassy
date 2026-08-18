@@ -1,4 +1,4 @@
-//! Optional read-only CAS Cloud device hints for the Commander catalog.
+//! Optional read-only Cassy Cloud device hints for the Commander catalog.
 
 use std::time::Duration;
 

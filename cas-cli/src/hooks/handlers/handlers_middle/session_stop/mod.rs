@@ -226,7 +226,7 @@ pub fn build_learning_review_context(store: &dyn Store, config: &Config) -> Opti
     context.push_str(
         "1. Use the Task tool to spawn a `learning-reviewer` subagent with this prompt:\n",
     );
-    context.push_str("   \"Review the unreviewed learnings in CAS. For each:\n");
+    context.push_str("   \"Review the unreviewed learnings in Cassy. For each:\n");
     context.push_str("   - If it describes a pattern/convention → create a draft rule\n");
     context.push_str("   - If it describes a workflow/procedure → create a draft skill\n");
     context.push_str("   - If it's project-specific context → leave as learning\n");
@@ -329,7 +329,7 @@ pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) ->
     context.push_str("\n**Instructions:**\n");
     context
         .push_str("1. Use the Task tool to spawn a `rule-reviewer` subagent with this prompt:\n");
-    context.push_str("   \"Review the draft rules in CAS. For each:\n");
+    context.push_str("   \"Review the draft rules in Cassy. For each:\n");
     context.push_str("   - If clear and validated → promote to proven\n");
     context.push_str("   - If similar to another → merge them\n");
     context.push_str("   - If vague or outdated → archive it\"\n");
@@ -424,7 +424,7 @@ pub fn build_duplicate_detection_context(store: &dyn Store, config: &Config) -> 
     context.push_str(
         "1. Use the Task tool to spawn a `duplicate-detector` subagent with this prompt:\n",
     );
-    context.push_str("   \"Scan CAS memories for duplicates. For each duplicate pair:\n");
+    context.push_str("   \"Scan Cassy memories for duplicates. For each duplicate pair:\n");
     context.push_str("   - Merge content into the more complete entry\n");
     context.push_str("   - Archive the redundant entry\n");
     context.push_str("   - Report statistics on space saved\"\n");
@@ -634,7 +634,7 @@ mod tests_b3 {
     fn setup_git_repo_with_factory_branch(tmp: &std::path::Path) {
         Command::new("git").args(["init", "-b", "main"]).current_dir(tmp).output().unwrap();
         Command::new("git").args(["config", "user.email", "test@cas"]).current_dir(tmp).output().unwrap();
-        Command::new("git").args(["config", "user.name", "CAS Test"]).current_dir(tmp).output().unwrap();
+        Command::new("git").args(["config", "user.name", "Cassy Test"]).current_dir(tmp).output().unwrap();
         std::fs::write(tmp.join("README"), "init").unwrap();
         Command::new("git").args(["add", "README"]).current_dir(tmp).output().unwrap();
         Command::new("git").args(["commit", "-m", "init"]).current_dir(tmp).output().unwrap();

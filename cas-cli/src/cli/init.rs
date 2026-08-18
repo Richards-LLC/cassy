@@ -163,7 +163,7 @@ impl NonProjectDir {
 /// Classify the directory `cas init` was invoked in.
 ///
 /// Deliberately narrow: only the home directory and the filesystem root are
-/// refused. "Not a git repository" is NOT a signal — CAS supports non-git
+/// refused. "Not a git repository" is NOT a signal — Cassy supports non-git
 /// projects and derives a canonical id from the folder name, so refusing there
 /// would reject legitimate setups.
 pub(crate) fn classify_init_dir(cwd: &Path, home: Option<&Path>) -> Option<NonProjectDir> {
@@ -347,7 +347,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
         println!();
         print_colored(&format!("  ⚠  {}", kind.warning(&cwd)), colors::ORANGE)?;
         println!();
-        if !interactive::confirm("  Initialize CAS here anyway", false)? {
+        if !interactive::confirm("  Initialize Cassy here anyway", false)? {
             println!("\n  Nothing was written. `cd` into your project and run `cas init` there.");
             return Ok(());
         }
@@ -433,7 +433,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     if config.agents.codex {
         // Codex will otherwise prompt on both project and command-hook trust
-        // before it invokes CAS. Unlike cosmetic init artifacts, treating this
+        // before it invokes Cassy. Unlike cosmetic init artifacts, treating this
         // failure as success would leave the default install non-functional.
         codex_configured = provision_codex_project(cwd)?;
 
@@ -500,7 +500,7 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     if cas_dir_path.exists() && !args.force {
         print_colored("", colors::WHITE)?;
         print_colored("  ● ", colors::CYAN)?;
-        print_colored("CAS already initialized at ", colors::WHITE)?;
+        print_colored("Cassy already initialized at ", colors::WHITE)?;
         print_colored(&cas_dir_path.display().to_string(), colors::CYAN)?;
         println!();
         print_colored("  → ", colors::GRAY)?;
@@ -552,7 +552,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     // Check if already initialized
     if cas_dir_path.exists() && !args.force {
         println!();
-        print_colored("  CAS is already initialized at ", colors::WHITE)?;
+        print_colored("  Cassy is already initialized at ", colors::WHITE)?;
         print_colored(&cas_dir_path.display().to_string(), colors::CYAN)?;
         println!("\n");
 
@@ -563,7 +563,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
             println!("\n  Keeping existing configuration.");
             return Ok(());
         }
-        println!("\n  Reconfiguring CAS...");
+        println!("\n  Reconfiguring Cassy...");
     }
 
     // Initialize .cas directory
@@ -720,7 +720,7 @@ fn confirm_and_apply(
     print_colored("  Create:\n", colors::WHITE)?;
 
     if !cas_exists {
-        print_file_item(".cas/", "CAS data directory", colors::GREEN)?;
+        print_file_item(".cas/", "Cassy data directory", colors::GREEN)?;
     }
     print_file_item(".cas/config.toml", "Configuration", colors::GREEN)?;
     if !gitignore_exists {
@@ -735,7 +735,7 @@ fn confirm_and_apply(
             print_file_item(".claude/settings.json", "Claude Code hooks", colors::GREEN)?;
         }
         if !skill_exists {
-            print_file_item(".claude/skills/cas/SKILL.md", "CAS skill", colors::GREEN)?;
+            print_file_item(".claude/skills/cas/SKILL.md", "Cassy skill", colors::GREEN)?;
         }
         print_file_item(".claude/agents/", "Built-in agents", colors::GREEN)?;
         print_file_item(".claude/commands/", "Built-in commands", colors::GREEN)?;
@@ -748,7 +748,7 @@ fn confirm_and_apply(
         if !codex_hooks_exists {
             print_file_item(
                 ".codex/hooks.json",
-                "CAS hook (review with /hooks)",
+                "Cassy hook (review with /hooks)",
                 colors::GREEN,
             )?;
         }
@@ -800,26 +800,26 @@ fn confirm_and_apply(
 
         if config.agents.claude {
             if settings_exists {
-                print_file_item(".claude/settings.json", "Add CAS hooks", colors::ORANGE)?;
+                print_file_item(".claude/settings.json", "Add Cassy hooks", colors::ORANGE)?;
             }
             if mcp_exists {
-                print_file_item(".mcp.json", "Add CAS server", colors::ORANGE)?;
+                print_file_item(".mcp.json", "Add Cassy server", colors::ORANGE)?;
             }
             if claude_md_exists {
-                print_file_item("CLAUDE.md", "Add CAS instructions", colors::ORANGE)?;
+                print_file_item("CLAUDE.md", "Add Cassy instructions", colors::ORANGE)?;
             } else {
-                print_file_item("CLAUDE.md", "Create with CAS instructions", colors::GREEN)?;
+                print_file_item("CLAUDE.md", "Create with Cassy instructions", colors::GREEN)?;
             }
         }
 
         if config.agents.codex {
             if codex_config_exists {
-                print_file_item(".codex/config.toml", "Add CAS server", colors::ORANGE)?;
+                print_file_item(".codex/config.toml", "Add Cassy server", colors::ORANGE)?;
             }
             if codex_hooks_exists {
                 print_file_item(
                     ".codex/hooks.json",
-                    "Install CAS hook (review with /hooks)",
+                    "Install Cassy hook (review with /hooks)",
                     colors::ORANGE,
                 )?;
             }
@@ -828,7 +828,7 @@ fn confirm_and_apply(
         // Only print .mcp.json's "Modify" row once — claude's clause above
         // already covers it when claude is also enabled.
         if config.agents.grok && mcp_exists && !config.agents.claude {
-            print_file_item(".mcp.json", "Add CAS server (shared with Grok)", colors::ORANGE)?;
+            print_file_item(".mcp.json", "Add Cassy server (shared with Grok)", colors::ORANGE)?;
         }
     }
 
@@ -898,8 +898,8 @@ fn apply_configuration(
             Ok("CLAUDE.md".to_string())
         })?;
 
-        // Step 5: Generate CAS skill
-        execute_step("Generating CAS guidance skill", animate, || {
+        // Step 5: Generate Cassy skill
+        execute_step("Generating Cassy guidance skill", animate, || {
             generate_cas_skill(cwd)?;
             Ok(".claude/skills/cas/SKILL.md".to_string())
         })?;
@@ -917,7 +917,7 @@ fn apply_configuration(
     if config.agents.codex {
         execute_step("Configuring Codex MCP server", animate, || {
             provision_codex_project(cwd)?;
-            Ok(".codex/config.toml + .codex/hooks.json; project and CAS hook trust registered".to_string())
+            Ok(".codex/config.toml + .codex/hooks.json; project and Cassy hook trust registered".to_string())
         })?;
 
         execute_step("Syncing Codex built-in files", animate, || {
@@ -976,7 +976,7 @@ fn apply_configuration(
     // Final success message
     println!();
     print_colored("  ✓ ", colors::GREEN)?;
-    print_colored("CAS initialized at ", colors::WHITE)?;
+    print_colored("Cassy initialized at ", colors::WHITE)?;
     print_colored(&cas_dir.display().to_string(), colors::CYAN)?;
     println!("\n");
 
@@ -1126,7 +1126,7 @@ fn print_next_steps(cwd: &Path) {
 
         print_colored("  │", colors::CYAN)?;
         print_colored(
-            "  Commit CAS config so factory workers can access it:   ",
+            "  Commit Cassy config so factory workers can access it:   ",
             colors::WHITE,
         )?;
         print_colored("│\n", colors::CYAN)?;
@@ -1147,7 +1147,7 @@ fn print_next_steps(cwd: &Path) {
 
         print_colored("  │", colors::CYAN)?;
         print_colored(
-            "    git commit -m \"Configure CAS\"                       ",
+            "    git commit -m \"Configure Cassy\"                       ",
             colors::GREEN,
         )?;
         print_colored("│\n", colors::CYAN)?;
@@ -1175,7 +1175,7 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
     }
     Some(vec![
         "git add .claude/ CLAUDE.md .mcp.json .gitignore".to_string(),
-        "git commit -m \"Configure CAS\"".to_string(),
+        "git commit -m \"Configure Cassy\"".to_string(),
     ])
 }
 
@@ -1227,7 +1227,7 @@ fn ensure_gitignore(cwd: &Path) -> anyhow::Result<String> {
 // CLAUDE.md management
 // ============================================================================
 
-/// Marker for CAS-managed section in CLAUDE.md
+/// Marker for Cassy-managed section in CLAUDE.md
 mod docs_and_skill;
 
 pub(crate) use crate::cli::init::docs_and_skill::{
@@ -1354,7 +1354,7 @@ mod non_project_guard_tests {
 
     #[test]
     fn a_non_git_project_directory_is_allowed() {
-        // CAS supports non-git projects (canonical id falls back to the folder
+        // Cassy supports non-git projects (canonical id falls back to the folder
         // name), so "no git repo" must not be treated as "not a project".
         let home = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();

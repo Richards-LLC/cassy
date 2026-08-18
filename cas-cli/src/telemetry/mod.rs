@@ -1,6 +1,6 @@
 //! Telemetry module for anonymous usage tracking
 //!
-//! Provides opt-in analytics via PostHog to understand CAS usage patterns.
+//! Provides opt-in analytics via PostHog to understand Cassy usage patterns.
 //! All data is anonymous (no PII, paths, or content).
 //!
 //! Events are sent asynchronously via a background thread to avoid blocking

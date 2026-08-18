@@ -39,7 +39,7 @@ pub struct DaemonConfig {
     pub foreground: bool,
     /// Enable boot progress socket handshake before entering daemon loop.
     pub boot_progress: bool,
-    /// Enable cloud phone-home (push state/events to CAS Cloud)
+    /// Enable cloud phone-home (push state/events to Cassy Cloud)
     pub phone_home: bool,
 }
 
@@ -139,7 +139,7 @@ enum PendingSpawn {
     KillShell { name: String },
 }
 
-/// A launched worker that has not yet proved liveness by registering in CAS.
+/// A launched worker that has not yet proved liveness by registering in Cassy.
 #[derive(Debug, Clone)]
 struct SpawnVerification {
     request_id: Option<i64>,
@@ -194,7 +194,7 @@ pub struct FactoryDaemon {
         Option<String>,
         JoinHandle<anyhow::Result<WorkerSpawnResult>>,
     )>,
-    /// Workers whose CLI was launched but whose CAS registration is not confirmed yet.
+    /// Workers whose CLI was launched but whose Cassy registration is not confirmed yet.
     spawn_verifications: HashMap<String, SpawnVerification>,
     /// Cloud phone-home WebSocket client handle
     cloud_handle: Option<cloud_client::CloudClientHandle>,

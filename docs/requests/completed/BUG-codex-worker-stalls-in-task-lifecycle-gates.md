@@ -23,7 +23,7 @@ Verification evidence:
 ## Summary
 
 A factory worker spawned with `cli=codex` (model **gpt-5.4 medium**) consumed an entire ~5+ minute
-session on CAS task-lifecycle coordination and produced **zero implementation** — no file edits, no
+session on Cassy task-lifecycle coordination and produced **zero implementation** — no file edits, no
 commits, and it never even reset its worktree to the assigned epic base. It marked two assigned tasks
 `InProgress`, attempted to start a third, hit the "one unverified in-progress task" gate, interpreted
 that expected gate as a hard blocker, and halted.
@@ -45,9 +45,9 @@ file-level instructions provided via supervisor message).
 - Tool-call breakdown for the whole session: ~22 `exec_command` + 8 `write_stdin` + 1 `_get_user_login`.
   **Zero `apply_patch`/edit/write calls. Zero git commits. No branch pushed to origin.**
 - The worker's own final message:
-  > "Right now I'm not implementing code yet. I completed CAS worker startup and task sync. … `cas-e582`
+  > "Right now I'm not implementing code yet. I completed Cassy worker startup and task sync. … `cas-e582`
   > is `InProgress`, `cas-5192` is `InProgress`, `cas-dafb` is still `Open`. I attempted to start
-  > `cas-dafb`, but CAS blocked it because there is already an unverified in-progress task (`cas-e582`)."
+  > `cas-dafb`, but Cassy blocked it because there is already an unverified in-progress task (`cas-e582`)."
 - Git ground truth at shutdown: worktree HEAD still at `903401e1c` (staging) — it **never reset to the
   assigned epic branch** despite instructions to do so; `factory/posthog-codex` never pushed.
 
@@ -61,7 +61,7 @@ file-level instructions provided via supervisor message).
 2. **Expected gate read as a terminal blocker.** The "unverified in-progress task" gate is *normal*
    sequential-work backpressure. The Codex worker treated it as a stop condition and reported a blocker
    instead of proceeding to implement an already-in-progress task.
-3. **Possible gate inconsistency.** CAS allowed **two** tasks to be `InProgress` simultaneously for one
+3. **Possible gate inconsistency.** Cassy allowed **two** tasks to be `InProgress` simultaneously for one
    worker but blocked the **third**, citing the first. If the intended invariant is one-in-progress-per-
    worker, the second start should have been blocked too; if multiple are allowed, the third should not
    have been blocked. Worth confirming the intended rule.
@@ -110,7 +110,7 @@ designed.
 ### What the transcript actually shows
 
 The Codex worker **never had the CAS MCP tools mounted.** Its own narration is explicit:
-- [16] "The CAS tools weren't in the initial tool list"
+- [16] "The Cassy tools weren't in the initial tool list"
 - [28] "The requested MCP endpoints still aren't exposed in this session"
 - [97] "the `cs`/`cas` MCP tools still aren't mounted in this session. I'm using the local `cas serve`
   MCP server directly … instead of faking state"
@@ -131,7 +131,7 @@ no `CODEX_HOME`.** Codex does not read Claude's `.mcp.json`; it discovers `[mcp_
 
 This factory ran in **gabber-studio**, which has `.mcp.json` (Claude) but **no `.codex/` directory at
 all** — it was integrated for the Claude harness, never for Codex. So the Codex worker had no reachable
-CAS server by any path. A Claude worker on the sibling lane worked because `.mcp.json` was present.
+Cassy server by any path. A Claude worker on the sibling lane worked because `.mcp.json` was present.
 
 ### Verdict on the report's hypotheses
 
@@ -148,9 +148,9 @@ CAS server by any path. A Claude worker on the sibling lane worked because `.mcp
   cas-e582. Low-priority hardening at most.
 - **#4 (no coordination→work transition): symptom of the MCP gap, not a separate cause.**
 
-The `[CAS] Serve panic log: …` line is the normal `cas serve` startup banner, **not** a panic.
+The `[Cassy] Serve panic log: …` line is the normal `cas serve` startup banner, **not** a panic.
 
-### Fix direction (in-repo — cas-src IS CAS)
+### Fix direction (in-repo — cas-src IS Cassy)
 
 1. **Primary — spawn-inject the CAS MCP server into the Codex command** in `PtyConfig::codex`, parallel
    to `developer_instructions`: `-c mcp_servers.cs.command=cas`, `-c 'mcp_servers.cs.args=["serve"]'`,
@@ -162,4 +162,4 @@ The `[CAS] Serve panic log: …` line is the normal `cas serve` startup banner, 
 3. **Prompt fix (independent):** rewrite `CODEX_WORKER_INSTRUCTIONS` / startup prompt to start exactly
    one task at a time.
 
-Tracking: see CAS bug task created 2026-06-23 (linked from the team-lead report).
+Tracking: see Cassy bug task created 2026-06-23 (linked from the team-lead report).

@@ -6,11 +6,11 @@ Channel: #cas-internal (`C0B44GUKDK2`) — two top-level posts.
 
 ## Post 1 — User
 
-CAS used to treat every model the same way: heavy questions burned the expensive model's budget, cheap models got handed wording-sensitive work they write badly, and there was no honest way to get a second opinion from a different AI lab. Now CAS routes work by what each model is actually good at — and taps the near-free Codex allowance for the heavy lifting.
+Cassy used to treat every model the same way: heavy questions burned the expensive model's budget, cheap models got handed wording-sensitive work they write badly, and there was no honest way to get a second opinion from a different AI lab. Now Cassy routes work by what each model is actually good at — and taps the near-free Codex allowance for the heavy lifting.
 
-- Big read-only investigations (digging through logs, giant specs, sweeping hundreds of files) now go to a one-shot Codex helper instead of eating your Claude budget — ask for an investigation and CAS knows where to send it.
+- Big read-only investigations (digging through logs, giant specs, sweeping hundreds of files) now go to a one-shot Codex helper instead of eating your Claude budget — ask for an investigation and Cassy knows where to send it.
 - Anything a human will read — docs, release notes, error messages, API surfaces — routes to a model with taste, even when the change looks trivially small.
-- If a cheaper model's work doesn't meet the bar, CAS escalates to a better one without being asked: judge the output, not the price tag.
+- If a cheaper model's work doesn't meet the bar, Cassy escalates to a better one without being asked: judge the output, not the price tag.
 - Code reviews on big changes can now include an independent second opinion from GPT-5.5 — a genuinely different reviewer, not another copy of the same one — and it clearly says when it couldn't run rather than pretending it found nothing.
 
 ## Post 2 — Dev

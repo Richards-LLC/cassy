@@ -9,11 +9,11 @@ cas_task: cas-eb38
 
 ## Problem
 
-Active team configuration is currently per-project only. `cas cloud team set <uuid>` writes into the repo's `.cas/cloud.json`, so a user with N CAS-initialized projects must run it N times before `cas cloud team-memories` will return anything. Pure friction for the common single-team case.
+Active team configuration is currently per-project only. `cas cloud team set <uuid>` writes into the repo's `.cas/cloud.json`, so a user with N Cassy-initialized projects must run it N times before `cas cloud team-memories` will return anything. Pure friction for the common single-team case.
 
 ## Motivation
 
-Discovered during Ben onboarding (2026-04-23). Ben has 19 CAS-initialized projects on `starscream`. After bulk-promoting 206 entries to the Petra Stella team, he has to run `cas cloud team set 2a57bec9-…` 19 times to consume them, and repeat the dance for every new project he initializes.
+Discovered during Ben onboarding (2026-04-23). Ben has 19 Cassy-initialized projects on `starscream`. After bulk-promoting 206 entries to the Petra Stella team, he has to run `cas cloud team set 2a57bec9-…` 19 times to consume them, and repeat the dance for every new project he initializes.
 
 ## Files (cas-src)
 
@@ -36,7 +36,7 @@ Two-level resolution. Read order:
 
 ## Test scenarios
 
-- Fresh user: `cas cloud team set <uuid>` (no flag) → global file written, every CAS-initialized project sees the team
+- Fresh user: `cas cloud team set <uuid>` (no flag) → global file written, every Cassy-initialized project sees the team
 - User opts into per-project: `cas cloud team set <uuid> --project` → only the current dir gets it; other projects fall back to global
 - Existing per-project user (from before this change): per-project value still resolves correctly even after global is set to a different team
 - `cas cloud team show` output identifies whether the active team came from project-level or global config
@@ -48,7 +48,7 @@ Two-level resolution. Read order:
 
 - 19 existing `~/projects/*` to test bulk-apply behavior
 - Current per-project config lives in `.cas/cloud.json` inside each repo (confirm exact path/schema from code — not audited in detail here)
-- Ben's CAS env at `~/.config/cas/env` provides token + endpoint
+- Ben's Cassy env at `~/.config/cas/env` provides token + endpoint
 
 **Schema decision you need to make:**
 

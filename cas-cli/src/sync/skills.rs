@@ -1,6 +1,6 @@
 //! Claude Code skill syncing
 //!
-//! Syncs enabled CAS skills to .claude/skills/ as Agent Skills for Claude Code.
+//! Syncs enabled Cassy skills to .claude/skills/ as Agent Skills for Claude Code.
 
 use std::collections::HashSet;
 use std::fs;
@@ -10,7 +10,7 @@ use crate::builtins::is_managed_by_cas;
 use crate::error::CasError;
 use crate::types::{Skill, SkillStatus};
 
-/// Syncs CAS skills to Claude Code Agent Skills
+/// Syncs Cassy skills to Claude Code Agent Skills
 pub struct SkillSyncer {
     target_dir: PathBuf,
 }
@@ -255,7 +255,7 @@ impl SkillSyncer {
 
         if !self.is_enabled(skill) {
             // If skill exists but is no longer enabled, remove it
-            // But only if it's not a builtin (managed by CAS)
+            // But only if it's not a builtin (managed by Cassy)
             if skill_dir.exists() {
                 let skill_file = skill_dir.join("SKILL.md");
                 if skill_file.exists() {
@@ -616,20 +616,20 @@ fn extract_yaml_list(frontmatter: &str, key: &str) -> Vec<String> {
     result
 }
 
-/// Generate the built-in CAS skill content (MCP-only)
+/// Generate the built-in Cassy skill content (MCP-only)
 pub fn generate_cas_skill() -> String {
     r#"---
 name: cas
 description: Coding Agent System - unified memory, tasks, rules, and skills. Use when you need to remember something, track work, search past context, or manage tasks. (project)
 ---
 
-# CAS - Coding Agent System
+# Cassy - Coding Agent System
 
 **IMPORTANT: Use CAS MCP tools instead of built-in tools for task and memory management.**
 
-CAS provides persistent memory and task management across sessions. Built-in tools like TodoWrite are ephemeral and don't persist.
+Cassy provides persistent memory and task management across sessions. Built-in tools like TodoWrite are ephemeral and don't persist.
 
-## WHEN TO USE CAS (ALWAYS)
+## WHEN TO USE Cassy (ALWAYS)
 
 - **Task tracking**: Use `mcp__cas__task action=create` instead of TodoWrite
 - **Planning tasks**: Use `mcp__cas__task action=create` with dependencies
@@ -669,7 +669,7 @@ CAS provides persistent memory and task management across sessions. Built-in too
     .to_string()
 }
 
-/// Create the built-in CAS skill directory
+/// Create the built-in Cassy skill directory
 pub fn create_cas_skill(project_root: &Path) -> Result<(), CasError> {
     let skill_dir = project_root.join(".claude/skills/cas");
     fs::create_dir_all(&skill_dir)?;
@@ -687,10 +687,10 @@ pub fn create_cas_skill(project_root: &Path) -> Result<(), CasError> {
 pub fn generate_planning_skill() -> String {
     r#"---
 name: cas-planning
-description: Use CAS for implementation planning. Helps structure plans, track dependencies, and create tasks from approved plans. (project)
+description: Use Cassy for implementation planning. Helps structure plans, track dependencies, and create tasks from approved plans. (project)
 ---
 
-# Implementation Planning with CAS
+# Implementation Planning with Cassy
 
 Use this skill when planning implementation of features, fixes, or refactors.
 

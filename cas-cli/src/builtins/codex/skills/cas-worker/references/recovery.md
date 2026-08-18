@@ -14,8 +14,8 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
    ```
    Do **NOT** `gh pr create --base epic/...` — epic branches are supervisor-local; the ref doesn't exist on origin and the call always fails.
 4. **Parent is `main`/`master`/`staging`**: push and complete the project's PR/merge flow, then retry close.
-5. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift makes already-merged commits look missing. **Clear it yourself first**: re-close with `commit_receipt=<sha>` naming the commit that carries this task's work (cas-e74c). CAS resolves the SHA, checks it has a non-empty diff and is reachable from the parent branch (or `origin/<parent>`), and treats that as the delivery evidence — close proceeds with a note even if the lane branch still holds other tasks' commits. Only if the receipt is rejected, send the supervisor the exact guard text *and* the rejection reason (they reset the stale branch ref). Do not retry-loop against the guard.
-   - For a fully transactional handoff, `close` also accepts `completion_receipt=<json>` (`WorkerCompletionReceiptInput`: `task_id`, `worker_agent_id`, `repo_selector`, `source_branch`, `commit_sha`, `merge_base_sha`, `target_branch`, `target_sha`, `proof_reference`, `scope_summary`). CAS revalidates every field against registered agent state and live Git, persists an immutable delivery transaction, releases your lease, and parks the task in `pending_supervisor_review`. It is opt-in — omitting it leaves close unchanged. See [close-gate.md](close-gate.md).
+5. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift makes already-merged commits look missing. **Clear it yourself first**: re-close with `commit_receipt=<sha>` naming the commit that carries this task's work (cas-e74c). Cassy resolves the SHA, checks it has a non-empty diff and is reachable from the parent branch (or `origin/<parent>`), and treats that as the delivery evidence — close proceeds with a note even if the lane branch still holds other tasks' commits. Only if the receipt is rejected, send the supervisor the exact guard text *and* the rejection reason (they reset the stale branch ref). Do not retry-loop against the guard.
+   - For a fully transactional handoff, `close` also accepts `completion_receipt=<json>` (`WorkerCompletionReceiptInput`: `task_id`, `worker_agent_id`, `repo_selector`, `source_branch`, `commit_sha`, `merge_base_sha`, `target_branch`, `target_sha`, `proof_reference`, `scope_summary`). Cassy revalidates every field against registered agent state and live Git, persists an immutable delivery transaction, releases your lease, and parks the task in `pending_supervisor_review`. It is opt-in — omitting it leaves close unchanged. See [close-gate.md](close-gate.md).
 6. **Never route around it** with `action=update status=closed` plus a hand-written `verification action=add` — that forges the verification record and the audit trail. Rejection loops are a supervisor conversation, not a workaround opportunity.
 
 ## Close requires task-scoped verification
@@ -28,11 +28,11 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
 
 ## ALL tools blocked (stale-binary universal jail)
 
-If **every** MCP tool call fails with a jail/blocked error (not just the named task's close/update-to-closed), the running CAS binary predates task-scoped verification enforcement.
+If **every** MCP tool call fails with a jail/blocked error (not just the named task's close/update-to-closed), the running Cassy binary predates task-scoped verification enforcement.
 
 1. **Do NOT attempt workarounds** — no sqlite edits, no env var hacks, no retries.
 2. **Report to supervisor immediately** via `mcp__cs__coordination action=message` with the exact error message and your agent name.
-3. **Supervisor will rebuild CAS and respawn you.** This is not something you can fix from inside your session.
+3. **Supervisor will rebuild Cassy and respawn you.** This is not something you can fix from inside your session.
 
 ## Context Exhaustion
 
@@ -88,7 +88,7 @@ If `mcp__cs__*` tools stop responding or return connection errors:
    ```
    If the symlink is broken or missing, the MCP server can't start.
 
-2. **Check the CAS server process**: The `cas serve` process may have crashed.
+2. **Check the Cassy server process**: The `cas serve` process may have crashed.
    ```bash
    ps aux | grep 'cas serve'
    ```
@@ -101,9 +101,9 @@ If `mcp__cs__*` tools stop responding or return connection errors:
 
 Symptom: `ToolSearch(query="select:mcp__cs__task")` returns a match for `mcp__cs__task` (or any `mcp__cs__*` tool), but you're unsure how to proceed and are tempted to run ToolSearch again "to make it callable."
 
-**Do not re-run ToolSearch for a tool it already resolved — that will not make it more callable.** A successful ToolSearch match means the tool is now loadable; the very next action is a *separate* tool call literally named `mcp__cs__task` (or whichever tool matched), passing your real arguments (e.g. `action=mine`). If that direct call then fails or the tool name is rejected as unknown, treat it as **Zero CAS Tools Available** below and report to the supervisor — don't loop on ToolSearch, and don't fall back to `cas task ...` as a shell command (no such CLI subcommand exists).
+**Do not re-run ToolSearch for a tool it already resolved — that will not make it more callable.** A successful ToolSearch match means the tool is now loadable; the very next action is a *separate* tool call literally named `mcp__cs__task` (or whichever tool matched), passing your real arguments (e.g. `action=mine`). If that direct call then fails or the tool name is rejected as unknown, treat it as **Zero Cassy Tools Available** below and report to the supervisor — don't loop on ToolSearch, and don't fall back to `cas task ...` as a shell command (no such CLI subcommand exists).
 
-## Zero CAS Tools Available
+## Zero Cassy Tools Available
 
 (no `mcp__cs__*` tools surfaced at all — not one call errors, they simply do not exist in your tool set)
 
@@ -120,9 +120,9 @@ mcp__cs__coordination action=message target=supervisor \
 
 If even `mcp__cs__coordination` is missing (so you cannot send that message), you are fully detached. Output a short plain-text report and stop — the supervisor polls your session and will detect the stall. Do not spin attempting workarounds.
 
-## Known-fixed CAS bug reappears
+## Known-fixed Cassy bug reappears
 
-If a bug that was supposedly fixed in the source code still manifests, the running CAS binary may be outdated (not rebuilt after the fix). Report to supervisor — don't file a duplicate bug or attempt your own fix.
+If a bug that was supposedly fixed in the source code still manifests, the running Cassy binary may be outdated (not rebuilt after the fix). Report to supervisor — don't file a duplicate bug or attempt your own fix.
 
 ## Supervisor goes silent
 

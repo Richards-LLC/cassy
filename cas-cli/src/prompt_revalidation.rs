@@ -46,7 +46,7 @@ pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
 
 /// Terminal task states make an assignment's `task start` imperative stale.
 /// Missing/unreadable state deliberately returns false: delivery must fail
-/// open unless CAS has positive terminal evidence.
+/// open unless Cassy has positive terminal evidence.
 pub(crate) fn assignment_targets_terminal_task(prompt: &str, status: TaskStatus) -> Option<String> {
     matches!(status, TaskStatus::Closed | TaskStatus::Cancelled)
         .then(|| assignment_solicited_task_id(prompt))
@@ -58,7 +58,7 @@ fn first_task_id_token(text: &str) -> Option<String> {
         .find(|token| {
             let Some(suffix) = token
                 .strip_prefix("cas-")
-                .or_else(|| token.strip_prefix("CAS-"))
+                .or_else(|| token.strip_prefix("Cassy-"))
             else {
                 return false;
             };
@@ -163,7 +163,7 @@ pub(crate) fn merge_request_anchor_invalidated_guidance(
 ) -> String {
     let current = current_anchor.unwrap_or("none (the prior delivery was invalidated)");
     format!(
-        "CAS suppressed your stale merge request for {task_id}: delivery anchor {branch_tip} \
+        "Cassy suppressed your stale merge request for {task_id}: delivery anchor {branch_tip} \
          is no longer current (current anchor: {current}). Do not ask the supervisor to merge \
          the prior tip. Re-read the task with `task action=show id={task_id}` before sending \
          anything further about it."
@@ -174,7 +174,7 @@ pub(crate) fn merge_request_anchor_invalidated_guidance(
 /// the task is no longer parked (cas-6eab).
 pub(crate) fn merge_request_moot_guidance(task_id: &str, status: TaskStatus) -> String {
     format!(
-        "CAS suppressed your merge request for {task_id}: the task is no longer awaiting a \
+        "Cassy suppressed your merge request for {task_id}: the task is no longer awaiting a \
          merge (current status: {status}). Nothing is queued for the supervisor. Re-read the \
          task with `task action=show id={task_id}` before sending anything further about it."
     )
@@ -261,7 +261,7 @@ pub(crate) fn lifecycle_stale_outcome(
 ///
 /// States what did not happen and what to do, in that order, without
 /// mentioning a queue stage or a prompt row — the reader is a supervisor
-/// deciding whether a lane is waiting on them, not someone debugging CAS.
+/// deciding whether a lane is waiting on them, not someone debugging Cassy.
 pub(crate) fn undelivered_relay_notice(task_id: &str, summary: Option<&str>) -> String {
     let what = summary.unwrap_or("a task lifecycle transition");
     format!(
@@ -593,7 +593,7 @@ pub(crate) fn merge_landed_guidance(
     target_tip: &str,
 ) -> String {
     format!(
-        "Merge already landed; CAS suppressed your stale merge request.\n\n\
+        "Merge already landed; Cassy suppressed your stale merge request.\n\n\
          Task: {task_id}\nBranch tip: {branch_tip}\nTarget: {target_branch} at {target_tip}\n\n\
          Re-run task close for {task_id} now."
     )
@@ -1031,7 +1031,7 @@ mod tests {
             repo.path(),
             &["config", "user.email", "cas-test@example.invalid"],
         );
-        git(repo.path(), &["config", "user.name", "CAS Test"]);
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
         std::fs::write(repo.path().join("base"), "base\n").expect("base file");
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
@@ -1085,7 +1085,7 @@ mod tests {
             repo.path(),
             &["config", "user.email", "cas-test@example.invalid"],
         );
-        git(repo.path(), &["config", "user.name", "CAS Test"]);
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
         std::fs::write(repo.path().join("base"), "base\n").expect("base file");
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
@@ -1141,7 +1141,7 @@ mod tests {
             repo.path(),
             &["config", "user.email", "cas-test@example.invalid"],
         );
-        git(repo.path(), &["config", "user.name", "CAS Test"]);
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
         std::fs::write(repo.path().join("base"), "base\n").expect("base file");
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
@@ -1170,7 +1170,7 @@ mod tests {
             repo.path(),
             &["config", "user.email", "cas-test@example.invalid"],
         );
-        git(repo.path(), &["config", "user.name", "CAS Test"]);
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
         std::fs::write(repo.path().join("base"), "base\n").expect("base file");
         git(repo.path(), &["add", "base"]);
         git(repo.path(), &["commit", "-m", "base"]);
@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     /// A genuinely outstanding merge must still reach the supervisor — and so
-    /// must anything CAS cannot verify. Suppression requires positive evidence.
+    /// must anything Cassy cannot verify. Suppression requires positive evidence.
     #[test]
     fn outstanding_and_unverifiable_merge_requests_are_delivered() {
         let task = merge_task(TaskStatus::AwaitingMerge, Some("worker-tip"));

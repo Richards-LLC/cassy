@@ -6,7 +6,7 @@ Channel: #cas-internal (C0B44GUKDK2). Two top-level posts per runtime rubric.
 
 Live on main — **User**
 
-One machine, two Claude subscriptions, zero juggling. It used to be that every Claude session and every factory worker on the machine shared a single login — logging into a different account anywhere silently switched it everywhere, and nothing told you which account a worker was actually burning. Now you pick the account per launch, and CAS says out loud which one it used.
+One machine, two Claude subscriptions, zero juggling. It used to be that every Claude session and every factory worker on the machine shared a single login — logging into a different account anywhere silently switched it everywhere, and nothing told you which account a worker was actually burning. Now you pick the account per launch, and Cassy says out loud which one it used.
 
 - **Was → Now:** shell-alias gymnastics and silent account mix-ups → `cas claude alt` opens Claude Code on your alt subscription from any shell, no aliases or rc-file setup needed.
 - Plain `cas claude` lists every account profile on the machine, shows which are logged in, and which one is active right now.

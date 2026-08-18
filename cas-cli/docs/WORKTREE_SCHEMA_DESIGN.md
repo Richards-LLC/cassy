@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the schema changes for automatic git worktree management in CAS.
+This document describes the schema changes for automatic git worktree management in Cassy.
 We use **Option C: Virtual Isolation** - a single database with branch-scoped visibility.
 
 ## Design Principles
@@ -146,7 +146,7 @@ ALTER TABLE agents ADD COLUMN branch TEXT;
 
 ## Migration Plan
 
-Following CAS migration conventions (see MIGRATIONS.md):
+Following Cassy migration conventions (see MIGRATIONS.md):
 
 ### Entries Subsystem (IDs 29-35)
 
@@ -494,7 +494,7 @@ Response additions:
 1. **Schema migrations** - Add columns and tables
 2. **Rust types** - Add `Worktree` struct, update `Task`, `Entry`
 3. **WorktreeStore trait** - CRUD for worktrees table
-4. **GitWorktreeManager** - Git operations wrapper (separate from CAS)
+4. **GitWorktreeManager** - Git operations wrapper (separate from Cassy)
 5. **Integration in task_start** - Wire worktree creation into task lifecycle
 6. **Integration in task_close** - Wire merge/cleanup into task close
 7. **MCP tool updates** - Add worktree parameters to `cas_task`

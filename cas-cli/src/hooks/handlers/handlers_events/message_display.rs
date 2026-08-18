@@ -4,7 +4,7 @@ use crate::hooks::handlers::*;
 // ============================================================================
 //
 // CC 2.1.152+ fires MessageDisplay before assistant text reaches the terminal
-// renderer. CAS uses this to:
+// renderer. Cassy uses this to:
 //
 //   1. Detect and defuse React-Ink Box-in-Text crash triggers (nested fenced
 //      code blocks) — see CLAUDE.md "Output hygiene" / cas-97ba.

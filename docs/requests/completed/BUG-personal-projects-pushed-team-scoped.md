@@ -26,7 +26,7 @@ Both projects, before the cloud-side repair:
 
 Notable signals:
 - Both `projects` rows were created at the **identical** timestamp `2026-06-16T13:27:38.507966+00:00` by `created_by = 3535edb0-a949-4200-883d-3c2c0d46de77` (Daniel) — looks like a single batch registration event, not two separate intentional "create team project" actions.
-- Both have `git_remote = NULL` (no local git repo — these are CAS workspaces without a remote).
+- Both have `git_remote = NULL` (no local git repo — these are Cassy workspaces without a remote).
 - `sync_entities` shows **zero** personal rows for either project — i.e. the CLI never wrote them personally and later promoted; from the cloud's perspective they were team-scoped from the first push.
 
 ## What the cloud team already did (applied + verified, 2026-06-24)

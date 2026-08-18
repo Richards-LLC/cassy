@@ -81,7 +81,7 @@ impl FactoryApp {
             {
                 if head_sha != trunk_sha {
                     eprintln!(
-                        "[CAS] ⚠  supervisor HEAD ({}) differs from trunk '{}' ({}). \
+                        "[Cassy] ⚠  supervisor HEAD ({}) differs from trunk '{}' ({}). \
                          Epic branch will be based on trunk.",
                         &head_sha[..head_sha.len().min(8)],
                         trunk,
@@ -570,7 +570,7 @@ impl FactoryApp {
     /// - **`cas_dir` / `project_dir`**: `PathBuf::from("/tmp/cas-test")`.
     ///   Placeholders — they exist so paths inside the app don't panic
     ///   on `.is_some()` checks, but **must not** be assumed to exist on
-    ///   disk. Tests that need a real CAS root should use `tempfile`.
+    ///   disk. Tests that need a real Cassy root should use `tempfile`.
     /// - **`terminal_cols` / `terminal_rows`**: 80x24 — matches the Mux
     ///   dimensions above. Keep these in sync if you change the Mux
     ///   size; viewport math reads both.

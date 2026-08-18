@@ -240,7 +240,7 @@ fn merge_target_remediation(assignee: &str) -> String {
          (and `task_id` when merging a non-epic task). `force=true` only bypasses dirty \
          worktree protection — it does NOT authorize trunk.\n\
          Session `focus_epic` is a display filter and never authorizes a merge target. \
-         CAS never relies on a silent default to main/master/staging."
+         Cassy never relies on a silent default to main/master/staging."
     )
 }
 
@@ -425,7 +425,7 @@ fn protected_default_branch_pr_error(
          3. `gh pr view \"$PR_URL\" --json url,number,statusCheckRollup`\n\
          4. Surface that PR URL and required-check status to the supervisor.\n\
          5. After the required checks are green: `gh pr merge \"$PR_URL\" --merge`\n\
-         6. `git fetch origin {target_branch}`, then retry this `worktree_merge` so CAS \
+         6. `git fetch origin {target_branch}`, then retry this `worktree_merge` so Cassy \
          can reconcile and close the delivery.\n\n\
          GitHub evidence:\n{reason}",
         short_sha(sha)
@@ -685,8 +685,8 @@ fn resolve_factory_worktree_base(cas_root: &Path) -> PathBuf {
     config.worktrees().resolve_base_path(project_dir)
 }
 
-/// Whether a live git worktree looks CAS-managed (factory, epic, cas/*, or
-/// under known CAS worktree roots) and should appear in worktree_list even
+/// Whether a live git worktree looks Cassy-managed (factory, epic, cas/*, or
+/// under known Cassy worktree roots) and should appear in worktree_list even
 /// without a WorktreeStore row (sibling/predecessor sessions).
 fn is_cas_pattern_worktree(
     path: &Path,
@@ -732,7 +732,7 @@ fn is_factory_style_worktree(
         || path_is_under(path, &cas_root.join("worktrees"))
 }
 
-/// Reconcile live git worktrees that match CAS patterns but are missing from
+/// Reconcile live git worktrees that match Cassy patterns but are missing from
 /// the SQLite WorktreeStore (System B never registers; System A rows are
 /// project-scoped but may be absent for sibling-session worktrees).
 ///
@@ -1167,7 +1167,7 @@ fn resolve_system_b_merge_target(
         message: Cow::from(format!(
             "no declared merge target for worktree assignee {assignee}: no task_id or \
              assignee epic binding. The fallback would merge to: {trunk}; allow_trunk \
-             was not set, so CAS is refusing (cas-0b32/cas-b86e). Session focus is not \
+             was not set, so Cassy is refusing (cas-0b32/cas-b86e). Session focus is not \
              merge authority.\n\n{}",
             merge_target_remediation(assignee)
         )),
@@ -1315,7 +1315,7 @@ impl CasCore {
     /// List worktrees
     ///
     /// Combines the project-scoped WorktreeStore (System A) with a live
-    /// `git worktree list` reconcile for CAS-pattern paths/branches that were
+    /// `git worktree list` reconcile for Cassy-pattern paths/branches that were
     /// never registered (System B factory workers, sibling-session epic
     /// worktrees). Registry rows live in `.cas/cas.db` — shared by every
     /// session in the project; git is the second source of truth when a
@@ -1448,7 +1448,7 @@ impl CasCore {
             };
             let path_status = if wt.path.exists() { "" } else { " (missing)" };
             // git: prefix = reconciled from live git (not in WorktreeStore).
-            // Factory-style vs other CAS patterns get distinct labels so
+            // Factory-style vs other Cassy patterns get distinct labels so
             // supervisors can tell spawn workers from untracked epic trees.
             let type_indicator = if wt.id.starts_with("git:") {
                 if is_factory_style_worktree(&wt.path, &wt.branch, &cas_root, &factory_base) {
@@ -2150,7 +2150,7 @@ impl CasCore {
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
         // cas-0a21: held from before the target tip is first read until after
-        // the post-merge delivery state is durable, so no other CAS-mediated
+        // the post-merge delivery state is durable, so no other Cassy-mediated
         // merge can move this repository's target ref inside the window.
         // Bound to the function scope so it releases on every exit path.
         let _delivery_target_lock;
@@ -2547,7 +2547,7 @@ impl CasCore {
             // commit still leaves the receipt commit an ancestor of the new
             // tip. Only first-parent identity pins the topology. This is the
             // check that catches drift landing inside the merge itself, which
-            // the target lock cannot prevent (a non-CAS actor can always move
+            // the target lock cannot prevent (a non-Cassy actor can always move
             // the ref).
             //
             // `reconciled_delivery` resumes are exempt: they intentionally
@@ -2559,7 +2559,7 @@ impl CasCore {
                     // target to the merge's own first parent via git's
                     // compare-and-swap. That preserves the concurrent actor's
                     // commit — resetting to receipt.target_sha would destroy
-                    // it. If the CAS fails, the ref moved again; leave it
+                    // it. If the Cassy fails, the ref moved again; leave it
                     // alone and report rather than clobber a third writer.
                     let rollback = first_parent.as_deref().map(|parent| {
                         manager.git().rollback_branch_to(
@@ -2893,9 +2893,9 @@ impl CasCore {
             output.push('\n');
         }
 
-        // System A — CAS experimental worktrees (config-gated).
+        // System A — Cassy experimental worktrees (config-gated).
         // Explicitly labeled to avoid confusion with System B (factory isolation).
-        output.push_str("System A (CAS experimental worktrees):\n");
+        output.push_str("System A (Cassy experimental worktrees):\n");
         output.push_str(&format!("  Enabled:        {}\n", wt_config.enabled));
         output.push_str(&format!("  Base path:      {}\n", wt_config.base_path));
         output.push_str(&format!("  Branch prefix:  {}\n", wt_config.branch_prefix));
@@ -2922,7 +2922,7 @@ impl CasCore {
             }
         }
 
-        // Live git reconcile — same CAS-pattern rules as worktree_list (cas-d1a0).
+        // Live git reconcile — same Cassy-pattern rules as worktree_list (cas-d1a0).
         let factory_base = resolve_factory_worktree_base(&cas_root);
         let untracked = collect_untracked_git_worktrees(
             &cas_root,
@@ -2953,10 +2953,10 @@ impl CasCore {
             }
         }
 
-        // Untracked CAS-pattern worktrees (e.g. epic/* outside factory base)
+        // Untracked Cassy-pattern worktrees (e.g. epic/* outside factory base)
         // from sibling sessions — visible for management without a store row.
         if !other_untracked.is_empty() {
-            output.push_str("\nUntracked CAS-pattern worktrees:\n");
+            output.push_str("\nUntracked Cassy-pattern worktrees:\n");
             for (branch, path) in &other_untracked {
                 output.push_str(&format!("    {} ({})\n", branch, path.display()));
             }

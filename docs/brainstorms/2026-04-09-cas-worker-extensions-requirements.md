@@ -13,7 +13,7 @@ The compound engineering roadmap §3.1, §3.2, §3.3 specify three additional ex
 
 This brainstorm resolves those decisions so a follow-up Phase 1 EPIC can ship subsystem F as the smallest Phase 1 deliverable — adding one task-schema field, one Rust migration, three skill-content sections, and a mechanical `additive-only` enforcement check.
 
-Operational validation on PRs (roadmap §2.3) is **dropped** from this subsystem — CAS is distributed via homebrew and direct main commits, not a deploy pipeline, so post-deploy monitoring requirements do not map cleanly.
+Operational validation on PRs (roadmap §2.3) is **dropped** from this subsystem — Cassy is distributed via homebrew and direct main commits, not a deploy pipeline, so post-deploy monitoring requirements do not map cleanly.
 
 ## Requirements
 
@@ -56,7 +56,7 @@ Operational validation on PRs (roadmap §2.3) is **dropped** from this subsystem
 
 ## Scope Boundaries
 
-- **Not shipping:** operational validation on PRs (roadmap §2.3). Dropped entirely for cas-src. Revisit only if CAS deploys to a production environment that needs monitoring hooks.
+- **Not shipping:** operational validation on PRs (roadmap §2.3). Dropped entirely for cas-src. Revisit only if Cassy deploys to a production environment that needs monitoring hooks.
 - **Not shipping:** enforcement for `characterization-first` via git history inspection. Git ordering is too fragile (amended commits, squashes, rebases) and the check is left to task-verifier judgment.
 - **Not shipping:** UI/TUI enhancements beyond surfacing the new field in `action=show` output. No new filters, no posture-based task list views.
 - **Not shipping:** auto-population of `execution_note` based on task content (e.g., "refactoring tasks should be characterization-first"). Supervisors set it explicitly when they want the signal.
@@ -71,7 +71,7 @@ Operational validation on PRs (roadmap §2.3) is **dropped** from this subsystem
 - **Mixed enforcement strategy — `additive-only` hard, others advisory.** Rationale: `additive-only` is mechanically checkable from a diff without ambiguity; the other two require evidence inspection that is the task-verifier's job. Don't pretend git-ordering enforcement works when it doesn't.
 - **Simplify trigger is a hard-coded counter at every 3rd close**, not a flexible rhythm or supervisor-triggered. Rationale: predictable and visible. A flexible trigger ("when you feel like it") gets skipped; a supervisor-triggered trigger centralizes discipline on the supervisor.
 - **System-wide test check requires running the tests**, not just verifying they exist. Rationale: a test file's presence is a weak signal; an executed test is evidence.
-- **Drop operational validation (§2.3) from subsystem F.** Rationale: cas-src ships via `cargo build` and distribution sync, not a deploy pipeline. The monitoring/rollback framing is a poor fit. Worth revisiting if CAS grows a production deployment surface.
+- **Drop operational validation (§2.3) from subsystem F.** Rationale: cas-src ships via `cargo build` and distribution sync, not a deploy pipeline. The monitoring/rollback framing is a poor fit. Worth revisiting if Cassy grows a production deployment surface.
 - **Counter is stateless via task list query**, not a persistent field. Rationale: avoids another schema change for a derived value; list query is cheap.
 
 ## Dependencies / Assumptions

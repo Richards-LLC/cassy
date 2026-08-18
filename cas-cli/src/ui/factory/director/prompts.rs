@@ -1,6 +1,6 @@
 //! Auto-prompting system for the Director
 //!
-//! Generates prompts based on detected CAS state changes and injects them
+//! Generates prompts based on detected Cassy state changes and injects them
 //! into the appropriate agent's terminal.
 
 use std::collections::HashSet;

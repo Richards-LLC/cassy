@@ -1,6 +1,6 @@
 //! Config command - comprehensive configuration management
 //!
-//! Provides commands for viewing, modifying, and managing CAS configuration
+//! Provides commands for viewing, modifying, and managing Cassy configuration
 //! with rich metadata, validation, and export/import capabilities.
 
 mod docs_ops;

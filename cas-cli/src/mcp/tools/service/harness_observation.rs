@@ -15,7 +15,7 @@
 //!   same `turn_id` is reaction evidence.
 //! - **Grok:** `updates.jsonl` exposes turn starts for worker-level status, and
 //!   sibling `events.jsonl` exposes `turn_ended` completion. Neither artifact
-//!   currently exposes a stable message/turn correlation CAS can support, so
+//!   currently exposes a stable message/turn correlation Cassy can support, so
 //!   per-message wake and reaction remain unobserved rather than being inferred
 //!   from an unrelated later turn.
 //!

@@ -3,14 +3,14 @@ date: 2026-04-16
 topic: cas-google-stitch-integration
 ---
 
-# CAS × Google Stitch Integration — Scope-Driven Screens & Visual Agent Loop
+# Cassy × Google Stitch Integration — Scope-Driven Screens & Visual Agent Loop
 
 ## Problem Frame
 
 An agency runs $10K exploratory contracts where a client concept must be turned into visual screens for a pitch, then later graduated into the authoritative spec for the build phase. Today that means hand-authoring screens one-by-one in Stitch, then copy-pasting them into a deliverable disconnected from the eventual repo. In the build phase, frontend workers code UI blind — no visual spec, no way to verify their output matches the design, regressions ship. This integration closes both loops:
 
 1. **Pitch phase:** concept → implied screens → interactive HTML preview, ready for the client
-2. **Build phase:** same screens become CAS tasks with `design_ref` attached; workers can render their implementation and visually critique it against the canonical screen, and task-verifier gates close on significant drift
+2. **Build phase:** same screens become Cassy tasks with `design_ref` attached; workers can render their implementation and visually critique it against the canonical screen, and task-verifier gates close on significant drift
 
 ## User Flow
 
@@ -42,7 +42,7 @@ Build graduation
 ┌────────────────────────────────────────────────────────────────────┐
 │  cas stitch lock                                                   │
 │    ├─ snapshots current screen set as canonical build spec         │
-│    ├─ creates one CAS epic + one task per screen                   │
+│    ├─ creates one Cassy epic + one task per screen                   │
 │    └─ populates design_ref {screen_id, path, thumbnail} per task   │
 └────────────────────────────────────────────────────────────────────┘
 
@@ -73,7 +73,7 @@ Build phase (per task)
 
 **Pitch → Build Graduation**
 - R9. Pitch artifacts (screens, DESIGN.md, `.cas/stitch.toml`) live in the same repo that becomes the build repo — no export/import step.
-- R10. `cas stitch lock` is the explicit pitch-to-build transition: snapshots the current screen set and creates one CAS epic + one task per screen with `design_ref` populated.
+- R10. `cas stitch lock` is the explicit pitch-to-build transition: snapshots the current screen set and creates one Cassy epic + one task per screen with `design_ref` populated.
 - R11. Before `lock`, no build tasks exist. The pitch phase is design-only to avoid task pollution during iteration.
 
 **Visual Agent Critique Loop**
@@ -98,15 +98,15 @@ Build phase (per task)
 - **Not in scope:** Figma export pipeline — users can trigger it via Stitch MCP directly; no dedicated `cas stitch export figma` command.
 - **Not in scope:** Code generation from screens. Workers still write code; `design_ref` is input, not output. Downstream tools like `stitch-kit` or `oogleyskr/stitch-mcp-server` may add this later as a layered capability.
 - **Not in scope:** Client-facing collaboration in the preview (comments, approvals, sharing). Preview is read-only HTML; clients communicate outside the tool.
-- **Not in scope:** Cross-engagement quota pooling, agency-wide dashboards. Quota is per-CAS-project = per-Stitch-project. One project bears its own rate-limit fate.
+- **Not in scope:** Cross-engagement quota pooling, agency-wide dashboards. Quota is per-Cassy-project = per-Stitch-project. One project bears its own rate-limit fate.
 - **Not in scope:** Shared Stitch project across engagements. Isolation (both quota and Stitch generation context) is a hard requirement.
 - **Not in scope:** Stitch web-UI refinement as a primary workflow. Web UI remains optional for power users but the CLI is the canonical surface.
 
 ## Key Decisions
 
-- **Same repo, pitch + build** — simpler than export/import, matches CAS's "project = repo" assumption. Pitch artifacts persist, become build spec in place.
+- **Same repo, pitch + build** — simpler than export/import, matches Cassy's "project = repo" assumption. Pitch artifacts persist, become build spec in place.
 - **Fully-auto Stitch project creation** — validated April 2026 that `stitch.createProject()` exists as a first-class SDK method; removing the manual step is free.
-- **CLI-driven refinement** — most CAS-native; scriptable; keeps Stitch web UI optional, not required.
+- **CLI-driven refinement** — most Cassy-native; scriptable; keeps Stitch web UI optional, not required.
 - **Both on-demand and gate-at-close visual critique** — gives workers self-correction capability during work AND verifier teeth at close. Neither alone is sufficient.
 - **Explicit `lock` command to transition pitch → build** — prevents task pollution during design iteration. Pitch phase is "designs only, no tasks," build phase begins at lock.
 - **Per-engagement Stitch project isolation** — quota isolation and avoiding generation-context cross-contamination from prior clients.
@@ -115,9 +115,9 @@ Build phase (per task)
 
 - Stitch `createProject()` API remains publicly available (confirmed April 2026 via SDK README and release notes).
 - Stitch rate-limit tier remains approximately 350 standard + 50 pro gen/mo on free; if a paid tier arrives, quota-budget logic must accept a configurable ceiling.
-- Stitch remains a Google Labs experiment with no deprecation policy — integration should be feature-flagged so CAS can operate if Stitch goes away.
+- Stitch remains a Google Labs experiment with no deprecation policy — integration should be feature-flagged so Cassy can operate if Stitch goes away.
 - `cas-mcp-proxy` can inject per-project auth headers for upstream calls (to verify during planning against proxy internals).
-- Worker rendering capability (for visual check) can be bootstrapped from existing CAS infrastructure or a scoped headless-browser dependency.
+- Worker rendering capability (for visual check) can be bootstrapped from existing Cassy infrastructure or a scoped headless-browser dependency.
 
 ## Outstanding Questions
 
@@ -125,8 +125,8 @@ Build phase (per task)
 *(none — all product decisions made)*
 
 ### Deferred to Planning
-- [Affects R3][Technical] Exact TOML schema for `.cas/stitch.toml` — field names, defaults, layering with global CAS config.
-- [Affects R12][Technical] Rendering backend choice for visual check — Playwright? puppeteer-core? a native Rust approach? Pick during planning based on existing CAS dependencies.
+- [Affects R3][Technical] Exact TOML schema for `.cas/stitch.toml` — field names, defaults, layering with global Cassy config.
+- [Affects R12][Technical] Rendering backend choice for visual check — Playwright? puppeteer-core? a native Rust approach? Pick during planning based on existing Cassy dependencies.
 - [Affects R12][Technical] Diff algorithm — SSIM, PSNR, or a structural-DOM diff as fallback for dynamic content (data-driven lists, dates).
 - [Affects R14][Needs research] Drift-threshold default calibration — needs empirical validation on a handful of real UI tasks before a sensible default ships.
 - [Affects R5][Technical] Cache invalidation rules — when does a cached screen become stale? On `regen` only, or also on Stitch-side edits detected via polling?

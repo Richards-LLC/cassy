@@ -1,14 +1,14 @@
 ---
 date: 2026-04-16
 topic: cas-google-stitch-integration
-focus: integrate CAS with Google Stitch — official APIs/exports vs community tooling
+focus: integrate Cassy with Google Stitch — official APIs/exports vs community tooling
 ---
 
-# Ideation: CAS × Google Stitch Integration
+# Ideation: Cassy × Google Stitch Integration
 
 ## Grounding Summary
 
-### CAS extension surfaces (relevant to this topic)
+### Cassy extension surfaces (relevant to this topic)
 
 - **`cas-mcp-proxy/`** — already aggregates upstream MCP servers (Figma, GitHub, etc.); one registration exposes N tools to every worker in every project
 - **Skill sync** (`cas-cli/src/sync/skills.rs`) — DB↔`.claude/skills/*/SKILL.md` with YAML frontmatter; designed to mirror external skill libraries
@@ -25,7 +25,7 @@ focus: integrate CAS with Google Stitch — official APIs/exports vs community t
 **Official surfaces:**
 - MCP server at `https://stitch.googleapis.com/mcp` (auth via `STITCH_API_KEY` or OAuth)
 - `@google/stitch-sdk` (npm, JS/TS) wrapping the MCP surface, integrates with Vercel AI SDK
-- `google-labs-code/stitch-skills` — official agent skills library (same SKILL.md shape as CAS)
+- `google-labs-code/stitch-skills` — official agent skills library (same SKILL.md shape as Cassy)
 - Exports: HTML/CSS (primary), PNG, DESIGN.md (portable Markdown design-system spec), Figma via community plugin
 - Rate limits: **350 gen/mo standard + 50 gen/mo pro** on free tier — tight for iterative agents
 - Auth: API key from Stitch Settings UI, or OAuth with Google Cloud project
@@ -65,7 +65,7 @@ focus: integrate CAS with Google Stitch — official APIs/exports vs community t
 **Grounding:** `cas-mcp-proxy/`, `cas-cli/src/commands/mcp.rs`
 **Status:** Explored — requirements captured in `docs/brainstorms/2026-04-16-cas-google-stitch-integration-requirements.md` (R15)
 
-### 2. Import `stitch-skills` wholesale via CAS skill sync
+### 2. Import `stitch-skills` wholesale via Cassy skill sync
 **Description:** Extend `cas-cli/src/sync/skills.rs` to mirror `google-labs-code/stitch-skills` into `.claude/skills/stitch/*` with `provenance: stitch-official` frontmatter so upstream updates flow on `cas sync`. Optionally also mirror `gabelul/stitch-kit` under a `.claude/skills/stitch-community/` namespace.
 **Rationale:** Both ecosystems publish SKILL.md in the same YAML-frontmatter shape. The sync mechanism is the compounding primitive — one import authored once reaches every future session, every project. Dedupe against existing `.claude/skills/` and preserve upstream update path.
 **Downsides:** Upstream schema drift risk; some skills may be irrelevant to non-UI projects (gate imports on project-config detection); supply-chain consideration if pulling community repos.
@@ -114,12 +114,12 @@ focus: integrate CAS with Google Stitch — official APIs/exports vs community t
 **Description:** New `cas stitch scaffold "<scope>"` command (or MCP tool). Input: a natural-language scope like "recipe-sharing mobile app" or "SaaS admin dashboard for ops team." Pipeline:
 1. LLM enumerates implied screens from scope (home, detail, profile, auth, empty states, errors) with acceptance criteria per screen.
 2. For each screen, call Stitch MCP (`project.generate()` against a project, or multi-screen generation — up to 5 at once as of March 2026).
-3. Cache screens in the `StitchCacheStore` (#6), emit one CAS task per screen with `design_ref` (#4) pre-populated, create a parent epic tying them together.
+3. Cache screens in the `StitchCacheStore` (#6), emit one Cassy task per screen with `design_ref` (#4) pre-populated, create a parent epic tying them together.
 4. Return a summary with thumbnail refs and quota consumed.
 
-**Rationale:** This is the use case that makes #1 (proxy integration) actually valuable to operators — instead of pointing CAS at a pre-made Stitch project, the user hands it a scope and gets back a decomposed task graph with designs attached. Sidesteps R3's "task queue pollution from design iteration" failure mode because scope expansion runs once upfront. Leverages Stitch's new multi-screen mode to batch gen-calls.
+**Rationale:** This is the use case that makes #1 (proxy integration) actually valuable to operators — instead of pointing Cassy at a pre-made Stitch project, the user hands it a scope and gets back a decomposed task graph with designs attached. Sidesteps R3's "task queue pollution from design iteration" failure mode because scope expansion runs once upfront. Leverages Stitch's new multi-screen mode to batch gen-calls.
 
-**Downsides:** Quota-burning — one scope could cost 8–15 generations (addressed by #6 caching + budget-check pre-flight). LLM-driven screen enumeration is lossy; user may need to edit the implied-screen list before dispatching. No public Stitch creation API means the target project must already exist (prompt user for project ID, or fall back to a CAS-owned "scaffold" project shared across scope calls).
+**Downsides:** Quota-burning — one scope could cost 8–15 generations (addressed by #6 caching + budget-check pre-flight). LLM-driven screen enumeration is lossy; user may need to edit the implied-screen list before dispatching. No public Stitch creation API means the target project must already exist (prompt user for project ID, or fall back to a Cassy-owned "scaffold" project shared across scope calls).
 
 **Confidence:** 70%
 **Complexity:** Medium-High (orchestration layer, but all components are in #1/#4/#6)
@@ -130,7 +130,7 @@ focus: integrate CAS with Google Stitch — official APIs/exports vs community t
 **Description:**
 - **Phase A:** Task-verifier agent attaches the Stitch-canonical PNG (via `screen.getImage()`) to the task-close payload as an artifact. No automated diff — humans see before/after in the close summary and Slack notification.
 - **Phase B:** Add Playwright headless render of the implemented route + SSIM diff against canonical PNG. Gate close on threshold. Rule demotes on repeated red diffs.
-**Rationale:** Explicitly addresses "CAS is text-only, no way to show what a worker built" pain from grounding. One PNG per screen serves task-verifier + PR review + Slack bridge + docs + onboarding — multi-consumer artifact from a single generation.
+**Rationale:** Explicitly addresses "Cassy is text-only, no way to show what a worker built" pain from grounding. One PNG per screen serves task-verifier + PR review + Slack bridge + docs + onboarding — multi-consumer artifact from a single generation.
 **Downsides:** Phase B is High complexity (headless render, SSIM brittleness, threshold tuning, animation/theme flakiness). Don't couple Phase A and B — A has standalone value.
 **Confidence:** 70% (Phase A) / 45% (Phase B)
 **Complexity:** Medium (Phase A) / High (Phase B)
@@ -145,7 +145,7 @@ focus: integrate CAS with Google Stitch — official APIs/exports vs community t
 | R2 | Visual diff via Slack bridge (standalone) | Duplicates #7 — Slack is one consumer of the same PNG artifact, not a separate mechanism |
 | R3 | DESIGN.md watcher → auto-task decomposition | High risk of task-queue pollution from design-iteration churn; granularity of "new component" is hard to diff-detect. Revisit after #3/#5 stabilize |
 | R4 | Slack `/stitch` command router | Niche convenience for Slack+Stitch-active teams; doesn't compound across workers. Follow-up once foundation ships |
-| R5 | Stitch screens as first-class CAS artifact type | Speculative architectural change (new schema, new sync, new semantics) ahead of confirmed friction from #3/#5 |
+| R5 | Stitch screens as first-class Cassy artifact type | Speculative architectural change (new schema, new sync, new semantics) ahead of confirmed friction from #3/#5 |
 | R6 | Reverse-generate Stitch designs from existing code | Depends on unconfirmed Stitch code→design multimodal capability; not in documented surface |
 | R7 | Designer-worker role that outputs Stitch prompts | Blocked by Stitch's lack of a public creation API (April 2026); premature role specialization |
 | R8 | Stitch screen URL as acceptance criteria (standalone) | Covered by #7 Phase B — this is how the verifier attaches to a task, not a separate feature |
@@ -167,11 +167,11 @@ focus: integrate CAS with Google Stitch — official APIs/exports vs community t
 
 **Operational notes:**
 - Stitch rate limits make a **shared cache mandatory**, not optional, for factory use
-- Stitch's Labs-experimental status argues for **loose coupling** — keep integration behind a feature flag; don't let CAS hard-depend on Stitch APIs
+- Stitch's Labs-experimental status argues for **loose coupling** — keep integration behind a feature flag; don't let Cassy hard-depend on Stitch APIs
 - Auth-key-per-project is the right scope boundary; rate limits are per-project anyway
 
 ## Session Log
 
-- 2026-04-16: Initial ideation — 41 raw ideas generated across 4 frames (operator pain, inversion/automation, assumption-breaking, leverage/compounding), merged/deduped to 21, filtered to 7 survivors. Focus: integrate CAS with Google Stitch — compare official + community options.
+- 2026-04-16: Initial ideation — 41 raw ideas generated across 4 frames (operator pain, inversion/automation, assumption-breaking, leverage/compounding), merged/deduped to 21, filtered to 7 survivors. Focus: integrate Cassy with Google Stitch — compare official + community options.
 - 2026-04-16: Selected idea #1 (Wire Stitch MCP as upstream in `cas-mcp-proxy`) for brainstorming.
 - 2026-04-16: User added scope-driven usage requirement → ideation extended with idea #7 (Scope → implied-screens generator). Survivor count now 8. Both #1 and #7 selected for combined brainstorm (scope generator is the use case that gives #1 its shape).

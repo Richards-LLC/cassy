@@ -432,7 +432,7 @@ pub fn diagnose_daemon_death(
     };
     let next_action = match &cause {
         DaemonDeathCause::Signal { signal: 4, .. } => {
-            "Replace this CAS binary with the portable release artifact for this machine, then \
+            "Replace this Cassy binary with the portable release artifact for this machine, then \
              restart the factory session; preserve the daemon log and core dump for diagnosis."
         }
         _ => {

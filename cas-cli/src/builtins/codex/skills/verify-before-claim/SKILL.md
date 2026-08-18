@@ -90,7 +90,7 @@ A proof command is **observable, deterministic, and recoverable** — anyone re-
 
 **v1 ships as advisory.** This skill instructs the worker; it does NOT mechanically enforce that a proof-command output is pasted as a task note before close. The reasons:
 
-- The CAS runtime already has `verification_store` + close-gate.md's 6-check self-verification as the mechanical layer. This skill is the *agent-discipline* layer on top.
+- The Cassy runtime already has `verification_store` + close-gate.md's 6-check self-verification as the mechanical layer. This skill is the *agent-discipline* layer on top.
 - Mechanical enforcement (refusing close until a note matching a regex like `Proof:.*\nExit: 0` appears) is straightforward to add later, but adds friction on legitimate documentation/spike tasks and creates a tempting bypass surface ("paste a fake proof to unblock").
 - A clear advisory rule that the supervisor can cite when a worker skips proof (and that the verifier prompt can quote when finding "claimed done without evidence") is the right v1 surface. If workers ignore it, escalate to required-paste in v2.
 

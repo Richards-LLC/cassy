@@ -13,17 +13,17 @@ The goal of this report is concrete evidence — file paths, log excerpts, exact
 
 ---
 
-## 1. CAS-managed CLAUDE.md block triple-duplicates across ancestor directories (P1)
+## 1. Cassy-managed CLAUDE.md block triple-duplicates across ancestor directories (P1)
 
 ### Symptoms
 
-Session entered Ozer Health repo and loaded **three identical CAS-managed blocks** into context:
+Session entered Ozer Health repo and loaded **three identical Cassy-managed blocks** into context:
 
 - `/home/pippenz/CLAUDE.md` (14 lines, CAS:BEGIN…CAS:END)
 - `/home/pippenz/Petrastella/CLAUDE.md` (14 lines, byte-identical)
 - `/home/pippenz/Petrastella/ozer/CLAUDE.md` (14 lines, byte-identical)
 
-All three contain the exact same `# IMPORTANT: USE CAS FOR TASK AND MEMORY MANAGEMENT` body, wrapped in the same `<!-- CAS:BEGIN -->` / `<!-- CAS:END -->` markers.
+All three contain the exact same `# IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT` body, wrapped in the same `<!-- CAS:BEGIN -->` / `<!-- CAS:END -->` markers.
 
 ### Concrete evidence
 
@@ -48,7 +48,7 @@ Result: 50 lines load per Ozer session (was ~79 with the dup).
 
 ### Likely root cause
 
-CAS injects the managed block via `cas hook UserPromptSubmit` (or session-start equivalent). The injection logic likely doesn't check whether an ancestor CLAUDE.md already contains the managed block before writing to the project-level file. The same logic ran when CAS initialized `~/Petrastella/CLAUDE.md` and `~/Petrastella/ozer/CLAUDE.md` separately.
+Cassy injects the managed block via `cas hook UserPromptSubmit` (or session-start equivalent). The injection logic likely doesn't check whether an ancestor CLAUDE.md already contains the managed block before writing to the project-level file. The same logic ran when Cassy initialized `~/Petrastella/CLAUDE.md` and `~/Petrastella/ozer/CLAUDE.md` separately.
 
 ### Proposed fix
 
@@ -64,7 +64,7 @@ CAS injects the managed block via `cas hook UserPromptSubmit` (or session-start 
 
 ### Symptoms
 
-The CAS-managed CLAUDE.md says repeatedly:
+The Cassy-managed CLAUDE.md says repeatedly:
 
 > **DO NOT USE BUILT-IN TOOLS (TodoWrite, EnterPlanMode) FOR TASK TRACKING.**
 > Use CAS MCP tools instead:
@@ -81,33 +81,33 @@ ToolSearch(query="select:mcp__cas__task", max_results=1)
 ### Concrete evidence
 
 Today's session hit this twice:
-1. After deciding to track the codemap/skill-rewrite work via CAS tasks, I called `ToolSearch(query="select:mcp__cas__task")` at ~14:30 UTC to load the schema before the first `mcp__cas__task action=create`.
+1. After deciding to track the codemap/skill-rewrite work via Cassy tasks, I called `ToolSearch(query="select:mcp__cas__task")` at ~14:30 UTC to load the schema before the first `mcp__cas__task action=create`.
 2. Again after the ripple-check fired with task IDs, I needed `mcp__cas__task action=show` to look them up — but the tool wasn't loaded yet in that turn either (parent context vs branch context drift), required another ToolSearch.
 
 ### Why this matters
 
-The whole point of the CAS-managed CLAUDE.md block is to deflect Claude away from the harness's built-in TaskCreate/TodoWrite (which fires its own reminder; see #3). But the deflection-target tool is **harder** to reach than the built-in. Net friction:
+The whole point of the Cassy-managed CLAUDE.md block is to deflect Claude away from the harness's built-in TaskCreate/TodoWrite (which fires its own reminder; see #3). But the deflection-target tool is **harder** to reach than the built-in. Net friction:
 
 | Path | Steps to first task created |
 |---|---|
 | Harness default (`TaskCreate`) | 1 (just call it) |
-| CAS-recommended (`mcp__cas__task`) | 2 (ToolSearch, then call) |
+| Cassy-recommended (`mcp__cas__task`) | 2 (ToolSearch, then call) |
 
 Combine that with #3 (built-in reminder firing every PostToolUse) and the friction gradient is the wrong direction.
 
 ### Proposed fix
 
-This is mostly a Claude Code harness decision (eager vs deferred MCP tool loading), but CAS can influence it:
+This is mostly a Claude Code harness decision (eager vs deferred MCP tool loading), but Cassy can influence it:
 
-- **(a)** Document in the CAS-managed CLAUDE.md block the exact ToolSearch query Claude should run on first task-tracking intent: `ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search")`. Saves Claude from inferring the syntax.
+- **(a)** Document in the Cassy-managed CLAUDE.md block the exact ToolSearch query Claude should run on first task-tracking intent: `ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search")`. Saves Claude from inferring the syntax.
 - **(b)** Provide a tiny eagerly-loaded shim skill (`cas-mcp-bootstrap`?) whose only job is to pre-fetch the CAS MCP tool schemas via ToolSearch at session start. Users could opt-in via `cas hook configure --eager-mcp`.
-- **(c)** Upstream: file a Claude Code request for "pin MCP tools listed in CLAUDE.md to non-deferred" — but that's not CAS's lane.
+- **(c)** Upstream: file a Claude Code request for "pin MCP tools listed in CLAUDE.md to non-deferred" — but that's not Cassy's lane.
 
 **Cost today:** ~2 extra ToolSearch calls in this session. Multiply by every session that does any task tracking.
 
 ---
 
-## 3. Built-in Claude Code `TaskCreate` reminder fires repeatedly despite CAS-managed CLAUDE.md telling Claude not to use it (P2 upstream, but CAS-adjacent)
+## 3. Built-in Claude Code `TaskCreate` reminder fires repeatedly despite Cassy-managed CLAUDE.md telling Claude not to use it (P2 upstream, but Cassy-adjacent)
 
 ### Symptoms
 
@@ -126,21 +126,21 @@ new tasks and ${hI} to update task status ...
 
 `${QE}` resolves to `TaskCreate`, `${hI}` to `TaskUpdate` — substituted at runtime. The harness doesn't read CLAUDE.md to decide whether to fire.
 
-### Why this is a CAS-adjacent issue (not just upstream)
+### Why this is a Cassy-adjacent issue (not just upstream)
 
-The CAS-managed CLAUDE.md block is a defection-rule for this exact reminder. CAS users *expect* the rule to be load-bearing. Today every fire of the built-in reminder is also evidence that the rule isn't doing what users assume — Claude just sees the nudge and ignores it (correctly per CLAUDE.md), but the user sees the nudge **fire anyway** and assumes their config is broken.
+The Cassy-managed CLAUDE.md block is a defection-rule for this exact reminder. Cassy users *expect* the rule to be load-bearing. Today every fire of the built-in reminder is also evidence that the rule isn't doing what users assume — Claude just sees the nudge and ignores it (correctly per CLAUDE.md), but the user sees the nudge **fire anyway** and assumes their config is broken.
 
 ### Workaround applied
 
-Confirmed via grep that the reminder is harness-baked, not CAS-emitted. No action taken; the behavior is upstream.
+Confirmed via grep that the reminder is harness-baked, not Cassy-emitted. No action taken; the behavior is upstream.
 
 ### Proposed fix
 
-- **(a)** **CAS-side** (defense in depth): the existing `cas hook PostToolUse` could pattern-strip these specific reminders from injected context. Risk: fragile against any wording change in CC releases; adds latency to every tool call. Likely not worth it.
-- **(b)** **Upstream**: CAS team files a Claude Code feature request for a settings.json knob like `disableBuiltInTaskReminders: true` or `taskTools: { provider: "mcp__cas__task" }` so the harness skips the reminder when an MCP provider claims the task surface. (CAS reaching out to Anthropic on behalf of users is more leveraged than each user filing individually.)
+- **(a)** **Cassy-side** (defense in depth): the existing `cas hook PostToolUse` could pattern-strip these specific reminders from injected context. Risk: fragile against any wording change in CC releases; adds latency to every tool call. Likely not worth it.
+- **(b)** **Upstream**: Cassy team files a Claude Code feature request for a settings.json knob like `disableBuiltInTaskReminders: true` or `taskTools: { provider: "mcp__cas__task" }` so the harness skips the reminder when an MCP provider claims the task surface. (Cassy reaching out to Anthropic on behalf of users is more leveraged than each user filing individually.)
 - **(c)** **Documentation**: add a FAQ entry to `cas-src/docs/` explicitly explaining "you'll still see the built-in reminder; here's why, here's that it's harmless, here's the upstream request to follow."
 
-**Cost today:** ~10 system-reminder injections × ~80 tokens each = ~800 tokens of context noise. Cosmetic, but erodes user trust in the CAS rule.
+**Cost today:** ~10 system-reminder injections × ~80 tokens each = ~800 tokens of context noise. Cosmetic, but erodes user trust in the Cassy rule.
 
 ---
 
@@ -203,7 +203,7 @@ CODEMAP.md: /home/pippenz/Petrastella/ozer/.claude/CODEMAP.md
   Status: up to date
 ```
 
-Two CAS-emitted signals, conflicting interpretations of the same file state.
+Two Cassy-emitted signals, conflicting interpretations of the same file state.
 
 ### Why the two paths differ (hypothesis)
 
@@ -252,9 +252,9 @@ Net effect either way: the user/agent should never have to manually invoke `cas 
 
 | # | Issue | Severity | Cost today | Affects |
 |---|---|---|---|---|
-| 1 | CAS-managed CLAUDE.md triple-duplicates across ancestors | P1 | 28 wasted lines / session | every CC session on this machine |
+| 1 | Cassy-managed CLAUDE.md triple-duplicates across ancestors | P1 | 28 wasted lines / session | every CC session on this machine |
 | 2 | `mcp__cas__task` deferred-tool friction | P1 UX | ~2 extra tool calls | every session that tracks work |
-| 3 | Built-in `TaskCreate` reminder fires anyway (upstream + CAS-adjacent) | P2 | ~800 tokens cosmetic noise | every CC session, harness-level |
+| 3 | Built-in `TaskCreate` reminder fires anyway (upstream + Cassy-adjacent) | P2 | ~800 tokens cosmetic noise | every CC session, harness-level |
 | 4 | Ripple-check substring-match cross-project false positives | P2 | ~30s + 3 lookups per fire | multi-repo workflows |
 | 5 | `cas codemap status` disagrees with SessionStart banner | P3 | ~2 min triage | sessions inheriting stale ledger |
 | 6 | `/codemap` regen doesn't auto-`cas codemap clear` | P3 | None today; produces #5 next session | every codemap regen |

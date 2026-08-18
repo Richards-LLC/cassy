@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-10
 **Task:** cas-9b39
-**Epic:** cas-84a9 (CAS Remote Deployment & Slack Bridge)
+**Epic:** cas-84a9 (Cassy Remote Deployment & Slack Bridge)
 **Author:** cosmic-marten-61
 
 ## Summary
@@ -384,7 +384,7 @@ Behavior:
 | **No task-level events in SSE** | Low | Task completions appear as activity events (`entity_type: "task"`) but the current SSE filter only shows events from session agents. The Slack adapter can use `GET /status` which includes `tasks_in_progress` and `tasks_ready` for polling. |
 | **No file/attachment passthrough** | Low | Slack users may upload files. No endpoint to inject file content. Would need a new endpoint or workaround (base64 in message body, or write to project dir). |
 | **SSE is pull-only from server** | None | SSE is the right pattern for Slack — the adapter opens one SSE connection per active session and maps events to Slack threads. No gap here. |
-| **Auth is bearer token only** | None | Fine for server-to-server. The Slack bot authenticates users via Slack OAuth; the bridge-to-CAS auth is a separate internal concern. |
+| **Auth is bearer token only** | None | Fine for server-to-server. The Slack bot authenticates users via Slack OAuth; the bridge-to-Cassy auth is a separate internal concern. |
 
 ### The `from` field is the response routing key
 

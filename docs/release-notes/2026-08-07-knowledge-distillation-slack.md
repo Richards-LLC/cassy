@@ -25,7 +25,7 @@ Permalinks: _(fill in after posting)_
 
 Live on main — **User**
 
-Every new conversation used to start by reading your project from scratch — the same files, the same questions, the same slow rediscovery, over and over. Your project can now explain itself: CAS distills your docs and code into a wiki it reads at startup, so a session begins already knowing its way around.
+Every new conversation used to start by reading your project from scratch — the same files, the same questions, the same slow rediscovery, over and over. Your project can now explain itself: Cassy distills your docs and code into a wiki it reads at startup, so a session begins already knowing its way around.
 
 ### Reply to Post 1
 

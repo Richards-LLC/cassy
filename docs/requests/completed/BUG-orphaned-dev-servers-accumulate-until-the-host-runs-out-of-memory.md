@@ -31,18 +31,18 @@ All 33 were the same command, differing only in age:
 - **Ages spread 42 minutes to 2h07**, roughly evenly — i.e. a new copy appearing every few minutes and none ever exiting. This is accumulation, not a single leak.
 - Individually 1.2–2.3 GiB RSS, several also holding 125–335 MB of swap each.
 
-## Why this is filed against CAS (and the caveat)
+## Why this is filed against Cassy (and the caveat)
 
 Circumstantial but consistent:
 
-- `/home/pippenz/Petrastella/ozer/` contains **5 CAS factory worktrees** (`.cas/worktrees/`), and `~/.cas/` holds **21 factory sockets** referencing that project. It is a heavily factory-driven repo.
+- `/home/pippenz/Petrastella/ozer/` contains **5 Cassy factory worktrees** (`.cas/worktrees/`), and `~/.cas/` holds **21 factory sockets** referencing that project. It is a heavily factory-driven repo.
 - `apps/frontend/package.json` declares `"dev": "nuxt dev"` — exactly the process shape that accumulated.
 - The accumulation cadence (one every few minutes, over hours) matches agent-driven task execution far better than it matches a human starting dev servers by hand. No person starts 33 dev servers in two hours.
 - Prior recurrence is already recorded in this operator's notes: the same pattern previously consumed ~26 GiB, with the same remedy (`pkill -f /Petrastella/`).
 
-**The caveat, stated because it weakens the case:** the orphaned processes' paths pointed at the **main checkout** (`/home/pippenz/Petrastella/ozer/apps/frontend`), not at any `.cas/worktrees/<worker>/` path. If workers were launching them from inside isolated worktrees, I would have expected worktree paths. That is consistent with non-isolated workers (`isolate=false`, which share the main working directory) or with a worker `cd`-ing to the main checkout, but I did not capture the parent chain before killing the processes, so I cannot prove CAS spawned them.
+**The caveat, stated because it weakens the case:** the orphaned processes' paths pointed at the **main checkout** (`/home/pippenz/Petrastella/ozer/apps/frontend`), not at any `.cas/worktrees/<worker>/` path. If workers were launching them from inside isolated worktrees, I would have expected worktree paths. That is consistent with non-isolated workers (`isolate=false`, which share the main working directory) or with a worker `cd`-ing to the main checkout, but I did not capture the parent chain before killing the processes, so I cannot prove Cassy spawned them.
 
-**What would settle it:** on the next occurrence, capture `ps -eo pid,ppid,lstart,args` for the orphans *before* killing, and correlate their start times against factory session start/end times. If they cluster at worker boot, it is CAS.
+**What would settle it:** on the next occurrence, capture `ps -eo pid,ppid,lstart,args` for the orphans *before* killing, and correlate their start times against factory session start/end times. If they cluster at worker boot, it is Cassy.
 
 ## Impact
 
@@ -67,8 +67,8 @@ Circumstantial but consistent:
 ## Resolution (2026-07-29)
 
 Factory worker panes already started as `setsid(2)` session/process-group
-leaders, but CAS did not persist those PGIDs and factory exit killed only the
-direct pane children. CAS now records each worker's PGID, factory session, and
+leaders, but Cassy did not persist those PGIDs and factory exit killed only the
+direct pane children. Cassy now records each worker's PGID, factory session, and
 Linux process-start fingerprint under `.cas/factory-process-groups/` at spawn
 and respawn. Worker shutdown, crash/rotation, factory exit, and worker-lane
 worktree cleanup reap the whole fingerprint-validated group. Factory exit now

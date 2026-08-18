@@ -1,6 +1,6 @@
 //! Factory tooling setup for cas init
 //!
-//! Creates lightweight worktree helper templates managed by CAS.
+//! Creates lightweight worktree helper templates managed by Cassy.
 
 use anyhow::Result;
 use std::path::Path;
@@ -148,7 +148,7 @@ pub fn setup_factory_tooling(cwd: &Path) -> Result<String> {
 
     let mut results = Vec::new();
 
-    // Create CAS-managed helper templates only.
+    // Create Cassy-managed helper templates only.
 
     if create_env_template(cwd)? {
         results.push(".env.worktree.template");

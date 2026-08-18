@@ -8,7 +8,7 @@ priority: P2
 
 ## Summary
 
-Add a CAS skill that generates a **PRODUCT_OVERVIEW.md** for any project — a lean,
+Add a Cassy skill that generates a **PRODUCT_OVERVIEW.md** for any project — a lean,
 domain-focused document describing what the project *is*, who uses it, and its core
 concepts — plus lightweight automation that keeps it from going stale.
 
@@ -29,7 +29,7 @@ way to produce and refresh it.
    Deals…) is diffused across the Prisma schema, dashboard components, and planning
    docs. No single artifact pulls it together.
 
-2. **CAS has no product-domain layer.** CAS memories capture architecture, conventions,
+2. **Cassy has no product-domain layer.** Cassy memories capture architecture, conventions,
    incidents, and preferences, but there is no convention for *product context*. Agents
    spun up in a new session guess at the domain from file names.
 
@@ -81,8 +81,8 @@ Model this on the existing CODEMAP freshness hook:
 - A **rule** auto-surfaced on domain-model edits: "You are editing the core domain
   model — consider whether `docs/PRODUCT_OVERVIEW.md` needs an update in the same PR."
 - A **memory-pointer convention**: when this skill runs, it also writes (or updates) a
-  tiny CAS memory named `project_<slug>_domain.md` that just points at the doc. Gives
-  CAS search a first-class hit without duplicating the doc's contents in memory.
+  tiny Cassy memory named `project_<slug>_domain.md` that just points at the doc. Gives
+  Cassy search a first-class hit without duplicating the doc's contents in memory.
 
 ---
 
@@ -90,13 +90,13 @@ Model this on the existing CODEMAP freshness hook:
 
 Two layers is deliberate:
 
-- **Doc in git** — versioned, reviewable in PRs, visible to humans without CAS, survives
+- **Doc in git** — versioned, reviewable in PRs, visible to humans without Cassy, survives
   across branches/worktrees, and is the natural place to update alongside schema
   changes.
-- **Thin CAS memory pointer** — ensures CAS surfaces the doc during semantic search,
-  without CAS holding a stale copy of its contents.
+- **Thin Cassy memory pointer** — ensures Cassy surfaces the doc during semantic search,
+  without Cassy holding a stale copy of its contents.
 
-Memory-only drifts silently; doc-only is invisible to CAS search. The pointer pattern
+Memory-only drifts silently; doc-only is invisible to Cassy search. The pointer pattern
 gives us both without the maintenance cost of keeping two copies in sync.
 
 ---

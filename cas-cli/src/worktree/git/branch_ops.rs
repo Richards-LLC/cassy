@@ -787,7 +787,7 @@ impl GitOperations {
 
     /// Mark .claude/, CLAUDE.md, and .mcp.json as skip-worktree in a worktree
     ///
-    /// This prevents workers from accidentally staging and committing CAS-synced
+    /// This prevents workers from accidentally staging and committing Cassy-synced
     /// changes to these tracked config files. The files remain in the worktree
     /// (Claude Code works normally) but git ignores local modifications.
     pub fn mark_config_skip_worktree(&self, worktree_path: &Path) -> Result<()> {
@@ -843,7 +843,7 @@ impl GitOperations {
 
         if !fetch_output.status.success() {
             eprintln!(
-                "[CAS] Warning: git fetch failed: {}",
+                "[Cassy] Warning: git fetch failed: {}",
                 String::from_utf8_lossy(&fetch_output.stderr)
             );
         }

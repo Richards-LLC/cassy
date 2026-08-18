@@ -9,7 +9,7 @@ Merge: `main` @ `5e10edcd` — Homebrew formula now installs the current release
 
 **Top-level:**
 
-Live on production — **User**: `brew install` now delivers the current CAS release on Apple Silicon Macs and Linux instead of a months-old version from a dead download link.
+Live on production — **User**: `brew install` now delivers the current Cassy release on Apple Silicon Macs and Linux instead of a months-old version from a dead download link.
 
 **Reply:**
 

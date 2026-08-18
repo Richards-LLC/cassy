@@ -6,7 +6,7 @@ use anyhow::Context;
 use crate::mcp::server::CasCore;
 use crate::store::open_agent_store;
 
-/// Run the MCP server with 13 meta-tools (11 CAS + 2 proxy)
+/// Run the MCP server with 13 meta-tools (11 Cassy + 2 proxy)
 pub async fn run_server() -> anyhow::Result<()> {
     run_server_impl().await
 }
@@ -36,7 +36,7 @@ fn open_startup_pull_task_store(
 /// errors on the first tool call.
 fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
     let status = crate::migration::check_migrations(cas_root)
-        .context("could not determine the CAS schema required by this MCP binary")?;
+        .context("could not determine the Cassy schema required by this MCP binary")?;
     if !status.has_pending() {
         return Ok(());
     }
@@ -57,7 +57,7 @@ fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
         Ok(result) => {
             if result.applied_count > 0 {
                 eprintln!(
-                    "[CAS] Applied {} pending schema migration(s) before MCP startup.",
+                    "[Cassy] Applied {} pending schema migration(s) before MCP startup.",
                     result.applied_count
                 );
             }
@@ -71,7 +71,7 @@ fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
     }
 
     let final_status = crate::migration::check_migrations(cas_root)
-        .context("could not verify the CAS schema after automatic migration")?;
+        .context("could not verify the Cassy schema after automatic migration")?;
     if final_status.has_pending() {
         return Err(anyhow::Error::from(mismatch()));
     }
@@ -134,7 +134,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
         match crate::worktree::sweep::opportunistic::run_if_due(&wt_cfg) {
             Ok(Some(summary)) => {
                 eprintln!(
-                    "[CAS] opportunistic sweep: visited {} repo(s), reclaimed {}, salvaged {}",
+                    "[Cassy] opportunistic sweep: visited {} repo(s), reclaimed {}, salvaged {}",
                     summary.repos_visited, summary.reclaimed, summary.salvaged,
                 );
             }
@@ -215,10 +215,10 @@ async fn run_server_impl() -> anyhow::Result<()> {
                         commit_link_store.as_ref(),
                     ) {
                         Ok(result) if result.total_pulled() > 0 => {
-                            eprintln!("[CAS] Synced {} items from cloud", result.total_pulled());
+                            eprintln!("[Cassy] Synced {} items from cloud", result.total_pulled());
                         }
                         Err(e) => {
-                            eprintln!("[CAS] Cloud sync failed (continuing): {e}");
+                            eprintln!("[Cassy] Cloud sync failed (continuing): {e}");
                         }
                         _ => {}
                     }
@@ -226,7 +226,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
             )
             .await;
             if result.is_err() {
-                eprintln!("[CAS] Cloud sync timed out (continuing without sync)");
+                eprintln!("[Cassy] Cloud sync timed out (continuing without sync)");
             }
         })
     };
@@ -285,7 +285,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
             let agent_name =
                 std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "worker".to_string());
             eprintln!(
-                "[CAS] Eager registration: {} ({})",
+                "[Cassy] Eager registration: {} ({})",
                 agent_name,
                 &session_id[..8.min(session_id.len())]
             );
@@ -301,7 +301,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[CAS] Eager registration failed: {e}");
+                    eprintln!("[Cassy] Eager registration failed: {e}");
                 }
             }
         }
@@ -319,7 +319,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
         match cfg {
             Ok(cfg) if !cfg.servers.is_empty() => {
                 eprintln!(
-                    "[CAS] Connecting to {} upstream MCP server(s)...",
+                    "[Cassy] Connecting to {} upstream MCP server(s)...",
                     cfg.servers.len()
                 );
                 let snapshot_config = cfg.clone();
@@ -327,7 +327,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
                         let count = engine.tool_count().await;
-                        eprintln!("[CAS] MCP proxy ready ({count} upstream tools)");
+                        eprintln!("[Cassy] MCP proxy ready ({count} upstream tools)");
                         if let Err(error) = write_proxy_snapshot_cache_for_config(
                             &cas_root,
                             &engine,
@@ -335,18 +335,18 @@ async fn run_server_impl() -> anyhow::Result<()> {
                         )
                         .await
                         {
-                            eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                            eprintln!("[Cassy] Failed to publish MCP proxy state: {error}");
                         }
                         Some(std::sync::Arc::new(engine))
                     }
                     Err(e) => {
-                        eprintln!("[CAS] MCP proxy init failed (continuing without proxy): {e}");
+                        eprintln!("[Cassy] MCP proxy init failed (continuing without proxy): {e}");
                         if let Err(error) = write_unavailable_proxy_snapshot_cache(
                             &cas_root,
                             Some(&snapshot_config),
                             ProxySnapshotFailure::EngineStartFailed,
                         ) {
-                            eprintln!("[CAS] Failed to publish MCP proxy failure state: {error}");
+                            eprintln!("[Cassy] Failed to publish MCP proxy failure state: {error}");
                         }
                         None
                     }
@@ -359,20 +359,20 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     ProxySnapshotState::Empty,
                     None,
                 ) {
-                    eprintln!("[CAS] Failed to publish empty MCP proxy state: {error}");
+                    eprintln!("[Cassy] Failed to publish empty MCP proxy state: {error}");
                 }
                 None
             }
             Err(error) => {
                 eprintln!(
-                    "[CAS] Failed to load MCP proxy config (continuing without proxy): {error}"
+                    "[Cassy] Failed to load MCP proxy config (continuing without proxy): {error}"
                 );
                 if let Err(error) = write_unavailable_proxy_snapshot_cache(
                     &cas_root,
                     None,
                     ProxySnapshotFailure::ConfigInvalid,
                 ) {
-                    eprintln!("[CAS] Failed to publish MCP proxy failure state: {error}");
+                    eprintln!("[Cassy] Failed to publish MCP proxy failure state: {error}");
                 }
                 None
             }
@@ -399,18 +399,18 @@ async fn run_server_impl() -> anyhow::Result<()> {
 
     // Empty-registry guard — if the tool router somehow ends up empty, refuse
     // to start. Otherwise the server would respond to `tools/list` with `[]`
-    // and the MCP client (e.g. Claude Code) silently shows zero CAS tools to
+    // and the MCP client (e.g. Claude Code) silently shows zero Cassy tools to
     // the agent with no surfaced error. See cas-5c05.
     let tool_names = service.registered_tool_names();
     if tool_names.is_empty() {
         anyhow::bail!(
-            "MCP tool registry is empty. This is a CAS build bug — refusing to \
+            "MCP tool registry is empty. This is a Cassy build bug — refusing to \
              start a server that would silently expose zero tools to the client. \
-             Rebuild CAS and retry."
+             Rebuild Cassy and retry."
         );
     }
     eprintln!(
-        "[CAS] Starting MCP server ({} tools: {}{})",
+        "[Cassy] Starting MCP server ({} tools: {}{})",
         tool_names.len(),
         tool_names.join(", "),
         if proxy_active { ", proxy active" } else { "" }
@@ -426,18 +426,18 @@ async fn run_server_impl() -> anyhow::Result<()> {
     tokio::select! {
         result = &mut waiting => {
             if let Err(e) = result {
-                eprintln!("[CAS] MCP server terminated with error: {e}");
+                eprintln!("[Cassy] MCP server terminated with error: {e}");
             }
         }
         () = parent_watchdog.tripped() => {}
     }
 
-    eprintln!("[CAS] Shutting down, releasing tasks...");
+    eprintln!("[Cassy] Shutting down, releasing tasks...");
     {
         use crate::agent_id::read_session_for_mcp;
         if let Ok(agent_id) = read_session_for_mcp(&cas_root) {
             if let Err(e) = release_agent_tasks(&cas_root, &agent_id) {
-                eprintln!("[CAS] Failed to release agent tasks for {agent_id}: {e}");
+                eprintln!("[Cassy] Failed to release agent tasks for {agent_id}: {e}");
             }
         }
     }
@@ -568,7 +568,7 @@ fn eager_init_stores(core: &CasCore, cas_root: &std::path::Path) -> anyhow::Resu
     // gets called lazily via the OnceLock cache on first tool dispatch.
 
     eprintln!(
-        "[CAS] Stores initialized in {}ms",
+        "[Cassy] Stores initialized in {}ms",
         start.elapsed().as_millis()
     );
     Ok(())
@@ -591,14 +591,14 @@ fn install_serve_panic_hook(cas_root: &std::path::Path) {
     let log_dir = cas_root.join("logs");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!(
-            "[CAS] Warning: could not create serve log dir {}: {e}",
+            "[Cassy] Warning: could not create serve log dir {}: {e}",
             log_dir.display()
         );
         return;
     }
     let today = chrono::Local::now().format("%Y-%m-%d");
     let log_path = log_dir.join(format!("cas-serve-{today}.log"));
-    eprintln!("[CAS] Serve panic log: {}", log_path.display());
+    eprintln!("[Cassy] Serve panic log: {}", log_path.display());
 
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -624,7 +624,7 @@ fn install_serve_panic_hook(cas_root: &std::path::Path) {
     }));
 }
 
-/// Resolve the CAS project root for an MCP stdio server.
+/// Resolve the Cassy project root for an MCP stdio server.
 ///
 /// Called once at `cas serve` startup.  Priority order:
 ///
@@ -647,7 +647,7 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
             );
             return find_cas_root_from(&project_dir).map_err(|_| {
                 anyhow::anyhow!(
-                    "CAS not initialized in CLAUDE_PROJECT_DIR={dir}. Run `cas init` first."
+                    "Cassy not initialized in CLAUDE_PROJECT_DIR={dir}. Run `cas init` first."
                 )
             });
         }
@@ -663,7 +663,7 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
     }
 
     crate::store::find_cas_root()
-        .map_err(|_| anyhow::anyhow!("CAS not initialized. Run `cas init` in your project first."))
+        .map_err(|_| anyhow::anyhow!("Cassy not initialized. Run `cas init` in your project first."))
 }
 
 /// Release all tasks claimed by an agent on shutdown and unregister the agent
@@ -682,7 +682,7 @@ pub async fn write_proxy_catalog_cache(
     engine: &cmcp_core::ProxyEngine,
 ) {
     if let Err(error) = write_proxy_snapshot_cache(cas_root, engine).await {
-        eprintln!("[CAS] Failed to write proxy snapshot cache: {error}");
+        eprintln!("[Cassy] Failed to write proxy snapshot cache: {error}");
     }
 }
 
@@ -1770,7 +1770,7 @@ mod tests {
         );
     }
 
-    /// When CLAUDE_PROJECT_DIR is set to the path of a CAS factory worktree
+    /// When CLAUDE_PROJECT_DIR is set to the path of a Cassy factory worktree
     /// (.cas/worktrees/<name>/), resolve_mcp_serve_root must return the PARENT
     /// repo's .cas/ directory — not a nested .cas/ inside the worktree.
     ///
@@ -1787,10 +1787,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let tmp_path = tmp.path().canonicalize().unwrap();
 
-        // Initialize CAS in the project root
+        // Initialize Cassy in the project root
         init_cas_dir(&tmp_path).unwrap();
 
-        // Create the CAS factory worktree directory (.cas/worktrees/<name>/)
+        // Create the Cassy factory worktree directory (.cas/worktrees/<name>/)
         let worktree_path = tmp_path.join(".cas/worktrees/fox");
         std::fs::create_dir_all(&worktree_path).unwrap();
 
@@ -1799,7 +1799,7 @@ mod tests {
             ("CAS_ROOT", None),
         ]);
         let result = resolve_mcp_serve_root()
-            .expect("should succeed when CLAUDE_PROJECT_DIR is a CAS worktree path");
+            .expect("should succeed when CLAUDE_PROJECT_DIR is a Cassy worktree path");
         assert_eq!(
             result,
             tmp_path.join(".cas"),
@@ -1826,7 +1826,7 @@ mod tests {
             ("CAS_ROOT", None),
         ]);
         let result = resolve_mcp_serve_root()
-            .expect("should succeed from a nested path inside a CAS worktree");
+            .expect("should succeed from a nested path inside a Cassy worktree");
         assert_eq!(
             result,
             tmp_path.join(".cas"),

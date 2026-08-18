@@ -38,7 +38,7 @@ fn canonicalize_json_objects(value: &mut serde_json::Value) {
 }
 
 /// Check whether a Claude *config directory* (e.g. `~/.claude`, `~/.claude-alt`)
-/// has CAS hooks in its `settings.json`.
+/// has Cassy hooks in its `settings.json`.
 ///
 /// The argument is the config dir itself, NOT the home dir — Claude Code reads
 /// `$CLAUDE_CONFIG_DIR/settings.json` and falls back to `~/.claude/settings.json`
@@ -69,7 +69,7 @@ fn expand_tilde(raw: &str, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Every Claude config dir a CAS install has to keep hooked.
+/// Every Claude config dir a Cassy install has to keep hooked.
 ///
 /// At minimum the default `<home>/.claude`, plus the active `CLAUDE_CONFIG_DIR`
 /// when one is set (two-subscription factory setups run workers under e.g.
@@ -106,7 +106,7 @@ pub(crate) fn known_claude_config_dirs() -> Vec<PathBuf> {
     known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref())
 }
 
-/// True only when EVERY known config dir already carries CAS hooks.
+/// True only when EVERY known config dir already carries Cassy hooks.
 ///
 /// Deliberately conservative: if any config dir a session could be launched
 /// under lacks hooks, global hooks do NOT cover that session, so project-level
@@ -116,7 +116,7 @@ pub(crate) fn all_config_dirs_have_cas_hooks(dirs: &[PathBuf]) -> bool {
     !dirs.is_empty() && dirs.iter().all(|dir| config_dir_has_cas_hooks(dir))
 }
 
-/// Config dirs that are missing CAS hooks (used for actionable diagnostics).
+/// Config dirs that are missing Cassy hooks (used for actionable diagnostics).
 pub(crate) fn config_dirs_missing_cas_hooks(dirs: &[PathBuf]) -> Vec<PathBuf> {
     dirs.iter()
         .filter(|dir| !config_dir_has_cas_hooks(dir))
@@ -124,7 +124,7 @@ pub(crate) fn config_dirs_missing_cas_hooks(dirs: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Check if global Claude settings already have CAS hooks configured for every
+/// Check if global Claude settings already have Cassy hooks configured for every
 /// config dir this machine uses.
 ///
 /// Returns true only if *all* known config dirs (`~/.claude` plus the active
@@ -140,10 +140,10 @@ pub fn global_has_cas_hooks() -> bool {
     all_config_dirs_have_cas_hooks(&known_claude_config_dirs())
 }
 
-/// Check if a settings JSON value contains any CAS hook entries.
+/// Check if a settings JSON value contains any Cassy hook entries.
 ///
 /// Recognises both the shell-form (`"command": "cas hook ..."`) — emitted by
-/// CAS since cas-c17b — and the exec-form (`"args": ["cas", "hook", ...]`)
+/// Cassy since cas-c17b — and the exec-form (`"args": ["cas", "hook", ...]`)
 /// emitted by the cas-7ecd era, so that detection is backwards-compatible
 /// with settings.json files generated before cas-c17b.  Emitters were
 /// reverted to shell-form because Claude Code 2.1.139's /doctor validator
@@ -188,7 +188,7 @@ fn is_cas_hook_args(hook: &serde_json::Value) -> bool {
         && args.get(1).and_then(|v| v.as_str()) == Some("hook")
 }
 
-/// Returns true when a hook JSON object is a CAS exec-form or shell-form factory
+/// Returns true when a hook JSON object is a Cassy exec-form or shell-form factory
 /// hook (`"args": ["cas", "factory", ...]` or `"command": "cas factory ..."`).
 fn is_cas_factory_args(hook: &serde_json::Value) -> bool {
     let Some(args) = hook.get("args").and_then(|a| a.as_array()) else {
@@ -198,10 +198,10 @@ fn is_cas_factory_args(hook: &serde_json::Value) -> bool {
         && args.get(1).and_then(|v| v.as_str()) == Some("factory")
 }
 
-/// Strip CAS hook entries from a settings JSON value.
+/// Strip Cassy hook entries from a settings JSON value.
 ///
-/// Removes hook event keys where ALL entries are CAS hooks. If an event has
-/// a mix of CAS and non-CAS hooks, only the CAS entries are removed.
+/// Removes hook event keys where ALL entries are Cassy hooks. If an event has
+/// a mix of Cassy and non-Cassy hooks, only the Cassy entries are removed.
 /// Returns true if any hooks were removed.
 pub fn strip_cas_hooks(settings: &mut serde_json::Value) -> bool {
     let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
@@ -221,7 +221,7 @@ pub fn strip_cas_hooks(settings: &mut serde_json::Value) -> bool {
             let Some(hook_list) = entry.get("hooks").and_then(|h| h.as_array()) else {
                 return true; // keep non-standard entries
             };
-            // Remove entry if ALL its hooks are CAS hooks (shell form OR exec form)
+            // Remove entry if ALL its hooks are Cassy hooks (shell form OR exec form)
             let all_cas = hook_list.iter().all(|hook| {
                 // Legacy shell-string form
                 let cmd_match = hook
@@ -260,7 +260,7 @@ pub fn strip_cas_hooks(settings: &mut serde_json::Value) -> bool {
     modified
 }
 
-/// Get the CAS hooks configuration JSON
+/// Get the Cassy hooks configuration JSON
 ///
 /// Emits shell-form `"command": "cas hook <Event>"` entries (and
 /// `"command": "cas factory check-staleness"` for the staleness check),
@@ -271,7 +271,7 @@ pub fn strip_cas_hooks(settings: &mut serde_json::Value) -> bool {
 /// `{"type": "command", "args": ["cas", "hook", "<Event>"]}` with NO top-level
 /// `command` string. That is malformed: Claude Code's `/doctor` validator
 /// requires a string `command` for every `type: "command"` hook, so it
-/// rejected all 12 entries and the harness silently disabled every CAS hook.
+/// rejected all 12 entries and the harness silently disabled every Cassy hook.
 /// (The cas-9a60 docstring's claim that exec-form is accepted once
 /// anthropics/claude-code#58441 closed was a red herring — valid exec-form is
 /// `{"command": "cas", "args": [...]}`, and `command` is required regardless.)
@@ -283,7 +283,7 @@ pub fn strip_cas_hooks(settings: &mut serde_json::Value) -> bool {
 /// upgrade cleanly from either form on the next `cas init`.
 ///
 /// Note: Claude Code 2.1.0+ supports `once: true` for hooks that should only run once
-/// per session, even if resumed. CAS hooks intentionally do NOT use `once: true` because:
+/// per session, even if resumed. Cassy hooks intentionally do NOT use `once: true` because:
 /// - SessionStart should inject context on every session start/resume
 /// - PostToolUse and Stop should run on every matching event
 ///
@@ -602,20 +602,20 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
     })
 }
 
-/// Get suggested Bash permission patterns for CAS commands
+/// Get suggested Bash permission patterns for Cassy commands
 ///
 /// Claude Code 2.1.0+ supports wildcard patterns like `Bash(cas :*)` to allow
-/// all CAS CLI commands without individual prompts.
+/// all Cassy CLI commands without individual prompts.
 pub fn get_cas_bash_permissions() -> Vec<String> {
     vec![
-        "Bash(cas :*)".to_string(),       // All CAS commands
+        "Bash(cas :*)".to_string(),       // All Cassy commands
         "Bash(cas task:*)".to_string(),   // Task operations
         "Bash(cas search:*)".to_string(), // Search operations
         "Bash(cas add:*)".to_string(),    // Memory operations
     ]
 }
 
-/// Get MCP tool permission patterns for CAS tools
+/// Get MCP tool permission patterns for Cassy tools
 ///
 /// Workers need these permissions to call mcp__cas__* tools without prompts.
 pub fn get_cas_mcp_permissions() -> Vec<String> {
@@ -633,9 +633,9 @@ pub fn get_cas_mcp_permissions() -> Vec<String> {
     ]
 }
 
-/// Configure CAS as an MCP server via .mcp.json
+/// Configure Cassy as an MCP server via .mcp.json
 ///
-/// Creates or updates .mcp.json in the project root to register CAS.
+/// Creates or updates .mcp.json in the project root to register Cassy.
 /// This follows the Claude Code convention for project-level MCP configuration.
 /// Returns Ok(true) if file was modified, Ok(false) if no changes needed.
 pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
@@ -659,7 +659,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
         config["mcpServers"] = serde_json::json!({});
     }
 
-    // Add or update CAS server config
+    // Add or update Cassy server config
     config["mcpServers"]["cas"] = serde_json::json!({
         "command": "cas",
         "args": ["serve"]
@@ -677,7 +677,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Configure CAS for Codex via `.codex/config.toml` and `.codex/hooks.json`.
+/// Configure Cassy for Codex via `.codex/config.toml` and `.codex/hooks.json`.
 ///
 /// Registers the MCP server and installs native Codex `PreToolUse` and
 /// `PostToolUse` hooks for shell/unified-exec calls. Codex documents both shell
@@ -856,12 +856,12 @@ pub fn provision_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
     Ok(configured)
 }
 
-/// Install CAS's command guards and task-anchor hook using Codex's native
+/// Install Cassy's command guards and task-anchor hook using Codex's native
 /// `hooks.json` schema.
 ///
 /// The timeout is three seconds (Codex timeout units are seconds, unlike the
-/// millisecond values in Claude's settings). Existing non-CAS hook groups are
-/// preserved, while older CAS entries are converged to these exact matchers and
+/// millisecond values in Claude's settings). Existing non-Cassy hook groups are
+/// preserved, while older Cassy entries are converged to these exact matchers and
 /// handlers.
 fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
     let hooks_path = codex_dir.join("hooks.json");
@@ -896,7 +896,7 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
             .as_array_mut()
             .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.{event}` is not an array"))?;
 
-        // CAS owns both the current harness-aware command and the pre-cas-a53c
+        // Cassy owns both the current harness-aware command and the pre-cas-a53c
         // form. Remove either before adding the canonical entry so an upgrade
         // never leaves two registrations for the same Codex event.
         let legacy_command = format!("cas hook {event}");
@@ -960,7 +960,7 @@ mod codex_provision_tests {
         let state = config
             .get("hooks")
             .and_then(|hooks| hooks.get("state"))
-            .expect("CAS hook hashes must be trusted in the same user config");
+            .expect("Cassy hook hashes must be trusted in the same user config");
         let pre_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
         let post_key = format!("{}:post_tool_use:0:0", hooks_path.display());
         assert!(state.get(&pre_key).is_some());

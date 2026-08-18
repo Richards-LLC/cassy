@@ -62,10 +62,10 @@ Supervisor manually diffed every worktree (`git -C .cas/worktrees/<name> status/
 
 ## Note
 
-This class pairs with the known "Codex-default workers ignore dispatch / confidently report done with no work" behavior — but the CAS-side defect (attemptable close on empty worktree + premature director broadcast) is independent of the CLI and worth fixing regardless of model.
+This class pairs with the known "Codex-default workers ignore dispatch / confidently report done with no work" behavior — but the Cassy-side defect (attemptable close on empty worktree + premature director broadcast) is independent of the CLI and worth fixing regardless of model.
 
 ## Update — confirmed NOT model-specific (2026-07-02, later)
 
 After the original Codex phantom close, the same task (cas-0b7d) was reassigned to a **`cli=claude`** worker (`vivid-octopus-81`). It **synced its worktree to the epic tip and then closed cas-0b7d with zero implementation** — clean tree, no commits beyond the epic, target files (`PostHogErrorFeed.vue`, `posthogCharts.ts`) untouched. The director again broadcast "has closed task cas-0b7d" while the task remained `InProgress`.
 
-This confirms the diagnosis: **the empty-worktree phantom close is a CAS-side gap, not a Codex quirk.** A Claude worker hit it identically. It also surfaces a nastier variant — "sync ≠ work": the worker did produce a HEAD change (a fast-forward/merge to the epic tip) but **zero task-relevant diff**, so any guard that only checks "did HEAD move?" would be fooled. The correct guard is **"is there a non-empty diff attributable to this task vs. the epic base?"**, not merely "does the branch have a commit / did HEAD advance?"
+This confirms the diagnosis: **the empty-worktree phantom close is a Cassy-side gap, not a Codex quirk.** A Claude worker hit it identically. It also surfaces a nastier variant — "sync ≠ work": the worker did produce a HEAD change (a fast-forward/merge to the epic tip) but **zero task-relevant diff**, so any guard that only checks "did HEAD move?" would be fooled. The correct guard is **"is there a non-empty diff attributable to this task vs. the epic base?"**, not merely "does the branch have a commit / did HEAD advance?"

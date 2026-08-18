@@ -1,7 +1,7 @@
 //! Opportunistic cross-repo sweep — the Unit 3 keystone.
 //!
 //! Runs at MCP server startup and factory daemon startup (the only remaining
-//! "always-fires" lifecycle points in the CAS architecture since the
+//! "always-fires" lifecycle points in the Cassy architecture since the
 //! standalone daemon was removed; see `cas-cli/src/daemon/mod.rs:11-13`).
 //! Debounced via `~/.cas/last_global_sweep` mtime vs
 //! `worktrees.global_sweep_debounce_secs` (default 3600s).

@@ -1,16 +1,16 @@
 ---
 date: 2026-04-28
 topic: cas-harness-portability
-focus: extend CAS to support OpenCode and Claude Code as alternative harnesses (driver — strategic portability)
+focus: extend Cassy to support OpenCode and Claude Code as alternative harnesses (driver — strategic portability)
 ---
 
-# Ideation: CAS Harness Portability — OpenCode + Claude Code
+# Ideation: Cassy Harness Portability — OpenCode + Claude Code
 
 ## Grounding Summary
 
 ### Codebase context
 
-CAS is a Rust monorepo (~15 crates under `crates/` plus `cas-cli`) providing memory, tasks, rules, skills, and a multi-agent factory. It already has a *partial* harness abstraction that has never been forced to prove itself:
+Cassy is a Rust monorepo (~15 crates under `crates/` plus `cas-cli`) providing memory, tasks, rules, skills, and a multi-agent factory. It already has a *partial* harness abstraction that has never been forced to prove itself:
 
 - `crates/cas-mux/src/harness.rs` defines `SupervisorCli` enum (`Claude`, `Codex`) with a capability matrix: `supports_hooks`, `supports_subagents`, `supports_textbox_submit`, `tool_prefix`.
 - `crates/cas-mux/src/harness_policy.rs` gates verification + tool-prefix selection from that matrix.
@@ -28,7 +28,7 @@ Tightly coupled to Claude Code today (no abstraction):
 
 **Zero OpenCode references** in the codebase. Fresh integration.
 
-### Past learnings (CAS memory)
+### Past learnings (Cassy memory)
 
 - Memory `2026-04-23-13` — Claude Code 2.1.117/2.1.118 shipped a Bun/React-Ink regression that crashed factory workers on Edit/Write to `.claude/` paths (upstream issue #52337). Three workers lost in one day. Mitigation: hand-pinned downgrade to 2.1.116. Direct evidence that single-harness coupling has real cost.
 - Memory `2026-04-15-2` — Claude Code v2.1.x does NOT auto-discover per-team `settings.json`. The factory needed a three-belt permission stack (per-role `--settings`, `PreToolUse` hook returning `permissionDecision:allow`, `PermissionRequest` notification hook auto-approve). Belts 2 & 3 require Claude-specific hook surface — won't naively port.
@@ -38,17 +38,17 @@ Tightly coupled to Claude Code today (no abstraction):
 
 ### Driver
 
-User selected **strategic portability** — CAS as a harness-agnostic "agent operating system" where the user picks the harness while the CAS brain stays the same. Bias toward clean abstraction layers over tactical fixes.
+User selected **strategic portability** — Cassy as a harness-agnostic "agent operating system" where the user picks the harness while the Cassy brain stays the same. Bias toward clean abstraction layers over tactical fixes.
 
 ## Ranked Ideas
 
 ### 1. `.cas/` as source of truth; `.claude/` and `.opencode/` as generated projections
-**Description:** Single canonical CAS state lives under `.cas/` (skills, rules, settings, MCP wiring, hook definitions). A `cas project` step (run inside `cas update --sync`) emits per-harness files: `.claude/skills/cas-*/SKILL.md`, `.claude/settings.json`, `.mcp.json`, OpenCode equivalents. Hand-editing emitted files is forbidden and detected via mtime-vs-source checks and a pre-commit `cas project --check` hook.
+**Description:** Single canonical Cassy state lives under `.cas/` (skills, rules, settings, MCP wiring, hook definitions). A `cas project` step (run inside `cas update --sync`) emits per-harness files: `.claude/skills/cas-*/SKILL.md`, `.claude/settings.json`, `.mcp.json`, OpenCode equivalents. Hand-editing emitted files is forbidden and detected via mtime-vs-source checks and a pre-commit `cas project --check` hook.
 **Rationale:** Hardcoded sync paths are scattered across the codebase. Adding a second harness without consolidating doubles every edit site. With projection, "add a harness" reduces to "add an emitter."
 **Downsides:**
 - Authoring/debugging workflow changes — the user can't `cat .claude/settings.json` to introspect state without mentally projecting from `.cas/config.toml`.
 - Drift detection is the load-bearing piece, not the projector. If detection misses, user changes vanish on next emit.
-- `.mcp.json` is consumed by Claude Code at startup *before* CAS hooks run — projector probably must run unconditionally pre-launch (in `cas update --sync`), not as a hook.
+- `.mcp.json` is consumed by Claude Code at startup *before* Cassy hooks run — projector probably must run unconditionally pre-launch (in `cas update --sync`), not as a hook.
 - Live deltas in current git status (`.claude/CODEMAP.md`, `.claude/settings.json`) mean migration must coexist with in-flight work.
 **Confidence:** 80%
 **Complexity:** Medium-High
@@ -56,7 +56,7 @@ User selected **strategic portability** — CAS as a harness-agnostic "agent ope
 **Status:** Unexplored
 
 ### 2. Versioned Capability Manifest with graceful degradation, hosted in `cas-mux` as the abstraction home
-**Description:** Promote the ad-hoc `Capabilities` struct in `crates/cas-mux/src/harness.rs` into a versioned, declarative manifest each adapter ships (TOML/JSON-schema). Fields cover hook events supported, tool-prefix convention, skill format, permission model, statusline support, MCP variant, blocklisted upstream versions, and a degradation registry per feature (e.g., `statusline: none → notify_via: log`). Refactor `cas-mux` from "PTY/process manager" into the lifecycle owner that mounts adapters, drives manifest negotiation at boot, and dispatches to it. CAS subsystems query the manifest at runtime, never `match` on a hardcoded enum.
+**Description:** Promote the ad-hoc `Capabilities` struct in `crates/cas-mux/src/harness.rs` into a versioned, declarative manifest each adapter ships (TOML/JSON-schema). Fields cover hook events supported, tool-prefix convention, skill format, permission model, statusline support, MCP variant, blocklisted upstream versions, and a degradation registry per feature (e.g., `statusline: none → notify_via: log`). Refactor `cas-mux` from "PTY/process manager" into the lifecycle owner that mounts adapters, drives manifest negotiation at boot, and dispatches to it. Cassy subsystems query the manifest at runtime, never `match` on a hardcoded enum.
 **Rationale:** Without a versioned public contract, the abstraction is whatever the most recent code change happens to make it — exactly how the `Codex` variant ended up unverified. The manifest is the contract; `cas-mux` becomes where that contract lives.
 **Downsides:**
 - Manifest schema evolution is its own commitment — once external adapters consume the schema, breaking changes mean coordinated migration. v1 must be deliberate.
@@ -81,21 +81,21 @@ User selected **strategic portability** — CAS as a harness-agnostic "agent ope
 **Grounding:** `crates/cas-mux/src/harness.rs:5-8` (Codex variant), `crates/cas-factory/`, memory `2026-04-23-13`, memory `2026-04-15-2`
 **Status:** Unexplored
 
-### 4. CAS-canonical hook event taxonomy with adapter translation (CHP Phase 1)
-**Description:** Replace stringly-typed `cas hook <Event>` dispatch (where event names are verbatim Claude Code's: `SessionStart`, `PreToolUse`, etc.) with a typed CAS-defined enum (`HarnessEvent`) inside `crates/cas-core/src/hooks/`. Each adapter translates its native protocol into the enum. Unmapped events are hard errors. Closed set, exhaustive match, compiler-enforced completeness. This is Phase 1 of the larger "CAS Harness Protocol" idea — Phases 2-3 (one-MCP-server, native CASP) cut from strict survivor list as not-essential-for-v1.
-**Rationale:** Today the event names match Claude Code by accident-not-design. Without this, every CAS handler in `handlers_events/` is reading Claude's wire payload (`tool_input`, `tool_response`, `permission_mode` field names match Claude literally), so adding OpenCode means a parallel fork of every handler — and bug fixes diverge.
+### 4. Cassy-canonical hook event taxonomy with adapter translation (CHP Phase 1)
+**Description:** Replace stringly-typed `cas hook <Event>` dispatch (where event names are verbatim Claude Code's: `SessionStart`, `PreToolUse`, etc.) with a typed Cassy-defined enum (`HarnessEvent`) inside `crates/cas-core/src/hooks/`. Each adapter translates its native protocol into the enum. Unmapped events are hard errors. Closed set, exhaustive match, compiler-enforced completeness. This is Phase 1 of the larger "Cassy Harness Protocol" idea — Phases 2-3 (one-MCP-server, native CASP) cut from strict survivor list as not-essential-for-v1.
+**Rationale:** Today the event names match Claude Code by accident-not-design. Without this, every Cassy handler in `handlers_events/` is reading Claude's wire payload (`tool_input`, `tool_response`, `permission_mode` field names match Claude literally), so adding OpenCode means a parallel fork of every handler — and bug fixes diverge.
 **Downsides:**
 - Choosing the canonical taxonomy is a design decision that locks in semantics. Should `SubagentStart` and `SessionStart` be unified? Should `Notification` collapse into a generic `UserMessage`? Each choice has implications for skills, rules, and the permission engine (#5).
 - `crates/cas-core/src/hooks/types.rs` `HookInput` mirrors Claude's wire format directly. Translating means every handler that touches `HookInput` gets touched. That's the entire `handlers_events/` tree. Bounded but not small.
 - The hook protocol is the primary integration surface. Refactoring it during active feature work risks the kind of silent breakage commit `715891c` introduced. Sequence behind #2 so the manifest can declare which event semantics each adapter promises.
-- Phase 1 alone delivers most of the portability value, but the bigger CHP vision (one MCP server, native CAS protocol, MCP-as-adapter) may pull you back later. Choosing the smaller scope is a deliberate hedge.
+- Phase 1 alone delivers most of the portability value, but the bigger CHP vision (one MCP server, native Cassy protocol, MCP-as-adapter) may pull you back later. Choosing the smaller scope is a deliberate hedge.
 **Confidence:** 80%
 **Complexity:** Medium
 **Grounding:** `cas-cli/src/cli/hook.rs:33-78`, `crates/cas-core/src/hooks/types.rs:9-78`, `cas-cli/src/hooks/handlers/handlers_events/`
 **Status:** Unexplored
 
-### 5. CAS-owned permission policy engine; harnesses execute verdicts only
-**Description:** All allow/deny/ask logic moves into a CAS policy engine (consumes rules + memory + manifest capabilities). Adapter's only job: ask CAS, get verdict, plumb it into the harness's permission gate. The Claude-Code-specific three-belt system collapses into one in-process state machine on the CAS side. The adapter becomes a translator, not a co-author of policy.
+### 5. Cassy-owned permission policy engine; harnesses execute verdicts only
+**Description:** All allow/deny/ask logic moves into a Cassy policy engine (consumes rules + memory + manifest capabilities). Adapter's only job: ask Cassy, get verdict, plumb it into the harness's permission gate. The Claude-Code-specific three-belt system collapses into one in-process state machine on the Cassy side. The adapter becomes a translator, not a co-author of policy.
 **Rationale:** Without this, OpenCode either (a) re-implements the three-belt mess in a different shape, or (b) ships with divergent permission semantics — meaning "single source of policy" is a lie and the abstraction has a permission-shaped hole.
 **Downsides:**
 - The current belts work and are recently battle-tested. Memory `2026-04-15-2` describes a fix that just landed (commit `959e69b`, 2026-04-27). Touching this code while it's freshly stabilized is risky. Phased rollout: new engine emits verdicts that existing belts consume *first*, then later replace belts with a thin shim.
@@ -116,7 +116,7 @@ These five aren't independent. Forced ordering by dependency:
 #2 manifest in cas-mux                →  the contract; #1 #4 #5 all query it
 #4 hook event taxonomy                →  inside #2's home, before #5 needs the events
 #1 .cas/ projections                  →  parallel-safe with #4 once #2 lands
-#5 CAS-side permission engine         →  last; depends on manifest declaring permission model
+#5 Cassy-side permission engine         →  last; depends on manifest declaring permission model
 ```
 
 Fastest honest path: ship #3's conformance scaffolding first (against existing `Codex` variant), then #2 + #4 in parallel, then #1, then #5.
@@ -131,9 +131,9 @@ Fastest honest path: ship #3's conformance scaffolding first (against existing `
 | 2 | Test-derived capability matrix (capabilities measured not declared) | Cute but mechanism is fragile; better as a property of #3's conformance suite — manifest claims validated by tests |
 | 3 | CHP-driven factory daemon multiplexes sessions | Strictly downstream of CHP wire protocol; not realizable without it |
 | 4 | Capability-gated `requires_capability:` blocks in skills | Falls out of #1 + #2 once they exist; feature, not foundation |
-| 5 | CAS-owned subagent runtime (harness-agnostic spawning) | High value but orthogonal to portability driver; revisit only if OpenCode subagent gap proves blocking |
+| 5 | Cassy-owned subagent runtime (harness-agnostic spawning) | High value but orthogonal to portability driver; revisit only if OpenCode subagent gap proves blocking |
 | 6 | Multi-harness role/task routing (supervisor on Claude, workers on OpenCode) | User chose "one or the other" — closes mesh option for v1; premature optimization |
-| 7 | CAS-native TUI, harnesses as headless backends | Too expensive for chosen driver; solves a problem user hasn't expressed; competes with CC's existing TUI |
+| 7 | Cassy-native TUI, harnesses as headless backends | Too expensive for chosen driver; solves a problem user hasn't expressed; competes with CC's existing TUI |
 | 8 | Delete statusLine entirely | Cosmetic-but-load-bearing (user glances at it daily); falls under #2's degradation registry |
 | 9 | StatusLine as harness-agnostic daemon stream | Same — single feature, falls under #2's degradation registry |
 | 10 | `cas harness migrate / use` swap tool | Falls out of #1 naturally as two projector passes; double-billing |
@@ -145,7 +145,7 @@ Fastest honest path: ship #3's conformance scaffolding first (against existing `
 |---|------|-----------------|
 | 12 | `cas doctor --harness` + crash-signature version blocklist | Operationally valuable but tactical, not essential. Cleanly defers as Phase-2 hygiene; manifest in #2 already provides the version field it needs. Memory `2026-04-23-13` follow-up still standing. |
 | 13 | Adapter SDK extraction (cargo-generate template, public traits, derive macros) | Premature platform play — risks freezing wrong abstraction. Defers cleanly until #3 has run conformance against two real adapters. The `cas-mux` refactor part survived as the home for #2's manifest. |
-| 14 | CHP wire-protocol Phases 2-3 (one MCP server, namespace overhaul, native CAS protocol) | Boldest vision but not necessary for portability v1. Phase 1 (now #4) captures most of the leverage. Reconsider after #1-#5 land. |
+| 14 | CHP wire-protocol Phases 2-3 (one MCP server, namespace overhaul, native Cassy protocol) | Boldest vision but not necessary for portability v1. Phase 1 (now #4) captures most of the leverage. Reconsider after #1-#5 land. |
 
 ## Session Log
 

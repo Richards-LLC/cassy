@@ -9,7 +9,7 @@ cas_task: (none)
 
 Report from a supervisor that ran two back-to-back multi-worker EPICs (cas-9b16 invite flow batch 3 with 3 workers, then a cas-code-review follow-up EPIC with 3 more workers) on the abundant-mines project today. Every individual issue below is minor in isolation; in aggregate they add real overhead to a factory session. Ordered by impact.
 
-The goal of this report is to give the CAS team concrete evidence — log excerpts, timestamps, exact supervisor-side workarounds — for issues that are otherwise easy to dismiss as "the user did it wrong."
+The goal of this report is to give the Cassy team concrete evidence — log excerpts, timestamps, exact supervisor-side workarounds — for issues that are otherwise easy to dismiss as "the user did it wrong."
 
 ## 1. Spawn-time `action=mine` race (P1, reproducible every session)
 
@@ -96,7 +96,7 @@ Per the documented "binary outdated" recovery path, supervisor used `mcp__cas__t
 
 ### Ask
 
-This isn't a CAS bug per se — the fix exists, the binary is just out of date. But the operational guidance in the skill should emphasize:
+This isn't a Cassy bug per se — the fix exists, the binary is just out of date. But the operational guidance in the skill should emphasize:
 
 > **Before starting a factory session:** verify `cas serve` is running a binary rebuilt after `bba6fbf`. Run `cargo build --release && restart cas serve` if unsure. An outdated binary will cost ~5 min per closed task to the jail/bypass path.
 
@@ -136,7 +136,7 @@ Factory worker sessions that end mid-task (user interruption, crash, compaction 
 
 ### Ask
 
-- When a factory session ends (session_end / shutdown / crash), CAS could at least *log* what's untracked in the supervisor's worktree so the next supervisor knows there's salvageable state.
+- When a factory session ends (session_end / shutdown / crash), Cassy could at least *log* what's untracked in the supervisor's worktree so the next supervisor knows there's salvageable state.
 - Or: add a `mcp__cas__coordination action=gc_report` variant that surfaces "untracked files in main worktree that appear to be from prior factory work" so supervisor can decide whether to salvage, stash, or delete.
 
 ---

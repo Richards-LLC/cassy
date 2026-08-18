@@ -154,7 +154,7 @@ fn launch_instruction_text(harness: SupervisorCli, role: ContractRole) -> Result
         }
         SupervisorCli::Claude => {
             // Claude has no launch instruction flag; the surface it consumes is
-            // the launch-time intro prompt CAS queues. That prompt is exactly the
+            // the launch-time intro prompt Cassy queues. That prompt is exactly the
             // canonical `claude_*_contract` builder output — the queue write is
             // only the delivery step. The runner captures the authoritative
             // CONTENT here; that the app layer actually enqueues it is proven
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn missing_role_clause_fails_effective_contract_stage_not_unknown() {
         // A surface with the coordinate-only clause but no urgent-stop recovery.
-        let broken = "You are the CAS Factory Supervisor. Coordinate only. Assign tasks. \
+        let broken = "You are the Cassy Factory Supervisor. Coordinate only. Assign tasks. \
              Worker messages arrive asynchronously as injected turns (triage trigger). \
              MERGE REQUIRED: merge factory/<worker> then re-close. \
              Uses mcp__cas__task and mcp__cas__coordination.";
@@ -654,7 +654,7 @@ mod tests {
     /// AC-2 faithfulness: the Claude launch surface the runner captures matches
     /// what the REAL app enqueue path queues at launch — i.e. the intro prompt is
     /// actually wired, not just derivable. Drives the production
-    /// queue_*_intro_prompt into a disposable CAS root and asserts the queued
+    /// queue_*_intro_prompt into a disposable Cassy root and asserts the queued
     /// prompt carries the full contract with no missing clauses.
     #[test]
     fn claude_launch_intro_is_actually_wired() {

@@ -1,4 +1,4 @@
-# Codex factory startup crash: AVX-512 leaked into the CAS release binary
+# Codex factory startup crash: AVX-512 leaked into the Cassy release binary
 
 Date: 2026-08-08
 
@@ -6,16 +6,16 @@ Status: resolved; `2.54.1` replacement published, installed, and runtime-verifie
 
 Severity: high local outage, with potentially broader x86_64 release-portability impact
 
-Audience: CAS maintainers, release engineering, and factory/harness owners
+Audience: Cassy maintainers, release engineering, and factory/harness owners
 
 ## Impact
 
 `cas codex` could not start a new Codex factory on the affected machine. The
-factory reached **Spawning agents**, the CAS daemon terminated, and the client
+factory reached **Spawning agents**, the Cassy daemon terminated, and the client
 then reported that the new session was not running. Repeated retries failed in
 the same startup phase.
 
-The failure was inside the installed CAS `2.54.0` binary, not in the standalone
+The failure was inside the installed Cassy `2.54.0` binary, not in the standalone
 Codex CLI. Direct Codex startup, `codex doctor`, authentication, and network
 connectivity all succeeded. An already-running factory was unaffected. The
 confirmed affected host is an x86_64 Linux machine with an Intel Core i9-13900K
@@ -39,12 +39,12 @@ changed.
 | User-visible symptom | `cas codex` showed **Spawning agents**, then exited with `[ERROR] Session '<name>' not found or not running` |
 | First retained failure | 2026-08-08 21:49:57 EDT / 2026-08-09 01:49:57 UTC |
 | Definitive detection | 2026-08-08 21:57:37 EDT, when `coredumpctl` recorded `cas` dying from signal 4 (`SIGILL`) |
-| Affected installed CAS | `cas 2.54.0 (c215061 2026-08-09)` at `/home/pippenz/.local/bin/cas` |
-| Codex version | `codex-cli 0.147.0`; CAS preflight said the validated harness was `0.146.0` and the installed harness was stale |
+| Affected installed Cassy | `cas 2.54.0 (c215061 2026-08-09)` at `/home/pippenz/.local/bin/cas` |
+| Codex version | `codex-cli 0.147.0`; Cassy preflight said the validated harness was `0.146.0` and the installed harness was stale |
 | Host | x86_64 Linux, 13th Gen Intel Core i9-13900K, 32 logical CPUs; AVX/AVX2 present, AVX-512 absent |
 | Root cause | The Ghostty VT Zig dependency was built without an explicit target for native Cargo builds, allowing a release runner's AVX-512 features into the distributed static library |
 | Crash instruction | `vcvttsd2usi %xmm0,%rcx`, AVX-512 encoded, at installed executable offset `0x2f24543` |
-| Local mitigation | Always pass Cargo's supported target triple to Zig, rebuild CAS, and replace the installed binary |
+| Local mitigation | Always pass Cargo's supported target triple to Zig, rebuild Cassy, and replace the installed binary |
 | Local resolution | Rebuilt binary installed at 2026-08-08 22:08:03 EDT; fresh factory startup reached `READY` and `SYSTEM READY` and remained attachable |
 | Replacement release | Annotated tag object `c004f2d2be9f7e916fdc578a649d085cac8c7de0` peels to release commit `22fe07c46fb9aec159142956d8d45689157552b6`; GitHub Actions run `31291108866` completed successfully |
 | Published assets | Linux x86_64 tarball SHA-256 `645177c6b379a7cf37c44f16dd537c0520954dec257b18b83d929ef1d2c01126`; macOS aarch64 tarball SHA-256 `58ca6eaa1075301dee6a36262c87d543a3fbc133564ee380864602c2eb68033d` |
@@ -54,14 +54,14 @@ changed.
 ## Timeline
 
 All local times are EDT (UTC-04:00). UTC timestamps are included where they
-were emitted by CAS.
+were emitted by Cassy.
 
 | Time | Event | Evidence / decision |
 | --- | --- | --- |
-| 21:49:57 | First retained failed startup | CAS logged a PTY spawn of `codex`; about 252 ms later the boot client reported `Daemon closed connection during initialization`. |
+| 21:49:57 | First retained failed startup | Cassy logged a PTY spawn of `codex`; about 252 ms later the boot client reported `Daemon closed connection during initialization`. |
 | 21:50:13 | Failure reproduced | A second new factory died during the same initialization phase. |
 | 21:52:40 | Failure reproduced again | A third launch showed the same daemon-disconnect pattern. Ordinary retry was ruled out as a remedy. |
-| Before 21:57 | Codex itself cleared | Direct Codex startup with the CAS-injected launch arguments worked. `codex doctor` passed runtime, configuration, authentication, and connectivity checks. |
+| Before 21:57 | Codex itself cleared | Direct Codex startup with the Cassy-injected launch arguments worked. `codex doctor` passed runtime, configuration, authentication, and connectivity checks. |
 | 21:57:37 | Native process crash captured | `cas codex --new -n codex-strace-repro` dumped core. `coredumpctl info 642419` reported signal 4 (`ILL`) and fault offset `0x2f24543` in `/home/pippenz/.local/bin/cas`. |
 | After 21:57 | Illegal instruction identified | Disassembly at the fault offset showed `vcvttsd2usi %xmm0,%rcx`, an AVX-512 instruction. `lscpu` showed AVX/AVX2 but no AVX-512 on the runtime host. |
 | After disassembly | Build-path defect isolated | `ghostty_vt_sys/build.rs` was found to omit Zig's `-Dtarget` for native Cargo builds. Zig therefore optimized for the release runner rather than a portable target baseline. |
@@ -87,12 +87,12 @@ were emitted by CAS.
    matched the build host. Consequently, ordinary native release builds did
    not pass `-Dtarget` to Zig.
 4. With no explicit target, Zig was permitted to optimize for the build
-   machine's native CPU. The released CAS executable consequently contained an
+   machine's native CPU. The released Cassy executable consequently contained an
    unguarded AVX-512 instruction from the Ghostty VT static library.
 5. The affected runtime machine supports AVX2 but not AVX-512. During Codex
-   `0.147.0` startup, CAS's terminal processing exercised that instruction.
+   `0.147.0` startup, Cassy's terminal processing exercised that instruction.
 6. The kernel raised `SIGILL`. Because this was a hardware illegal-instruction
-   trap rather than a Rust panic, the daemon disappeared without a normal CAS
+   trap rather than a Rust panic, the daemon disappeared without a normal Cassy
    error record; the boot client could only report that initialization closed.
 
 The current fix makes supported Cargo targets explicit for both native and
@@ -120,37 +120,37 @@ distributable target can silently fall back to the build host.
 
 | Observation | Result | What it establishes |
 | --- | --- | --- |
-| Direct Codex launch under a PTY | Passed | Codex executable, arguments, authentication, and basic terminal use were viable outside CAS. |
+| Direct Codex launch under a PTY | Passed | Codex executable, arguments, authentication, and basic terminal use were viable outside Cassy. |
 | `codex doctor` on `0.147.0` | Runtime/config/auth/connectivity passed | The crash was not explained by a broken Codex install or service access. |
-| Repeated `cas codex --new` | Failed during initialization | The defect was deterministic enough to reproduce in the CAS factory path. |
-| Core dump, PID 642419 | `Signal: 4 (ILL)` | The CAS process died from an illegal CPU instruction, not a handled application error. |
-| Fault address | CAS executable + `0x2f24543` | The failing code was linked into the installed CAS executable. |
+| Repeated `cas codex --new` | Failed during initialization | The defect was deterministic enough to reproduce in the Cassy factory path. |
+| Core dump, PID 642419 | `Signal: 4 (ILL)` | The Cassy process died from an illegal CPU instruction, not a handled application error. |
+| Fault address | Cassy executable + `0x2f24543` | The failing code was linked into the installed Cassy executable. |
 | Disassembly at fault | `vcvttsd2usi %xmm0,%rcx` | The faulting operation required AVX-512 encoding. |
 | Runtime CPU flags | AVX and AVX2 present; AVX-512 absent | The host could not execute the linked instruction. |
 | Prior native-build logic | Returned no Zig target for a matching host/target | It exposed native release artifacts to build-host CPU feature selection. |
 | Portable rebuild opcode scan | No `vcvttsd2usi`; no `zmm[0-9]` | The explicit baseline removed the observed AVX-512 signatures from the Ghostty archive. |
-| Rebuilt installed CAS factory launch | `READY`, `SYSTEM READY`, running and attachable | The target-pinning change removed the user-visible failure on the same machine and Codex version. |
+| Rebuilt installed Cassy factory launch | `READY`, `SYSTEM READY`, running and attachable | The target-pinning change removed the user-visible failure on the same machine and Codex version. |
 | Official release archive audit | `evex_avx512=absent`; archive SHA-256 `4c0bb944…` | The release runner executed the deterministic guard against the bundled Ghostty archive before packaging. |
 | Freshly downloaded release assets | Both local SHA-256 values matched GitHub's published digests | The runtime proof used the public release bytes, not a local pre-release build. |
 | Installed published executable | `cas 2.54.1 (22fe07c)`; SHA-256 `1bc9691f…`; no `vcvttsd2usi` mnemonic | The installed executable is the extracted public artifact and lacks the incident instruction. |
-| Published CAS factory launch | `READY`, `SYSTEM READY`, running and attachable | The public replacement survives the original startup path on the affected AVX-512-absent host. |
+| Published Cassy factory launch | `READY`, `SYSTEM READY`, running and attachable | The public replacement survives the original startup path on the affected AVX-512-absent host. |
 
 The correlation with Codex `0.147.0` is a trigger condition, not the root
-cause. CAS preflight reported version drift from the validated `0.146.0`
+cause. Cassy preflight reported version drift from the validated `0.146.0`
 harness, and `0.147.0` output exercised the bad terminal-library path. A
-correctly built CAS binary must not contain instructions beyond its supported
+correctly built Cassy binary must not contain instructions beyond its supported
 runtime baseline regardless of which valid terminal output Codex produces.
 
 ### Alternatives ruled out
 
-- **Bad Codex flags:** the same CAS-injected Codex launch shape worked when run
+- **Bad Codex flags:** the same Cassy-injected Codex launch shape worked when run
   directly under a PTY.
 - **Codex authentication or connectivity:** `codex doctor` passed those checks.
 - **A recoverable Rust panic:** the kernel recorded `SIGILL`; no Rust backtrace
   or normal daemon error existed because the process trapped at the CPU level.
 - **The runtime machine lacking all vector support:** it has AVX and AVX2; the
   unsupported boundary was AVX-512.
-- **Generic CAS state corruption:** rebuilding only the binary with an explicit
+- **Generic Cassy state corruption:** rebuilding only the binary with an explicit
   Zig target made a fresh factory start and remain attachable without repairing
   project state.
 
@@ -177,7 +177,7 @@ unknown; neither uncertainty changes the artifact-level or same-host result.
   `0.147.0`. Preflight surfaced this as stale validation but did not block a
   factory, because version drift alone is not proof of incompatibility.
 - Direct `codex --version`, direct startup, and `codex doctor` all passed. Those
-  checks do not execute CAS's Ghostty-based terminal-processing path.
+  checks do not execute Cassy's Ghostty-based terminal-processing path.
 - `SIGILL` bypassed normal panic/error reporting, so the client saw a secondary
   daemon-disconnect symptom rather than the primary processor fault. A core
   dump was required to expose the signal and fault address.
@@ -190,10 +190,10 @@ CPU baseline.
 
 | Status | Action | Owner | Verification |
 | --- | --- | --- | --- |
-| Done locally | Pass a mapped `-Dtarget` to Zig for every supported Cargo target, including native builds. | CAS maintainers | Inspect `build.rs` invocation; build emits the supported mapped target. |
-| Done locally | Extract target mapping into testable Rust code and add native/cross/unsupported mapping tests. | CAS maintainers | `cargo test -p ghostty_vt_sys`: 3 passed, 0 failed. |
-| Done locally | Rebuild and install a portable CAS binary on the affected host. | Incident operator | `cmp` passed; source and installed SHA-256 match; fresh factory became running and attachable. |
-| Done | Publish the committed `2.54.1` replacement without changing `2.54.0`, then install the published artifact. | CAS maintainers / release engineering | Tag `c004f2d2` peels to `22fe07c4`; both asset digests match; installed `cas --version` identifies `2.54.1`. |
+| Done locally | Pass a mapped `-Dtarget` to Zig for every supported Cargo target, including native builds. | Cassy maintainers | Inspect `build.rs` invocation; build emits the supported mapped target. |
+| Done locally | Extract target mapping into testable Rust code and add native/cross/unsupported mapping tests. | Cassy maintainers | `cargo test -p ghostty_vt_sys`: 3 passed, 0 failed. |
+| Done locally | Rebuild and install a portable Cassy binary on the affected host. | Incident operator | `cmp` passed; source and installed SHA-256 match; fresh factory became running and attachable. |
+| Done | Publish the committed `2.54.1` replacement without changing `2.54.0`, then install the published artifact. | Cassy maintainers / release engineering | Tag `c004f2d2` peels to `22fe07c4`; both asset digests match; installed `cas --version` identifies `2.54.1`. |
 | Done | Add an x86_64 bundled-Ghostty ISA audit that rejects AVX-512. | Release engineering | Deterministic self-test accepts a baseline fixture, rejects seeded incident-matching `vcvttsd2usi`, fails closed on invalid input, and accepts the built `libghostty_vt.a`. |
 | Done | Run the released factory binary on baseline x86_64 hardware or a VM with AVX-512 masked. | Release engineering | Current Codex reached `READY` and `SYSTEM READY`; final registry state is running and attachable on a host with no `avx512*` CPU flag. |
 | Open follow-up | Refresh Codex harness conformance for the current supported Codex CLI instead of relying only on the prior validated pin. | Codex harness owner | `cas codex preflight --json` no longer reports the supported installed version as stale. The current preflight warning is non-blocking (`factory_blocked=false`) and the published runtime proof passed. |
@@ -282,7 +282,7 @@ post-detach registry/agent inspection: exit 0
 
 The first published-runtime command ran from the isolated release worktree and
 exited 1 before spawning because that directory was not an
-initialized CAS project. The proof was then run from the initialized canonical
+initialized Cassy project. The proof was then run from the initialized canonical
 checkout at the same `22fe07c4` commit; no `cas init` or source mutation was
 performed. The final `codex-v2541-published-proof` session was left running and
 attachable for inspection. The core dump remains stored by systemd as recorded

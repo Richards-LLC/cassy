@@ -5,7 +5,7 @@ pub const MIGRATION: Migration = Migration {
     id: 134,
     name: "code_memory_links_create_table",
     subsystem: Subsystem::Code,
-    description: "Create code_memory_links table to associate code with CAS memory entries",
+    description: "Create code_memory_links table to associate code with Cassy memory entries",
     up: &["CREATE TABLE IF NOT EXISTS code_memory_links (
             code_id TEXT NOT NULL,
             entry_id TEXT NOT NULL,

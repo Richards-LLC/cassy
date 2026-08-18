@@ -89,7 +89,7 @@ use crate::error::MemError;
 use crate::store::find_cas_root;
 
 /// Process-wide mutex for tests that mutate `CAS_AGENT_ROLE` or any other env
-/// var read by CAS hook handlers.
+/// var read by Cassy hook handlers.
 ///
 /// All test modules that call `std::env::set_var("CAS_AGENT_ROLE", …)` (or any
 /// `CAS_*` var) must hold this guard for the duration of the test.  Per-module
@@ -111,7 +111,7 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 /// This is the single entry point that resolves cas_root once and passes it
 /// to all handlers, eliminating redundant find_cas_root() calls.
 pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput, MemError> {
-    // CAS-owned headless model calls are implementation details, not user
+    // Cassy-owned headless model calls are implementation details, not user
     // sessions. Their prompts must never be captured as memory and their
     // short-lived harnesses must never register as factory workers.
     if crate::internal_llm::is_internal_invocation() {

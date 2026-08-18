@@ -19,7 +19,7 @@ pub const ROLE_REQUIREMENT: &str =
 
 /// Cloud pagination is additive and opt-in: a request carrying neither `limit`
 /// nor `cursor` is answered in the legacy shape with no `next_cursor`, which
-/// would silently truncate a drain at the server default. CAS therefore always
+/// would silently truncate a drain at the server default. Cassy therefore always
 /// sends an explicit in-range `limit` (server accepts 1..=500) so every listing
 /// receives a `next_cursor` it can follow to exhaustion.
 const PAGE_LIMIT_PARAM: &str = "100";
@@ -114,7 +114,7 @@ pub struct ExternalTaskDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyFeed {
     pub dependencies: Vec<ExternalTaskDependency>,
-    /// The last server-issued high-watermark. It is opaque to CAS.
+    /// The last server-issued high-watermark. It is opaque to Cassy.
     pub cursor: Option<String>,
 }
 
@@ -142,7 +142,7 @@ impl fmt::Display for TaskProposalError {
 impl std::error::Error for TaskProposalError {}
 
 /// Fail-closed local role gate. `None` means the caller was not found in the
-/// registered CAS agent store; environment strings alone are not authority.
+/// registered Cassy agent store; environment strings alone are not authority.
 pub fn authorize_registered_role(role: Option<AgentRole>) -> Result<AgentRole, TaskProposalError> {
     match role {
         Some(role @ (AgentRole::Supervisor | AgentRole::Director)) => Ok(role),
@@ -220,7 +220,7 @@ impl TaskProposalClient {
             let Some(next) = continuation else {
                 break;
             };
-            // Cursor contents are opaque. Equality is the only operation CAS
+            // Cursor contents are opaque. Equality is the only operation Cassy
             // performs, solely to prevent a stable/repeated token loop.
             if next.is_empty()
                 || next == cursor.as_deref().unwrap_or_default()
@@ -425,7 +425,7 @@ impl DependencyPage {
 /// `since=` feed reads deliberately replay a 5-second safety window so a
 /// late-committing transaction cannot fall permanently behind an observed
 /// cursor. That makes duplicates an expected, contractual outcome rather than a
-/// server bug, so CAS collapses them by `proposal_id`. The most recently
+/// server bug, so Cassy collapses them by `proposal_id`. The most recently
 /// observed row wins (feed order is the server's, and later rows carry the
 /// newer resolution state), while first-seen ordering is preserved so the
 /// reconciler reports a stable, truthful edge count.
@@ -985,7 +985,7 @@ mod tests {
     /// Pagination is opt-in on production: a request carrying neither `limit`
     /// nor `cursor` is answered in the legacy shape with no `next_cursor`, so a
     /// client that never opts in cannot discover page 2 and silently truncates
-    /// at the server default. CAS must send an explicit in-range `limit`.
+    /// at the server default. Cassy must send an explicit in-range `limit`.
     #[tokio::test]
     async fn inbox_opts_into_pagination_so_later_pages_are_not_silently_dropped() {
         let server = MockServer::start().await;

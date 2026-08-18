@@ -1,6 +1,6 @@
 # Factory Cargo target-cache capacity
 
-CAS keeps each factory worktree's Cargo `target/` directory isolated. It does
+Cassy keeps each factory worktree's Cargo `target/` directory isolated. It does
 not set a shared `CARGO_TARGET_DIR`: concurrent branches can build different
 features, build scripts, generated sources, and dependency graphs, so sharing
 that mutable output tree is not treated as safe without a separate correctness
@@ -37,7 +37,7 @@ Only an exact, non-symlink `target/` child of the repository root or a known
 factory worktree is eligible. Known roots include the default and configured
 worktree base directories, durable worktree-store paths, and registered worker
 clone paths, so external scratch layouts are covered without scanning arbitrary
-host directories. CAS never traverses symlinks and never deletes source, `.git`,
-or CAS databases. Before recursive removal it atomically renames the cache to a
+host directories. Cassy never traverses symlinks and never deletes source, `.git`,
+or Cassy databases. Before recursive removal it atomically renames the cache to a
 sibling `.cas-target-gc-*` quarantine; an interrupted removal is reported and
 safely resumed by a later GC pass.

@@ -1,4 +1,4 @@
-# VPS Provider Comparison for CAS Remote Server
+# VPS Provider Comparison for Cassy Remote Server
 
 **Date:** 2026-04-10
 **Status:** Recommendation ready
@@ -6,7 +6,7 @@
 
 ## Context
 
-The CAS remote server runs CAS binary + Claude Code + Node.js Slack bridge on a single Linux box. The workload is mostly I/O-bound (Claude API calls), not CPU-bound. The current Vultr box (2 vCPU / 3.8GB) is underpowered. We need 4+ vCPU, 8-16GB RAM, 100GB+ NVMe, US datacenter, SSH access, and multi-user Linux support.
+The Cassy remote server runs Cassy binary + Claude Code + Node.js Slack bridge on a single Linux box. The workload is mostly I/O-bound (Claude API calls), not CPU-bound. The current Vultr box (2 vCPU / 3.8GB) is underpowered. We need 4+ vCPU, 8-16GB RAM, 100GB+ NVMe, US datacenter, SSH access, and multi-user Linux support.
 
 ## Requirements
 
@@ -116,11 +116,11 @@ Dedicated vCPU:
 
 1. **Best value by a wide margin.** At $35.59/mo, the CCX23 with *dedicated* vCPUs costs less than a *shared* 4-vCPU plan at any other provider ($40-48/mo). That's dedicated CPU for 26% less than everyone else's shared CPU.
 
-2. **Dedicated vCPUs eliminate noisy-neighbor risk.** While our workload is I/O-bound today, dedicated cores ensure consistent performance for Claude Code compilation, CAS binary builds, and any future CPU-intensive tasks.
+2. **Dedicated vCPUs eliminate noisy-neighbor risk.** While our workload is I/O-bound today, dedicated cores ensure consistent performance for Claude Code compilation, Cassy binary builds, and any future CPU-intensive tasks.
 
-3. **16 GB RAM (double the minimum).** Comfortably runs CAS + Claude Code + Node.js Slack bridge + OS overhead with room to grow. Other providers charge $72-120/mo for 4 dedicated vCPU + 16GB.
+3. **16 GB RAM (double the minimum).** Comfortably runs Cassy + Claude Code + Node.js Slack bridge + OS overhead with room to grow. Other providers charge $72-120/mo for 4 dedicated vCPU + 16GB.
 
-4. **160 GB NVMe meets storage requirement.** Sufficient for CAS binary, project repos, logs, and tooling. Can be expanded with Hetzner volumes if needed.
+4. **160 GB NVMe meets storage requirement.** Sufficient for Cassy binary, project repos, logs, and tooling. Can be expanded with Hetzner volumes if needed.
 
 5. **Ashburn VA datacenter.** Low latency to Anthropic API endpoints on the US East Coast.
 

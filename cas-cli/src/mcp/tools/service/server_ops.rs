@@ -72,7 +72,7 @@ pub(super) fn render_server_line(
 }
 
 impl CasService {
-    /// Launch a long-running server under CAS supervision.
+    /// Launch a long-running server under Cassy supervision.
     pub(super) async fn factory_server_start(
         &self,
         req: FactoryRequest,
@@ -248,7 +248,7 @@ impl CasService {
             ),
             StopOutcome::RefusedUnverified(liveness) => format!(
                 "Refused to signal server '{}' (id {}): pid {} {}.\n\n\
-                 Nothing was killed. The entry is marked dead — CAS never signals a pid it \
+                 Nothing was killed. The entry is marked dead — Cassy never signals a pid it \
                  cannot prove is still the process it started, because the pid may now belong \
                  to something else entirely.",
                 record.name,

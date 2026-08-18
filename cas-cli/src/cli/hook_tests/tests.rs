@@ -122,19 +122,19 @@ fn test_configure_merges_existing() {
     )
     .unwrap();
 
-    // Configure CAS hooks using isolated home so the check is deterministic.
+    // Configure Cassy hooks using isolated home so the check is deterministic.
     let result = configure_claude_hooks_with_home(temp.path(), false, Some(fake_home.path())).unwrap();
     assert!(!result); // Updated, not created
 
     let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-    // Isolated home → no global hooks → CAS hooks must be added.
+    // Isolated home → no global hooks → Cassy hooks must be added.
     assert!(settings.pointer("/hooks/SessionStart").is_some());
     assert!(settings.pointer("/hooks/Stop").is_some());
     assert!(settings.pointer("/hooks/PostToolUse").is_some());
 
-    // Existing permissions should always be preserved and CAS permissions added
+    // Existing permissions should always be preserved and Cassy permissions added
     let allow = settings
         .pointer("/permissions/allow")
         .expect("permissions.allow missing");
@@ -177,11 +177,11 @@ fn test_strip_cas_hooks() {
     let modified = strip_cas_hooks(&mut settings);
     assert!(modified);
 
-    // CAS hooks should be removed
+    // Cassy hooks should be removed
     assert!(settings.pointer("/hooks/PreToolUse").is_none());
     assert!(settings.pointer("/hooks/SessionStart").is_none());
 
-    // Non-CAS hook should be preserved
+    // Non-Cassy hook should be preserved
     assert!(settings.pointer("/hooks/CustomHook").is_some());
 
     // Permissions should be untouched
@@ -423,7 +423,7 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
         .pointer("/hooks/PostToolUse")
         .and_then(|value| value.as_array())
         .expect("PostToolUse array missing");
-    assert_eq!(post_tool.len(), 2, "custom hook plus one CAS hook");
+    assert_eq!(post_tool.len(), 2, "custom hook plus one Cassy hook");
     assert_eq!(
         post_tool[0].pointer("/hooks/0/command"),
         Some(&serde_json::json!("custom post-tool hook"))
@@ -440,7 +440,7 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
         .pointer("/hooks/PreToolUse")
         .and_then(|value| value.as_array())
         .expect("PreToolUse array missing");
-    assert_eq!(pre_tool.len(), 2, "custom hook plus one CAS hook");
+    assert_eq!(pre_tool.len(), 2, "custom hook plus one Cassy hook");
     assert_eq!(
         pre_tool[0].pointer("/hooks/0/command"),
         Some(&serde_json::json!("custom pre-tool hook"))
@@ -555,7 +555,7 @@ fn committed_codex_hooks_file_regenerates_without_byte_changes() {
 // The cas-9a60 exec-form attempt emitted `{"type":"command","args":[...]}`
 // with NO top-level `command` string. That is malformed: CC's /doctor requires
 // a string `command` for every type:"command" hook, so it rejected all 12
-// entries and the harness silently disabled every CAS hook (see
+// entries and the harness silently disabled every Cassy hook (see
 // docs/requests/BUG-hooks-exec-form-missing-command.md). #58441 closing was a
 // red herring — valid exec-form is `{"command":"cas","args":[...]}` and
 // `command` is required regardless.
@@ -786,20 +786,20 @@ fn emitted_config_round_trips_through_detect_and_strip() {
 
     assert!(
         has_cas_hook_entries(&config),
-        "freshly-emitted shell-form config must be detected as CAS hooks"
+        "freshly-emitted shell-form config must be detected as Cassy hooks"
     );
 
     let stripped = strip_cas_hooks(&mut config);
-    assert!(stripped, "strip_cas_hooks must report removal of CAS hooks");
+    assert!(stripped, "strip_cas_hooks must report removal of Cassy hooks");
     assert!(
         config.get("hooks").is_none(),
-        "hooks key must be gone after stripping an all-CAS config"
+        "hooks key must be gone after stripping an all-Cassy config"
     );
 
     // Idempotent: detection now false, second strip is a no-op.
     assert!(
         !has_cas_hook_entries(&config),
-        "no CAS hooks should remain after stripping"
+        "no Cassy hooks should remain after stripping"
     );
     assert!(
         !strip_cas_hooks(&mut config),
@@ -812,7 +812,7 @@ fn emitted_config_round_trips_through_detect_and_strip() {
 /// (`args[0]=="cas"`, no command) and the cas-c17b shell-form.
 #[test]
 fn legacy_forms_still_detected_and_stripped() {
-    // Malformed exec-form: shape CAS actually wrote on cas-9a60 / cas-7ecd era,
+    // Malformed exec-form: shape Cassy actually wrote on cas-9a60 / cas-7ecd era,
     // including matcher, timeout, and async fields. No top-level command.
     let mut exec_form = serde_json::json!({
         "hooks": {
@@ -835,18 +835,18 @@ fn legacy_forms_still_detected_and_stripped() {
     });
     assert!(
         has_cas_hook_entries(&exec_form),
-        "malformed exec-form settings from pre-cas-c17b CAS must still be detected"
+        "malformed exec-form settings from pre-cas-c17b Cassy must still be detected"
     );
     assert!(
         strip_cas_hooks(&mut exec_form),
-        "malformed exec-form CAS hooks must be stripped on re-init"
+        "malformed exec-form Cassy hooks must be stripped on re-init"
     );
     assert!(
         exec_form.get("hooks").is_none(),
-        "all exec-form CAS hooks should be removed, leaving no hooks key"
+        "all exec-form Cassy hooks should be removed, leaving no hooks key"
     );
 
-    // Shell-form: shape generated by CAS after cas-c17b.
+    // Shell-form: shape generated by Cassy after cas-c17b.
     let mut shell_form = serde_json::json!({
         "hooks": {
             "PreToolUse": [{"hooks": [{"type": "command", "command": "cas hook PreToolUse"}]}]
@@ -854,15 +854,15 @@ fn legacy_forms_still_detected_and_stripped() {
     });
     assert!(
         has_cas_hook_entries(&shell_form),
-        "shell-form settings must also be detected as CAS hooks"
+        "shell-form settings must also be detected as Cassy hooks"
     );
     assert!(
         strip_cas_hooks(&mut shell_form),
-        "shell-form CAS hooks must be stripped on re-init"
+        "shell-form Cassy hooks must be stripped on re-init"
     );
     assert!(
         shell_form.get("hooks").is_none(),
-        "all shell-form CAS hooks should be removed, leaving no hooks key"
+        "all shell-form Cassy hooks should be removed, leaving no hooks key"
     );
 }
 
@@ -1063,7 +1063,7 @@ fn unrelated_hooks_still_track_their_own_flags() {
 // Claude Code reads `$CLAUDE_CONFIG_DIR/settings.json` when the variable is set
 // and `~/.claude/settings.json` otherwise. Treating hooks in `~/.claude` as
 // covering *every* session silently stripped project hooks and left alt-dir
-// sessions with zero CAS hooks.
+// sessions with zero Cassy hooks.
 // ---------------------------------------------------------------------------
 
 use crate::cli::hook::config_gen::{
@@ -1073,7 +1073,7 @@ use crate::cli::hook::config_gen::{
 use crate::cli::hook::configure_claude_hooks_with_config_dirs;
 use std::path::PathBuf;
 
-/// Write a settings.json containing CAS hooks into `config_dir`.
+/// Write a settings.json containing Cassy hooks into `config_dir`.
 fn write_global_hooks(config_dir: &std::path::Path) {
     std::fs::create_dir_all(config_dir).unwrap();
     let settings = serde_json::json!({
@@ -1183,7 +1183,7 @@ fn configure_keeps_project_hooks_when_alt_config_dir_lacks_them() {
 }
 
 /// Regression for the reported failure: an existing project settings file with
-/// CAS hooks must not be stripped by a re-run (`cas update`) when the alt config
+/// Cassy hooks must not be stripped by a re-run (`cas update`) when the alt config
 /// dir is hookless.
 #[test]
 fn configure_does_not_strip_existing_project_hooks_for_alt_config_dir() {
@@ -1223,7 +1223,7 @@ fn configure_project_hooks_converge_across_config_dirs() {
     let first = std::fs::read(project.path().join(".claude/settings.json")).unwrap();
     assert!(
         project_has_cas_hooks(project.path()),
-        "project settings always own the canonical CAS hook block"
+        "project settings always own the canonical Cassy hook block"
     );
     configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir, alt_dir])
         .unwrap();

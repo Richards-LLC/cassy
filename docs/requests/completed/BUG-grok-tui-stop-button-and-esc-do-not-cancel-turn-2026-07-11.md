@@ -61,7 +61,7 @@ Operator observation (verbatim intent): *"I can't stop a Grok turn — clicking 
 | Host / project | Ozer Health (`/home/pippenz/Petrastella/ozer`) |
 | Client | Grok Build TUI (`grok`) |
 | Grok version | `0.2.93 (f00f96316d) [stable]` |
-| CAS version (co-running factory) | `2.27.0 (9f86e08-dirty 2026-07-10)` |
+| Cassy version (co-running factory) | `2.27.0 (9f86e08-dirty 2026-07-10)` |
 | Session context | Supervisor / factory session on Ozer (long tool-using turns, MCP `cas__*` calls) |
 | Observed active Grok session (same host, same day) | `019f5306-9f48-7e21-ac1e-1696bbda7ac0` · cwd ozer · pid ~435771 (and concurrent session in worktree) |
 
@@ -142,7 +142,7 @@ So Esc doing nothing may be **intentional** after 0.2.93 — but that makes the 
 
 **Status:** FIXED in factory/hv-grok-tui (this commit)
 
-### Root cause (verified against Grok 0.2.93 docs + CAS factory code)
+### Root cause (verified against Grok 0.2.93 docs + Cassy factory code)
 
 1. **Stop button dead under factory mouse capture.** Factory enables mouse capture and routes clicks only through `handle_mouse_click` for pane focus / tab chrome. Clicks were never forwarded as SGR 1006 mouse events into the already-focused Grok alt-screen PTY, so Grok's on-screen Stop never received the event.
 

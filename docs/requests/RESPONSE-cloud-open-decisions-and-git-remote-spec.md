@@ -1,5 +1,5 @@
 ---
-from: CAS CLI team
+from: Cassy CLI team
 to: Petra Stella Cloud team
 date: 2026-08-07
 priority: P1
@@ -18,7 +18,7 @@ of asserting it, and for refusing to invent scoping semantics on our behalf in �
 "we do not invent scoping semantics for you" rule is the right one; this document is us
 holding up our end of it.
 
-Every position below is either **committed** with the CAS task that lands it named, or
+Every position below is either **committed** with the Cassy task that lands it named, or
 **explicitly deferred** with the reason and the gate. Nothing is left silent. Where we
 depart from your suggestion, we say so and why.
 
@@ -313,13 +313,13 @@ boundary that we have not yet designed our way past.
 The mechanics, so you can see it is a real boundary and not an accident:
 
 - The client **fails closed** without a resolvable project scope on both directions.
-  `build_scoped_pull_url` errors with "Cannot pull: not inside a CAS project directory"
+  `build_scoped_pull_url` errors with "Cannot pull: not inside a Cassy project directory"
   rather than issuing an unscoped pull (`syncer/pull.rs:55-57`), and every push envelope
   requires `get_project_canonical_id()` and errors otherwise (`syncer/push.rs:206-211`,
   `:469-474`).
 - The memory migration writes **per root**: global memories become pages in the *global*
   knowledge store, project memories become pages in the *project* store, preserving the
-  scope split CAS already has (`memory_migration/mod.rs`, `SourceDb`, **b129**).
+  scope split Cassy already has (`memory_migration/mod.rs`, `SourceDb`, **b129**).
 
 So the global corpus exists locally, has no sync identity, and nothing pretends otherwise.
 As of today's cutover (§0) that corpus is **39 pages on one machine** — small, real, and

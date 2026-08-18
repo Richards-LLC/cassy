@@ -27,7 +27,7 @@ Hunt for exploitable defects — places where a malicious or malformed input, a 
 - **Cryptographic misuse.** Custom crypto, `Math.random()` for security purposes, ECB mode, static IVs, missing HMAC verification, TLS verification disabled.
 - **Deserialization** of untrusted input without a schema boundary (pickle, YAML unsafe load, `eval`, Rust `unsafe` transmute of network bytes).
 - **SSRF / open redirect** when the diff introduces URL fetching or redirect logic.
-- **Factory / tool-dispatch surface** specific to CAS: a new MCP tool without jail or permission checks, a new hook that runs with elevated privileges, a worker-callable path that can influence supervisor state.
+- **Factory / tool-dispatch surface** specific to Cassy: a new MCP tool without jail or permission checks, a new hook that runs with elevated privileges, a worker-callable path that can influence supervisor state.
 - **Race conditions on security boundaries** — TOCTOU on permission checks, lease confusion letting one worker act as another.
 
 ## Out of scope

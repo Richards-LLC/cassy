@@ -21,12 +21,12 @@ use crate::store::find_cas_root;
 
 /// Cached project canonical ID. Only `Some` results are cached; if resolution
 /// returns `None` (e.g. `find_cas_root()` fails because the process started
-/// outside a CAS project), the next call retries instead of locking in `None`
+/// outside a Cassy project), the next call retries instead of locking in `None`
 /// for the process lifetime. This prevents transient failures during daemon
 /// startup or early session hooks from permanently disabling project scoping.
 static CACHED_PROJECT_ID: Mutex<Option<String>> = Mutex::new(None);
 
-/// Get the canonical project ID for the current CAS project.
+/// Get the canonical project ID for the current Cassy project.
 ///
 /// See [`resolve_canonical_id`] for the full read chain: explicit
 /// `config.toml` pin, then the `origin` git remote, then the project folder
@@ -38,10 +38,10 @@ static CACHED_PROJECT_ID: Mutex<Option<String>> = Mutex::new(None);
 ///
 /// If the folder name cannot be derived (e.g. `.cas/` lives at the filesystem root
 /// and its parent has no file name), falls back to a deterministic `local:<sha256>`
-/// hash of the canonicalized project path. This guarantees every valid CAS project
+/// hash of the canonicalized project path. This guarantees every valid Cassy project
 /// has a stable, unique `project_id` for cloud sync scoping.
 ///
-/// Returns `None` only if not inside a CAS project directory at all.
+/// Returns `None` only if not inside a Cassy project directory at all.
 /// Successful results are cached for the process lifetime; `None` results
 /// are retried on each call so transient failures don't stick.
 pub fn get_project_canonical_id() -> Option<String> {
@@ -415,7 +415,7 @@ pub fn fallback_project_id_from_path(cas_root: &Path) -> Option<String> {
     Some(format!("local:{hex}"))
 }
 
-/// One local CAS project as seen by the collision detector: where it lives,
+/// One local Cassy project as seen by the collision detector: where it lives,
 /// which cloud bucket it resolves to, and the repository identity (`origin`
 /// remote) that distinguishes it from an unrelated project.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -956,7 +956,7 @@ pub enum TeamScopeAdoption {
     /// No token in this project's cloud config; nothing can be resolved.
     NotLoggedIn,
     /// No single team identity resolves. `membership_count` is 0 (no teams)
-    /// or ≥ 2 with no user-level default (genuinely ambiguous — CAS refuses
+    /// or ≥ 2 with no user-level default (genuinely ambiguous — Cassy refuses
     /// to guess which team a project belongs to).
     NoResolvableTeam { membership_count: usize },
 }
@@ -1085,7 +1085,7 @@ impl CloudConfig {
 
     /// The config governing the current context, never failing.
     ///
-    /// Inside a CAS project this is [`load`][Self::load]; outside one (for
+    /// Inside a Cassy project this is [`load`][Self::load]; outside one (for
     /// example `cas login --token` run from `$HOME`) it is the user-level
     /// `~/.cas/cloud.json` alone. Auth commands use this so they work
     /// everywhere: credentials do not live in a project.
@@ -1223,7 +1223,7 @@ impl CloudConfig {
     ///    explicit team link and has not opted in to user-level auto-promotion.
     ///    Personal projects (no `team_id`, no `team_auto_promote = Some(true)`)
     ///    MUST NOT inherit the user's default team, because that would silently
-    ///    promote every CAS workspace the user touches to team scope, including
+    ///    promote every Cassy workspace the user touches to team scope, including
     ///    private personal side-projects.
     ///
     /// 2. `user_cfg.default_team_id` if `Some` → user's preferred team.
@@ -1519,7 +1519,7 @@ mod tests {
     #[test]
     fn store_login_credentials_works_outside_a_project() {
         // Ben #4 (cas-046d): `cas login --token` from $HOME died with
-        // "CAS not initialized — run cas init".
+        // "Cassy not initialized — run cas init".
         let temp = TempDir::new().unwrap();
         let user_path = temp.path().join("home-cas").join("cloud.json");
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
@@ -2639,7 +2639,7 @@ mod tests {
             "None must not be cached — resolver should be called again"
         );
 
-        // Third call: resolver now succeeds (simulates cwd moved into a CAS project)
+        // Third call: resolver now succeeds (simulates cwd moved into a Cassy project)
         let result3 = get_id(&|| Some("my-project".to_string()));
         assert_eq!(result3, Some("my-project".to_string()));
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
@@ -2994,7 +2994,7 @@ mod tests {
     fn resolve_canonical_id_prefers_config_toml_over_folder_name() {
         // Lock in the resolution-order change: config.toml beats folder name.
         let temp = tempfile::tempdir().unwrap();
-        // Create the `.cas/` subdir so cas_root looks like a real CAS root
+        // Create the `.cas/` subdir so cas_root looks like a real Cassy root
         // (parent dir name = `quiet-leopard-46` or whatever — irrelevant).
         let cas_root = temp.path().join("project-dir");
         std::fs::create_dir_all(&cas_root).unwrap();

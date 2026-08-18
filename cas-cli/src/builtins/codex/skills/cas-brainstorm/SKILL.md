@@ -12,7 +12,7 @@ disallowed-tools:
 
 Brainstorming answers **WHAT** to build through collaborative dialogue. It precedes planning (which answers **HOW**) and execution (which builds it).
 
-CAS agents tend to default to executing immediately. This skill exists to invert that bias: **80% understanding the problem, 20% capturing the answer.** If you finish a brainstorm having mostly talked rather than mostly listened, you did it wrong.
+Cassy agents tend to default to executing immediately. This skill exists to invert that bias: **80% understanding the problem, 20% capturing the answer.** If you finish a brainstorm having mostly talked rather than mostly listened, you did it wrong.
 
 The durable output is a **requirements document** stored at `docs/brainstorms/YYYY-MM-DD-<topic>-requirements.md`, strong enough that planning does not need to invent product behavior, scope boundaries, or success criteria.
 
@@ -31,7 +31,7 @@ The durable output is a **requirements document** stored at `docs/brainstorms/YY
 
 ## Interaction Rules (NON-NEGOTIABLE)
 
-These exist because CAS agents have a documented tendency to dump multiple questions at once and lead with solutions. Do not skip them.
+These exist because Cassy agents have a documented tendency to dump multiple questions at once and lead with solutions. Do not skip them.
 
 1. **Ask ONE question at a time.** Never batch unrelated questions into one message. If you find yourself writing "Also,..." or "And another thing:" — stop. Send the first question, wait for the answer, then ask the next.
 2. **Use the `AskUserQuestion` tool for blocking questions.** It is the platform's blocking question tool. Use it instead of presenting numbered options in chat whenever possible. Numbered chat options are a fallback only. In factory mode AskUserQuestion is blocked — ask the questions in plain text and end your turn; the director relays answers.
@@ -68,7 +68,7 @@ Check for an existing requirements document on this topic:
 ls docs/brainstorms/ 2>/dev/null
 ```
 
-Also check CAS for prior brainstorms or tasks:
+Also check Cassy for prior brainstorms or tasks:
 
 ```
 mcp__cs__search action=search query="<topic keywords>" doc_type=entry limit=5
@@ -121,7 +121,7 @@ Match depth to scope:
 
 **Standard and Deep** — Two passes:
 
-*Constraint Check* — Read project instruction files (`CLAUDE.md`, `AGENTS.md` if present) for workflow, product, or scope constraints that affect the brainstorm. Search CAS for prior decisions:
+*Constraint Check* — Read project instruction files (`CLAUDE.md`, `AGENTS.md` if present) for workflow, product, or scope constraints that affect the brainstorm. Search Cassy for prior decisions:
 ```
 mcp__cs__search action=search query="<topic>" doc_type=entry
 mcp__cs__task action=list status=closed
@@ -209,7 +209,7 @@ Read `references/requirements-capture.md` for the document template, formatting 
 
 For **Lightweight** brainstorms, keep the document compact. Skip document creation entirely when the user only needs brief alignment and no durable decisions need to be preserved.
 
-After writing the document, also store the topic and key decisions in CAS memory so future brainstorms can find them:
+After writing the document, also store the topic and key decisions in Cassy memory so future brainstorms can find them:
 
 ```
 mcp__cs__memory action=remember title="Brainstorm: <topic>" content="<1-paragraph summary + decisions + path to doc>" tags=brainstorm,<topic>

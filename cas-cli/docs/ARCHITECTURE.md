@@ -1,4 +1,4 @@
-# CAS Architecture
+# Cassy Architecture
 
 ## Workspace Layout
 
@@ -24,7 +24,7 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 | `consolidation/` | Memory consolidation and decay |
 | `extraction/` | AI-powered extraction of observations into structured memory |
 | `bridge/` | Local helper server for external tool integration |
-| `cloud/` | CAS Cloud sync (optional) |
+| `cloud/` | Cassy Cloud sync (optional) |
 | `sync/` | Filesystem sync to `.claude/rules/` and `.claude/skills/` |
 
 ### Workspace Crates — `crates/`
@@ -48,7 +48,7 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 
 ### The memory surfaces — one map
 
-CAS stores agent-facing knowledge in seven distinct surfaces. They are not tiers of one thing; each has its own store, its own write path, and its own retrieval channel. The recurring confusion this table exists to end is "which one do I write to, and who will ever read it back?"
+Cassy stores agent-facing knowledge in seven distinct surfaces. They are not tiers of one thing; each has its own store, its own write path, and its own retrieval channel. The recurring confusion this table exists to end is "which one do I write to, and who will ever read it back?"
 
 | Surface | What it holds | Stored where | Written by | Read back by |
 |---------|---------------|--------------|------------|--------------|
@@ -58,7 +58,7 @@ CAS stores agent-facing knowledge in seven distinct surfaces. They are not tiers
 | **Entities** | Extracted proper nouns (person, project, technology, file, concept, …) and their mentions — the join layer between prose and code. | `entities`, `entity_mentions`, `relationships` | `search action=entity_extract`, background extraction | `search action=entity_list` / `entity_show` |
 | **Code index** | Symbols and files parsed by tree-sitter, plus code↔memory links. | `code_symbols`, `code_files`, `code_relationships`, `code_memory_links` | Daemon code-index cycle (60s), `cas index` | `search action=code_search` / `code_show` / `grep` |
 | **Knowledge pages** | The distilled project wiki: LLM-written prose about *this repo*, with source provenance and a user-sovereignty lock. | Index rows in `knowledge_pages` + `knowledge_sources`; **bodies are markdown files on disk** under `.cas/knowledge/<type>/<title>.md` | `cas knowledge build` (distillation), `knowledge action=write` (hand-authored, always `locked=1`) | `knowledge` MCP tool (`search`/`read`/`list`), `cas knowledge search|read` |
-| **Patterns** | Cross-project personal/team conventions. | **Not local** — CAS Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
+| **Patterns** | Cross-project personal/team conventions. | **Not local** — Cassy Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
 
 Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
@@ -81,7 +81,7 @@ Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
 Rules that keep that boundary honest:
 
-- **Personal push is incremental and root-bound.** `cas cloud push` and the push leg of `cas cloud sync` read only the personal `sync_queue` in the supplied CAS root; they do not rescan or re-send the local corpus. The same root supplies `cloud.json`, `config.toml` canonical-id resolution, and `cas.db`, so a push planned for project A cannot consume project B's rows or label them with project B's id. Successful rows are deleted from the queue; failed or server-skipped rows remain retryable. `--entries-only` and `--tasks-only` filter the queue before its batch limit and send no sibling entity kinds.
+- **Personal push is incremental and root-bound.** `cas cloud push` and the push leg of `cas cloud sync` read only the personal `sync_queue` in the supplied Cassy root; they do not rescan or re-send the local corpus. The same root supplies `cloud.json`, `config.toml` canonical-id resolution, and `cas.db`, so a push planned for project A cannot consume project B's rows or label them with project B's id. Successful rows are deleted from the queue; failed or server-skipped rows remain retryable. `--entries-only` and `--tasks-only` filter the queue before its batch limit and send no sibling entity kinds.
 - **Dry-run describes the next queue batch, not an invented snapshot.** Its JSON includes `source = "sync_queue"`, the root, canonical project id, scope, per-kind counts, batch limit, and `batch_limit_reached`. A count exactly equal to the limit is explicitly saturated: it is the number in the next attempt, not a claim about the full backlog. The old newest-10,000 snapshot windows (and their inaccurate “last 90 days” labels) are not part of push planning.
 - **Personal request limits are measured in bytes.** Queued upserts are split using the fully serialized envelope, then checked again after gzip. The default pre-gzip budget is 4 MiB and the hard cloud gzip ceiling is 4 MiB; fixed item-count chunking is not used for personal push.
 

@@ -29,7 +29,7 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
    # Similar past EPICs (patterns, sizing, what worked)
    cas__task action=list task_type=epic status=closed
 
-   # CAS memories for learnings, bugfixes, architectural decisions
+   # Cassy memories for learnings, bugfixes, architectural decisions
    cas__search action=search query="<keywords>" doc_type=entry limit=10
 
    # Codebase for existing implementations you might duplicate or conflict with
@@ -103,7 +103,7 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
 
 Workers from previous sessions are gone. Stale DB records are not live processes.
 
-1. **Check for binary/source drift** — fixes merged to main since last session don't take effect until rebuild. Run `~/.cargo/bin/cargo build --release` if CAS source changed, then restart `cas serve`. If a "fixed" bug reappears, this is the first thing to check.
+1. **Check for binary/source drift** — fixes merged to main since last session don't take effect until rebuild. Run `~/.cargo/bin/cargo build --release` if Cassy source changed, then restart `cas serve`. If a "fixed" bug reappears, this is the first thing to check.
 2. Spawn fresh workers
 3. Verify they appear in TUI
 4. Assign open tasks to the new workers
@@ -121,7 +121,7 @@ base branch ────────────────────► (sta
                └─ factory/owl ┘
 ```
 
-### Merging with CAS, not raw git
+### Merging with Cassy, not raw git
 
 `cas__coordination action=worktree_merge` is the **primary** merge path. It resolves
 the merge target from task state, enforces the trunk guard, and keeps factory tracking,
@@ -134,7 +134,7 @@ cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
 
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
-**display filter and never merge authority**, and CAS never silently defaults to
+**display filter and never merge authority**, and Cassy never silently defaults to
 `main`/`master`/`staging`.
 
 ### Required merge-review discipline

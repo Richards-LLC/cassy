@@ -63,7 +63,7 @@ pub fn default_baseline_path(machine: &str) -> PathBuf {
 
 /// Resolve the global memory store a parity run should merge.
 ///
-/// Prefers the host root `~/.cas` — which is where the live global CAS state
+/// Prefers the host root `~/.cas` — which is where the live global Cassy state
 /// actually lives — and only falls back to [`crate::config::global_cas_dir`]
 /// (`~/.config/cas` on Linux, `Application Support` on macOS) when the host
 /// root holds no database. See the rationale comment on

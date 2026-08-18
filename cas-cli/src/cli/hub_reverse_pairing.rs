@@ -301,7 +301,7 @@ fn authorize_with_relay(
         .ok()
         .and_then(|hostname| hostname.into_string().ok())
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "CAS machine".to_owned());
+        .unwrap_or_else(|| "Cassy machine".to_owned());
     let attempt = AuthorizationAttempt::load_or_create(paths.root(), &code)?;
     let claim = relay.claim(&code, &attempt.nonce)?;
     anyhow::ensure!(

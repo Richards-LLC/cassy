@@ -6,11 +6,11 @@ Channel: #cas-internal (`C0B44GUKDK2`) — two top-level posts.
 
 ## Post 1 — User
 
-Setting up team sync used to mean hunting down a raw team ID from a dashboard and pasting a UUID into a command — and if you skipped it, your project quietly synced to just you, with no hint anything was off. Now CAS already knows your teams: link a project by name, or with no argument at all, and CAS speaks up (once) if you're syncing solo while a team is available.
+Setting up team sync used to mean hunting down a raw team ID from a dashboard and pasting a UUID into a command — and if you skipped it, your project quietly synced to just you, with no hint anything was off. Now Cassy already knows your teams: link a project by name, or with no argument at all, and Cassy speaks up (once) if you're syncing solo while a team is available.
 
 - `cas cloud team set petra-stella` just works — team names resolve automatically from your login. If you're only on one team, plain `cas cloud team set` links it with zero typing. Raw UUIDs still work.
 - New `cas cloud team auto on | off | clear` — one command to make a project follow your default team, hard-block team sync, or go back to the default, instead of hand-editing a JSON file.
-- One-time heads-up: if a project is syncing to personal scope while you're a member of a team, CAS tells you once — with the exact command to link it — and never nags again.
+- One-time heads-up: if a project is syncing to personal scope while you're a member of a team, Cassy tells you once — with the exact command to link it — and never nags again.
 - Your choice always wins: nothing ever switches a project to team scope on its own. The notice informs; only your command changes anything.
 
 ## Post 2 — Dev

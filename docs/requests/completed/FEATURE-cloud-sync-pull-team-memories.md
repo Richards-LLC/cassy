@@ -9,7 +9,7 @@ cas_task: cas-e38e
 
 ## Problem
 
-When a user runs `cas cloud sync` from a CAS-initialized project directory with a configured team, the command pulls only personal-scope data. Team-scoped memories for the project's canonical id are silently excluded — the user has to know about the separate `cas cloud team-memories` command.
+When a user runs `cas cloud sync` from a Cassy-initialized project directory with a configured team, the command pulls only personal-scope data. Team-scoped memories for the project's canonical id are silently excluded — the user has to know about the separate `cas cloud team-memories` command.
 
 The "Full sync (push then pull)" naming is misleading when team scope is silently dropped.
 
@@ -48,8 +48,8 @@ After the existing personal pull completes, if a team is configured for the curr
 
 **Live verification box — `root@starscream` (Hetzner), Ben's account:**
 
-- 19 CAS-initialized projects under `~/projects/` (ozer, domdms, cas-src, petra-stella-cloud, abundant-mines, closure-club, gabber-studio, …)
-- Ben's CAS env at `~/.config/cas/env` provides `CAS_CLOUD_TOKEN` and `CAS_CLOUD_ENDPOINT=https://petra-stella-cloud.vercel.app`
+- 19 Cassy-initialized projects under `~/projects/` (ozer, domdms, cas-src, petra-stella-cloud, abundant-mines, closure-club, gabber-studio, …)
+- Ben's Cassy env at `~/.config/cas/env` provides `CAS_CLOUD_TOKEN` and `CAS_CLOUD_ENDPOINT=https://petra-stella-cloud.vercel.app`
 - `~/.zshrc` auto-logs in on shell start and defines `cas-login` alias
 
 **Reproduction smoke test (from ben's account):**

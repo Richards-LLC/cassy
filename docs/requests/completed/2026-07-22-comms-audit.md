@@ -5,7 +5,7 @@ priority: P1
 cas_task: cas-4fb4
 ---
 
-# CAS factory communication audit — 2026-07-21
+# Cassy factory communication audit — 2026-07-21
 
 The communication system was **not seamless** across the Ozer factories observed on 2026-07-21. Healthy normal-priority messages reached the target inbox in 25–101 ms, but other normal messages stalled for 18–24 minutes and drained only during shutdown. Urgent interrupt delivery was consistent at about 1.2 seconds. All four previously filed failure modes reproduced during the day; two additional observability defects made the persisted records contradict the actual logs.
 
@@ -52,7 +52,7 @@ All timestamps below are UTC.
 
   Both were logged as `interrupt-and-redirect` / `urgent_interrupt`.
 
-Four operationally important messages were delayed 18–24 minutes in the Jill wave alone. Later same-day CAS records contain additional normal messages delayed until their factories shut down.
+Four operationally important messages were delayed 18–24 minutes in the Jill wave alone. Later same-day Cassy records contain additional normal messages delayed until their factories shut down.
 
 ### Workaround applied
 
@@ -212,7 +212,7 @@ Lean recommendation: **(a) and (b)**, with **(c)** as the safety signal.
 
 ### Symptoms
 
-For historical messages that the CAS text log proves were delivered, `message_status` reports `legacy_status: Delivered` while simultaneously reporting authoritative `stage: enqueued`, `delivered_at: null`, and `pending_reason: awaiting_delivery`.
+For historical messages that the Cassy text log proves were delivered, `message_status` reports `legacy_status: Delivered` while simultaneously reporting authoritative `stage: enqueued`, `delivered_at: null`, and `pending_reason: awaiting_delivery`.
 
 ### Concrete evidence
 

@@ -1,14 +1,14 @@
 # Total ambient recall: bounded retrieval architecture and vector-ingestion economics
 
 **Date:** 2026-08-08
-**Audience:** CAS retrieval and factory practitioners
+**Audience:** Cassy retrieval and factory practitioners
 **Report contract:** System / architecture explainer
 **Repository commit measured:** `c9668ef5d8c2e8cd10125b189ab9ad8c26cb7947`
-**Confidence:** High for the measured CAS repository receipt and the architecture boundaries; medium for size projections, which scale today's corpus mix linearly.
+**Confidence:** High for the measured Cassy repository receipt and the architecture boundaries; medium for size projections, which scale today's corpus mix linearly.
 
 ## 1. System takeaway
 
-CAS can provide useful ambient recall without ambient prompt bloat by keeping the full corpus outside the model context, embedding one bounded query per event, retrieving namespace-scoped candidates across every surface, and injecting only a deduplicated evidence packet with hard role-specific token ceilings. The current CAS history corpus is cheap in resource units: 2,239 eligible commit/doc units required 71 successful embedding requests, about 1.89 MB of input, about 12.33 MB of total wire traffic, 56 seconds without a failure, and 18.64 MB of LMDB allocation. `cas-embed-v1` has no published client monetary price, so this report does not invent one; it gives resource units and formulas.
+Cassy can provide useful ambient recall without ambient prompt bloat by keeping the full corpus outside the model context, embedding one bounded query per event, retrieving namespace-scoped candidates across every surface, and injecting only a deduplicated evidence packet with hard role-specific token ceilings. The current Cassy history corpus is cheap in resource units: 2,239 eligible commit/doc units required 71 successful embedding requests, about 1.89 MB of input, about 12.33 MB of total wire traffic, 56 seconds without a failure, and 18.64 MB of LMDB allocation. `cas-embed-v1` has no published client monetary price, so this report does not invent one; it gives resource units and formulas.
 
 ## 2. End-to-end system flow or loop
 
@@ -173,9 +173,9 @@ Structured source data remains authoritative in SQLite/files/git. Vectors are a 
 
 Deleting or de-scoping a source synchronously tombstones its lexical, structural, and vector records. Team/project reassignment cannot leave a vector visible in the former namespace. Session ledgers expire with the session. Old model generations are removed only after the replacement is complete and serving.
 
-### 5.4 Fresh CAS benchmark
+### 5.4 Fresh Cassy benchmark
 
-The benchmark used a newly initialized isolated CAS root inside this worktree, the installed `cas 2.53.0` client, current repository commit `c9668ef5`, CHANGELOG-only docs (no network fetch), and the already-configured embedding capability. The live project database and vector cache were not read or mutated for benchmark writes.
+The benchmark used a newly initialized isolated Cassy root inside this worktree, the installed `cas 2.53.0` client, current repository commit `c9668ef5`, CHANGELOG-only docs (no network fetch), and the already-configured embedding capability. The live project database and vector cache were not read or mutated for benchmark writes.
 
 | Metric | Prior M7 receipt (2026-08-08) | Fresh measurement | Change |
 | --- | ---: | ---: | ---: |
@@ -200,7 +200,7 @@ The endpoint does not expose billed token counts. Measured bytes are therefore t
 
 ### 5.5 Representative project projections
 
-Projection assumptions: current eligible-commit ratio (84.79%), 788 input bytes/eligible commit, 3,160 input bytes/doc, 1,024 f32 dimensions, measured 2.032 LMDB amplification, 4,634 downstream TLS bytes/unit, 1.033 upstream TLS bytes/input byte, 0.789 s/request, and linear SQLite scaling. “Small” is 500 commits + 10 docs; “medium” is the measured CAS repository; “large” is 100,000 commits + 2,000 docs. These are capacity scenarios, not claims about a population distribution.
+Projection assumptions: current eligible-commit ratio (84.79%), 788 input bytes/eligible commit, 3,160 input bytes/doc, 1,024 f32 dimensions, measured 2.032 LMDB amplification, 4,634 downstream TLS bytes/unit, 1.033 upstream TLS bytes/input byte, 0.789 s/request, and linear SQLite scaling. “Small” is 500 commits + 10 docs; “medium” is the measured Cassy repository; “large” is 100,000 commits + 2,000 docs. These are capacity scenarios, not claims about a population distribution.
 
 | Scenario | Total commits / docs | Eligible units | Input bytes | Requests | Embed time | Raw vectors | LMDB | Total wire | SQLite + LMDB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -231,7 +231,7 @@ one query-embedding dollars = (T_query / 1,000,000) * P + Q
 monthly query dollars = events_month * one_query_embedding_dollars
 ```
 
-Until the provider publishes `P`, `Q`, and billed `T`, CAS should report measured bytes, units, requests, elapsed time, wire bytes, and storage rather than a dollar figure. A typical 512-byte canonical query is roughly 102–171 planning tokens at 3–5 bytes/token, produces one 4,096-byte raw query vector, and should be cached by query hash within the session.
+Until the provider publishes `P`, `Q`, and billed `T`, Cassy should report measured bytes, units, requests, elapsed time, wire bytes, and storage rather than a dollar figure. A typical 512-byte canonical query is roughly 102–171 planning tokens at 3–5 bytes/token, produces one 4,096-byte raw query vector, and should be cached by query hash within the session.
 
 ## 6. Annotated walkthrough
 
@@ -396,7 +396,7 @@ Socket-byte receipts were summed from positive syscall return values on TCP file
 - `cas-cli/src/cloud/embed_drain.rs`: shared knowledge/history drain, 512-unit tick, capability-absent boundary, generated-merge exclusion, failure ledger.
 - `crates/cas-store/src/history_store.rs`: pending queues, oldest-first order, content-change re-arming, model-change re-arm.
 - `docs/specs/2026-08-07-code-history-search.md`: published 120 requests/60 s service limit and privacy/provider contract.
-- CAS task `cas-db6e`: prior live receipt used only as the named comparison baseline.
+- Cassy task `cas-db6e`: prior live receipt used only as the named comparison baseline.
 
 ### Raw receipt summary
 

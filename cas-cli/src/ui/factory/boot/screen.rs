@@ -178,7 +178,7 @@ mod minions_colors {
     };
 }
 
-/// ASCII art logo for CAS Factory
+/// ASCII art logo for Cassy Factory
 const LOGO: &str = r#"
    ██████╗ █████╗ ███████╗    ███████╗ █████╗  ██████╗████████╗ ██████╗ ██████╗ ██╗   ██╗
   ██╔════╝██╔══██╗██╔════╝    ██╔════╝██╔══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗╚██╗ ██╔╝
@@ -304,7 +304,7 @@ impl BootScreen {
         let compact_title = if self.minions_theme {
             "Minion Factory Boot"
         } else {
-            "CAS Factory Boot"
+            "Cassy Factory Boot"
         };
 
         let compact_subtitle = if self.minions_theme {

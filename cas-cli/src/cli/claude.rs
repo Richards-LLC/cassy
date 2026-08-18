@@ -1,7 +1,7 @@
-//! `cas claude` — launch the CAS factory with a Claude supervisor on an
+//! `cas claude` — launch the Cassy factory with a Claude supervisor on an
 //! explicitly selected account profile.
 //!
-//! `cas claude alt` is the operator-facing spelling for "run CAS, supervised by
+//! `cas claude alt` is the operator-facing spelling for "run Cassy, supervised by
 //! Claude, signed in as my alt subscription". It is the Claude sibling of
 //! `cas codex` / `cas grok`, with one extra positional: the account profile.
 //!
@@ -55,7 +55,7 @@ pub struct ClaudeArgs {
     #[arg(long = "list-profiles")]
     pub list_profiles: bool,
 
-    /// Launch plain Claude Code on this profile instead of the CAS factory.
+    /// Launch plain Claude Code on this profile instead of the Cassy factory.
     #[arg(long = "bare")]
     pub bare: bool,
 
@@ -421,7 +421,7 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
     }
 }
 
-/// Plain Claude Code launch. On Unix this replaces the CAS process with Claude.
+/// Plain Claude Code launch. On Unix this replaces the Cassy process with Claude.
 fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
     // `apply_profile_env` already ran the picker for this process; reuse its

@@ -1,7 +1,7 @@
 # Factory failure-mode frequency audit v1
 
 - **Date:** 2026-08-11
-- **Audience:** CAS factory practitioners
+- **Audience:** Cassy factory practitioners
 - **Report contract:** Metrics / mining analysis
 - **Window:** 2026-07-28 00:00 EDT through 2026-08-11 13:55:35 EDT
 - **Confidence:** High for the named evidence and counts in the adjudicated manifest; medium for cross-model comparison because task mix and model assignment were not randomized.
@@ -41,7 +41,7 @@ The source inventory before factory filtering was 2,628 Claude files / 1.25 GB a
 
 The frequency unit is a unique **model × harness × session/work-episode × failure class**. Repeated evidence in one session/class is one episode; the manifest separately records raw occurrences. That is why the three zero-test invocations in one Claude Opus 5 session appear as `1 episode / 3 events`.
 
-`docs/analysis/scripts/mine_failure_modes.py` streams JSONL, inherits model from Claude assistant metadata or Codex turn context, excludes system/developer rows and CAS task-show/sibling-note dumps, and emits one candidate pointer per source/session/class. Two evidence frames are accepted:
+`docs/analysis/scripts/mine_failure_modes.py` streams JSONL, inherits model from Claude assistant metadata or Codex turn context, excludes system/developer rows and Cassy task-show/sibling-note dumps, and emits one candidate pointer per source/session/class. Two evidence frames are accepted:
 
 1. a unique runtime guard banner in tool output for unscoped tests or workspace-contract denial; or
 2. a concrete supervisor correction, close rejection, blocker/discovery note, or task-note incident carrying the actual missing action or damage.

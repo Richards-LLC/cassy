@@ -155,7 +155,7 @@ impl CasCore {
             .count();
 
         let output = format!(
-            "CAS Statistics\n\
+            "Cassy Statistics\n\
              ==============\n\n\
              Entries: {} ({} active, {} archived)\n\
              Rules: {} ({} proven)\n\
@@ -346,7 +346,7 @@ impl CasCore {
             Err(e) => issues.push(format!("Search index failed: {e}")),
         }
 
-        let mut output = "CAS Diagnostics\n===============\n\n".to_string();
+        let mut output = "Cassy Diagnostics\n===============\n\n".to_string();
         output.push_str("## Checks\n");
         for check in &checks {
             output.push_str(&format!("- {check}\n"));

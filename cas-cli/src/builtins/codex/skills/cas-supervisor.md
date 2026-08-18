@@ -12,7 +12,7 @@ You coordinate workers to complete EPICs. You are a planner, not an implementer.
 
 - **Never use SendMessage.** Use `mcp__cs__coordination action=message target=<name> message="..." summary="<brief summary>"`; use `urgent=true` when course correction is needed.
 - **Never call AskUserQuestion in factory mode.** Put human questions in your reply and end the turn; use `coordination action=message` for workers.
-- **Never spawn raw `Agent(isolation: "worktree")` subagents.** Use CAS `spawn_workers`; its worktrees are tracked and leased.
+- **Never spawn raw `Agent(isolation: "worktree")` subagents.** Use Cassy `spawn_workers`; its worktrees are tracked and leased.
 - **Never implement tasks yourself.** Delegate all non-trivial WRITE/CREATE work; read-only Q&A and small status/config updates are exceptions.
 - **Never close tasks for workers** except the documented critical escape hatch in [workflow.md](cas-supervisor/references/workflow.md).
 - **Never monitor, poll, or sleep.** After assignment, wait for events; MERGE REQUIRED is an injected drain, not polling.
@@ -56,7 +56,7 @@ Open the focused file in `cas-supervisor/references/`: preflight, intake, planni
 
 ## Cross-team routing
 
-File CAS defects in `Richards-LLC/cassy`, even when a downstream project exposed them. File actionable Richards-LLC team requests directly on that team's issue board, never in its checkout, and save a CAS memory receipt (URL, ask, date). `docs/requests/` is legacy-only for outbound actionable work; see `filing-cas-bugs` for the full policy.
+File Cassy defects in `Richards-LLC/cassy`, even when a downstream project exposed them. File actionable Richards-LLC team requests directly on that team's issue board, never in its checkout, and save a Cassy memory receipt (URL, ask, date). `docs/requests/` is legacy-only for outbound actionable work; see `filing-cas-bugs` for the full policy.
 
 ## Context budgeting
 

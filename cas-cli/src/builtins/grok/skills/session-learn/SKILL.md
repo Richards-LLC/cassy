@@ -6,17 +6,17 @@ managed_by: cas
 
 # session-learn — 7-signal session classifier
 
-Borrowed from `third-brain-v5-skills/skills/session-learn` (MIT, reference_third_brain_v5_skills_borrow_source) and adapted to the CAS memory schema. The third-brain version writes to a wiki tree; this version writes to the CAS memory + rule stores via `cas__memory remember` so findings benefit from CAS's existing dedup, embedding, and recall pipeline.
+Borrowed from `third-brain-v5-skills/skills/session-learn` (MIT, reference_third_brain_v5_skills_borrow_source) and adapted to the Cassy memory schema. The third-brain version writes to a wiki tree; this version writes to the Cassy memory + rule stores via `cas__memory remember` so findings benefit from Cassy's existing dedup, embedding, and recall pipeline.
 
 ## When to use
 
 - **Auto-trigger** (default OFF): the `Stop` hook runs this classifier when `[memory] session_learn_auto = true` is set in `.cas/config.toml`. The flag defaults to `false` for v1 because each invocation pays one Haiku call (~1–3 s, ~$0.001) and the user should opt in.
 - **Manual** ("extract this session", "save what we learned", "extract knowledge"): the user invokes the skill at any point. Honors the same `<5 tool calls` skip rule unless the user explicitly says "extract even though it's short".
-- **Chained from other skills** (third-brain pattern: cognitive-compile, wiki-ingest, deep-research). CAS does not yet have those skills, but the contract is the same — call this skill with the session's transcript path.
+- **Chained from other skills** (third-brain pattern: cognitive-compile, wiki-ingest, deep-research). Cassy does not yet have those skills, but the contract is the same — call this skill with the session's transcript path.
 
 ## What you produce
 
-Exactly one batched output: a JSON array of memory drafts, each with the 7-signal classification, the proposed CAS entry_type / tags / scope, and a confidence score. The caller (Rust handler or interactive user) routes them through `cas__memory action=remember` so the standard overlap-detection gate decides whether each draft lands.
+Exactly one batched output: a JSON array of memory drafts, each with the 7-signal classification, the proposed Cassy entry_type / tags / scope, and a confidence score. The caller (Rust handler or interactive user) routes them through `cas__memory action=remember` so the standard overlap-detection gate decides whether each draft lands.
 
 **You do NOT write to the store directly.** Return drafts only; the caller writes. This separation lets the user preview drafts in interactive mode and lets the hook handler apply the overlap gate.
 
@@ -24,7 +24,7 @@ Exactly one batched output: a JSON array of memory drafts, each with the 7-signa
 
 ## The 7 signals
 
-| # | Signal | What triggers it | CAS `entry_type` | Typical `tags` | Scope |
+| # | Signal | What triggers it | Cassy `entry_type` | Typical `tags` | Scope |
 |:--|--------|------------------|------------------|----------------|-------|
 | 1 | **Concept** | A new domain term the agent learned (e.g., "verification jail", "supervisor-owned review"). | `learning` | `concept`, plus the term itself | `project` (term is project-specific) or `global` (cross-project) |
 | 2 | **Entity** | A person, project, tool, repo, or library that came up by name and is worth remembering for future recall. | `context` | `entity`, plus type (`person`/`tool`/`repo`/`library`) | usually `project` |
@@ -34,7 +34,7 @@ Exactly one batched output: a JSON array of memory drafts, each with the 7-signa
 | 6 | **Decision** | An architectural / process / scope decision with a rationale that should outlive the session. | `context` | `decision`, plus the area | `project` (rare global decisions are fine too) |
 | 7 | **Gap** | Something the agent didn't know but should have. Becomes input to a follow-up question or doc-read. | `observation` | `gap`, plus the area, plus the speculative source (e.g., `needs-docs`, `needs-question`) | usually `project` |
 
-**Signal vs. content-type:** signals describe the *epistemic role* of the memory. `entry_type` describes *how CAS treats it for recall*. The mapping above is the default; the classifier may override on a case-by-case basis when a particular finding clearly fits a different entry_type (e.g., a correction so specific to a codebase pattern that `learning` fits better than `preference`). Record the override in the draft's `notes` field.
+**Signal vs. content-type:** signals describe the *epistemic role* of the memory. `entry_type` describes *how Cassy treats it for recall*. The mapping above is the default; the classifier may override on a case-by-case basis when a particular finding clearly fits a different entry_type (e.g., a correction so specific to a codebase pattern that `learning` fits better than `preference`). Record the override in the draft's `notes` field.
 
 ---
 
@@ -116,7 +116,7 @@ Session-end transcript shows: user corrected me twice on scope discipline, I dis
     "entry_type": "learning",
     "scope": "project",
     "tags": ["pattern", "skills", "managed-by-cas"],
-    "content": "Frontmatter `description:` fields in CAS skill markdown are the first thing the LLM sees in the skills list; if they disagree with the body, the description wins in practice. Pin descriptions in regression tests.",
+    "content": "Frontmatter `description:` fields in Cassy skill markdown are the first thing the LLM sees in the skills list; if they disagree with the body, the description wins in practice. Pin descriptions in regression tests.",
     "confidence": 0.85,
     "dedup_hits": []
   },
@@ -136,6 +136,6 @@ Session-end transcript shows: user corrected me twice on scope discipline, I dis
 
 ## See also
 
-- `cas-cli/src/builtins/skills/cas-memory-management/SKILL.md` — how memories are stored, recalled, and pruned in CAS.
+- `cas-cli/src/builtins/skills/cas-memory-management/SKILL.md` — how memories are stored, recalled, and pruned in Cassy.
 - `cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs` — the existing single-bucket `extract_learnings_sync` path that session-learn complements. session-learn is the richer multi-signal successor; the old path remains for legacy `[hooks] generate_summaries = true` users until session_learn_auto becomes the default.
-- `third-brain-v5-skills/skills/session-learn/SKILL.md` — upstream pattern. Diffs: third-brain writes to a wiki tree; this skill writes via `cas__memory remember` so findings inherit CAS dedup and recall.
+- `third-brain-v5-skills/skills/session-learn/SKILL.md` — upstream pattern. Diffs: third-brain writes to a wiki tree; this skill writes via `cas__memory remember` so findings inherit Cassy dedup and recall.

@@ -200,7 +200,7 @@ fn poll_interval() -> Duration {
 /// the transport exists is covered too.
 pub(crate) fn spawn() -> ParentWatchdog {
     if !enabled_by_env() {
-        eprintln!("[CAS] Parent watchdog disabled via {ENV_ENABLED}");
+        eprintln!("[Cassy] Parent watchdog disabled via {ENV_ENABLED}");
         return ParentWatchdog::inert();
     }
 
@@ -208,7 +208,7 @@ pub(crate) fn spawn() -> ParentWatchdog {
     let startup_parent = parent_state(original_ppid);
     if !may_arm(startup_parent) {
         eprintln!(
-            "[CAS] Parent watchdog not armed: already adopted at startup (ppid {original_ppid}) — \
+            "[Cassy] Parent watchdog not armed: already adopted at startup (ppid {original_ppid}) — \
              treating this as a deliberately detached server"
         );
         return ParentWatchdog::inert();
@@ -234,7 +234,7 @@ pub(crate) fn spawn() -> ParentWatchdog {
             }
 
             eprintln!(
-                "[CAS] Parent harness is gone (ppid {original_ppid} -> {current_ppid}); \
+                "[Cassy] Parent harness is gone (ppid {original_ppid} -> {current_ppid}); \
                  shutting down so this server stops holding the project database."
             );
             tripped.store(true, Ordering::SeqCst);
@@ -245,7 +245,7 @@ pub(crate) fn spawn() -> ParentWatchdog {
             // contention this bug causes — exiting hard is still strictly
             // better than squatting write-side fds for another 36 hours.
             tokio::time::sleep(GRACEFUL_SHUTDOWN_GRACE).await;
-            eprintln!("[CAS] Graceful shutdown did not complete in time; exiting.");
+            eprintln!("[Cassy] Graceful shutdown did not complete in time; exiting.");
             std::process::exit(0);
         }
     });

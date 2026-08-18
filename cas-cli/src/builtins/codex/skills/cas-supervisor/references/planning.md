@@ -133,7 +133,7 @@ Practical worker limits: 3–4 parallel workers for most EPICs. Beyond 4, coordi
 
 **Dependency patterns:**
 
-| Pattern | Shape | When to use | CAS fields |
+| Pattern | Shape | When to use | Cassy fields |
 |---|---|---|---|
 | Chain | A → B → C | Sequential work where each step needs the prior output | `dep_add id=B to_id=A dep_type=blocks` |
 | Fan-out | A → {B, C, D} → E | Independent tasks after a shared setup, converging at a gate | B/C/D each `blocked_by=A`; E `blocked_by=B,C,D` |

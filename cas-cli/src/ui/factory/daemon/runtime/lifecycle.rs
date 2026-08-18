@@ -592,7 +592,7 @@ impl FactoryDaemon {
                 self.process_pending_spawns().await;
             }
 
-            // Periodic CAS data refresh
+            // Periodic Cassy data refresh
             let mut refreshed = false;
             if last_refresh.elapsed() >= refresh_interval {
                 // Collect a completed GitHub Actions snapshot in the background.
@@ -680,7 +680,7 @@ impl FactoryDaemon {
                 }
 
                 // A successful PTY spawn is not a verified worker. Confirm the
-                // harness reached CAS registration (or surface a bounded
+                // harness reached Cassy registration (or surface a bounded
                 // timeout) on the existing two-second lifecycle cadence.
                 self.reconcile_spawn_verifications().await;
                 // cas-f9e8 telemetry: the gap between the previous refresh

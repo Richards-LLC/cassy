@@ -162,7 +162,7 @@ The CLI already sends `project_canonical_id` on every push (enforced in `push_su
 
 After implementing fixes, verify:
 
-1. Start a Claude Code session, create a CAS entry, confirm it appears in sync_queue
+1. Start a Claude Code session, create a Cassy entry, confirm it appears in sync_queue
 2. Exit Claude Code — check that sync_queue is now empty (Fix 1 drained it)
 3. Manually add items to sync_queue while no session is running
 4. Start a new Claude Code session — check queue drains within ~10s (Fix 2)

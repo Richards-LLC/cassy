@@ -5,7 +5,7 @@ use crate::mcp::tools::types::defaults::{default_agent_type, default_lease_durat
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SessionStartRequest {
-    /// Optional session ID (if omitted, CAS generates one)
+    /// Optional session ID (if omitted, Cassy generates one)
     #[schemars(description = "Optional session ID to use as the agent ID")]
     #[serde(default)]
     pub session_id: Option<String>,

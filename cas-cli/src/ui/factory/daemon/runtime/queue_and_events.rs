@@ -21,7 +21,7 @@ const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 /// cas-28a49 (GH #97): for `cli=codex` the overwhelmingly likely cause is an
 /// untrusted working directory — Codex parks on its interactive trust prompt
 /// before it can start `cas serve`, so the generic "inspect the pane" advice
-/// sends the operator hunting. CAS pre-trusts the cwd at launch
+/// sends the operator hunting. Cassy pre-trusts the cwd at launch
 /// (`cas_pty::codex_trust`), so a Codex timeout that still happens means that
 /// write did not take, and the message says so. Non-Codex harnesses keep the
 /// previous wording verbatim.
@@ -31,7 +31,7 @@ fn registration_timeout_detail(
     pane_tail: Option<&str>,
 ) -> String {
     let base = format!(
-        "Worker process launched but did not register with CAS within {} seconds; \
+        "Worker process launched but did not register with Cassy within {} seconds; \
          inspect the worker pane/process and daemon logs.",
         timeout.as_secs()
     );
@@ -1410,7 +1410,7 @@ impl FactoryDaemon {
                         &pane,
                         self.app.harness_for(&pane),
                         source,
-                        "CAS delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
+                        "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
                         Some(row_id),
                     );
                     let _ = self
@@ -1753,7 +1753,7 @@ impl FactoryDaemon {
         self.app.notifier().notify_crash(worker_name, &exit_info);
 
         if let Some(verification) = unverified {
-            let detail = format!("Worker process {exit_info} before CAS agent registration.");
+            let detail = format!("Worker process {exit_info} before Cassy agent registration.");
             append_spawn_audit(
                 self.app.cas_dir(),
                 &self.session_name,
@@ -1826,7 +1826,7 @@ impl FactoryDaemon {
             let (outcome, detail) = if success {
                 (
                     "confirmed",
-                    "Worker is active in the CAS agent registry for this factory session."
+                    "Worker is active in the Cassy agent registry for this factory session."
                         .to_string(),
                 )
             } else {
@@ -1881,7 +1881,7 @@ impl FactoryDaemon {
                 } else {
                     let detail = format!(
                         "Task {task_id} was promised to worker '{worker}', which never registered \
-                         with CAS. The task is not being worked — re-assign it or re-spawn."
+                         with Cassy. The task is not being worked — re-assign it or re-spawn."
                     );
                     append_spawn_audit(
                         self.app.cas_dir(),
@@ -3091,8 +3091,8 @@ impl FactoryDaemon {
             ) {
                 DeferredInboxOutcome::HarnessConsumed => {
                     self.forget_row_delivery_state(queued.id);
-                    // cas-b8ce (GH #176): this arm is CAS's strongest evidence
-                    // that a NON-CAS transport surfaced the content — the
+                    // cas-b8ce (GH #176): this arm is Cassy's strongest evidence
+                    // that a NON-Cassy transport surfaced the content — the
                     // harness took our inbox copy AND the pane then produced
                     // output. Write the per-recipient receipt so the row leaves
                     // the recipient's unread set for good; stamping only
@@ -4240,7 +4240,7 @@ impl FactoryDaemon {
                 }
                 // cas-b8ce (GH #176): reaching this arm means the delivery was
                 // NOT wake-deferred and NOT awaiting an urgent wake probe — the
-                // content went into the recipient's turn over CAS's transport.
+                // content went into the recipient's turn over Cassy's transport.
                 // Record the receipt against the ADDRESSED target (the key the
                 // recipient's own poll joins on), not the pane name, or the
                 // supervisor's `supervisor`/pane alias split leaves the row
@@ -4669,7 +4669,7 @@ impl FactoryDaemon {
                                 Some(&name),
                                 "launch",
                                 "started",
-                                "Worker PTY process started; awaiting CAS registration.",
+                                "Worker PTY process started; awaiting Cassy registration.",
                             );
                             // cas-28a4 (GH #84): the pre-assignment is confirmed
                             // at REGISTRATION, not here. A launched PTY is not
@@ -5712,7 +5712,7 @@ mod tests {
             None,
         );
         assert!(
-            codex.contains("did not register with CAS within 60 seconds"),
+            codex.contains("did not register with Cassy within 60 seconds"),
             "must keep the base diagnostic: {codex}"
         );
         assert!(
@@ -5728,7 +5728,7 @@ mod tests {
             let detail = registration_timeout_detail(Duration::from_secs(60), other, None);
             assert_eq!(
                 detail,
-                "Worker process launched but did not register with CAS within 60 seconds; \
+                "Worker process launched but did not register with Cassy within 60 seconds; \
                  inspect the worker pane/process and daemon logs.",
                 "{other:?} must keep the pre-cas-28a49 wording verbatim"
             );
@@ -7807,7 +7807,7 @@ mod tests {
         );
     }
 
-    /// cas-45c4: an agent CAS has no registry row for (mid-spawn) is not a wake
+    /// cas-45c4: an agent Cassy has no registry row for (mid-spawn) is not a wake
     /// candidate — absence of a row is not evidence the pane is parked.
     #[test]
     fn an_unknown_agent_is_not_woken_on_pane_evidence_alone() {
@@ -8055,7 +8055,7 @@ mod tests {
             Some("brave-otter-9"),
             "launch",
             "started",
-            "Worker PTY process started; awaiting CAS registration.",
+            "Worker PTY process started; awaiting Cassy registration.",
         );
 
         let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
@@ -8072,7 +8072,7 @@ mod tests {
             Some("brave-otter-9"),
             "register",
             "timeout",
-            "did not register with CAS within 120 seconds",
+            "did not register with Cassy within 120 seconds",
         );
 
         let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
@@ -8157,7 +8157,7 @@ mod tests {
             "short-lived-worker",
             "register",
             false,
-            "Worker process exited before CAS agent registration.",
+            "Worker process exited before Cassy agent registration.",
         )
         .unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();

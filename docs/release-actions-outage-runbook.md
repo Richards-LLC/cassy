@@ -6,7 +6,7 @@ Use this only when [GitHub Status](https://www.githubstatus.com/) reports **Acti
 
 1. Check GitHub Status and the queued timestamp. A queued run is an outage signal, not evidence that the release source is bad.
 2. Queue **one fresh rerun** after recovery is indicated. Do not repeatedly rerun an outage-era job: during the 2026-08-17 incident, those runs stayed wedged while newly-created runs progressed.
-3. Do not foreground-watch `gh run watch` or poll in a loop. In a factory session, record the run URL/ID, set a CAS reminder, end the turn, and check once when it fires. A 10–15 minute reminder is appropriate while GitHub Status remains degraded.
+3. Do not foreground-watch `gh run watch` or poll in a loop. In a factory session, record the run URL/ID, set a Cassy reminder, end the turn, and check once when it fires. A 10–15 minute reminder is appropriate while GitHub Status remains degraded.
 4. If Actions still cannot publish and the release owner accepts the missing CI evidence, build the Linux asset below. The GitHub REST/Release API can remain available while Actions runners are not.
 
 Git-over-SSH may also remain healthy while GitHub’s merge API returns 5xx. It does not bypass protected-main checks: keep the release-source PR open and merge it through the normal protected-branch path after recovery.
@@ -79,7 +79,7 @@ Dry-run the exact publish command without changing GitHub:
 
 ```bash
 printf 'gh release create %q --repo %q --title %q --generate-notes %q %q\n' \
-  "$TAG" "$REPO" "CAS $TAG" "$LINUX_ASSET" "$MACOS_ASSET"
+  "$TAG" "$REPO" "Cassy $TAG" "$LINUX_ASSET" "$MACOS_ASSET"
 ```
 
 After the release owner approves that output, run the printed command. Then run `./scripts/release-published-receipt.sh "$TAG" --write-draft <draft>` before any release announcement. The published GitHub assets—not a local archive or its checksum—are the source for announcement digests.

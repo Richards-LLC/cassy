@@ -785,7 +785,7 @@ Against the installed v2.50.0 binary, with a probe row targeted at a synthetic r
 | payload shape | result |
 |---|---|
 | `{"hook_event_name":"UserPromptSubmit","prompt":"…"}` — what Claude actually sends | `{}` — mail not surfaced |
-| `{"hook_event_name":"UserPromptSubmit","user_prompt":"…"}` — what CAS assumed | `additionalContext` carrying the message |
+| `{"hook_event_name":"UserPromptSubmit","user_prompt":"…"}` — what Cassy assumed | `additionalContext` carrying the message |
 
 ### The corroboration that settles "inert vs. never-fires"
 
@@ -912,7 +912,7 @@ every line the daemon wrote that day is a single stage, and 16,604 of those 17,1
 `22:54:20Z`. The per-minute profile is flat — 412, 538, 549, 541, 529, 562, … 557, 537, 551, 194 —
 ≈9.2 lines/second, i.e. the 100ms poll tick, with no decay across thirty minutes.
 
-**What ended it: nothing in CAS.** The last line is `22:54:20.707Z`; the next line in the file is
+**What ended it: nothing in Cassy.** The last line is `22:54:20.707Z`; the next line in the file is
 `22:54:20.790Z  Supervisor exited with code None, shutting down`. The loop was terminated by an
 unrelated process exit — no argument from code required.
 

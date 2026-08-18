@@ -442,7 +442,7 @@ fn open_envs() -> &'static Mutex<HashMap<PathBuf, Arc<LmdbVectorStore>>> {
 }
 
 impl KnowledgeVectorCache {
-    /// Directory holding the cache for a given CAS root.
+    /// Directory holding the cache for a given Cassy root.
     pub fn cache_dir(cas_root: &Path) -> PathBuf {
         cas_root.join("index").join("knowledge-vectors")
     }

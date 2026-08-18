@@ -1,4 +1,4 @@
-//! CAS-specific hybrid source-code search.
+//! Cassy-specific hybrid source-code search.
 //!
 //! Structural SQLite + BM25 search is always available once indexed. The
 //! semantic channel is attached only when cloud auth and a non-empty,

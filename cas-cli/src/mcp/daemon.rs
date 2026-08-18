@@ -428,7 +428,7 @@ impl EmbeddedDaemon {
                 {
                     Ok(()) => self.mark_proxy_snapshot_refreshed(),
                     Err(error) => {
-                        eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                        eprintln!("[Cassy] Failed to publish MCP proxy state: {error}");
                     }
                 }
             }
@@ -440,7 +440,7 @@ impl EmbeddedDaemon {
             *guard = new_mtime;
         }
 
-        eprintln!("[CAS] Proxy config changed, reloading...");
+        eprintln!("[Cassy] Proxy config changed, reloading...");
 
         let cfg = cmcp_core::config::Config::load_merged(if proxy_path.exists() {
             Some(&proxy_path)
@@ -466,7 +466,7 @@ impl EmbeddedDaemon {
                         crate::mcp::server::install_proxy_policy(&proxy, &snapshot_config).await;
                         let tool_count = proxy.tool_count().await;
                         eprintln!(
-                            "[CAS] Proxy reloaded ({server_count} server(s), {tool_count} tools)"
+                            "[Cassy] Proxy reloaded ({server_count} server(s), {tool_count} tools)"
                         );
                         match crate::mcp::server::write_proxy_snapshot_cache_for_config(
                             &self.config.cas_root,
@@ -477,12 +477,12 @@ impl EmbeddedDaemon {
                         {
                             Ok(()) => self.mark_proxy_snapshot_refreshed(),
                             Err(error) => {
-                                eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                                eprintln!("[Cassy] Failed to publish MCP proxy state: {error}");
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("[CAS] Proxy reload failed: {e}");
+                        eprintln!("[Cassy] Proxy reload failed: {e}");
                         match crate::mcp::server::write_unavailable_proxy_snapshot_cache(
                             &self.config.cas_root,
                             Some(&snapshot_config),
@@ -491,7 +491,7 @@ impl EmbeddedDaemon {
                             Ok(()) => self.mark_proxy_snapshot_refreshed(),
                             Err(error) => {
                                 eprintln!(
-                                    "[CAS] Failed to publish MCP proxy failure state: {error}"
+                                    "[Cassy] Failed to publish MCP proxy failure state: {error}"
                                 );
                             }
                         }
@@ -499,7 +499,7 @@ impl EmbeddedDaemon {
                 }
             }
             Err(e) => {
-                eprintln!("[CAS] Failed to load proxy config: {e}");
+                eprintln!("[Cassy] Failed to load proxy config: {e}");
                 match crate::mcp::server::write_unavailable_proxy_snapshot_cache(
                     &self.config.cas_root,
                     None,
@@ -507,7 +507,7 @@ impl EmbeddedDaemon {
                 ) {
                     Ok(()) => self.mark_proxy_snapshot_refreshed(),
                     Err(error) => {
-                        eprintln!("[CAS] Failed to publish MCP proxy failure state: {error}");
+                        eprintln!("[Cassy] Failed to publish MCP proxy failure state: {error}");
                     }
                 }
             }
@@ -676,7 +676,7 @@ impl EmbeddedDaemon {
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             if let Ok(Some(agent)) = store.get_by_pid(cc_pid) {
                 eprintln!(
-                    "[CAS] Adopting pre-registered agent: {} (registered via fallback)",
+                    "[Cassy] Adopting pre-registered agent: {} (registered via fallback)",
                     agent.id
                 );
                 // Populate pid_sessions so GetSession queries work
@@ -690,14 +690,14 @@ impl EmbeddedDaemon {
 
         // Initial cloud sync: push any stale items from previous sessions, then pull
         if self.cloud_syncer.is_some() {
-            eprintln!("[CAS] Running initial cloud sync (push stale + pull)...");
+            eprintln!("[Cassy] Running initial cloud sync (push stale + pull)...");
             match self.run_cloud_sync().await {
                 Ok(result) => {
                     let pushed = result.total_pushed();
                     let pulled = result.total_pulled();
                     if pushed > 0 || pulled > 0 {
                         eprintln!(
-                            "[CAS] Initial cloud sync complete: {pushed} pushed, {pulled} pulled"
+                            "[Cassy] Initial cloud sync complete: {pushed} pushed, {pulled} pulled"
                         );
                     }
                     let mut status = self.status.write().await;
@@ -795,7 +795,7 @@ impl EmbeddedDaemon {
                         if should_run_code_index(is_idle, stale_for) {
                             if !is_idle {
                                 eprintln!(
-                                    "[CAS] Code indexing: no idle window for {}s, indexing anyway \
+                                    "[Cassy] Code indexing: no idle window for {}s, indexing anyway \
                                      (max staleness {CODE_INDEX_MAX_STALENESS_SECS}s)",
                                     stale_for.as_secs()
                                 );
@@ -889,17 +889,17 @@ impl EmbeddedDaemon {
 
         // Final cloud sync: drain any pending items before shutdown
         if self.cloud_syncer.is_some() {
-            eprintln!("[CAS] Running final cloud sync before shutdown...");
+            eprintln!("[Cassy] Running final cloud sync before shutdown...");
             match tokio::time::timeout(Duration::from_secs(10), self.run_cloud_sync()).await {
                 Ok(Ok(result)) => {
                     let pushed = result.total_pushed();
                     let pulled = result.total_pulled();
                     if pushed > 0 || pulled > 0 {
                         eprintln!(
-                            "[CAS] Final cloud sync complete: {pushed} pushed, {pulled} pulled"
+                            "[Cassy] Final cloud sync complete: {pushed} pushed, {pulled} pulled"
                         );
                     } else {
-                        eprintln!("[CAS] Final cloud sync complete (nothing pending)");
+                        eprintln!("[Cassy] Final cloud sync complete (nothing pending)");
                     }
                 }
                 Ok(Err(e)) => {
@@ -980,7 +980,7 @@ impl EmbeddedDaemon {
             ) {
                 Ok(outcome) => Some(outcome),
                 Err(e) => {
-                    eprintln!("[CAS] History provenance repair failed: {e}");
+                    eprintln!("[Cassy] History provenance repair failed: {e}");
                     None
                 }
             };
@@ -993,7 +993,7 @@ impl EmbeddedDaemon {
         if let Some((outcome, repaired)) = outcome {
             if outcome.commits_indexed > 0 {
                 eprintln!(
-                    "[CAS] History indexing ({}): {} commits, {} file changes",
+                    "[Cassy] History indexing ({}): {} commits, {} file changes",
                     outcome.mode.as_str(),
                     outcome.commits_indexed,
                     outcome.files_indexed,
@@ -1002,7 +1002,7 @@ impl EmbeddedDaemon {
             if let Some(repaired) = repaired {
                 if repaired.written > 0 {
                     eprintln!(
-                        "[CAS] History provenance: {} commit link(s) reconstructed \
+                        "[Cassy] History provenance: {} commit link(s) reconstructed \
                          ({} examined, {} with no session-bearing edge, {} ambiguous)",
                         repaired.written,
                         repaired.examined,
@@ -1054,7 +1054,7 @@ impl EmbeddedDaemon {
             && fetch.docs_total() > 0
         {
             eprintln!(
-                "[CAS] History docs: {} issue(s), {} PR(s), {} comment(s)",
+                "[Cassy] History docs: {} issue(s), {} PR(s), {} comment(s)",
                 fetch.issues, fetch.pull_requests, fetch.comments,
             );
         }
@@ -1086,7 +1086,7 @@ impl EmbeddedDaemon {
 
         if report.did_work() {
             eprintln!(
-                "[CAS] Embedding drain: {} embedded ({} request(s), {} skipped), {} still pending",
+                "[Cassy] Embedding drain: {} embedded ({} request(s), {} skipped), {} still pending",
                 report.embedded(),
                 report.requests(),
                 report.skipped(),
@@ -1127,7 +1127,7 @@ impl EmbeddedDaemon {
 
         if result.files_indexed > 0 || result.files_deleted > 0 {
             eprintln!(
-                "[CAS] Code indexing: {} indexed, {} deleted, {} symbols",
+                "[Cassy] Code indexing: {} indexed, {} deleted, {} symbols",
                 result.files_indexed, result.files_deleted, result.symbols_indexed,
             );
 
@@ -1180,7 +1180,7 @@ impl EmbeddedDaemon {
         match outcome {
             Ok(Ok(report)) if !report.is_noop() => {
                 eprintln!(
-                    "[CAS] Knowledge distillation: {} pages written, {} llm calls",
+                    "[Cassy] Knowledge distillation: {} pages written, {} llm calls",
                     report.pages_written, report.llm_calls
                 );
             }
@@ -1210,7 +1210,7 @@ impl EmbeddedDaemon {
             if queue.init().is_ok() {
                 if let Err(e) = queue.prune_failed(7, 5) {
                     let msg = format!("Failed to prune failed sync queue items: {e}");
-                    eprintln!("[CAS] {msg}");
+                    eprintln!("[Cassy] {msg}");
                     result.errors.push(msg);
                 }
             }
@@ -1231,7 +1231,7 @@ impl EmbeddedDaemon {
                         .collect();
                     if let Err(e) = agent_store.mark_stale(&agent.id) {
                         let msg = format!("Failed to mark stale agent {}: {}", agent.id, e);
-                        eprintln!("[CAS] {msg}");
+                        eprintln!("[Cassy] {msg}");
                         result.errors.push(msg);
                     } else {
                         match queue_stale_factory_worker_shutdown(&cas_root, &agent) {
@@ -1239,7 +1239,7 @@ impl EmbeddedDaemon {
                             Ok(None) => {}
                             Err(error) => {
                                 let msg = format!("Failed to queue factory teardown for stale worker {}: {error}", agent.id);
-                                eprintln!("[CAS] {msg}");
+                                eprintln!("[Cassy] {msg}");
                                 result.errors.push(msg);
                             }
                         }
@@ -1263,7 +1263,7 @@ impl EmbeddedDaemon {
                 .collect();
             if let Err(e) = agent_store.reclaim_expired_leases() {
                 let msg = format!("Failed to reclaim expired leases: {e}");
-                eprintln!("[CAS] {msg}");
+                eprintln!("[Cassy] {msg}");
                 result.errors.push(msg);
             } else if !expired.is_empty() {
                 let _ = crate::mcp::tools::service::orphan_recovery::recover_expired_leases_for_dead_holders(
@@ -1306,7 +1306,7 @@ impl EmbeddedDaemon {
                 clone_path,
             } => {
                 eprintln!(
-                    "[CAS] Socket: SessionStart for {} (name: {:?}, role: {:?}, pid: {})",
+                    "[Cassy] Socket: SessionStart for {} (name: {:?}, role: {:?}, pid: {})",
                     &session_id[..8.min(session_id.len())],
                     agent_name,
                     agent_role,
@@ -1324,7 +1324,7 @@ impl EmbeddedDaemon {
             }
             DaemonEvent::SessionEnd { session_id, cc_pid } => {
                 eprintln!(
-                    "[CAS] Socket: SessionEnd for {}",
+                    "[Cassy] Socket: SessionEnd for {}",
                     &session_id[..8.min(session_id.len())]
                 );
                 // Remove PID → session mapping
@@ -1384,7 +1384,7 @@ impl EmbeddedDaemon {
 
                     let _ = event_store.record(&event);
                     eprintln!(
-                        "[CAS] Worker activity: {} - {}",
+                        "[Cassy] Worker activity: {} - {}",
                         &session_id[..8.min(session_id.len())],
                         description
                     );
@@ -1445,7 +1445,7 @@ impl EmbeddedDaemon {
             ) {
                 registered_id = Some(agent.id.clone());
                 eprintln!(
-                    "[CAS] Daemon {} agent: {} (role: {}, ours: {})",
+                    "[Cassy] Daemon {} agent: {} (role: {}, ours: {})",
                     if reused { "refreshed" } else { "registered" },
                     &agent.id[..8.min(agent.id.len())],
                     agent.role,
@@ -1480,13 +1480,13 @@ impl EmbeddedDaemon {
                         match coord.register(&agent) {
                             Ok(_) => {
                                 eprintln!(
-                                    "[CAS] Cloud registered agent: {}",
+                                    "[Cassy] Cloud registered agent: {}",
                                     &session_id[..8.min(session_id.len())]
                                 );
                             }
                             Err(e) => {
                                 eprintln!(
-                                    "[CAS] Cloud agent registration failed (best-effort): {e}"
+                                    "[Cassy] Cloud agent registration failed (best-effort): {e}"
                                 );
                             }
                         }
@@ -1543,7 +1543,7 @@ impl EmbeddedDaemon {
 
                 if let Ok(Some(agent)) = store.get_by_pid(our_cc_pid) {
                     eprintln!(
-                        "[CAS] Adopted agent by PID match: {} (pid: {})",
+                        "[Cassy] Adopted agent by PID match: {} (pid: {})",
                         &agent.id[..8.min(agent.id.len())],
                         our_cc_pid
                     );
@@ -1738,7 +1738,7 @@ impl EmbeddedDaemon {
             match maybe_mark_personal_scope_notice(&cas_root) {
                 Ok(Some(notice)) => {
                     let msg = notice.message();
-                    eprintln!("[CAS] {msg}");
+                    eprintln!("[Cassy] {msg}");
                     tracing::info!(target: "cas::sync", team_id = %notice.team_id, team_slug = %notice.team_slug, "{}", msg);
                 }
                 Ok(None) => {}
@@ -2113,11 +2113,11 @@ fn init_code_watcher(config: &EmbeddedDaemonConfig) -> Option<Arc<std::sync::Mut
     if let Err(e) = watcher.start_with_initial_scan(|| {
         crate::daemon::indexing::collect_source_files(&scan_paths, &extensions, &excludes)
     }) {
-        eprintln!("[CAS] Failed to start code watcher: {e}");
+        eprintln!("[Cassy] Failed to start code watcher: {e}");
         return None;
     }
 
-    eprintln!("[CAS] Code watcher started");
+    eprintln!("[Cassy] Code watcher started");
     Some(Arc::new(std::sync::Mutex::new(watcher)))
 }
 
@@ -2136,7 +2136,7 @@ fn get_sessions_for_sync(
         .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30)); // Default: last 30 days
 
     // Open SqliteStore directly to access session-specific methods.
-    // SqliteStore::open expects the CAS directory path, not cas.db.
+    // SqliteStore::open expects the Cassy directory path, not cas.db.
     let sqlite_store = match SqliteStore::open(cas_root) {
         Ok(store) => store,
         Err(_) => return Vec::new(),

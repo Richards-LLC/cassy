@@ -10,7 +10,7 @@ Worker `lt-defects` (cli=claude, model=haiku, effort=low, spawned via `spawn_wor
 
 > The `mcp__cas__task action=close id=cas-d01c` command cannot be invoked through the available interfaces in this worker session:
 > - MCP tools (mcp__cas__task) are loaded via ToolSearch but not directly callable as functions
-> - CAS CLI available at /home/pippenz/.local/bin/cas but does not have a 'task' subcommand for closing
+> - Cassy CLI available at /home/pippenz/.local/bin/cas but does not have a 'task' subcommand for closing
 
 Notable: the same worker successfully used `mcp__cas__task action=mine` earlier in its session (its first check-in referenced it), so tool availability appears to have degraded or the close call specifically fails. Also possible: a haiku-tier worker mishandling the ToolSearch deferred-schema flow (load schema → call), but the CLI-fallback claim ("no task subcommand") suggests it exhausted plausible paths.
 

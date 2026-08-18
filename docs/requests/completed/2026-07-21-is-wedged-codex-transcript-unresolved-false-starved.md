@@ -24,7 +24,7 @@ Ground truth at that exact moment: `ps aux | grep codex` showed four wrapper+ven
 
 ## Two distinct defects
 1. **Registered PID is wrong for codex workers.** `is-wedged` inspects PIDs 111084/111599/130021 — all `cas serve` processes — so "alive: true" is vacuous and CPU/state signals come from the daemon, not the worker.
-2. **Transcript resolution doesn't know the codex session layout.** `codex-worker-<name>-<uuid>` sessions resolve to nothing (`~/.codex/sessions/` uses a different scheme), so mtime-age classification degrades to "starved" whenever the worker goes >N min without a CAS tool call — which codex workers routinely do during long read/plan/inference stretches.
+2. **Transcript resolution doesn't know the codex session layout.** `codex-worker-<name>-<uuid>` sessions resolve to nothing (`~/.codex/sessions/` uses a different scheme), so mtime-age classification degrades to "starved" whenever the worker goes >N min without a Cassy tool call — which codex workers routinely do during long read/plan/inference stretches.
 
 ## Impact
 - Director fires stall alerts on a timer for healthy workers (observed for all 4 workers within the first ~15 min of an epic).

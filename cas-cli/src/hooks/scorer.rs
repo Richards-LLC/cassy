@@ -27,7 +27,7 @@ impl HybridContextScorer {
         Self { hybrid_search }
     }
 
-    /// Try to open hybrid context scorer from a CAS directory
+    /// Try to open hybrid context scorer from a Cassy directory
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let hybrid_search = HybridSearch::open(cas_dir)?;
         Ok(Self { hybrid_search })

@@ -1300,7 +1300,10 @@ fn http_transport_config(
     let mut config = StreamableHttpClientTransportConfig::with_uri(Arc::<str>::from(url));
     config.custom_headers = custom_headers;
     if let Some(auth) = auth {
-        config.auth_header = Some(format!("Bearer {}", resolve_credential(auth)?));
+        // RMCP owns the Authorization header and applies the Bearer scheme itself.
+        // Supplying a pre-prefixed value sends `Bearer Bearer <token>`, which a
+        // conforming streamable HTTP server rejects during initialization.
+        config.auth_header = Some(resolve_credential(auth)?);
     }
     Ok(config)
 }
@@ -1918,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_http_headers_and_literal_or_env_auth_are_applied_as_bearer_tokens() {
+    fn imported_http_headers_and_literal_or_env_auth_are_forwarded_as_raw_bearer_tokens() {
         let config = http_transport_config(
             "https://example.invalid/mcp",
             Some("literal-token"),
@@ -1926,7 +1929,7 @@ mod tests {
         )
         .expect("valid HTTP config");
 
-        assert_eq!(config.auth_header.as_deref(), Some("Bearer literal-token"));
+        assert_eq!(config.auth_header.as_deref(), Some("literal-token"));
         assert_eq!(
             config
                 .custom_headers
@@ -1950,10 +1953,9 @@ mod tests {
         .expect("valid env-backed auth");
         unsafe { std::env::remove_var(&env_name) };
 
-        let expected_auth = format!("Bearer {env_secret}");
         assert_eq!(
             env_config.auth_header.as_deref(),
-            Some(expected_auth.as_str())
+            Some(env_secret)
         );
         let health = serde_json::to_string(&ProxyHealthSnapshot {
             session_id: "redaction-test".to_string(),

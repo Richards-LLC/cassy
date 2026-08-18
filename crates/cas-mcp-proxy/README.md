@@ -6,6 +6,28 @@ MCP proxy engine for CAS. Connects to upstream MCP servers and exposes their too
 
 Upstream servers are configured in `.cas/proxy.toml` (project-scoped) and `~/.config/code-mode-mcp/config.toml` (user-scoped). Project config takes precedence.
 
+### Managed Viktor default
+
+On `cas serve` startup, Cassy refreshes a user-scoped `viktor` upstream using
+streamable HTTP at `https://api.viktor.com/mcp` and the credential reference
+`env:VIKTOR_API_KEY`. The API key is read only when the connection is made; it
+is never written to the config file. On this managed host, source the canonical
+credential file `~/.cas/viktor.env` into the serving process; never copy its
+value into a project file, artifact, or command output. The managed direct-call allowlist is
+exactly `ask_viktor`, `create_thread`, `send_message`, `wait_for_run`,
+`get_run`, `get_run_result`, `list_threads`, `list_messages`, and `whoami`.
+Every forwarded call is attributed by the proxy policy audit to the registered
+CAS caller, active task leases, and dispatch timestamp; request arguments and
+upstream output are not retained in that receipt.
+
+An existing `.cas/proxy.toml` intentionally replaces the user allowlist and
+delegation policy rather than widening it. Projects that have one must add the
+same exact routes there to opt into direct Viktor conversations. This preserves
+the fail-closed project boundary. The separate
+`delegation.external_production_verification` configuration remains the
+supervisor-only external-verification gateway; it is not installed by the
+managed Viktor default.
+
 ### Supported transports
 
 **Stdio** — spawns a child process:

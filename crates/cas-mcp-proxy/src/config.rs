@@ -4,6 +4,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Canonical Viktor streamable-HTTP upstream. The credential is resolved at
+/// connection time so it is safe to place this managed default on disk.
+pub const VIKTOR_MCP_URL: &str = "https://api.viktor.com/mcp";
+pub const VIKTOR_API_KEY_ENV: &str = "VIKTOR_API_KEY";
+pub const VIKTOR_SERVER: &str = "viktor";
+pub const VIKTOR_CONVERSATION_TOOLS: [&str; 9] = [
+    "ask_viktor",
+    "create_thread",
+    "send_message",
+    "wait_for_run",
+    "get_run",
+    "get_run_result",
+    "list_threads",
+    "list_messages",
+    "whoami",
+];
+
 /// MCP proxy configuration containing upstream server definitions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Config {
@@ -211,6 +228,59 @@ impl Config {
     pub fn remove_server(&mut self, name: &str) -> bool {
         self.servers.remove(name).is_some()
     }
+
+    /// Install the credential-free Viktor default in a user-scoped config.
+    ///
+    /// A pre-existing Viktor server is operator-owned and therefore retained,
+    /// while its dispatch surface is refreshed to the deliberately small
+    /// conversation contract. Project configuration remains authoritative for
+    /// policy because [`Self::load_merged`] replaces (rather than unions) the
+    /// user allowlist when `.cas/proxy.toml` exists.
+    pub fn ensure_viktor_managed_default(&mut self) -> bool {
+        let mut changed = false;
+        if !self.servers.contains_key(VIKTOR_SERVER) {
+            self.servers.insert(
+                VIKTOR_SERVER.to_string(),
+                ServerConfig::Http {
+                    url: VIKTOR_MCP_URL.to_string(),
+                    auth: Some(format!("env:{VIKTOR_API_KEY_ENV}")),
+                    headers: HashMap::new(),
+                    oauth: false,
+                },
+            );
+            changed = true;
+        }
+
+        let desired = VIKTOR_CONVERSATION_TOOLS
+            .iter()
+            .map(|tool| ExternalToolConfig {
+                server: VIKTOR_SERVER.to_string(),
+                tool: (*tool).to_string(),
+            })
+            .collect::<Vec<_>>();
+        if self
+            .allowlist
+            .iter()
+            .filter(|route| route.server == VIKTOR_SERVER)
+            .ne(desired.iter())
+        {
+            self.allowlist.retain(|route| route.server != VIKTOR_SERVER);
+            self.allowlist.extend(desired);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Refresh the user-scoped managed Viktor default without copying a
+    /// credential into configuration.
+    pub fn refresh_viktor_managed_default(path: &Path) -> Result<bool> {
+        let mut config = Self::load_from(path)?;
+        let changed = config.ensure_viktor_managed_default();
+        if changed {
+            config.save_to(path)?;
+        }
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]
@@ -354,5 +424,74 @@ tool = "ask_viktor"
     fn scope_user_config_path() {
         let path = Scope::User.config_path().unwrap();
         assert!(path.ends_with("code-mode-mcp/config.toml"));
+    }
+
+    #[test]
+    fn managed_viktor_default_is_credential_free_and_exactly_allowlisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[allowlist]]
+server = "github"
+tool = "list_issues"
+
+[[allowlist]]
+server = "viktor"
+tool = "get_file_download_url"
+"#,
+        )
+        .unwrap();
+
+        assert!(Config::refresh_viktor_managed_default(&path).unwrap());
+        assert!(!Config::refresh_viktor_managed_default(&path).unwrap());
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.servers.get(VIKTOR_SERVER),
+            Some(&ServerConfig::Http {
+                url: VIKTOR_MCP_URL.to_string(),
+                auth: Some(format!("env:{VIKTOR_API_KEY_ENV}")),
+                headers: HashMap::new(),
+                oauth: false,
+            })
+        );
+        assert_eq!(
+            config
+                .allowlist
+                .iter()
+                .filter(|route| route.server == VIKTOR_SERVER)
+                .map(|route| route.tool.as_str())
+                .collect::<Vec<_>>(),
+            VIKTOR_CONVERSATION_TOOLS
+        );
+        assert!(
+            config
+                .allowlist
+                .iter()
+                .any(|route| { route.server == "github" && route.tool == "list_issues" })
+        );
+        assert!(!toml::to_string(&config).unwrap().contains("zt_live"));
+    }
+
+    #[test]
+    fn managed_viktor_default_preserves_an_operator_owned_upstream() {
+        let mut config = Config::default();
+        config.add_server(
+            VIKTOR_SERVER.to_string(),
+            ServerConfig::Http {
+                url: "https://operator.example/mcp".to_string(),
+                auth: Some("env:OPERATOR_VIKTOR_KEY".to_string()),
+                headers: HashMap::new(),
+                oauth: false,
+            },
+        );
+        assert!(config.ensure_viktor_managed_default());
+        assert!(matches!(
+            config.servers.get(VIKTOR_SERVER),
+            Some(ServerConfig::Http { url, auth, .. })
+                if url == "https://operator.example/mcp"
+                    && auth.as_deref() == Some("env:OPERATOR_VIKTOR_KEY")
+        ));
     }
 }

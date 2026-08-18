@@ -18,7 +18,9 @@ command remains `cas`.
 
 ## 1. Basic Mac tools
 
-This guide assumes an Apple Silicon Mac. Install the normal prerequisites:
+This guide assumes an Apple Silicon Mac. First confirm it: `uname -m` must
+print `arm64`. If it does not, stop and message Daniel — the published Mac
+release is Apple Silicon only. Then install the normal prerequisites:
 
 ```zsh
 brew install git node
@@ -48,6 +50,11 @@ cas --version
 mkdir -p ~/.claude
 cas update --user
 ```
+
+The release workflow does not publish a checksum beside this tarball. This is a
+trust-on-first-use download from the official GitHub release URL; if Daniel
+provides a release digest, run `shasum -a 256 cas.tar.gz` and compare it before
+extracting.
 
 `cas update --user` refreshes Cassy integrations only for AI tool directories
 that already exist; it does not install Claude, Codex, or Grok.
@@ -114,16 +121,27 @@ required for the release-binary installation above.
 xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 source "$HOME/.cargo/env"
+mkdir -p ~/code && cd ~/code
+git clone https://github.com/Richards-LLC/cassy.git
 cd ~/code/cassy
 git submodule update --init --recursive
 contrib/shell-helpers/install.sh
+grep -qxF 'export CAS_SRC=$HOME/code/cassy' ~/.zprofile 2>/dev/null || echo 'export CAS_SRC=$HOME/code/cassy' >> ~/.zprofile
+export CAS_SRC="$HOME/code/cassy"
 cas-update --dry-run
 ```
 
 The installer copies the canonical helper to `~/.local/bin/cas-update`. Plain
-`cas-update` pulls/builds the current source, installs `cas`, migrates and
-syncs local Cassy projects, then safely turns over processes that run the old
-exact binary.
+`cas-update` pulls/builds the current source, installs `cas`, and migrates and
+syncs local Cassy projects. `CAS_SRC` is required here because the helper does
+not use the directory where you happen to run it; without that export it looks
+for `~/Petrastella/cas-src`.
+
+> **Mac restart note:** the helper's automatic process-turnover check is built
+> around Linux `/proc`, so it does not verify or restart old Cassy processes on
+> macOS. After a normal `cas-update`, manually quit and restart any running
+> `cas serve` or hub process/service. Use `cas hub service status`, then restart
+> the service if needed; this is a current macOS limitation, not a setup error.
 
 ```zsh
 cas-update --sync-only
@@ -165,6 +183,11 @@ source ~/.zprofile
 - `cas` missing: run `source ~/.zprofile` or open a new terminal.
 - Commander unavailable: run `cas hub service status`; check Tailscale if used;
   re-pair if prompted.
+- Claude Code shows Cassy as disconnected in `/mcp`: its generated MCP config
+  uses the bare `cas` command. Ensure a login shell PATH reaches
+  `~/.local/bin`, use the absolute `~/.local/bin/cas` path in `.mcp.json`, or
+  put that PATH export in `~/.zshenv` if Claude Code is launched without a
+  login shell.
 - Project issue: from the repository run `cas doctor`.
 - Cloud issue: repeat `cas login --token …`, then `cas whoami`.
 

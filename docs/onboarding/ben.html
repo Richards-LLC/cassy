@@ -1,59 +1,134 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>Ben’s Cassy setup</title>
-<style>
-:root{--bg:#fbf9f4;--panel:#fff;--ink:#1b1d20;--soft:#4a4e56;--faint:#747a83;--rule:#e9e1cf;--accent:#b8541a;--accentbg:#f5e2d1;--green:#276749;--code:#202226}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.58 Georgia,"Iowan Old Style",serif}.wrap{max-width:780px;margin:auto;padding:48px 24px 80px}header{padding:8px 0 26px}.eyebrow,.label{font:600 12px/1.2 system-ui,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}h1{font-size:clamp(2.2rem,7vw,4rem);line-height:1.03;letter-spacing:-.035em;margin:.2em 0}.lede{font-size:1.25rem;color:var(--soft);max-width:53ch}.card{background:var(--panel);border:1px solid var(--rule);border-radius:16px;padding:28px;margin:20px 0;box-shadow:0 12px 28px -26px #333}.card h2{font-size:1.55rem;line-height:1.15;margin:0 0 .45em}.number{display:inline-grid;place-items:center;width:30px;height:30px;margin:0 0 12px;border-radius:50%;background:var(--accentbg);color:var(--accent);font:700 14px system-ui}.notice{border-left:4px solid var(--accent);background:#fff5e8;padding:14px 16px;margin:18px 0;color:var(--soft)}.good{border-color:var(--green);background:#f0f8f2}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}code{background:#f2ead9;padding:2px 5px;border-radius:4px;font-size:.9em}pre{background:var(--code);color:#f6f1e8;border-radius:10px;padding:16px;overflow:auto;font-size:.82em;line-height:1.55}pre code{background:none;padding:0;color:inherit}a{color:#994510}table{width:100%;border-collapse:collapse;font-size:.94em}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid var(--rule)}th{font-family:system-ui,sans-serif;font-size:.78em;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}li{margin:.35em 0}footer{font:13px/1.5 system-ui,sans-serif;color:var(--faint);padding-top:22px}@media(max-width:560px){.wrap{padding:28px 16px 56px}.card{padding:22px}body{font-size:16px}}@media print{@page{margin:14mm}.wrap{max-width:none;padding:0}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]::after{content:" (" attr(href) ")";font-size:.75em;color:#666}pre{white-space:pre-wrap}}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Ben’s Cassy setup</title>
+  <style>
+    :root{--bg:#fbf9f4;--panel:#fff;--ink:#1b1d20;--soft:#4a4e56;--faint:#747a83;--rule:#e9e1cf;--accent:#b8541a;--accentbg:#f5e2d1;--green:#276749;--code:#202226}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.58 Georgia,"Iowan Old Style",serif}.wrap{max-width:780px;margin:auto;padding:48px 24px 80px}header{padding:8px 0 26px}.eyebrow,.label{font:600 12px/1.2 system-ui,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}h1{font-size:clamp(2.2rem,7vw,4rem);line-height:1.03;letter-spacing:-.035em;margin:.2em 0}.lede{font-size:1.25rem;color:var(--soft);max-width:53ch}.card{background:var(--panel);border:1px solid var(--rule);border-radius:16px;padding:28px;margin:20px 0;box-shadow:0 12px 28px -26px #333}.card h2{font-size:1.55rem;line-height:1.15;margin:0 0 .45em}.number{display:inline-grid;place-items:center;width:30px;height:30px;margin:0 0 12px;border-radius:50%;background:var(--accentbg);color:var(--accent);font:700 14px system-ui}.notice{border-left:4px solid var(--accent);background:#fff5e8;padding:14px 16px;margin:18px 0;color:var(--soft)}.good{border-color:var(--green);background:#f0f8f2}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}code{background:#f2ead9;padding:2px 5px;border-radius:4px;font-size:.9em}pre{background:var(--code);color:#f6f1e8;border-radius:10px;padding:16px;overflow:auto;font-size:.82em;line-height:1.55}pre code{background:none;padding:0;color:inherit}a{color:#994510}table{width:100%;border-collapse:collapse;font-size:.94em}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid var(--rule)}th{font-family:system-ui,sans-serif;font-size:.78em;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}li{margin:.35em 0}footer{font:13px/1.5 system-ui,sans-serif;color:var(--faint);padding-top:22px}@media(max-width:560px){.wrap{padding:28px 16px 56px}.card{padding:22px}body{font-size:16px}}@media print{@page{margin:14mm}.wrap{max-width:none;padding:0}.card{box-shadow:none;break-inside:avoid}a{color:inherit;text-decoration:none}a[href]::after{content:" (" attr(href) ")";font-size:.75em;color:#666}pre{white-space:pre-wrap}}
+  </style>
 </head>
-<body><main class="wrap">
-<header><div class="eyebrow">Mac completion guide · 18 August 2026</div><h1>Ben’s Cassy setup</h1><p class="lede">A clean path from a new Mac to a working Cassy workspace, Commander connection, and an easy update routine.</p></header>
-<section class="card"><div class="label">What is better now</div><h2>The setup problems from the first pass are fixed.</h2><ul><li><strong>Cloud sign-in is dependable:</strong> use the token Daniel gives you; no broken browser approval step and no repeated rate-limit polling.</li><li><strong>Team setup is honest:</strong> a failure is reported rather than hidden, and a clear default team is adopted automatically for a new project.</li><li><strong>The Mac instructions paste cleanly:</strong> they no longer replace your shell halfway through a block.</li><li><strong><code>cas init</code> protects your home folder:</strong> it stops you from creating a project in <code>~</code> by mistake.</li><li><strong>CAS is now Cassy:</strong> the name changed in version 3.0.0; the command stays <code>cas</code>.</li></ul></section>
-<section class="card"><div class="number">1</div><h2>Put the basics in place</h2><p>On an Apple Silicon Mac, install Homebrew, Git, Node, and Claude Code if they are not already present. Keep executable paths in <code>~/.zprofile</code>: it runs once for each login shell, while <code>~/.zshrc</code> runs for every interactive shell.</p><pre><code>brew install git node
+<body>
+<main class="wrap">
+  <header>
+    <div class="eyebrow">Mac completion guide · 18 August 2026</div>
+    <h1>Ben’s Cassy setup</h1>
+    <p class="lede">A clean path from a new Mac to a working Cassy workspace, Commander connection, and an easy update routine.</p>
+  </header>
+
+  <section class="card">
+    <div class="label">What is better now</div>
+    <h2>The setup problems from the first pass are fixed.</h2>
+    <ul>
+      <li><strong>Cloud sign-in is dependable:</strong> use the token Daniel gives you; no broken browser approval step and no repeated rate-limit polling.</li>
+      <li><strong>Team setup is honest:</strong> a failure is reported rather than hidden, and a clear default team is adopted automatically for a new project.</li>
+      <li><strong>The Mac instructions paste cleanly:</strong> they no longer replace your shell halfway through a block.</li>
+      <li><strong><code>cas init</code> protects your home folder:</strong> it stops you from creating a project in <code>~</code> by mistake.</li>
+      <li><strong>CAS is now Cassy:</strong> the name changed in version 3.0.0; the command stays <code>cas</code>.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <div class="number">1</div><h2>Put the basics in place</h2>
+    <p>On an Apple Silicon Mac, first run <code>uname -m</code>. It must print <code>arm64</code>; if it does not, stop and message Daniel because the published Mac release is Apple Silicon only. Then install the normal tools. Keep executable paths in <code>~/.zprofile</code>: it runs once for each login shell, while <code>~/.zshrc</code> runs for every interactive shell.</p>
+    <pre><code>brew install git node
 npm install -g @anthropic-ai/claude-code
 
 grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
 eval "$(/opt/homebrew/bin/brew shellenv)"
 grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zprofile 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zprofile
-export PATH="$HOME/.local/bin:$PATH"</code></pre></section>
-<section class="card"><div class="number">2</div><h2>Install Cassy</h2><pre><code>mkdir -p ~/.local/bin && cd "$(mktemp -d)"
+export PATH="$HOME/.local/bin:$PATH"</code></pre>
+  </section>
+
+  <section class="card">
+    <div class="number">2</div><h2>Install Cassy</h2>
+    <pre><code>mkdir -p ~/.local/bin && cd "$(mktemp -d)"
 curl -fsSL -o cas.tar.gz https://github.com/Richards-LLC/cassy/releases/latest/download/cas-aarch64-apple-darwin.tar.gz
 tar -xzf cas.tar.gz
 mv cas ~/.local/bin/cas && chmod +x ~/.local/bin/cas
 xattr -d com.apple.quarantine ~/.local/bin/cas 2>/dev/null || true
 cas --version
 mkdir -p ~/.claude
-cas update --user</code></pre><p><code>cas update --user</code> refreshes Cassy’s built-ins for AI tools that are already installed; it does not install Claude, Codex, or Grok for you.</p></section>
-<section class="card"><div class="number">3</div><h2>Sign in to Cassy Cloud once</h2><p>Ask Daniel for your personal Cloud API key. This is machine setup, not project setup.</p><pre><code>cas login --token &lt;YOUR-PERSONAL-API-KEY&gt;
-cas whoami</code></pre><p>Cassy stores this sign-in at <code>~/.cas/cloud.json</code>. Every new project can inherit it. Keep the key out of repositories and screenshots.</p><div class="notice good"><strong>Use the token command.</strong> It is the reliable path; you do not need the browser approval page.</div></section>
-<section class="card"><div class="number">4</div><h2>Initialize the actual project</h2><pre><code>mkdir -p ~/code && cd ~/code
+cas update --user</code></pre>
+    <p>The release workflow does not publish a checksum beside this tarball. This is a trust-on-first-use download from the official GitHub release URL; if Daniel provides a digest, run <code>shasum -a 256 cas.tar.gz</code> and compare it before extracting.</p>
+    <p><code>cas update --user</code> refreshes Cassy’s built-ins for AI tools that are already installed; it does not install Claude, Codex, or Grok for you.</p>
+  </section>
+
+  <section class="card">
+    <div class="number">3</div><h2>Sign in to Cassy Cloud once</h2>
+    <p>Ask Daniel for your personal Cloud API key. This is machine setup, not project setup.</p>
+    <pre><code>cas login --token &lt;YOUR-PERSONAL-API-KEY&gt;
+cas whoami</code></pre>
+    <p>Cassy stores this sign-in at <code>~/.cas/cloud.json</code>. Every new project can inherit it. Keep the key out of repositories and screenshots.</p>
+    <div class="notice good"><strong>Use the token command.</strong> It is the reliable path; you do not need the browser approval page.</div>
+  </section>
+
+  <section class="card">
+    <div class="number">4</div><h2>Initialize the actual project</h2>
+    <pre><code>mkdir -p ~/code && cd ~/code
 git clone &lt;YOUR-REPOSITORY-URL&gt;
 cd &lt;repository&gt;
 cas init
 cas doctor
 cas cloud team show
-cas cloud status</code></pre><p>Do not run <code>cas init</code> in <code>~</code>. If it refuses there, that is the safeguard working. If the team is not visible, confirm Daniel has added your Cloud account, then use <code>cas cloud team set &lt;uuid&gt;</code> or <code>cas cloud team auto on</code>.</p></section>
-<section class="card"><div class="number">5</div><h2>Connect the Mac to Commander</h2><p>The hub is a small loopback service that <a href="https://hub.petrastella.io">hub.petrastella.io</a> pairs with. Tailscale Serve is optional and gives the Petra Stella tailnet an HTTPS path to it.</p><pre><code># Optional: tailnet HTTPS
+cas cloud status</code></pre>
+    <p>Do not run <code>cas init</code> in <code>~</code>. If it refuses there, that is the safeguard working. If the team is not visible, confirm Daniel has added your Cloud account, then use <code>cas cloud team set &lt;uuid&gt;</code> or <code>cas cloud team auto on</code>.</p>
+  </section>
+
+  <section class="card">
+    <div class="number">5</div><h2>Connect the Mac to Commander</h2>
+    <p>The hub is a small loopback service that <a href="https://hub.petrastella.io">hub.petrastella.io</a> pairs with. Tailscale Serve is optional and gives the Petra Stella tailnet an HTTPS path to it.</p>
+    <pre><code># Optional: tailnet HTTPS
 brew install --cask tailscale
 open -a Tailscale
 
 cas hub service install --tailscale-serve
 cas hub service status
-cas hub pair</code></pre><p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot. Open Commander, choose <strong>Pair a machine</strong>, then follow the code flow. Use <code>cas hub service install</code> without the flag if you do not want tailnet access. Use <code>cas hub service uninstall</code> to remove the service later without deleting the hub identity or pairings.</p></section>
-<section class="card"><div class="number">6</div><h2>Make source-checkout updates easy</h2><p><code>cas-update</code> is the day-to-day updater when you keep a Cassy source checkout. It builds from source, so it needs Xcode Command Line Tools, Rust, Git, and the repository. It is not required for the release-binary setup above.</p><pre><code>xcode-select --install
+cas hub pair</code></pre>
+    <p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot. Open Commander, choose <strong>Pair a machine</strong>, then follow the code flow. Use <code>cas hub service install</code> without the flag if you do not want tailnet access. Use <code>cas hub service uninstall</code> to remove the service later without deleting the hub identity or pairings.</p>
+  </section>
+
+  <section class="card">
+    <div class="number">6</div><h2>Make source-checkout updates easy</h2>
+    <p><code>cas-update</code> is the day-to-day updater when you keep a Cassy source checkout. It builds from source, so it needs Xcode Command Line Tools, Rust, Git, and the repository. It is not required for the release-binary setup above.</p>
+    <pre><code>xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 source "$HOME/.cargo/env"
+mkdir -p ~/code && cd ~/code
+git clone https://github.com/Richards-LLC/cassy.git
 cd ~/code/cassy
 git submodule update --init --recursive
 contrib/shell-helpers/install.sh
-cas-update --dry-run</code></pre><p>The installer copies the canonical helper to <code>~/.local/bin/cas-update</code>. Plain <code>cas-update</code> pulls/builds, installs, migrates and syncs local projects, then safely turns over processes still using the old binary.</p><pre><code>cas-update --sync-only     # migrate/sync only; no build or process change
-cas-update --no-restart    # build/install/migrate/sync; leave runtimes alone</code></pre></section>
-<section class="card"><div class="number">7</div><h2><code>update-ai</code> is optional</h2><p>This is Daniel’s personal convenience script, not a Cassy requirement. It lives in Daniel’s <code>soundwave-config</code> dotfiles and refreshes Claude Code, Grok, Codex, and Cassy in its documented order. Ask Daniel to provide it if you want it. Its header is the source of truth for its order and failure behavior; do not use it as a replacement for <code>cas-update</code> on a source checkout.</p></section>
-<section class="card"><div class="number">8</div><h2>Where keys go</h2><table><thead><tr><th>What you need</th><th>Correct home</th></tr></thead><tbody><tr><td>Cassy Cloud credential</td><td><code>cas login --token …</code> writes <code>~/.cas/cloud.json</code>.</td></tr><tr><td>Optional shell-supplied AI key</td><td>Export it in <code>~/.zprofile</code> (or use that provider’s normal login).</td></tr></tbody></table><p>Cassy does not read <code>~/.zprofile</code>, <code>~/.zshrc</code>, or <code>~/.zshenv</code> itself. Your login shell provides the environment to programs it starts. Cassy’s optional AI enrichment uses <code>OPENAI_API_KEY</code> by default; semantic-search status also recognizes <code>VOYAGE_API_KEY</code>. When you explicitly choose a Claude or Codex profile, Cassy removes inherited key/token variables so the chosen login cannot be silently overridden.</p><pre><code>printf '%s\n' 'export OPENAI_API_KEY="&lt;key from Daniel&gt;"' >> ~/.zprofile
-source ~/.zprofile</code></pre></section>
-<section class="card"><div class="label">Quick recovery</div><h2>If something feels wrong</h2><ul><li><strong><code>cas</code> is missing:</strong> run <code>source ~/.zprofile</code> or open a new terminal.</li><li><strong>Commander cannot connect:</strong> run <code>cas hub service status</code>; check Tailscale if you enabled it; pair again if asked.</li><li><strong>A project is unhappy:</strong> from its repository run <code>cas doctor</code>.</li><li><strong>Cloud is not connected:</strong> repeat <code>cas login --token …</code>, then <code>cas whoami</code>.</li></ul></section>
-<footer>Verification basis: Cassy onboarding docs; the tracked <code>cas-update</code> installer/helper; hub service and cloud configuration source; init guard; and Claude/Codex environment handling. Checked 18 August 2026.</footer>
-</main></body></html>
+grep -qxF 'export CAS_SRC=$HOME/code/cassy' ~/.zprofile 2>/dev/null || echo 'export CAS_SRC=$HOME/code/cassy' >> ~/.zprofile
+export CAS_SRC="$HOME/code/cassy"
+cas-update --dry-run</code></pre>
+    <p>The installer copies the canonical helper to <code>~/.local/bin/cas-update</code>. Plain <code>cas-update</code> pulls/builds the current source, installs <code>cas</code>, and migrates and syncs local Cassy projects. The <code>CAS_SRC</code> export is required because the helper does not use the directory where you run it; without it, it looks for <code>~/Petrastella/cas-src</code>.</p>
+    <div class="notice"><strong>Mac restart note.</strong> The helper’s automatic process-turnover check uses Linux <code>/proc</code>, so it does not verify or restart old Cassy processes on macOS. After a normal <code>cas-update</code>, manually quit and restart any running <code>cas serve</code> or hub process/service. Check <code>cas hub service status</code>, then restart the service if needed.</div>
+    <pre><code>cas-update --sync-only     # migrate/sync only; no build or process change
+cas-update --no-restart    # build/install/migrate/sync; leave runtimes alone</code></pre>
+  </section>
+
+  <section class="card">
+    <div class="number">7</div><h2><code>update-ai</code> is optional</h2>
+    <p>This is Daniel’s personal convenience script, not a Cassy requirement. It lives in Daniel’s <code>soundwave-config</code> dotfiles and refreshes Claude Code, Grok, Codex, and Cassy in its documented order. Ask Daniel to provide it if you want it. Its header is the source of truth for its order and failure behavior; do not use it as a replacement for <code>cas-update</code> on a source checkout.</p>
+  </section>
+
+  <section class="card">
+    <div class="number">8</div><h2>Where keys go</h2>
+    <table><thead><tr><th>What you need</th><th>Correct home</th></tr></thead><tbody><tr><td>Cassy Cloud credential</td><td><code>cas login --token …</code> writes <code>~/.cas/cloud.json</code>.</td></tr><tr><td>Optional shell-supplied AI key</td><td>Export it in <code>~/.zprofile</code> (or use that provider’s normal login).</td></tr></tbody></table>
+    <p>Cassy does not read <code>~/.zprofile</code>, <code>~/.zshrc</code>, or <code>~/.zshenv</code> itself. Your login shell provides the environment to programs it starts. Cassy’s optional AI enrichment uses <code>OPENAI_API_KEY</code> by default; semantic-search status also recognizes <code>VOYAGE_API_KEY</code>. When you explicitly choose a Claude or Codex profile, Cassy removes inherited key/token variables so the chosen login cannot be silently overridden.</p>
+    <pre><code>printf '%s\n' 'export OPENAI_API_KEY="&lt;key from Daniel&gt;"' >> ~/.zprofile
+source ~/.zprofile</code></pre>
+  </section>
+
+  <section class="card">
+    <div class="label">Quick recovery</div><h2>If something feels wrong</h2>
+    <ul><li><strong><code>cas</code> is missing:</strong> run <code>source ~/.zprofile</code> or open a new terminal.</li><li><strong>Commander cannot connect:</strong> run <code>cas hub service status</code>; check Tailscale if you enabled it; pair again if asked.</li><li><strong>Claude Code shows Cassy as disconnected in <code>/mcp</code>:</strong> its MCP config uses the bare <code>cas</code> command. Use the absolute <code>~/.local/bin/cas</code> path in <code>.mcp.json</code>, or put the PATH export in <code>~/.zshenv</code> when Claude Code is launched outside a login shell.</li><li><strong>A project is unhappy:</strong> from its repository run <code>cas doctor</code>.</li><li><strong>Cloud is not connected:</strong> repeat <code>cas login --token …</code>, then <code>cas whoami</code>.</li></ul>
+  </section>
+
+  <footer>Verification basis: Cassy onboarding docs; the tracked <code>cas-update</code> installer/helper; hub service and cloud configuration source; init guard; Claude/Codex environment handling; and the local <code>update-ai</code> symlink. Checked 18 August 2026.</footer>
+</main>
+</body>
+</html>

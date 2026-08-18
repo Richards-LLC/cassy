@@ -380,7 +380,7 @@ fn factory_pane_configs_uses_per_worker_specs() {
                 cli: crate::harness::SupervisorCli::Codex,
                 model: None,
                 effort: None,
-                config_dir: None,
+                config_dir: Some("/accounts/codex-research".to_string()),
                 requester_config_dir: None,
             },
             WorkerSpec {
@@ -388,7 +388,7 @@ fn factory_pane_configs_uses_per_worker_specs() {
                 cli: crate::harness::SupervisorCli::Claude,
                 model: None,
                 effort: None,
-                config_dir: None,
+                config_dir: Some("/accounts/claude-review".to_string()),
                 requester_config_dir: None,
             },
         ],
@@ -414,6 +414,26 @@ fn factory_pane_configs_uses_per_worker_specs() {
         effective_command(w2),
         "claude",
         "worker-2 with Claude spec must use claude binary"
+    );
+    assert_eq!(
+        spawned_env(w1, "CODEX_HOME"),
+        Some("/accounts/codex-research"),
+        "worker-1 must receive its own Codex account home"
+    );
+    assert_eq!(
+        spawned_env(w1, "CAS_FACTORY_WORKER_ACCOUNT_DIR"),
+        Some("/accounts/codex-research"),
+        "worker-1 registration metadata must name its resolved account"
+    );
+    assert_eq!(
+        spawned_env(w2, "CLAUDE_CONFIG_DIR"),
+        Some("/accounts/claude-review"),
+        "worker-2 must receive its own Claude account directory"
+    );
+    assert_eq!(
+        spawned_env(w2, "CAS_FACTORY_WORKER_ACCOUNT_DIR"),
+        Some("/accounts/claude-review"),
+        "worker-2 registration metadata must name its resolved account"
     );
 }
 

@@ -443,6 +443,25 @@ async fn mount_knowledge_pull(server: &MockServer) {
 }
 
 async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
+    // Project↔team registration check (cas-c117): `execute_sync` now verifies
+    // with the server that this project is registered before it reports any
+    // success. Answer "already registered" so these tests keep exercising the
+    // pull wiring rather than the registration write.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/projects")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": [{
+                "id": "project-uuid-1",
+                "canonical_id": get_project_canonical_id()
+                    .unwrap_or_else(|| "cas-src".to_string()),
+                "name": "CAS",
+                "contributor_count": 1,
+                "memory_count": 0,
+            }]
+        })))
+        .mount(server)
+        .await;
+
     // Personal push: any payload, success. Empty stores still produce 1 batch.
     Mock::given(method("POST"))
         .and(path("/api/sync/push"))

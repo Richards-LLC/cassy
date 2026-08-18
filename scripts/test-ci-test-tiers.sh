@@ -381,6 +381,116 @@ else
     fail=$((fail + 1))
 fi
 
+# Compiler cache observability (cas-67a2). Warm lanes reach 90-92% sccache hits
+# and pre-cache-v2 lanes measured 0-6%; that gap is worth minutes per run and is
+# invisible unless each lane publishes its own hit rate. Pin both halves: every
+# compiling lane is cache-v2 configured, and every compiling lane reports.
+summary_script="$repo_root/scripts/ci-sccache-summary.sh"
+require_text "$ci_text" 'SCCACHE_GHA_VERSION: "cas-v2"' 'CI pins one shared cache-v2 object namespace'
+require_text "$release_text" 'SCCACHE_GHA_VERSION: "cas-v2"' 'release shares the CI cache-v2 object namespace'
+
+# Lane label must match the job so a summary is attributable to its job.
+declare -A compiling_lanes=(
+    [scoped-validation]='Scoped Validation'
+    [fast-validation-preflight]='Fast Validation — preflight'
+    [fast-validation-suite-build]='Fast Validation — suite archive build'
+    [fast-validation-docs]='Fast Validation — doctests'
+    [clippy]='Clippy'
+    [macos-check]='macOS Check'
+    [test-compile-guard]='Test Compile Guard'
+    [panic-isolation-release]='Panic Isolation — release profile'
+    [panic-isolation-release-fast]='Panic Isolation — release-fast profile'
+)
+for job in "${!compiling_lanes[@]}"; do
+    block="$(job_block "$job")"
+    require_text "$block" "./scripts/ci-sccache-summary.sh \"${compiling_lanes[$job]}\"" \
+        "$job publishes its own sccache hit stats"
+    require_text "$block" 'if: always()' "$job reports cache stats even when the lane fails"
+    require_absent "$block" 'SCCACHE_GHA_ENABLED: "false"' "$job keeps the cache-v2 backend enabled"
+done
+
+for job in build build-macos verify; do
+    block="$(release_job_block "$job")"
+    require_text "$block" './scripts/ci-sccache-summary.sh' "release $job publishes its own sccache hit stats"
+done
+
+# The single deliberate exemption. It measures a cold compiler, so a stats
+# summary there would report an alarming 0% for a lane that is working correctly.
+benchmark="$(job_block build-benchmark)"
+require_text "$benchmark" 'SCCACHE_GHA_ENABLED: "false"' 'Build Benchmark stays deliberately uncached'
+require_text "$benchmark" 'RUSTC_WRAPPER: ""' 'Build Benchmark clears the compiler wrapper'
+require_text "$benchmark" 'DELIBERATELY UNCACHED' 'Build Benchmark documents why it is exempt'
+require_absent "$benchmark" 'ci-sccache-summary.sh' 'Build Benchmark reports no cache stats'
+
+# Test-only lanes execute prebuilt binaries; a stats step there would report a
+# cache that never had a compile to serve.
+require_absent "$suite_shards" 'ci-sccache-summary.sh' 'suite shards compile nothing and report no cache stats'
+
+# Observability must not be able to fail a build. Exercise the real script
+# against a warm cache, a missing binary, and the probe's disabled-backend
+# state; every path must exit 0 and still say something useful.
+if [[ -x "$summary_script" ]]; then
+    printf 'ok   sccache summary script is executable\n'
+    pass=$((pass + 1))
+    stats_tmp="$(mktemp -d)"
+    mkdir -p "$stats_tmp/bin"
+    cat >"$stats_tmp/bin/sccache" <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *" --stats-format=json "* ]]; then
+    printf '%s\n' '{"stats":{"compile_requests":51,"requests_executed":51,"cache_errors":{"counts":{},"adv_counts":{}},"cache_hits":{"counts":{"Rust":47},"adv_counts":{}},"cache_misses":{"counts":{"Rust":4},"adv_counts":{}},"cache_writes":4}}'
+else
+    printf 'Compile requests                     51\nCompile requests executed            51\nCache hits                           47\nCache misses                          4\nCache writes                          4\nCache errors                          0\n'
+fi
+EOF
+    chmod +x "$stats_tmp/bin/sccache"
+
+    # Keep the exit-status assertion in this shell: running the probe inside a
+    # command substitution would swallow both its status and the counters.
+    summary_output=""
+    run_summary() {
+        local label="$1"
+        shift
+        local summary="$stats_tmp/summary.md" log="$stats_tmp/log"
+        : >"$summary"
+        if env "$@" GITHUB_STEP_SUMMARY="$summary" "$summary_script" 'Contract Lane' >"$log" 2>&1; then
+            printf 'ok   sccache summary exits 0 (%s)\n' "$label"
+            pass=$((pass + 1))
+        else
+            printf 'FAIL sccache summary must never fail a build (%s)\n' "$label"
+            fail=$((fail + 1))
+        fi
+        summary_output="$(cat "$summary" "$log")"
+    }
+
+    run_summary warm "PATH=$stats_tmp/bin:$PATH" SCCACHE_GHA_ENABLED=true SCCACHE_GHA_VERSION=cas-v2
+    require_text "$summary_output" '47 hits / 4 misses' 'warm lane summary reports hits and misses'
+    require_text "$summary_output" 'hit rate 92%' 'warm lane summary reports a hit rate'
+    require_text "$summary_output" 'cache v2' 'warm lane summary names the configured backend'
+
+    run_summary cold "PATH=$stats_tmp/bin:$PATH" SCCACHE_GHA_ENABLED=true CAS_SCCACHE_MIN_HIT_RATE=95
+    require_text "$summary_output" '::warning title=sccache cold lane::' 'a lane below the hit-rate floor is annotated, not failed'
+
+    # A PATH with no sccache but still a usable shell. If this host ships
+    # sccache in a system directory the case is unobservable, so say so rather
+    # than assert something the environment cannot demonstrate.
+    mkdir -p "$stats_tmp/empty"
+    if PATH="$stats_tmp/empty:/usr/bin:/bin" command -v sccache >/dev/null 2>&1; then
+        printf 'ok   (not observable here) system sccache shadows the missing-binary case\n'
+        pass=$((pass + 1))
+    else
+        run_summary missing "PATH=$stats_tmp/empty:/usr/bin:/bin" SCCACHE_GHA_ENABLED=true
+        require_text "$summary_output" 'Cache statistics unavailable' 'a missing sccache binary degrades to a visible note'
+    fi
+
+    run_summary disabled "PATH=$stats_tmp/bin:$PATH" SCCACHE_GHA_ENABLED=false
+    require_text "$summary_output" 'build ran uncached' 'the probe-disabled backend is reported as uncached'
+
+    rm -rf "$stats_tmp"
+else
+    printf 'FAIL sccache summary script must exist and be executable\n'
+    fail=$((fail + 1))
+fi
+
 printf '\ntest result: %s passed; %s failed\n' "$pass" "$fail"
 if [[ "$fail" -ne 0 ]]; then
     exit 1

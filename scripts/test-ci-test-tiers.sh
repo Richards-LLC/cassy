@@ -104,8 +104,8 @@ require_text "$scoped" "steps.classify-diff.outputs.rust-unaffected != 'true'" '
 require_text "$scoped" 'id: pr-dedupe' 'scoped lane checks for a PR event on the same head SHA'
 require_text "$scoped" 'scripts/check-ci-pr-event-coverage.sh' 'scoped lane uses the shared fail-closed PR coverage guard'
 require_text "$scoped" "steps.pr-dedupe.outputs.covered != 'true'" 'scoped lane gates expensive work on the dedupe verdict'
-require_text "$scoped" 'scoped-validation-${{ github.event.pull_request.head.sha || github.sha }}' 'scoped lane groups duplicate runs by head SHA'
-require_text "$scoped" 'cancel-in-progress: false' 'scoped lane queues duplicate runs instead of cancelling validation'
+require_text "$scoped" 'scoped-validation-${{ github.event.pull_request.number || github.ref }}' 'scoped lane groups runs by pull request, falling back to the branch ref'
+require_text "$scoped" 'cancel-in-progress: true' 'scoped lane cancels its own superseded runs'
 require_text "$scoped" 'pull-requests: read' 'scoped lane reads PR metadata without write access'
 
 # The dedupe may only ever silence the PUSH copy. If the pull-request event
@@ -289,8 +289,8 @@ for job in "${required_pr_jobs[@]}"; do
     block="$(job_block "$job")"
     require_text "$block" "github.event_name == 'pull_request'" "$job runs for pull requests"
     require_text "$block" 'github.base_ref == github.event.repository.default_branch' "$job targets the default PR base"
-    require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job deduplicates push/PR runs by head SHA"
-    require_text "$block" 'cancel-in-progress: false' "$job queues duplicate required-check runs without cancellation"
+    require_text "$block" 'github.event.pull_request.number || github.ref' "$job groups runs by pull request rather than by head SHA"
+    require_text "$block" 'cancel-in-progress: true' "$job releases runners held by its own superseded runs"
 done
 
 preflight="$(job_block fast-validation-preflight)"
@@ -303,6 +303,22 @@ require_text "$suite_shards" 'shard: [1, 2, 3]' 'suite uses three nextest shards
 require_text "$suite_shards" 'fail-fast: false' 'suite keeps running other shards after a failure'
 require_text "$suite_build" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'suite compiles the workspace test graph once into an archive'
 require_text "$suite_build" 'actions/upload-artifact@v4' 'suite build publishes the shared nextest archive'
+
+# Archive payload is on the PR critical path (cas-59d3). Every shard downloads
+# the whole artifact, so its size is multiplied by the shard count. Measured at
+# 4034 MB: the three shards spent 404s / 257s / 63s downloading it in order to
+# run 108s / 105s / 101s of tests, i.e. the apparent "shard skew" was download
+# variance, not partition imbalance. Stripping debug info measured 65% smaller
+# binaries on this workspace. Keep the override, and keep it scoped to the
+# archive build so local and other lanes keep their normal debug info.
+require_text "$suite_build" 'CARGO_PROFILE_DEV_DEBUG: "0"' 'suite archive drops dev debug info'
+require_text "$suite_build" 'CARGO_PROFILE_TEST_DEBUG: "0"' 'suite archive drops test debug info'
+require_text "$suite_build" 'CARGO_PROFILE_DEV_STRIP: debuginfo' 'suite archive strips dev debug sections'
+require_text "$suite_build" 'CARGO_PROFILE_TEST_STRIP: debuginfo' 'suite archive strips test debug sections'
+require_absent "$ci_text" 'CARGO_PROFILE_DEV_STRIP: symbols' 'archive keeps symbol names for readable panics'
+for job in fast-validation-preflight fast-validation-docs clippy test-compile-guard; do
+    require_absent "$(job_block "$job")" 'CARGO_PROFILE_DEV_DEBUG' "$job keeps normal debug info: $job"
+done
 require_text "$suite_build" 'tar -czf fast-validation-suite-runner.tar.gz target/debug/cas' 'suite packages the executable CLI runner with its mode bits'
 require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait for the shared test archive'
 require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'

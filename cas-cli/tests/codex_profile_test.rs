@@ -8,7 +8,9 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::process::{Command as StdCommand, Stdio};
 use tempfile::TempDir;
 
 fn cas_cmd(home: &std::path::Path) -> Command {
@@ -59,6 +61,7 @@ if [ "$1" = "login" ]; then
   printf 'LOGIN_ARGS=%s\n' "$*"
   exit 0
 fi
+printf 'BARE_CODEX_HOME=%s\n' "${CODEX_HOME:-<main>}"
 exit 0
 "#,
     )
@@ -66,6 +69,18 @@ exit 0
     let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&codex, permissions).unwrap();
+    home
+}
+
+fn home_with_single_profile() -> TempDir {
+    let home = home_with_profiles();
+    for directory in [
+        ".codex-alt",
+        ".codex-work",
+        ".codex-support@example.com.lock",
+    ] {
+        std::fs::remove_dir_all(home.path().join(directory)).unwrap();
+    }
     home
 }
 
@@ -189,11 +204,76 @@ fn unknown_trailing_flag_is_rejected() {
         .stderr(predicate::str::contains("unexpected argument"));
 }
 
-/// Non-interactive launches never prompt: the harness has no TTY, so this must
-/// reach the factory rather than block on a picker.
+/// A bare interactive launch with one detected profile still opens the shared
+/// picker so its new-login row remains discoverable. Enter accepts the default
+/// main profile and the fake Codex process proves the handoff kept that choice.
+#[cfg(target_os = "linux")]
 #[test]
-fn non_tty_launch_does_not_prompt() {
-    let home = home_with_profiles();
+fn bare_interactive_single_profile_shows_picker_and_keeps_main_default() {
+    let home = home_with_single_profile();
+    let path = std::env::join_paths(std::iter::once(home.path().join("bin")).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let mut child = StdCommand::new("script")
+        .args([
+            "-qec",
+            "\"$CAS_CODEX_PROFILE_TEST_BIN\" codex --bare",
+            "/dev/null",
+        ])
+        .env(
+            "CAS_CODEX_PROFILE_TEST_BIN",
+            assert_cmd::cargo::cargo_bin!("cas"),
+        )
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".xdg"))
+        .env("PATH", path)
+        .env_remove("CAS_ROOT")
+        .env_remove("CODEX_HOME")
+        .env("CAS_SKIP_FACTORY_TOOLING", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("script must provide a PTY for the picker");
+    child
+        .stdin
+        .as_mut()
+        .expect("script stdin")
+        .write_all(b"\n")
+        .expect("select the default profile");
+
+    let output = child
+        .wait_with_output()
+        .expect("picker command must finish");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "interactive launch failed: {rendered}"
+    );
+    assert!(
+        rendered.contains("Choose Codex account"),
+        "the single-profile picker did not render: {rendered}"
+    );
+    assert!(
+        rendered.contains("Log in a new account"),
+        "the new-login row was not discoverable: {rendered}"
+    );
+    assert!(
+        rendered.contains("BARE_CODEX_HOME=<main>"),
+        "default selection did not launch the sole main profile: {rendered}"
+    );
+}
+
+/// Non-interactive launches never prompt, even when precisely one detected
+/// profile would offer the picker in a terminal.
+#[test]
+fn non_tty_single_profile_launch_does_not_prompt() {
+    let home = home_with_single_profile();
 
     cas_cmd(home.path())
         .args(["codex"])

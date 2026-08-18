@@ -31,6 +31,8 @@ pub(crate) mod me;
 mod sync_queue;
 mod syncer;
 pub mod task_proposals;
+// cas-c117: explicit, verified project↔team registration for `cas cloud sync`.
+pub mod team_registration;
 
 // T6: first-run backfill — `pub` so integration tests can call the inner seam.
 pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_backfill_inner};
@@ -57,6 +59,9 @@ pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
 pub use sync_queue::{EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue};
+pub use team_registration::{
+    REGISTRATION_TIMEOUT, RegistrationFailure, RegistrationOutcome, TeamRegistration,
+};
 pub(crate) use syncer::entity_matches_project;
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

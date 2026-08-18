@@ -1,0 +1,287 @@
+{
+  "revision": "2026-08-18 (cas-2556 M2, first labelling round)",
+  "namespace": "operational/v2",
+  "method": "Pooled relevance: for each probe the top 6 results of the prefix, lexical (BM25) and vector channels were pooled and every pooled row was judged by a human on query intent alone, blind to which channel produced it. Gold is a reviewed LOWER BOUND - unpooled relevant rows certainly exist, so recall figures are comparative, not absolute. Probe wording is deliberately paraphrased away from corpus vocabulary for the drift family and left closer to corpus vocabulary for several symptom probes, so the lexical baselines are not structurally doomed.",
+  "required_families": [
+    "instruction-drift",
+    "symptom-to-fix"
+  ],
+  "items": [
+    {
+      "id": "D1",
+      "family": "instruction-drift",
+      "query": "a worker repeatedly failed to follow a standing rule and had to be corrected more than once",
+      "gold_content_hashes": [
+        "c82f002e2bda0bb4eef6cb3b05d24678ff0e29828e753660cffd6275d470a849",
+        "41e178f47beabcffc9a4383121e8d1b40a44473dc966048deb2746a9ad2abd25"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        24881,
+        3626
+      ],
+      "gold_surfaced_by": {
+        "24881": [
+          "vector"
+        ],
+        "3626": [
+          "vector"
+        ]
+      },
+      "pooled_candidates_judged": 12,
+      "judged_not_relevant_event_ids": [
+        28518,
+        30028,
+        22382,
+        45298,
+        41947,
+        30992,
+        8147,
+        23907,
+        18777,
+        23178
+      ]
+    },
+    {
+      "id": "D3",
+      "family": "instruction-drift",
+      "query": "an agent believed it was allowed to do something the policy forbids and only learned otherwise afterwards",
+      "gold_content_hashes": [
+        "5aa51aba71bd1a0e8f9bce10ee9d28fd31c87ac8a12a35d171d7c3809ba4a5e7",
+        "275ae1f96f5047ca594b0c9079f81c2b46ec243872be3fe0aa4049ad57cce2f6"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        1748,
+        1749
+      ],
+      "gold_surfaced_by": {
+        "1748": [
+          "vector"
+        ],
+        "1749": [
+          "vector"
+        ]
+      },
+      "pooled_candidates_judged": 12,
+      "judged_not_relevant_event_ids": [
+        36537,
+        13478,
+        4023,
+        30815,
+        18360,
+        37200,
+        23530,
+        23087,
+        17949,
+        21941
+      ]
+    },
+    {
+      "id": "D4",
+      "family": "instruction-drift",
+      "query": "the wording was ambiguous enough that the model did roughly the opposite of what the operator intended",
+      "gold_content_hashes": [
+        "a6446431711fbcc056ecf343a399159b59b0bdd8e89c6b6faabd324d957ff27a",
+        "eca340702cd715988518f78e3f820d6b743dedcc649b0a75a8998cd5752651f2"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        22091,
+        19241
+      ],
+      "gold_surfaced_by": {
+        "22091": [
+          "vector"
+        ],
+        "19241": [
+          "prefix",
+          "lexical"
+        ]
+      },
+      "pooled_candidates_judged": 13,
+      "judged_not_relevant_event_ids": [
+        41355,
+        14174,
+        33324,
+        14234,
+        25319,
+        29174,
+        23789,
+        19121,
+        23045,
+        9139,
+        1748
+      ]
+    },
+    {
+      "id": "S1",
+      "family": "symptom-to-fix",
+      "query": "the acknowledgement reported success even though the message never actually reached anyone",
+      "gold_content_hashes": [
+        "5bec0e20ffe8094b49a1409040ce3727dbf2913822a5123837e3a27756f36dc0",
+        "ae9a282e8250819e44e01cd919df8cd8eb5ca6e48297a8272125e1e9d92d4e72",
+        "1bc84c9d862a042decb146b3f7fc3b80c4f9de1ca04f344114746d2b25fdb2b7",
+        "efac4ddd54314fcec92614cb3c44b2a3de4a72f7c3ce517b01c6c4cc74e7a89e"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        37264,
+        22323,
+        24989,
+        31040
+      ],
+      "gold_surfaced_by": {
+        "37264": [
+          "prefix",
+          "lexical"
+        ],
+        "22323": [
+          "prefix"
+        ],
+        "24989": [
+          "lexical"
+        ],
+        "31040": [
+          "vector"
+        ]
+      },
+      "pooled_candidates_judged": 14,
+      "judged_not_relevant_event_ids": [
+        5915,
+        39286,
+        38939,
+        22231,
+        31502,
+        28549,
+        17444,
+        36402,
+        19177,
+        27347
+      ]
+    },
+    {
+      "id": "S2",
+      "family": "symptom-to-fix",
+      "query": "the whole fleet stalled because every participant was waiting for somebody else to move first",
+      "gold_content_hashes": [
+        "459876e910f8d7835205e30f4a2350038c86c96022ade1577e3b5436d29bb438",
+        "381ab252c988eb3856131dfc8a15f597b05ad9d4816e32ab36f0aa544caf071e",
+        "4504d72a1a2366d792c3d74723f8f6e7cb18aeeab885b1bc347dac32e8ea2229"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        2215,
+        23263,
+        23264
+      ],
+      "gold_surfaced_by": {
+        "2215": [
+          "prefix",
+          "lexical"
+        ],
+        "23263": [
+          "vector"
+        ],
+        "23264": [
+          "vector"
+        ]
+      },
+      "pooled_candidates_judged": 14,
+      "judged_not_relevant_event_ids": [
+        4614,
+        23991,
+        4272,
+        29570,
+        10912,
+        10913,
+        35655,
+        18650,
+        18623,
+        23373,
+        23387
+      ]
+    },
+    {
+      "id": "S3",
+      "family": "symptom-to-fix",
+      "query": "the running program was an older build, so a landed correction looked like it had not worked",
+      "gold_content_hashes": [
+        "0741c5c8c0ccedf322ee2d7c23940e78ff8aa65cfe15ddb2608227c5e5067915",
+        "d7e33a80b3cb9f0d2aedceab38008c6c7fd08bd864e7727e29abf66292d5f355",
+        "81f90a7313af138eea947146ac307ae9d1699d710a780d70b16898dc6c877deb"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        26037,
+        32633,
+        25817
+      ],
+      "gold_surfaced_by": {
+        "26037": [
+          "vector"
+        ],
+        "32633": [
+          "vector"
+        ],
+        "25817": [
+          "vector"
+        ]
+      },
+      "pooled_candidates_judged": 15,
+      "judged_not_relevant_event_ids": [
+        37608,
+        5228,
+        23182,
+        22581,
+        19703,
+        19246,
+        37849,
+        167,
+        1114,
+        19244,
+        29860,
+        45435
+      ]
+    },
+    {
+      "id": "S4",
+      "family": "symptom-to-fix",
+      "query": "a process quietly disappeared and nothing noticed for a long time afterwards",
+      "gold_content_hashes": [
+        "2ab6f10725b3619accddeb9dbe47f8020f018f2cba6b5631f3c31241c8823b7c",
+        "ce5b724e11b6e2568cc67b12442c6ad08dfdfbe47057eb5ddaf9df47041fec6a",
+        "8a09ed328259bc3142cad8d1f35a223f81683b7988767715874e34703afc0c15",
+        "0e0fd0a5e1c5bf1724be51888a3c0c1257dd508688b007338552f935f0e7e7f6"
+      ],
+      "gold_event_ids_at_labelling_time": [
+        18809,
+        18793,
+        41494,
+        7686
+      ],
+      "gold_surfaced_by": {
+        "18809": [
+          "vector"
+        ],
+        "18793": [
+          "vector"
+        ],
+        "41494": [
+          "vector"
+        ],
+        "7686": [
+          "lexical"
+        ]
+      },
+      "pooled_candidates_judged": 15,
+      "judged_not_relevant_event_ids": [
+        13349,
+        30230,
+        20775,
+        38896,
+        40125,
+        45588,
+        39990,
+        32277,
+        24782,
+        22489,
+        25359
+      ]
+    }
+  ]
+}

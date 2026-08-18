@@ -779,6 +779,15 @@ impl EmbeddedDaemon {
                     // both-binaries data read as post-fix.
                     self.touch_binary_epoch();
                     self.send_agent_heartbeat().await;
+                    #[cfg(feature = "mcp-proxy")]
+                    if let Some(proxy) = self.proxy.read().await.clone() {
+                        if let Err(error) = crate::mcp::viktor_watch::poll_due_watches(
+                            &self.config.cas_root,
+                            &proxy,
+                        ).await {
+                            tracing::warn!(error = %error, "Viktor inbound watch tick failed");
+                        }
+                    }
                 }
 
                 // Code indexing - idle-PREFERRED, with a max-staleness override.

@@ -4377,6 +4377,30 @@ impl CasCore {
             ),
         }
 
+        // Viktor inbound watches carry the same frozen task context as
+        // reminders. A reply arriving after task close must not wake a worker
+        // against an obsolete premise, so quarantine it at the close boundary.
+        match cas_store::SqliteViktorWatchStore::open(&self.cas_root) {
+            Ok(store) => match store.quarantine_for_task(&req.id) {
+                Ok(quarantined) if quarantined > 0 => tracing::info!(
+                    task_id = %req.id,
+                    quarantined,
+                    "quarantined Viktor watches on task close"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::error!(
+                    task_id = %req.id,
+                    error = %error,
+                    "task closed but Viktor watch quarantine failed"
+                ),
+            },
+            Err(error) => tracing::error!(
+                task_id = %req.id,
+                error = %error,
+                "task closed but Viktor watch store could not open for quarantine"
+            ),
+        }
+
         // cas-062d / cas-17e4: durable Closed outbox push after successful close.
         {
             let actor = self

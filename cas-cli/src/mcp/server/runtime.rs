@@ -336,6 +336,13 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 match cmcp_core::ProxyEngine::from_configs(cfg.servers).await {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
+                        engine
+                            .set_call_observer(std::sync::Arc::new(
+                                crate::mcp::viktor_watch::ViktorWatchRecorder::new(
+                                    cas_root.clone(),
+                                ),
+                            ))
+                            .await;
                         let count = engine.tool_count().await;
                         eprintln!("[Cassy] MCP proxy ready ({count} upstream tools)");
                         if let Err(error) = write_proxy_snapshot_cache_for_config(

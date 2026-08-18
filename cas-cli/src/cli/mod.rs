@@ -376,7 +376,10 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
 /// Ensure the user is authenticated before running a command
 fn ensure_authenticated() -> anyhow::Result<()> {
     {
-        let config = crate::cloud::CloudConfig::load().unwrap_or_default();
+        // `load_effective`: the login is machine-wide (cas-046d), so this gate
+        // must not report "not logged in" merely because the current directory
+        // is not a CAS project.
+        let config = crate::cloud::CloudConfig::load_effective();
         if config.token.is_some() {
             return Ok(());
         }

@@ -80,6 +80,10 @@ cas cloud team     # confirm/select the Petra Stella team scope
 cas cloud status   # confirm: logged in, team set, auto-sync on
 ```
 
+**Once per machine, not once per project.** The credential is stored at user level in `~/.cas/cloud.json`, so you can run `cas login` from anywhere — including outside a CAS project — and every project you set up afterwards is already signed in. `cas logout` signs the whole machine out.
+
+**Prefer the token over `cas login`'s browser flow for now.** The hosted device-approval page currently rejects a valid code with "Missing or invalid Authorization header"; that is a server-side defect (written up in [docs/reports/2026-08-18-cloud-device-login-server-defect.md](../reports/2026-08-18-cloud-device-login-server-defect.md)). `cas login --token` does not use that page at all.
+
 **When to sync: normally never by hand.** Auto-sync is on by default (`cloud.auto_sync = true`) and runs every 60 seconds while you are logged in. Manual commands exist for exactly three situations:
 
 | Situation | Command |

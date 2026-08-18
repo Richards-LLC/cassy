@@ -348,7 +348,7 @@ You're on a custom Cargo profile that overrides `panic`. The MCP panic catcher r
 ## What this guide does NOT cover
 
 - **Legacy public install paths** (`install.sh`, Homebrew). They ship a much older binary; use this repository's build instead.
-- **CAS Cloud sync setup beyond the basics** — `cas login` + `cas cloud sync` are packaged commands; team scope auto-resolves from your `/api/me` membership. See the [README Team Memories section](../../README.md#team-memories-optional) for the full flow (`cas cloud team default <slug>` if you want to pin a team override).
+- **CAS Cloud sync setup beyond the basics** — `cas login` + `cas cloud sync` are packaged commands; team scope auto-resolves from your `/api/me` membership. Logging in is once per machine (the credential lives in `~/.cas/cloud.json`, so later projects are already signed in), and `cas login --token <API-TOKEN>` works from any directory. See the [README Team Memories section](../../README.md#team-memories-optional) for the full flow (`cas cloud team default <slug>` if you want to pin a team override).
 - **`cas-update` / `cas-refresh` orchestrator scripts** — author-specific wrappers in `~/.local/bin/`. See `docs/ideation/2026-04-30-cas-shell-helpers-distribution-ideation.md`.
 - **Multi-user setups**, shared `cas.db`, team collaboration patterns.
 - **Custom skill / agent authoring**.

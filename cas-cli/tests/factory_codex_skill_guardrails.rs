@@ -298,7 +298,7 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
             "never retry the denied target",
             "A `/dev/null` denial is a guard defect to report",
             "every applicable entry must paste its proving file, command, or test",
-            "Bare assertions such as “synced all mirrors” or “migration covered” are non-compliant",
+            "Bare assertions are non-compliant",
         ] {
             assert!(
                 worker.contains(marker),

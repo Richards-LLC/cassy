@@ -544,22 +544,49 @@ fn set_profile_env(profile: &str, profile_dir: &Path) {
 /// factory supervisor pane and every codex worker then inherit `CODEX_HOME`
 /// through ordinary process environment inheritance.
 pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
-    if args.command.is_some() || args.list_profiles || args.bare {
+    if args.command.is_some() || args.list_profiles {
         return Ok(());
     }
-    let Some(profile) = args.profile() else {
-        return Ok(());
-    };
 
     let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
-    let profile_dir = resolve_profile_dir(&home, profile);
-    warn_about_profile_state(profile, &profile_dir);
+
+    let profile = match args.profile() {
+        // An explicitly named account is the no-prompt fast path.
+        Some(profile) => profile.to_string(),
+        None => {
+            let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+            let profiles = scan_profiles(&home, active_dir.as_deref()).with_context(|| {
+                format!("could not inspect Codex profiles under {}", home.display())
+            })?;
+            if should_prompt_for_profile(
+                None,
+                &profiles,
+                io::stdin().is_terminal(),
+                io::stdout().is_terminal(),
+            ) {
+                prompt_for_profile(&home, &profiles)?
+            } else {
+                // Non-interactive, or only one account exists: leave the
+                // ambient environment exactly as the caller set it.
+                return Ok(());
+            }
+        }
+    };
+
+    let profile_dir = resolve_profile_dir(&home, &profile);
+    warn_about_profile_state(&profile, &profile_dir);
     eprintln!("Using Codex account home: {}", profile_dir.display());
 
-    set_profile_env(profile, &profile_dir);
+    set_profile_env(&profile, &profile_dir);
+    // `execute`/`execute_bare` run later in the same process; record the choice
+    // so the operator is asked once, not once per launch path.
+    let _ = SELECTED_PROFILE.set(profile);
 
     Ok(())
 }
+
+/// The account chosen during `apply_profile_env`, for later launch paths.
+static SELECTED_PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Run `cas codex`: factory with a Codex supervisor by default, plain codex
 /// under `--bare`, profile listing under `--list-profiles`.
@@ -579,22 +606,10 @@ pub fn execute(args: &CodexArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<(
         return execute_bare(args);
     }
 
-    // An explicit profile was already exported by `apply_profile_env`. A bare
-    // interactive launch with more than one detected account stops here and
-    // asks, instead of silently loading whichever account the environment
-    // happened to select.
-    if args.profile().is_none() && io::stdin().is_terminal() && io::stdout().is_terminal() {
-        let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
-        let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-        let profiles = scan_profiles(&home, active_dir.as_deref())?;
-        if should_prompt_for_profile(None, &profiles, true, true) {
-            let profile = prompt_for_profile(&home, &profiles)?;
-            let profile_dir = resolve_profile_dir(&home, &profile);
-            eprintln!("Using Codex account home: {}", profile_dir.display());
-            set_profile_env(&profile, &profile_dir);
-        }
-    }
-
+    // Account selection already happened in `apply_profile_env`, deliberately:
+    // it runs before `initialize_telemetry` spawns a thread, and `set_var` in a
+    // multi-threaded process is UB. Prompting here would also ask twice
+    // (cas-898d lesson).
     let mut factory_args = parse_factory_args(args.passthrough_args());
     factory_args.supervisor_cli = "codex".to_string();
     factory_args.supervisor_cli_explicit = true;
@@ -624,21 +639,22 @@ fn execute_bare(args: &CodexArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
     let profile = match args.profile() {
         Some(profile) => profile.to_string(),
-        None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-            let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-            let profiles = scan_profiles(&home, active_dir.as_deref())?;
-            if should_prompt_for_profile(None, &profiles, true, true) {
-                prompt_for_profile(home.as_path(), &profiles)?
-            } else {
-                "main".to_string()
-            }
-        }
-        None => "main".to_string(),
+        // `apply_profile_env` already ran the picker in the single-threaded
+        // window; reuse its answer instead of asking a second time.
+        None => match SELECTED_PROFILE.get() {
+            Some(selected) => selected.clone(),
+            None => "main".to_string(),
+        },
     };
     let profile_dir = resolve_profile_dir(&home, &profile);
 
-    warn_about_profile_state(&profile, &profile_dir);
-    eprintln!("Using Codex account home: {}", profile_dir.display());
+    // `apply_profile_env` announces whatever it selected. Announcing again here
+    // printed the account line twice for every explicit-profile launch
+    // (cas-898d lesson 3), so only speak up for the fallback it left alone.
+    if SELECTED_PROFILE.get().is_none() && args.profile().is_none() {
+        warn_about_profile_state(&profile, &profile_dir);
+        eprintln!("Using Codex account home: {}", profile_dir.display());
+    }
 
     let mut command = build_codex_command(&profile, &profile_dir, args.passthrough_args());
     exec_codex(&mut command)

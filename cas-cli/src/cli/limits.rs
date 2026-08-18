@@ -379,7 +379,7 @@ fn compact_line(report: &LimitsReport) -> String {
 }
 
 fn print_human(report: &LimitsReport) {
-    println!("CAS provider limits");
+    println!("Cassy provider limits");
     for account in &report.accounts {
         let plan = account
             .plan

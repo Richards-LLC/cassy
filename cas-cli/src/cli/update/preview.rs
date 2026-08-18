@@ -39,12 +39,12 @@ pub(crate) fn compute_claude_md_change(project_root: &Path) -> Option<FileChange
                     std::path::PathBuf::from("CLAUDE.md"),
                     content,
                     new_content,
-                    "Update CAS section in CLAUDE.md",
+                    "Update Cassy section in CLAUDE.md",
                 ));
             }
-        } else if content.contains("IMPORTANT: USE CAS FOR TASK AND MEMORY MANAGEMENT") {
+        } else if content.contains("IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT") {
             // Migration from old format
-            let new_content = if content.starts_with("# IMPORTANT: USE CAS") {
+            let new_content = if content.starts_with("# IMPORTANT: USE Cassy") {
                 if let Some(pos) = content.find("---\n\n") {
                     format!("{}\n\n{}", new_section, &content[pos + 5..])
                 } else if let Some(pos) = content.find("---\n") {
@@ -59,7 +59,7 @@ pub(crate) fn compute_claude_md_change(project_root: &Path) -> Option<FileChange
                 std::path::PathBuf::from("CLAUDE.md"),
                 content,
                 new_content,
-                "Migrate CAS section format in CLAUDE.md",
+                "Migrate Cassy section format in CLAUDE.md",
             ));
         } else {
             // Prepend new section
@@ -68,7 +68,7 @@ pub(crate) fn compute_claude_md_change(project_root: &Path) -> Option<FileChange
                 std::path::PathBuf::from("CLAUDE.md"),
                 content,
                 new_content,
-                "Add CAS section to CLAUDE.md",
+                "Add Cassy section to CLAUDE.md",
             ));
         }
     } else {
@@ -76,14 +76,14 @@ pub(crate) fn compute_claude_md_change(project_root: &Path) -> Option<FileChange
         return Some(FileChange::create(
             std::path::PathBuf::from("CLAUDE.md"),
             format!("{new_section}\n"),
-            "Create CLAUDE.md with CAS section",
+            "Create CLAUDE.md with Cassy section",
         ));
     }
 
     None
 }
 
-/// Compute what CAS skill changes would be made (without applying)
+/// Compute what Cassy skill changes would be made (without applying)
 pub(crate) fn compute_cas_skill_change(project_root: &Path) -> Option<FileChange> {
     use crate::cli::init::{CAS_SKILL, is_old_cas_skill, is_skill_managed_by_cas};
 
@@ -97,13 +97,13 @@ pub(crate) fn compute_cas_skill_change(project_root: &Path) -> Option<FileChange
             return None; // No change needed
         }
 
-        // Only update if managed by CAS or old format
+        // Only update if managed by Cassy or old format
         if is_skill_managed_by_cas(&existing) || is_old_cas_skill(&existing) {
             return Some(FileChange::modify(
                 std::path::PathBuf::from(".claude/skills/cas/SKILL.md"),
                 existing,
                 skill_content.to_string(),
-                "Update CAS skill definition",
+                "Update Cassy skill definition",
             ));
         }
 
@@ -112,7 +112,7 @@ pub(crate) fn compute_cas_skill_change(project_root: &Path) -> Option<FileChange
         Some(FileChange::create(
             std::path::PathBuf::from(".claude/skills/cas/SKILL.md"),
             skill_content.to_string(),
-            "Create CAS skill definition",
+            "Create Cassy skill definition",
         ))
     }
 }
@@ -141,7 +141,7 @@ pub(crate) fn build_update_transaction(
         tx.add_file_change(change);
     }
 
-    // Compute CAS skill changes
+    // Compute Cassy skill changes
     if let Some(change) = compute_cas_skill_change(project_root) {
         tx.add_file_change(change);
     }

@@ -1,7 +1,7 @@
-//! Git worktree management for CAS
+//! Git worktree management for Cassy
 //!
 //! This module provides functionality for creating, managing, and cleaning up
-//! git worktrees associated with CAS tasks. It enables isolated development
+//! git worktrees associated with Cassy tasks. It enables isolated development
 //! environments for each task.
 //!
 //! ## Git Submodules

@@ -8,7 +8,7 @@ priority: P1
 
 Resolution: Already fixed by the cloud-sync reliability work merged in `34203e2` and released in `v2.21.0`: `be42057` fixed queue poison-head and duplicate NULL-team_id enqueue behavior, `28ac14c` added the `--rehome` guard and truthful push counts, and `b4d55d9`/`034a8a9` added bucket-ambiguity warning plus concrete team-show slug resolution.
 
-A user reported that SOW-10 tasks created on one machine (Linux) were **invisible on a second machine** (Mac) after `cas cloud sync` on both. The tasks were never actually missing from the cloud — they were in the canonical `ozer` project bucket the whole time. The Mac simply **read a different bucket**, because CAS 2.20 auto-derives the cloud project slug from the **git remote** instead of the established short slug. While diagnosing this, two further sync defects surfaced: the local push queue has a **poison-head FIFO stall** (pushes report success while draining nothing), and **touching a task enqueues duplicate items** that never fully clear. One diagnostic step also revealed that **pushing under a pinned slug silently re-homes ~17k entities between cloud buckets**.
+A user reported that SOW-10 tasks created on one machine (Linux) were **invisible on a second machine** (Mac) after `cas cloud sync` on both. The tasks were never actually missing from the cloud — they were in the canonical `ozer` project bucket the whole time. The Mac simply **read a different bucket**, because Cassy 2.20 auto-derives the cloud project slug from the **git remote** instead of the established short slug. While diagnosing this, two further sync defects surfaced: the local push queue has a **poison-head FIFO stall** (pushes report success while draining nothing), and **touching a task enqueues duplicate items** that never fully clear. One diagnostic step also revealed that **pushing under a pinned slug silently re-homes ~17k entities between cloud buckets**.
 
 ## Affected version
 
@@ -69,7 +69,7 @@ A single task mutation enqueues ~2 queue items; push drains fewer than it enqueu
 
 ## Repro sketch
 
-1. In a repo whose git remote is `github.com/<org>/<repo>` but whose CAS history lives under a short slug (`<repo-short>`), leave `canonical_id` unset.
+1. In a repo whose git remote is `github.com/<org>/<repo>` but whose Cassy history lives under a short slug (`<repo-short>`), leave `canonical_id` unset.
 2. Create tasks on machine A; `cas cloud sync`. On machine B, `cas cloud sync` and list tasks → **they're missing** (B resolved the git-remote bucket).
 3. On machine A, `cas cloud queue` → pending > 0 with an old `oldest_item`; run `cas cloud push` several times → `[OK]` each time, but `oldest_item` and the per-type counts don't move (poison-head stall).
 4. `cas cloud queue --clear`, touch a task, `cas cloud queue --json` → enqueued count is ~2× the tasks touched.

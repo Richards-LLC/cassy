@@ -1,6 +1,6 @@
 # Release Notes Rubric
 
-> Canonical CAS template. Copy to `docs/release-notes/RUBRIC.md` and fill the
+> Canonical Cassy template. Copy to `docs/release-notes/RUBRIC.md` and fill the
 > `<...>` placeholders. The rules below are the framework contract — a project
 > may add to them, never relax them.
 

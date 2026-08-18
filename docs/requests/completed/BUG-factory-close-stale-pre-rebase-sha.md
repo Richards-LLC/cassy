@@ -142,7 +142,7 @@ was never meant to go through that branch/parent pair in the first place.
   epic name) have been anonymized/generalized above (`W1`, `E1`, `A`/`A'`,
   `M1`/`M2`) — the underlying git objects and exact identifiers are available
   from the reporting session if needed for a repro.
-- This is a reporting-only request; no CAS source was modified to produce
+- This is a reporting-only request; no Cassy source was modified to produce
   this file.
 
 

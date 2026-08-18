@@ -1,6 +1,6 @@
 # Task depth: a speed lane for feel-driven work
 
-CAS tasks have a **depth**: `deep` (the default) or `light`. Depth controls the
+Cassy tasks have a **depth**: `deep` (the default) or `light`. Depth controls the
 speed-vs-rigor tradeoff at close time. It does not change what a task *is* — only
 how much machine verification stands between "I'm done" and "closed".
 

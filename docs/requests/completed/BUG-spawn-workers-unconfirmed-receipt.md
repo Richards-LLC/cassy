@@ -5,7 +5,7 @@
 # BUG: `spawn_workers` receipt does not confirm worker liveness
 
 **Component:** factory spawn queue, MCP coordination API, factory daemon logging  
-**First observed:** 2026-07-27 on soundwave with CAS 2.30.0 (`811377c`)  
+**First observed:** 2026-07-27 on soundwave with Cassy 2.30.0 (`811377c`)
 **Rechecked:** 2026-07-31 in factory session `Penguinz-proud-crane-49`
 
 ## Original reproduction — functional failure on 2026-07-27

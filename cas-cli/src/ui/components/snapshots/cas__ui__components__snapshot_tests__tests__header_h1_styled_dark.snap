@@ -2,4 +2,4 @@
 source: cas-cli/src/ui/components/snapshot_tests.rs
 expression: tf.output_plain()
 ---
-═══ CAS Doctor ═══
+═══ Cassy Doctor ═══

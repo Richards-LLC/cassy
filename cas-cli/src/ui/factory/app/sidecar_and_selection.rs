@@ -256,7 +256,7 @@ impl FactoryApp {
         };
 
         // Build mapping from agent session_id (agent.id) to agent.name
-        // Agent IDs in CAS are typically the Claude session ID
+        // Agent IDs in Cassy are typically the Claude session ID
         for agent in agents {
             // Skip agents we already have mapped
             if !self.session_to_pane.contains_key(&agent.id) {

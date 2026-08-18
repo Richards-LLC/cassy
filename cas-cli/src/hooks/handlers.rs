@@ -207,7 +207,7 @@ pub struct ExtractedLearning {
 pub struct SessionLearnDraft {
     /// Epistemic signal: concept | entity | correction | pattern | idea | decision | gap
     pub signal: String,
-    /// CAS entry_type string: learning | preference | context | observation
+    /// Cassy entry_type string: learning | preference | context | observation
     pub entry_type: String,
     /// Storage scope string: global | project
     pub scope: String,

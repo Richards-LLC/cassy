@@ -4,7 +4,7 @@ date: 2026-05-13
 priority: P1
 ---
 
-# `cas doctor --fix` auto-fix fails: `migration failed: skills_add_summary — database error: no such table: skills` on fresh-ish CAS database
+# `cas doctor --fix` auto-fix fails: `migration failed: skills_add_summary — database error: no such table: skills` on fresh-ish Cassy database
 
 ## Observed
 

@@ -169,6 +169,14 @@ fn help_piped_no_ansi() {
         !stdout.contains('\x1b'),
         "Help output contains ANSI escape codes:\n{stdout}"
     );
+    assert!(
+        stdout.starts_with("Cassy\n"),
+        "Piped help must fall back to the plain Cassy wordmark:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Usage: cas"),
+        "The command usage must remain `cas`:\n{stdout}"
+    );
 }
 
 // ============================================================================

@@ -7,16 +7,16 @@ reply on each root.
 Channel: `#cas-internal` (`C0B44GUKDK2`). Deploy label: **Live on production**.
 
 === MESSAGE 1 (user top-level) ===
-Live on production — **User** — Work for another project can now be proposed and followed in CAS without turning into a lost handoff.
+Live on production — **User** — Work for another project can now be proposed and followed in Cassy without turning into a lost handoff.
 
 === MESSAGE 2 (user reply to MESSAGE 1) ===
 Was → Now: Work for another project had to be copied or handed over manually, making its destination and outcome easy to lose track of. Now you can send one proposal to the intended project, see whether it is accepted or declined, and keep a dependent task honestly blocked until the work is finished.
 
 === MESSAGE 3 (dev top-level; new top-level, not a reply) ===
-Live on production — **Dev** — CAS now exposes creation, triage, and reconciliation for cross-project proposals while keeping each project's local task list truthful.
+Live on production — **Dev** — Cassy now exposes creation, triage, and reconciliation for cross-project proposals while keeping each project's local task list truthful.
 
 === MESSAGE 4 (dev reply to MESSAGE 3) ===
-Was → Now: CAS could create and track tasks only in its current local project. Now proposal creation is idempotent and scoped to explicit origin and target projects; acceptance or rejection is auditable; source attribution is preserved; and dependency reconciliation deduplicates replayed pages while tracking reopen and resolution transitions.
+Was → Now: Cassy could create and track tasks only in its current local project. Now proposal creation is idempotent and scoped to explicit origin and target projects; acceptance or rejection is auditable; source attribution is preserved; and dependency reconciliation deduplicates replayed pages while tracking reopen and resolution transitions.
 
 ## Posting sequence followed after confirmed main merge
 

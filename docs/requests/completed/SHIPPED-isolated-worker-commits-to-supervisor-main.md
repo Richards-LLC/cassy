@@ -94,7 +94,7 @@ The leak recurred a third+ time in the same session with a different (frontend) 
 ### What happened
 
 1. Frontend worker was assigned two tasks. It did the work but committed it onto the **supervisor's shared checkout** (`epic` branch in the primary working dir), not its `factory/frontend` worktree — the same leak as above. (The worker itself later narrated: *"my earlier commits went to the main repo on the epic branch (wrong place)."*)
-2. The worker then **closed the CAS task** (status → `Closed` via the dual-gate workaround). So from the task DB, the supervisor saw "done."
+2. The worker then **closed the Cassy task** (status → `Closed` via the dual-gate workaround). So from the task DB, the supervisor saw "done."
 3. But: there was **no PR**, the commits were **not on `origin/epic`**, and the supervisor's own `git status` / `git log` were now polluted with commits it never made (`7adca583` etc. sitting on the supervisor's local `epic`, unpushed).
 4. The worker eventually self-corrected (cherry-picked the stray commits into its `factory/frontend` worktree, force-pushed, opened a PR) — but the supervisor only learned this by reading the worker's terminal scrollback, which was surfaced **by the human**, not by any tool.
 5. Separately, the worker discovered the filed task pointed at the wrong file (`p/[slug]/settings.vue` had no overlap; the real bug was `brands/[id].vue`) — a correct call the supervisor had no way to see being made.

@@ -23,7 +23,7 @@
 //!   supervisor can see the last in-flight tool call without attaching the
 //!   TUI. Essential triage input before deciding to kill.
 //! * `kill <worker>` — SIGKILL the worker (SIGTERM doesn't exit cleanly on
-//!   the Bun wedge) and best-effort release the CAS lease.
+//!   the Bun wedge) and best-effort release the Cassy lease.
 //!
 //! See `cas-cli/src/mcp/tools/service/factory_ops.rs::resolve_transcript`
 //! (cas-900b) for the transcript path resolver used by `is-wedged` / `debug`.
@@ -88,7 +88,7 @@ pub(crate) const TRANSCRIPT_FRESH_WINDOW: Duration = Duration::from_secs(3 * 60)
 pub(crate) const GROK_TRANSCRIPT_FRESH_WINDOW: Duration = Duration::from_secs(60);
 
 /// Codex workers routinely sit mid-inference for several minutes without a
-/// CAS tool call (and sometimes without a rollout append). A 60 s transcript
+/// Cassy tool call (and sometimes without a rollout append). A 60 s transcript
 /// window false-flags them Starved; prefer a longer harness-specific window
 /// (cas-c655 / 2026-07-21 bug report). Worktree + CPU activity still override
 /// Starved even inside this window when the transcript is missing entirely.
@@ -862,7 +862,7 @@ pub(crate) struct ResolvedWorker {
 /// `cas factory is-wedged <worker>`: classify + print evidence + exit.
 pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: bool) -> Result<()> {
     let cas_root =
-        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a CAS project"))?;
+        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
     // Scope the store opens so their SqliteConnection drops (running any
     // pending WAL checkpoint) before we call `std::process::exit` — that
     // function skips Rust destructors entirely. cas-4513 adversarial P2.
@@ -897,7 +897,7 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
 /// `cas factory debug <worker>`: print tail of worker transcript.
 pub(crate) fn execute_debug(cas_root: Option<&Path>, worker: &str, tail: usize) -> Result<()> {
     let cas_root =
-        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a CAS project"))?;
+        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
     let w = resolve_worker(cas_root, worker)?;
     let Some(path) = w.transcript_path.as_deref() else {
         bail!(
@@ -1127,7 +1127,7 @@ pub(crate) fn environ_candidate_score(cmdline: Option<&[u8]>) -> i32 {
 /// The kernel's `children` files give a bounded, ownership-preserving walk:
 /// a cargo build started by the worker is a descendant, while an unrelated
 /// host build never is. Process start ages use the same `/proc/<pid>/stat`
-/// starttime fingerprint source used elsewhere in CAS. If either the root
+/// starttime fingerprint source used elsewhere in Cassy. If either the root
 /// traversal or uptime clock cannot be read, return `Unavailable` rather than
 /// pretending there are no jobs (cas-058e's fail-honest contract).
 pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState {
@@ -1411,7 +1411,7 @@ fn verify_death(pid: u32) -> bool {
 }
 
 /// `cas factory kill <worker>`: SIGKILL the worker process and release any
-/// active CAS lease. Idempotent — already-dead worker still runs the cleanup.
+/// active Cassy lease. Idempotent — already-dead worker still runs the cleanup.
 ///
 /// PID-recycling guard (cas-4513 adversarial P0): before delivering SIGKILL,
 /// we verify the agent's stored `pid_starttime` fingerprint matches the
@@ -1438,7 +1438,7 @@ fn verify_death(pid: u32) -> bool {
 /// worker.
 pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -> Result<()> {
     let cas_root =
-        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a CAS project"))?;
+        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
     let w = resolve_worker(cas_root, worker)?;
     let mut summary = Vec::<String>::new();
 

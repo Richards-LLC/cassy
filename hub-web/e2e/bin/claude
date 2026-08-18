@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic interactive PTY used by the Commander live-browser proof."""
+"""Deterministic interactive PTY used by the Cassy Commander live-browser proof."""
 
 import os
 import signal

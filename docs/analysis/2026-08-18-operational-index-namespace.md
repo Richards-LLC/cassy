@@ -14,7 +14,7 @@ channel is allowed to answer at all; and hybrid queries that join operational ev
 tasks, code symbols, commits, issues, memories and deployed-binary epochs with provenance
 on every row.
 
-Structured metrics stay in SQL. Nothing in this lane writes to any CAS store: every store
+Structured metrics stay in SQL. Nothing in this lane writes to any Cassy store: every store
 handle is opened `mode=ro`, and `isolation-check` proves it by attempting a write and
 recording the rejection.
 
@@ -51,11 +51,11 @@ dimensions, zero new provider cost.
 
 `operational_index.py isolation-check --live-fts` — all eight checks pass (exit 0):
 
-- **Artifact is not a CAS store or a store neighbour.** The namespace lives under the
+- **Artifact is not a Cassy store or a store neighbour.** The namespace lives under the
   artifacts root, never in a store's own directory. The check failed on its first real run
   and that was correct behaviour, not a bug: it flagged a location inside `~/.cas` before
   the rule was narrowed to "not a store, not a store's directory, not registered".
-- **Not registered in any CAS store.** No store has `op_*` tables and no store metadata,
+- **Not registered in any Cassy store.** No store has `op_*` tables and no store metadata,
   knowledge-source, or index-state row mentions the artifact.
 - **No memory/knowledge/code tables** inside the namespace; only `op_*` tables exist.
 - **Every row namespaced** — 0 rows outside `operational/v2` across events, occurrences and
@@ -70,7 +70,7 @@ dimensions, zero new provider cost.
   0 hits.
 - **Memory/knowledge/code text is absent from the namespace.** 75 canaries sampled from the
   three stores, matched by normalised content hash and by substring: 0 contamination.
-- **CAS stores are read-only.** A `CREATE TABLE` attempt on each store handle is rejected
+- **Cassy stores are read-only.** A `CREATE TABLE` attempt on each store handle is rejected
   with `attempt to write a readonly database`.
 
 The regression suite covers both failure directions: smuggling memory text into the

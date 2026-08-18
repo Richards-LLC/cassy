@@ -106,7 +106,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             key: "coordination.mode",
             section: "coordination",
             name: "Coordination Mode",
-            description: "Agent coordination mode. 'local' for standalone operation, 'cloud' for multi-device sync via CAS Cloud.",
+            description: "Agent coordination mode. 'local' for standalone operation, 'cloud' for multi-device sync via Cassy Cloud.",
             value_type: ConfigType::String,
             default: "local",
             constraint: Constraint::OneOf(vec!["local".to_string(), "cloud".to_string()]),
@@ -123,7 +123,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             key: "coordination.cloud_url",
             section: "coordination",
             name: "Cloud URL",
-            description: "URL of the CAS Cloud server for cloud coordination mode. Only used when coordination.mode is 'cloud'.",
+            description: "URL of the Cassy Cloud server for cloud coordination mode. Only used when coordination.mode is 'cloud'.",
             value_type: ConfigType::String,
             default: "",
             constraint: Constraint::None,
@@ -131,8 +131,8 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             requires_feature: None,
             keywords: &["cloud", "url", "server", "endpoint", "api"],
             use_cases: &[
-                "Set to your CAS Cloud instance URL",
-                "Leave empty to use default CAS Cloud",
+                "Set to your Cassy Cloud instance URL",
+                "Leave empty to use default Cassy Cloud",
             ],
         });
 
@@ -214,7 +214,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             key: "telemetry.enabled",
             section: "telemetry",
             name: "Enable Telemetry",
-            description: "Enable anonymous usage telemetry to help improve CAS. Opt-in via CAS_TELEMETRY=1 or this setting. No personal or code data is collected.",
+            description: "Enable anonymous usage telemetry to help improve Cassy. Opt-in via CAS_TELEMETRY=1 or this setting. No personal or code data is collected.",
             value_type: ConfigType::Bool,
             default: "false",
             constraint: Constraint::None,
@@ -223,7 +223,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             keywords: &["telemetry", "analytics", "usage", "metrics", "anonymous"],
             use_cases: &[
                 "Disable for complete privacy",
-                "Enable to help improve CAS with anonymous usage data",
+                "Enable to help improve Cassy with anonymous usage data",
             ],
         });
 
@@ -296,7 +296,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "notifications.on_auth_success",
         section: "notifications",
         name: "On Auth Success",
-        description: "Show notification when CAS Cloud authentication succeeds.",
+        description: "Show notification when Cassy Cloud authentication succeeds.",
         value_type: ConfigType::Bool,
         default: "false",
         constraint: Constraint::None,

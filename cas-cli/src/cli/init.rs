@@ -26,6 +26,7 @@ use crate::cli::Cli;
 use crate::cli::factory_tooling;
 use crate::cli::hook::{configure_claude_hooks, configure_mcp_server, provision_codex_project};
 use crate::cli::interactive;
+use crate::ui::components::OutputMode;
 
 /// Overall timeout for `cas init`. If init is still running past this, the
 /// watchdog aborts the process with a clear error so a hang never consumes
@@ -163,7 +164,7 @@ impl NonProjectDir {
 /// Classify the directory `cas init` was invoked in.
 ///
 /// Deliberately narrow: only the home directory and the filesystem root are
-/// refused. "Not a git repository" is NOT a signal — CAS supports non-git
+/// refused. "Not a git repository" is NOT a signal — Cassy supports non-git
 /// projects and derives a canonical id from the folder name, so refusing there
 /// would reject legitimate setups.
 pub(crate) fn classify_init_dir(cwd: &Path, home: Option<&Path>) -> Option<NonProjectDir> {
@@ -184,14 +185,13 @@ pub(crate) fn classify_init_dir(cwd: &Path, home: Option<&Path>) -> Option<NonPr
 mod colors {
     use crossterm::style::Color;
 
+    // Standard ANSI colors keep the wordmark readable in terminal themes that
+    // remap the 16-color palette.
+    pub const WORDMARK: Color = Color::Cyan;
+
     pub const CYAN: Color = Color::Rgb {
         r: 0,
         g: 200,
-        b: 255,
-    };
-    pub const CYAN_BRIGHT: Color = Color::Rgb {
-        r: 150,
-        g: 230,
         b: 255,
     };
     pub const GREEN: Color = Color::Rgb {
@@ -220,6 +220,35 @@ mod colors {
         g: 70,
         b: 75,
     };
+}
+
+/// Cassy's compact six-row wordmark. The 49-cell widest row leaves room for
+/// the init frame at 80 columns and keeps the wizard's first screen compact.
+const CASSY_WORDMARK: [&str; 6] = [
+    " ██████╗ █████╗ ███████╗███████╗██╗   ██╗",
+    "██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝",
+    "██║     ███████║███████╗███████╗ ╚████╔╝",
+    "██║     ██╔══██║╚════██║╚════██║  ╚██╔╝",
+    "╚██████╗██║  ██║███████║███████║   ██║",
+    " ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝",
+];
+
+const CASSY_PLAIN_WORDMARK: [&str; 1] = ["Cassy"];
+const INIT_WORDMARK_WIDTH: usize = 52;
+
+fn cassy_wordmark_lines() -> &'static [&'static str] {
+    if OutputMode::detect() == OutputMode::Plain {
+        &CASSY_PLAIN_WORDMARK
+    } else {
+        &CASSY_WORDMARK
+    }
+}
+
+fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
+    for line in cassy_wordmark_lines() {
+        print_colored(&format!("{indent}{line}\n"), colors::WORDMARK)?;
+    }
+    Ok(())
 }
 
 // Spinner frames (braille pattern)
@@ -347,7 +376,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
         println!();
         print_colored(&format!("  ⚠  {}", kind.warning(&cwd)), colors::ORANGE)?;
         println!();
-        if !interactive::confirm("  Initialize CAS here anyway", false)? {
+        if !interactive::confirm("  Initialize Cassy here anyway", false)? {
             println!("\n  Nothing was written. `cd` into your project and run `cas init` there.");
             return Ok(());
         }
@@ -433,7 +462,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     if config.agents.codex {
         // Codex will otherwise prompt on both project and command-hook trust
-        // before it invokes CAS. Unlike cosmetic init artifacts, treating this
+        // before it invokes Cassy. Unlike cosmetic init artifacts, treating this
         // failure as success would leave the default install non-functional.
         codex_configured = provision_codex_project(cwd)?;
 
@@ -500,7 +529,7 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     if cas_dir_path.exists() && !args.force {
         print_colored("", colors::WHITE)?;
         print_colored("  ● ", colors::CYAN)?;
-        print_colored("CAS already initialized at ", colors::WHITE)?;
+        print_colored("Cassy already initialized at ", colors::WHITE)?;
         print_colored(&cas_dir_path.display().to_string(), colors::CYAN)?;
         println!();
         print_colored("  → ", colors::GRAY)?;
@@ -512,10 +541,8 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     // Mini header
     println!();
-    print_colored("  █▀▀ ▄▀█ █▀ ", colors::CYAN_BRIGHT)?;
-    print_colored("Init ", colors::WHITE)?;
-    print_colored("(using defaults)\n", colors::GRAY)?;
-    print_colored("  █▄▄ █▀█ ▄█\n\n", colors::CYAN_BRIGHT)?;
+    print_cassy_wordmark("  ")?;
+    print_colored("  Cassy init (using defaults)\n\n", colors::GRAY)?;
 
     let cas_dir = init_cas_dir(cwd)?;
     register_initialized_repo(cwd);
@@ -552,7 +579,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     // Check if already initialized
     if cas_dir_path.exists() && !args.force {
         println!();
-        print_colored("  CAS is already initialized at ", colors::WHITE)?;
+        print_colored("  Cassy is already initialized at ", colors::WHITE)?;
         print_colored(&cas_dir_path.display().to_string(), colors::CYAN)?;
         println!("\n");
 
@@ -563,7 +590,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
             println!("\n  Keeping existing configuration.");
             return Ok(());
         }
-        println!("\n  Reconfiguring CAS...");
+        println!("\n  Reconfiguring Cassy...");
     }
 
     // Initialize .cas directory
@@ -598,15 +625,15 @@ fn print_welcome() -> anyhow::Result<()> {
         colors::CYAN,
     )?;
     print_colored("│\n", colors::CYAN)?;
-    print_colored("  │  ", colors::CYAN)?;
-    print_colored("█▀▀ ▄▀█ █▀", colors::CYAN_BRIGHT)?;
-    print_colored("  Init", colors::WHITE)?;
-    print_colored("                                     ", colors::CYAN)?;
-    print_colored("│\n", colors::CYAN)?;
-    print_colored("  │  ", colors::CYAN)?;
-    print_colored("█▄▄ █▀█ ▄█", colors::CYAN_BRIGHT)?;
-    print_colored("                                          ", colors::CYAN)?;
-    print_colored("│\n", colors::CYAN)?;
+    for line in cassy_wordmark_lines() {
+        print_colored("  │  ", colors::CYAN)?;
+        print_colored(line, colors::WORDMARK)?;
+        print_colored(
+            &" ".repeat(INIT_WORDMARK_WIDTH.saturating_sub(line.chars().count())),
+            colors::CYAN,
+        )?;
+        print_colored("│\n", colors::CYAN)?;
+    }
     print_colored("  │", colors::CYAN)?;
     print_colored(
         "                                                      ",
@@ -720,7 +747,7 @@ fn confirm_and_apply(
     print_colored("  Create:\n", colors::WHITE)?;
 
     if !cas_exists {
-        print_file_item(".cas/", "CAS data directory", colors::GREEN)?;
+        print_file_item(".cas/", "Cassy data directory", colors::GREEN)?;
     }
     print_file_item(".cas/config.toml", "Configuration", colors::GREEN)?;
     if !gitignore_exists {
@@ -735,7 +762,7 @@ fn confirm_and_apply(
             print_file_item(".claude/settings.json", "Claude Code hooks", colors::GREEN)?;
         }
         if !skill_exists {
-            print_file_item(".claude/skills/cas/SKILL.md", "CAS skill", colors::GREEN)?;
+            print_file_item(".claude/skills/cas/SKILL.md", "Cassy skill", colors::GREEN)?;
         }
         print_file_item(".claude/agents/", "Built-in agents", colors::GREEN)?;
         print_file_item(".claude/commands/", "Built-in commands", colors::GREEN)?;
@@ -748,7 +775,7 @@ fn confirm_and_apply(
         if !codex_hooks_exists {
             print_file_item(
                 ".codex/hooks.json",
-                "CAS hook (review with /hooks)",
+                "Cassy hook (review with /hooks)",
                 colors::GREEN,
             )?;
         }
@@ -800,26 +827,26 @@ fn confirm_and_apply(
 
         if config.agents.claude {
             if settings_exists {
-                print_file_item(".claude/settings.json", "Add CAS hooks", colors::ORANGE)?;
+                print_file_item(".claude/settings.json", "Add Cassy hooks", colors::ORANGE)?;
             }
             if mcp_exists {
-                print_file_item(".mcp.json", "Add CAS server", colors::ORANGE)?;
+                print_file_item(".mcp.json", "Add Cassy server", colors::ORANGE)?;
             }
             if claude_md_exists {
-                print_file_item("CLAUDE.md", "Add CAS instructions", colors::ORANGE)?;
+                print_file_item("CLAUDE.md", "Add Cassy instructions", colors::ORANGE)?;
             } else {
-                print_file_item("CLAUDE.md", "Create with CAS instructions", colors::GREEN)?;
+                print_file_item("CLAUDE.md", "Create with Cassy instructions", colors::GREEN)?;
             }
         }
 
         if config.agents.codex {
             if codex_config_exists {
-                print_file_item(".codex/config.toml", "Add CAS server", colors::ORANGE)?;
+                print_file_item(".codex/config.toml", "Add Cassy server", colors::ORANGE)?;
             }
             if codex_hooks_exists {
                 print_file_item(
                     ".codex/hooks.json",
-                    "Install CAS hook (review with /hooks)",
+                    "Install Cassy hook (review with /hooks)",
                     colors::ORANGE,
                 )?;
             }
@@ -828,7 +855,7 @@ fn confirm_and_apply(
         // Only print .mcp.json's "Modify" row once — claude's clause above
         // already covers it when claude is also enabled.
         if config.agents.grok && mcp_exists && !config.agents.claude {
-            print_file_item(".mcp.json", "Add CAS server (shared with Grok)", colors::ORANGE)?;
+            print_file_item(".mcp.json", "Add Cassy server (shared with Grok)", colors::ORANGE)?;
         }
     }
 
@@ -898,8 +925,8 @@ fn apply_configuration(
             Ok("CLAUDE.md".to_string())
         })?;
 
-        // Step 5: Generate CAS skill
-        execute_step("Generating CAS guidance skill", animate, || {
+        // Step 5: Generate Cassy skill
+        execute_step("Generating Cassy guidance skill", animate, || {
             generate_cas_skill(cwd)?;
             Ok(".claude/skills/cas/SKILL.md".to_string())
         })?;
@@ -917,7 +944,7 @@ fn apply_configuration(
     if config.agents.codex {
         execute_step("Configuring Codex MCP server", animate, || {
             provision_codex_project(cwd)?;
-            Ok(".codex/config.toml + .codex/hooks.json; project and CAS hook trust registered".to_string())
+            Ok(".codex/config.toml + .codex/hooks.json; project and Cassy hook trust registered".to_string())
         })?;
 
         execute_step("Syncing Codex built-in files", animate, || {
@@ -976,7 +1003,7 @@ fn apply_configuration(
     // Final success message
     println!();
     print_colored("  ✓ ", colors::GREEN)?;
-    print_colored("CAS initialized at ", colors::WHITE)?;
+    print_colored("Cassy initialized at ", colors::WHITE)?;
     print_colored(&cas_dir.display().to_string(), colors::CYAN)?;
     println!("\n");
 
@@ -1126,7 +1153,7 @@ fn print_next_steps(cwd: &Path) {
 
         print_colored("  │", colors::CYAN)?;
         print_colored(
-            "  Commit CAS config so factory workers can access it:   ",
+            "  Commit Cassy config so factory workers can access it:   ",
             colors::WHITE,
         )?;
         print_colored("│\n", colors::CYAN)?;
@@ -1147,7 +1174,7 @@ fn print_next_steps(cwd: &Path) {
 
         print_colored("  │", colors::CYAN)?;
         print_colored(
-            "    git commit -m \"Configure CAS\"                       ",
+            "    git commit -m \"Configure Cassy\"                       ",
             colors::GREEN,
         )?;
         print_colored("│\n", colors::CYAN)?;
@@ -1175,7 +1202,7 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
     }
     Some(vec![
         "git add .claude/ CLAUDE.md .mcp.json .gitignore".to_string(),
-        "git commit -m \"Configure CAS\"".to_string(),
+        "git commit -m \"Configure Cassy\"".to_string(),
     ])
 }
 
@@ -1185,6 +1212,10 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
 
 fn print_colored(text: &str, color: Color) -> anyhow::Result<()> {
     let mut stdout = stdout();
+    if OutputMode::detect() == OutputMode::Plain {
+        write!(stdout, "{text}")?;
+        return Ok(());
+    }
     execute!(stdout, SetForegroundColor(color), Print(text))?;
     execute!(stdout, SetForegroundColor(Color::Reset))?;
     Ok(())
@@ -1227,7 +1258,7 @@ fn ensure_gitignore(cwd: &Path) -> anyhow::Result<String> {
 // CLAUDE.md management
 // ============================================================================
 
-/// Marker for CAS-managed section in CLAUDE.md
+/// Marker for Cassy-managed section in CLAUDE.md
 mod docs_and_skill;
 
 pub(crate) use crate::cli::init::docs_and_skill::{
@@ -1239,6 +1270,14 @@ pub use crate::cli::init::docs_and_skill::{generate_cas_skill, update_claude_md}
 #[cfg(test)]
 mod integration_flag_tests {
     use super::*;
+
+    #[test]
+    fn cassy_init_wordmark_fits_80_column_wizard() {
+        assert_eq!(CASSY_WORDMARK.len(), 6, "the init splash must remain compact");
+        assert!(CASSY_WORDMARK
+            .iter()
+            .all(|row| row.chars().count() <= INIT_WORDMARK_WIDTH));
+    }
 
     #[test]
     fn integration_flags_from_threads_each_field() {
@@ -1354,7 +1393,7 @@ mod non_project_guard_tests {
 
     #[test]
     fn a_non_git_project_directory_is_allowed() {
-        // CAS supports non-git projects (canonical id falls back to the folder
+        // Cassy supports non-git projects (canonical id falls back to the folder
         // name), so "no git repo" must not be treated as "not a project".
         let home = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();

@@ -161,7 +161,7 @@ impl EntityQuery {
     }
 
     fn with_intent(name: &str, intent: QueryIntent) -> Self {
-        // Check if there's a type prefix like "project:CAS"
+        // Check if there's a type prefix like "project:Cassy"
         if let Some((type_str, entity_name)) = name.split_once(':') {
             let entity_type = type_str.parse().ok();
             Self {
@@ -329,8 +329,8 @@ mod tests {
 
     #[test]
     fn test_parse_about_query() {
-        let query = EntityQuery::parse("about:CAS").unwrap();
-        assert_eq!(query.entity_name, "CAS");
+        let query = EntityQuery::parse("about:Cassy").unwrap();
+        assert_eq!(query.entity_name, "Cassy");
         assert_eq!(query.intent, QueryIntent::About);
         assert!(query.entity_type.is_none());
     }
@@ -360,8 +360,8 @@ mod tests {
 
     #[test]
     fn test_parse_typed_entity() {
-        let query = EntityQuery::parse("about:project:CAS").unwrap();
-        assert_eq!(query.entity_name, "CAS");
+        let query = EntityQuery::parse("about:project:Cassy").unwrap();
+        assert_eq!(query.entity_name, "Cassy");
         assert_eq!(query.entity_type, Some(EntityType::Project));
     }
 
@@ -374,8 +374,8 @@ mod tests {
 
     #[test]
     fn test_parse_natural_about() {
-        let query = EntityQuery::parse("memories about CAS").unwrap();
-        assert_eq!(query.entity_name, "CAS");
+        let query = EntityQuery::parse("memories about Cassy").unwrap();
+        assert_eq!(query.entity_name, "Cassy");
         assert_eq!(query.intent, QueryIntent::About);
     }
 

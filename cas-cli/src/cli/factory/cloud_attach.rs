@@ -1,4 +1,4 @@
-//! Cloud relay attach — connect to a remote factory via CAS Cloud WebSocket
+//! Cloud relay attach — connect to a remote factory via Cassy Cloud WebSocket
 //!
 //! Opens a WebSocket to the cloud's terminal relay channel, sends user.attach,
 //! receives PTY frames and renders in the local terminal, forwards keystrokes.
@@ -26,7 +26,7 @@ pub fn execute_cloud_attach(factory_id: &str) -> Result<()> {
 
     if !cloud_config.is_logged_in() {
         bail!(
-            "Not logged in to CAS Cloud. Run 'cas auth login' first.\n\
+            "Not logged in to Cassy Cloud. Run 'cas auth login' first.\n\
              Cloud relay requires authentication to route terminal traffic."
         );
     }

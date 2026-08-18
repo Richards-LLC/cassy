@@ -121,7 +121,7 @@ untouched"), so a whole-corpus comparison would not be apples-to-apples.
 
 Establishing "what migrated" required work, because **`sources_json` is empty on
 all 146 pages** — deliberately, per Rule P2 (`memory_migration/apply.rs:21`):
-`sources` is CAS-owned provenance, not migration lineage. (`knowledge_sources`,
+`sources` is Cassy-owned provenance, not migration lineage. (`knowledge_sources`,
 also empty, is an unrelated file-ingestion ledger and is *not* evidence of
 anything here.) So no stored join exists.
 

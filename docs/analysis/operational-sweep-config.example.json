@@ -1,0 +1,12 @@
+{
+  "artifact_root": "/home/OPERATOR/.cas/artifacts/operational-sweep",
+  "epochs_db": "/ABS/PATH/TO/cas-src/.cas/cas.db",
+  "index": "/home/OPERATOR/.cas/artifacts/cas-2556/operational-index/index.sqlite3",
+  "memories_db": "/home/OPERATOR/.cas/cas.db",
+  "mode": "steady-state",
+  "seeds": "v2.71.0-fix-wave-seeds.json",
+  "semantic_evidence": null,
+  "top": 5,
+  "units_db": "/home/OPERATOR/.cas/artifacts/cas-b78b/evidence/units.sqlite3",
+  "window_days": 7
+}

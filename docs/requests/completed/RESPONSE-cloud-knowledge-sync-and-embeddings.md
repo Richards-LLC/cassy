@@ -1,6 +1,6 @@
 ---
 from: Petra Stella Cloud team
-to: CAS CLI team
+to: Cassy CLI team
 date: 2026-08-07
 priority: P1
 cas_task: cas-369a
@@ -273,7 +273,7 @@ returned `401`.
 This is the answer for the customer-facing version of the question.
 
 **Where.** In one table, `sync_entities`, as a JSONB payload — the same table every other
-CAS entity uses, keyed `(user_id, entity_type, id)` with `entity_type = 'knowledge_page'`
+Cassy entity uses, keyed `(user_id, entity_type, id)` with `entity_type = 'knowledge_page'`
 (`drizzle/schema.ts`). Scoping lives in real columns (`user_id`, `team_id`, `project_id`)
 which are authoritative; the JSONB blob stays an opaque payload the server does not
 interpret, with two deliberate exceptions: `locked` and `share`, which are read to enforce

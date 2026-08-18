@@ -1,4 +1,4 @@
-//! CLI commands for CAS
+//! CLI commands for Cassy
 //!
 //! Essential commands only. Use MCP tools for memory, tasks, rules, etc.
 
@@ -64,7 +64,7 @@ pub mod update_transaction;
 
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::store::find_cas_root;
 
@@ -98,20 +98,46 @@ fn build_version() -> String {
     format!("{version} ({git_hash} {build_date})")
 }
 
-const LOGO: &str = r#"
-   ______   ___    _____
-  / ____/  /   |  / ___/
- / /      / /| |  \__ \
-/ /___   / ___ | ___/ /
-\____/  /_/  |_|/____/
+/// Compact Doom-style Cassy wordmark. Its widest row is 53 cells, so it fits
+/// comfortably in an 80-column terminal without wrapping.
+const CASSY_WORDMARK: &str = r#"
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// CAS - Multi-agent coding factory
+const CASSY_PLAIN_WORDMARK: &str = "Cassy";
+
+/// Select the wordmark that is safe for the destination before clap renders
+/// help. Piped output and `NO_COLOR` deliberately get a compact text fallback.
+pub fn help_wordmark() -> &'static str {
+    match crate::ui::components::OutputMode::detect() {
+        crate::ui::components::OutputMode::Styled => CASSY_WORDMARK,
+        crate::ui::components::OutputMode::Plain => CASSY_PLAIN_WORDMARK,
+    }
+}
+
+/// Parse with a destination-aware top-level help banner.
+pub fn try_parse_from_with_wordmark<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = Cli::command()
+        .before_help(help_wordmark())
+        .try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
+}
+
+/// Cassy - Multi-agent coding factory
 #[derive(Parser)]
 #[command(name = "cas")]
-#[command(about = "Multi-agent coding factory with persistent memory and task coordination")]
+#[command(about = "Cassy — a multi-agent coding factory with persistent memory and task coordination")]
 #[command(version = build_version())]
-#[command(before_help = LOGO)]
+#[command(before_help = CASSY_WORDMARK)]
 pub struct Cli {
     /// Output in JSON format
     #[arg(long, global = true)]
@@ -134,7 +160,7 @@ pub enum Commands {
     /// Interactive project picker — scan ~/projects/, select, launch or attach
     Open(OpenArgs),
 
-    /// Initialize CAS in current directory
+    /// Initialize Cassy in current directory
     Init(InitArgs),
 
     /// Attach to a running factory session
@@ -155,7 +181,7 @@ pub enum Commands {
 
     /// Launch factory with Claude as the supervisor on a chosen account profile
     ///
-    /// `cas claude alt` runs CAS supervised by Claude, signed in as the account
+    /// `cas claude alt` runs Cassy supervised by Claude, signed in as the account
     /// in ~/.claude-alt; `main` uses ~/.claude. Spawned workers inherit the same
     /// account. All `cas factory` flags pass through. Use `--list-profiles` to
     /// see detected accounts, or `--bare` to open plain Claude Code instead.
@@ -163,7 +189,7 @@ pub enum Commands {
 
     /// Launch factory with Codex as the supervisor on a chosen account profile
     ///
-    /// `cas codex alt` runs CAS supervised by Codex, signed in as the account in
+    /// `cas codex alt` runs Cassy supervised by Codex, signed in as the account in
     /// ~/.codex-alt; `main` uses ~/.codex. Spawned codex workers inherit the same
     /// account through CODEX_HOME. All `cas factory` flags pass through. Use
     /// `--list-profiles` to see detected accounts, or `--bare` to open plain
@@ -219,7 +245,7 @@ pub enum Commands {
     #[command(subcommand)]
     Auth(AuthCommands),
 
-    /// Log in to CAS Cloud (shortcut for 'auth login')
+    /// Log in to Cassy Cloud (shortcut for 'auth login')
     Login(auth::LoginArgs),
 
     /// Log out (shortcut for 'auth logout')
@@ -228,7 +254,7 @@ pub enum Commands {
     /// Show current user (shortcut for 'auth whoami')
     Whoami,
 
-    /// Update CAS to the latest version
+    /// Update Cassy to the latest version
     Update(UpdateArgs),
 
     /// Show release notes and changelog from GitHub releases
@@ -242,7 +268,7 @@ pub enum Commands {
     #[command(subcommand)]
     Queue(queue::QueueCommands),
 
-    /// Sync data with CAS Cloud
+    /// Sync data with Cassy Cloud
     #[command(subcommand)]
     Cloud(cloud::CloudCommands),
 
@@ -384,7 +410,7 @@ fn ensure_authenticated() -> anyhow::Result<()> {
     {
         // `load_effective`: the login is machine-wide (cas-046d), so this gate
         // must not report "not logged in" merely because the current directory
-        // is not a CAS project.
+        // is not a Cassy project.
         let config = crate::cloud::CloudConfig::load_effective();
         if config.token.is_some() {
             return Ok(());
@@ -571,7 +597,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
 fn require_cas_root(cas_root: Option<&Path>) -> anyhow::Result<&Path> {
     cas_root.ok_or_else(|| {
         anyhow::anyhow!(
-            "CAS not initialized. Run 'cas init' first or navigate to a directory with .cas/"
+            "Cassy not initialized. Run 'cas init' first or navigate to a directory with .cas/"
         )
     })
 }
@@ -656,7 +682,7 @@ fn serve_execute() -> anyhow::Result<()> {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{CASSY_WORDMARK, Cli};
 
     #[test]
     fn top_level_help_exposes_cloud_without_internal_migration_language() {
@@ -666,11 +692,21 @@ mod tests {
         let help = String::from_utf8(help).expect("help is UTF-8");
 
         assert!(help.contains("cloud"));
-        assert!(help.contains("Sync data with CAS Cloud"));
+        assert!(help.contains("Sync data with Cassy Cloud"));
         assert!(help.contains("memory-migrate"));
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));
         assert!(!help.contains("EPIC cas-"));
+    }
+
+    #[test]
+    fn cassy_wordmark_stays_compact_for_80_column_terminals() {
+        let rows: Vec<_> = CASSY_WORDMARK
+            .lines()
+            .filter(|row| !row.is_empty())
+            .collect();
+        assert_eq!(rows.len(), 6, "the splash must remain at most eight rows");
+        assert!(rows.iter().all(|row| row.chars().count() <= 80));
     }
 
     #[test]

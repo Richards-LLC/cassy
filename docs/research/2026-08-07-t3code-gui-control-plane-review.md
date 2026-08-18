@@ -1,8 +1,8 @@
-# t3code review — GUI control plane for CAS factory sessions
+# t3code review — GUI control plane for Cassy factory sessions
 
 Date: 2026-08-07
 Source under review: `/mnt/datacube/staging/t3code-main` (Theo/T3's "t3code" monorepo, zip snapshot, treated read-only)
-Motivating question: a graphical way to control CAS sessions on multiple systems **without burning Claude/Codex subscription quota** — observe and control existing CLI sessions, never re-implement agent calls over metered APIs.
+Motivating question: a graphical way to control Cassy sessions on multiple systems **without burning Claude/Codex subscription quota** — observe and control existing CLI sessions, never re-implement agent calls over metered APIs.
 
 ---
 
@@ -87,7 +87,7 @@ Verdict on the constraint: **t3code's whole execution model is the subscription-
 
 **State model**: server side is event-sourced — clients dispatch typed commands (`orchestration.dispatchCommand`), a single-fiber `OrchestrationEngine` turns them into persisted events in one SQL transaction with the projection, then publishes committed events to subscribers (`apps/server/src/orchestration/Layers/OrchestrationEngine.ts`, `decider.ts`, `projector.ts`; `docs/internals/overview.md` "Orchestration is event-sourced"). Client side: `packages/client-runtime` owns connection supervision (retry forever, exp backoff capped 16s, offline-aware — `docs/internals/connection-runtime.md` "Connection State"), and exposes domain state as `@effect/atom-react` atoms that React renders. Components never construct transports.
 
-**Session-control affordances** (the things a CAS GUI needs):
+**Session-control affordances** (the things a Cassy GUI needs):
 - Session/thread list per environment, grouped across environments by `RepositoryIdentity` (UI-only grouping — `docs/internals/remote.md`).
 - Live agent output: streamed deltas via `subscribeThread`; markdown-rendered chat.
 - **Approve/deny**: `thread.approval.respond`; **message injection**: `thread.turn.start` with user input; **interrupt**: `thread.turn.interrupt`; **kill**: `thread.session.stop` (`docs/internals/providers.md`).
@@ -97,16 +97,16 @@ Verdict on the constraint: **t3code's whole execution model is the subscription-
 
 ---
 
-## 5. Mapping to CAS — recommended architecture
+## 5. Mapping to Cassy — recommended architecture
 
-### What CAS already has (more than expected)
+### What Cassy already has (more than expected)
 
 - **A live WS control protocol on the factory daemon, today.** The daemon binds a WebSocket listener (`cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs:66` — `TcpListener::bind("127.0.0.1:0")`, port recorded in session metadata `protocol.rs:289`) and serves the same `DaemonMessage`/`ClientMessage` protocol the TUI uses (`runtime/ws_client.rs:13` `accept_ws_clients`, frames are raw JSON over WS Binary). The protocol is already GUI-shaped: `ClientMessage::{Attach{request_scrollback}, Input{pane_id,data}, InputFocused, Focus, Resize}` (`cas-cli/src/ui/factory/protocol.rs:11-51`) and `DaemonMessage::{Welcome{state,scrollback}, Output{pane_id,data}, PaneAdded, PaneExited, FocusChanged, ...}` (`protocol.rs:128-168`). `Output.data` is raw VT bytes — exactly what a ghostty/xterm surface consumes.
 - **An HTTP bridge with auth.** `cas bridge` runs a `tiny_http` server with bearer-token auth + CORS (`cas-cli/src/bridge/server/mod.rs:34-74,122`), SSE event streams per session (`/v1/sessions/<name>/events`, `mod.rs:139-160`), pane tail snapshots (`/v1/sessions/<name>/panes/<pane_id>/tail`, `routes.rs:53`), inbox peek/poll/ack, `targets`, `activity`, and factory start (`bridge/server/factory.rs`).
 - **Cross-machine discovery + attach (terminal-grade).** `cas attach device:factory-id` resolves the device via cloud `GET /api/devices` (Bearer) and execs `ssh -t <host> -- cas attach <id>` (`cas-cli/src/cli/factory/remote_attach.rs:1-50`).
 - **Zero-token status surfaces.** `worker_status`, `worker_activity`, `epic_status`, `spawn_workers` are MCP tools reading SQLite/PTY state (`cas-cli/src/mcp/tools/service/factory_ops.rs`); message delivery to workers is PTY injection (`daemon/runtime/delivery.rs` → `Mux::inject`) — identical cost to a human typing.
 
-### Recommended shape (t3code's model, CAS's substrate)
+### Recommended shape (t3code's model, Cassy's substrate)
 
 Adopt t3code's **decentralized** topology: no central control plane, one authenticated endpoint per machine, a client that holds a list of known machines and fans out. Concretely:
 
@@ -118,20 +118,20 @@ Adopt t3code's **decentralized** topology: no central control plane, one authent
 **Client (one web app, new):**
 4. A web SPA (servable from the hub itself and openable on phone/laptop) with: machine list → factory list → pane grid; ghostty-WASM or xterm.js surfaces fed by `DaemonMessage::Output`; input box → `ClientMessage::Input` (message injection = what the supervisor's `deliver_to_worker` already does); interrupt button → inject the interrupt byte sequence / call a bridge route; status sidebars fed by bridge SSE + `worker_status` JSON. Browser-local list of paired machines, t3-style.
 
-**Centrally: nothing mandatory.** The existing CAS cloud `GET /api/devices` can serve as optional discovery (it already powers `remote_attach`). Do not build a relay first; tailnet covers the pippenz fleet.
+**Centrally: nothing mandatory.** The existing Cassy cloud `GET /api/devices` can serve as optional discovery (it already powers `remote_attach`). Do not build a relay first; tailnet covers the pippenz fleet.
 
 **Quota safety (the hard constraint), by construction:**
 - The GUI only ever attaches to PTYs the factory already runs, reads SQLite, and injects keystrokes. Zero model calls added.
 - Push-only: WS Output frames and SSE; no polling loops that touch agents. (Status endpoints read the DB, not the workers.)
 - N viewers of one pane = one PTY = one subscription session. Session count never multiplies.
-- Explicitly out of scope: t3code's provider drivers. They *own* agent sessions; in CAS the factory daemon owns them. Running both would double session count and fight over the CLIs.
+- Explicitly out of scope: t3code's provider drivers. They *own* agent sessions; in Cassy the factory daemon owns them. Running both would double session count and fight over the CLIs.
 
-### What CAS lacks today (the actual work list)
+### What Cassy lacks today (the actual work list)
 
 1. Auth + non-loopback bind for the daemon WS (currently `127.0.0.1:0`, unauthenticated — `lifecycle.rs:66`).
 2. A per-machine session index / hub that multiplexes N factory daemons behind one stable port (today: one ephemeral WS port per daemon, discoverable only via local session metadata).
 3. A pairing flow (token mint, QR, session store, revocation — `cas bridge` has a static token, not sessions).
-4. Any web UI at all (CAS is TUI-only).
+4. Any web UI at all (Cassy is TUI-only).
 5. A machine-level aggregate event stream (bridge SSE is per-session).
 6. Unification: the daemon WS protocol and the bridge HTTP API grew separately; the hub should present one coherent surface.
 
@@ -148,13 +148,13 @@ Adopt t3code's **decentralized** topology: no central control plane, one authent
 - `packages/tailscale/src/tailscale.ts` — small, self-contained `tailscale serve` management; direct port to Rust.
 
 **Pattern-inspiration only:**
-- The remote model itself: ExecutionEnvironment identity file, four-target connection taxonomy, advertised-endpoint hints, "access vs launch" separation, client-local environment catalog (`docs/internals/remote.md` is effectively a design doc for the CAS hub).
+- The remote model itself: ExecutionEnvironment identity file, four-target connection taxonomy, advertised-endpoint hints, "access vs launch" separation, client-local environment catalog (`docs/internals/remote.md` is effectively a design doc for the Cassy hub).
 - Connection supervisor policy: retry-forever with 16s-capped backoff, offline wakeups, auth failures block instead of retry (`docs/internals/connection-runtime.md`).
 - Per-method authz scopes on one socket (`RPC_REQUIRED_SCOPE`).
-- SSH launch flow (`packages/ssh/src/tunnel.ts`) — CAS's `remote_attach.rs` already does the terminal version; the tunnel-then-connect-WS version is the upgrade path.
+- SSH launch flow (`packages/ssh/src/tunnel.ts`) — Cassy's `remote_attach.rs` already does the terminal version; the tunnel-then-connect-WS version is the upgrade path.
 
 **Do not reuse:**
-- `apps/server` orchestration + provider drivers. It's an Effect-TS event-sourced runtime that assumes *it* is the execution boundary; CAS's daemon/mux/store already are. Adopting it would mean a second agent-owning harness (session multiplication — the exact failure mode to avoid) and a Node runtime dependency CAS doesn't have.
+- `apps/server` orchestration + provider drivers. It's an Effect-TS event-sourced runtime that assumes *it* is the execution boundary; Cassy's daemon/mux/store already are. Adopting it would mean a second agent-owning harness (session multiplication — the exact failure mode to avoid) and a Node runtime dependency Cassy doesn't have.
 - Clerk/relay infra (`infra/relay`) — needs a Cloudflare+Clerk+PlanetScale deployment; wrong first move for a tailnet-sized fleet.
 - The mobile app (nice reference for later; the web app on a phone is enough initially).
 
@@ -164,7 +164,7 @@ Adopt t3code's **decentralized** topology: no central control plane, one authent
 
 ## 7. Open questions
 
-1. Should CAS cloud (`/api/devices`) become the optional discovery/roster layer for the hub, or is a browser-local machine list (t3-style) + tailnet MagicDNS names enough? (t3code ships without any central roster.)
+1. Should Cassy cloud (`/api/devices`) become the optional discovery/roster layer for the hub, or is a browser-local machine list (t3-style) + tailnet MagicDNS names enough? (t3code ships without any central roster.)
 2. Hub scope: panes + status only, or also task/epic/memory read surfaces from `cas.db` (bridge already exposes some)? Recommend read-only task/epic views in v1 — still zero tokens.
 3. Interrupt semantics over the wire: raw ESC/Ctrl-C byte injection into the PTY vs a first-class daemon `ClientMessage::Interrupt{pane_id}` — the latter is cleaner and lets the daemon route through its existing interrupt handling.
 4. Does the GUI need write-path approval prompts (Claude permission prompts render inside the PTY today, so pane input already covers it), or should hooks surface approvals as structured events later?

@@ -9,7 +9,7 @@ The orchestrator selects your execution transport. Follow this persona mandate o
 **Conditional persona** — not always dispatched. The orchestrator activates `adversarial` when either:
 
 - The diff contains **50 or more changed non-test lines** (added + removed, excluding files under `tests/`, `*_test.*`, or `__tests__/`), OR
-- The diff touches a **CAS high-stakes module**. The orchestrator judges "high-stakes" semantically rather than by path match; canonical examples include task verification flow (`close_ops`, `verify_ops`), factory coordination (spawn / message / queue / lifecycle), SQLite store mutations, the hook system (`pre_tool`, `post_tool`), and MCP tool dispatch.
+- The diff touches a **Cassy high-stakes module**. The orchestrator judges "high-stakes" semantically rather than by path match; canonical examples include task verification flow (`close_ops`, `verify_ops`), factory coordination (spawn / message / queue / lifecycle), SQLite store mutations, the hook system (`pre_tool`, `post_tool`), and MCP tool dispatch.
 
 If neither condition holds, you are not dispatched and emit nothing.
 
@@ -29,7 +29,7 @@ You are explicitly allowed to step across lanes when the finding is about *the c
 - **Concurrency traps in shared state.** Not low-level data races (`correctness` owns those) but *system-level* concurrency: two workers racing on a lease, a supervisor and a worker seeing different views of the same task, a hook firing during an operation it was not designed to observe.
 - **Failure-mode asymmetry.** The happy path is well-tested but the error path leaves artifacts behind (partial writes, orphaned files, ghost tasks, leaked processes).
 - **Operational surprises.** Logging that will explode in production ("printed once per tool call" on a hot path), metrics that break downstream dashboards, config reads from a file that does not exist on the factory worker's filesystem.
-- **"Lessons from memory."** If the CAS project memory (`MEMORY.md`) or learnings record a class of incident this diff is adjacent to, call it out explicitly — the whole point of adversarial is to apply institutional scar tissue.
+- **"Lessons from memory."** If the Cassy project memory (`MEMORY.md`) or learnings record a class of incident this diff is adjacent to, call it out explicitly — the whole point of adversarial is to apply institutional scar tissue.
 
 ## Out of scope
 

@@ -65,7 +65,7 @@ Unknown top-level fields are rejected.
 | Field                   | Type           | Required | Rules                                                                                                              |
 | ----------------------- | -------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
 | `title`                 | string         | yes      | ≤ 100 characters. Non-empty after trim. One-line human label.                                                      |
-| `severity`              | enum           | yes      | `"P0"` \| `"P1"` \| `"P2"` \| `"P3"`. Maps to CAS task priorities 0–3.                                             |
+| `severity`              | enum           | yes      | `"P0"` \| `"P1"` \| `"P2"` \| `"P3"`. Maps to Cassy task priorities 0–3.                                             |
 | `file`                  | string         | yes      | **Relative** path from repo root. Absolute (`/…`, `C:\…`) paths are rejected.                                      |
 | `line`                  | u32            | yes      | 1-based. Use the most relevant single line even for multi-line issues.                                             |
 | `why_it_matters`        | string         | yes      | Consequence if unaddressed. Must be concrete — no "could be bad".                                                  |
@@ -101,7 +101,7 @@ Unknown fields are rejected at parse time.
 ### `owner` guidance
 
 - `review-fixer` — Only valid with `safe_auto` or `gated_auto`.
-- `downstream-resolver` — Becomes a CAS task via the review-to-task flow.
+- `downstream-resolver` — Becomes a Cassy task via the review-to-task flow.
 - `human` — Surfaces to the supervisor / developer. No automation routes here.
 
 On disagreement between personas about owner, the orchestrator keeps the

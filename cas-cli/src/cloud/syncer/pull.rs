@@ -216,7 +216,7 @@ pub(crate) fn entity_matches_project(
         None => {
             // Missing field — cloud now always includes project_id; treat as unscoped/foreign.
             eprintln!(
-                "[CAS sync] WARNING: skipping {entity_kind} '{entity_id}' — no project_id field \
+                "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — no project_id field \
                  (expected '{current_project_id}')"
             );
             false
@@ -224,7 +224,7 @@ pub(crate) fn entity_matches_project(
         Some(serde_json::Value::Null) => {
             // Explicitly null — no longer accepted; cloud must scope all entities.
             eprintln!(
-                "[CAS sync] WARNING: skipping {entity_kind} '{entity_id}' — null project_id \
+                "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — null project_id \
                  (expected '{current_project_id}')"
             );
             false
@@ -234,7 +234,7 @@ pub(crate) fn entity_matches_project(
                 true
             } else {
                 eprintln!(
-                    "[CAS sync] WARNING: skipping {entity_kind} '{entity_id}' from foreign \
+                    "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' from foreign \
                      project '{s}' (expected '{current_project_id}')"
                 );
                 false
@@ -243,7 +243,7 @@ pub(crate) fn entity_matches_project(
         Some(_) => {
             // Unexpected type — reject; unexpected field shapes shouldn't be silently accepted.
             eprintln!(
-                "[CAS sync] WARNING: skipping {entity_kind} '{entity_id}' — unexpected \
+                "[Cassy sync] WARNING: skipping {entity_kind} '{entity_id}' — unexpected \
                  project_id type (expected string '{current_project_id}')"
             );
             false
@@ -358,7 +358,7 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
 
 /// A terminal row is a durable outcome, not merely the latest version of a
 /// mutable task body. An incoming active row may replace it only when the
-/// remote task carries the audit event written by CAS's authorised `reopen`
+/// remote task carries the audit event written by Cassy's authorised `reopen`
 /// action after the local terminal timestamp.
 fn rejects_terminal_regression(local: &Task, remote: &Task) -> bool {
     if !local.is_terminal() || remote.is_terminal() {
@@ -368,7 +368,7 @@ fn rejects_terminal_regression(local: &Task, remote: &Task) -> bool {
     !has_explicit_remote_reopen(remote, local.closed_at)
 }
 
-/// CAS's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened: <reason>`
+/// Cassy's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened: <reason>`
 /// into the task's replicated note timeline. Treat that timestamped record as
 /// the reopening event; a bare active task row, even one with a newer
 /// `updated_at`, is not authorization to undo a close/cancellation.
@@ -1344,7 +1344,7 @@ impl CloudSyncer {
         // Use configured conflict resolution strategy for team sync
         let strategy = self.config.team_conflict_resolution;
         #[cfg(debug_assertions)]
-        eprintln!("[CAS sync] Starting team pull: team={team_id} strategy={strategy:?}");
+        eprintln!("[Cassy sync] Starting team pull: team={team_id} strategy={strategy:?}");
 
         // Use the caller-supplied project ID for client-side validation.
         // (cas-53d5: previously resolved internally via

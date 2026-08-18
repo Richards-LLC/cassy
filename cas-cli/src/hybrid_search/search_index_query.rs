@@ -256,7 +256,7 @@ impl SearchIndex {
 
         // Parse filter grammar FIRST (cas-7b1e) — `module:cas-mcp` tokens
         // must not reach the ID pattern extractor, which would otherwise
-        // mistake `cas-mcp` for a CAS ID.
+        // mistake `cas-mcp` for a Cassy ID.
         let pre_parsed = parse_filter_query(opts.query.trim());
         let filters = pre_parsed.filters.clone();
 

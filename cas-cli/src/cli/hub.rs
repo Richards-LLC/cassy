@@ -246,7 +246,7 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
                         .as_deref()
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
-                    println!("CAS hub started at {endpoint} (pid {})", record.pid);
+                    println!("Cassy hub started at {endpoint} (pid {})", record.pid);
                     if let Some(warning) = &record.transport_warning {
                         eprintln!(
                             "Tailscale Serve unavailable: {warning}; local hub remains healthy"
@@ -399,7 +399,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         #[cfg(debug_assertions)]
         hold_instance_lock_after_record_removal_for_test()?;
         // A service manager stops a foreground hub with SIGTERM instead of
-        // routing through `cas hub stop`. Always tear down only CAS's exact
+        // routing through `cas hub stop`. Always tear down only Cassy's exact
         // owned mapping here so an uninstall/reboot cannot leave a stale
         // Tailscale Serve publication behind. A restart republishes it from
         // the same private receipt and keeps machine identity/auth untouched.
@@ -648,12 +648,12 @@ fn status(cli: &Cli) -> Result<()> {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
         println!(
-            "CAS hub is running at {} (pid {}, version {})",
+            "Cassy hub is running at {} (pid {}, version {})",
             endpoint, record.pid, record.version
         );
     } else {
         println!(
-            "CAS hub is not running; stale record for pid {} remains",
+            "Cassy hub is not running; stale record for pid {} remains",
             record.pid
         );
     }
@@ -711,17 +711,17 @@ fn stop(cli: &Cli) -> Result<()> {
         );
     } else {
         if let Some(record) = &record {
-            println!("CAS hub stopped (pid {})", record.pid);
+            println!("Cassy hub stopped (pid {})", record.pid);
         } else {
-            println!("CAS hub was not running");
+            println!("Cassy hub was not running");
         }
         match tailscale_outcome {
             Ok((true, Some(receipt))) => println!(
-                "Removed CAS Tailscale Serve mapping at {}",
+                "Removed Cassy Tailscale Serve mapping at {}",
                 receipt.public_url
             ),
             Ok((true, None)) => {
-                println!("CAS Tailscale Serve mapping was removed as the hub exited")
+                println!("Cassy Tailscale Serve mapping was removed as the hub exited")
             }
             Ok((false, _)) => {}
             Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),

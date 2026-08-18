@@ -1,8 +1,8 @@
-//! Isolation contract for CAS-owned, headless LLM subprocesses.
+//! Isolation contract for Cassy-owned, headless LLM subprocesses.
 //!
 //! These subprocesses are implementation details (knowledge distillation,
 //! prompt classification, session summaries), not new user or factory-agent
-//! sessions.  They must not inherit the caller's durable CAS identity.
+//! sessions.  They must not inherit the caller's durable Cassy identity.
 
 use std::process::Command;
 
@@ -10,7 +10,7 @@ use std::process::Command;
 pub const INTERNAL_LLM_ENV: &str = "CAS_INTERNAL_LLM";
 
 /// Factory identity inherited by a nested harness would make it impersonate
-/// the parent worker.  Keep this list narrow: credentials and ordinary CAS
+/// the parent worker.  Keep this list narrow: credentials and ordinary Cassy
 /// configuration are intentionally unaffected.
 pub const FACTORY_IDENTITY_ENV: &[&str] = &[
     "CAS_AGENT_NAME",
@@ -46,7 +46,7 @@ pub fn sdk_environment() -> std::collections::HashMap<String, String> {
     env
 }
 
-/// True only inside a CAS-owned headless completion.
+/// True only inside a Cassy-owned headless completion.
 pub fn is_internal_invocation() -> bool {
     std::env::var(INTERNAL_LLM_ENV).as_deref() == Ok("1")
 }

@@ -39,7 +39,7 @@ modal/dialog, card/panel, primary + secondary button, text input, badge/chip, ta
 
 ### 3. Mine guardrails (for Do's & Don'ts)
 
-- CAS memories and rules tagged design / css / ui / frontend (`mcp__cas__search` with `action=search`)
+- Cassy memories and rules tagged design / css / ui / frontend (`mcp__cas__search` with `action=search`)
 - Recurring design-review findings and prior corrections in task notes
 - Framework gotchas the repo has already tripped on (search for comments like `// don't`, `// override`, `!important`)
 

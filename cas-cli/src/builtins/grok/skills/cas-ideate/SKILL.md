@@ -10,7 +10,7 @@ disallowed-tools:
 
 # Adversarial Ideation
 
-CAS pipeline position:
+Cassy pipeline position:
 
 - `cas-ideate` answers: **"What are the strongest ideas worth exploring?"** (many → critique → survivors)
 - `cas-brainstorm` answers: **"What exactly should one chosen idea mean?"** (Q&A → requirements)
@@ -50,7 +50,7 @@ If no argument is provided, proceed with open-ended ideation across the whole pr
 
 #### 0.1 Check for recent ideation work
 
-Look at `docs/ideation/` for ideation documents created within the last 30 days, and search CAS memory for prior ideation sessions:
+Look at `docs/ideation/` for ideation documents created within the last 30 days, and search Cassy memory for prior ideation sessions:
 
 ```bash
 ls docs/ideation/ 2>/dev/null
@@ -103,7 +103,7 @@ Run two grounding steps in parallel (in the **foreground** — results are neede
 >
 > Focus hint: {focus_hint}
 
-**2. CAS memory/learnings search** — run directly (not via sub-agent):
+**2. Cassy memory/learnings search** — run directly (not via sub-agent):
 
 ```
 cas__search action=search query="<focus or general pain points>" doc_type=entry limit=15
@@ -115,7 +115,7 @@ Pull out any bugfix memories, architecture notes, or feedback entries that sugge
 **Consolidate into a short grounding summary:**
 
 - **Codebase context** — project shape, notable patterns, observable pain points, likely leverage points
-- **Past learnings** — relevant CAS memories (bugfixes, architecture notes, feedback entries)
+- **Past learnings** — relevant Cassy memories (bugfixes, architecture notes, feedback entries)
 - **Known friction** — anything flagged as "this is annoying", "we keep hitting", "fragile", etc.
 
 Do **not** do external research in v1 of this skill.

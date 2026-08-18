@@ -19,7 +19,7 @@ pub enum ForkFirstResult {
 ///
 /// After fork, the child process uses this to:
 /// 1. Accept the parent as the first client (for progress updates)
-/// 2. Do all initialization (worktrees, CAS data, PTY spawning)
+/// 2. Do all initialization (worktrees, Cassy data, PTY spawning)
 /// 3. Send progress messages to parent
 /// 4. Convert to FactoryDaemon when ready
 pub struct DaemonInitPhase {
@@ -265,8 +265,8 @@ impl DaemonInitPhase {
         };
         self.send_progress("Setting up worktree manager", 2, 6, true)?;
 
-        // Step 3: Loading CAS data
-        self.send_progress("Loading CAS data", 3, 6, false)?;
+        // Step 3: Loading Cassy data
+        self.send_progress("Loading Cassy data", 3, 6, false)?;
         let director_data = DirectorData::load(&cas_dir, Some(&worktree_root))?;
         let preferred_epic_focus = preferred_epic_focus_from_session_metadata();
         let epic_state = resolve_epic_state_for_focus(&director_data, &preferred_epic_focus);
@@ -304,7 +304,7 @@ impl DaemonInitPhase {
         } else {
             None
         };
-        self.send_progress("Loading CAS data", 3, 6, true)?;
+        self.send_progress("Loading Cassy data", 3, 6, true)?;
 
         // Step 4: Preparing worker directories
         self.send_progress("Preparing worker directories", 4, 6, false)?;

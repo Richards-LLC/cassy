@@ -51,7 +51,7 @@ healthy worker's in-flight turn.
   failure, not worker inactivity. "Starved" invites the operator to interrupt
   or kill a worker that may be mid-turn.
 - The director's stall monitor should not emit "no activity" while the worker
-  is writing task notes through the same CAS instance.
+  is writing task notes through the same Cassy instance.
 
 ## Impact
 

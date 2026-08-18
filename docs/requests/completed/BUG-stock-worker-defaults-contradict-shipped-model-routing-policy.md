@@ -1,4 +1,4 @@
-# BUG: stock worker defaults (`gpt-5.5`, `sonnet`) contradict the routing policy CAS itself ships
+# BUG: stock worker defaults (`gpt-5.5`, `sonnet`) contradict the routing policy Cassy itself ships
 
 ## Resolution
 
@@ -16,7 +16,7 @@ existing project-default coverage proves configured overrides still win.
 
 ## Summary
 
-`spawn_workers` with an omitted `model=` resolves to **`gpt-5.5`** for Codex workers and **`sonnet`** for Claude workers. Both contradict `model-selection.md`, which CAS ships as a `managed_by: cas` builtin, and which states the Codex matrix is exactly `gpt-5.6-sol` at low/medium/high.
+`spawn_workers` with an omitted `model=` resolves to **`gpt-5.5`** for Codex workers and **`sonnet`** for Claude workers. Both contradict `model-selection.md`, which Cassy ships as a `managed_by: cas` builtin, and which states the Codex matrix is exactly `gpt-5.6-sol` at low/medium/high.
 
 The contradiction is enforced in the same repo. `cas-cli/src/builtins.rs:3611` asserts that no line of the shipped routing doc may contain `model=gpt-5.5` or `model=sonnet`:
 

@@ -191,14 +191,14 @@ mod tests {
         {
             let mut fmt = Formatter::styled(&mut buf, theme);
             KeyValue::new()
-                .add("Name", "CAS")
+                .add("Name", "Cassy")
                 .add("Version", "0.7.0")
                 .render(&mut fmt)
                 .unwrap();
         }
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Name"));
-        assert!(output.contains("CAS"));
+        assert!(output.contains("Cassy"));
         assert!(output.contains("\x1b["));
     }
 

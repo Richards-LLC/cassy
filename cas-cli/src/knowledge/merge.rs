@@ -31,7 +31,7 @@
 //!   fragment prose is preserved verbatim.
 //!
 //! One caveat the reader must know: frontmatter is *regenerated* from the fields
-//! CAS owns (see [`Frontmatter`]). Unrecognized keys are carried through
+//! Cassy owns (see [`Frontmatter`]). Unrecognized keys are carried through
 //! verbatim, but comments and key order inside the block are not preserved.
 
 use std::collections::BTreeSet;
@@ -74,7 +74,7 @@ impl Fragment {
     }
 }
 
-/// Frontmatter fields CAS owns, plus everything it does not.
+/// Frontmatter fields Cassy owns, plus everything it does not.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frontmatter {
     pub title: String,
@@ -82,13 +82,13 @@ pub struct Frontmatter {
     pub sources: Vec<String>,
     pub locked: bool,
     pub updated: Option<String>,
-    /// Lines CAS does not own, carried through a round trip verbatim. Without
+    /// Lines Cassy does not own, carried through a round trip verbatim. Without
     /// this, a `tags:` or `owner:` key a human added to a page would be
     /// silently destroyed by the next distillation pass.
     pub passthrough: Vec<String>,
 }
 
-/// Keys CAS owns and therefore regenerates; everything else is passthrough.
+/// Keys Cassy owns and therefore regenerates; everything else is passthrough.
 const OWNED_KEYS: &[&str] = &["title", "type", "sources", "locked", "updated"];
 
 /// Split a body into `(frontmatter_block_without_fences, rest)`.
@@ -113,7 +113,7 @@ pub fn split_frontmatter(body: &str) -> (Option<&str>, &str) {
     (None, body)
 }
 
-/// Parse the frontmatter fields CAS writes, keeping every other line for
+/// Parse the frontmatter fields Cassy writes, keeping every other line for
 /// passthrough. Deliberately a tiny reader, not a YAML engine: a malformed
 /// block simply yields defaults (which means `locked` reads false unless it is
 /// explicitly asserted).
@@ -153,7 +153,7 @@ pub fn parse_frontmatter(body: &str) -> Frontmatter {
                 }
             }
             other => {
-                // A key CAS does not own. Keep the original line so a user's
+                // A key Cassy does not own. Keep the original line so a user's
                 // page metadata survives every future pass.
                 if !OWNED_KEYS.contains(&other) {
                     frontmatter.passthrough.push(line.to_string());
@@ -181,7 +181,7 @@ fn unquote(value: &str) -> &str {
     }
 }
 
-/// Render CAS-owned frontmatter. `locked` is always written as the value the
+/// Render Cassy-owned frontmatter. `locked` is always written as the value the
 /// store holds; distillation never writes `locked: true` on its own.
 pub fn render_frontmatter(meta: &Frontmatter) -> String {
     let mut out = String::from("---\n");

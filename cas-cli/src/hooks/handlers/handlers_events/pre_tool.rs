@@ -80,7 +80,7 @@ pub fn handle_pre_tool_use(
     // It runs first so the refusal is decided before any other branch can
     // return, and so the containment block immediately below cannot skip it.
     // Role comes from the hook's own snapshot, and a dispatch that cannot
-    // resolve a CAS root must still refuse (`supervisor_owned_at(None)`
+    // resolve a Cassy root must still refuse (`supervisor_owned_at(None)`
     // returns the cas-865b default).
     // ========================================================================
     if crate::harness_policy::is_worker(input)
@@ -103,7 +103,7 @@ pub fn handle_pre_tool_use(
     // `Agent` CONTAINMENT (cas-62b0) — new matcher entry, ONE new effect
     //
     // `Agent` is the current Claude Code spelling of the subagent tool, and
-    // before this commit it appeared in NO PreToolUse matcher CAS generates:
+    // before this commit it appeared in NO PreToolUse matcher Cassy generates:
     // `default_pre_tool_use_matcher` (config/hooks.rs) and
     // `factory_pre_tool_intercept_list` (daemon/runtime/teams.rs) both listed
     // `Task` only, from an older harness generation. Adding it is what makes
@@ -146,7 +146,7 @@ pub fn handle_pre_tool_use(
     // Non-isolation Agent calls (Explore, code-review personas, task-verifier)
     // stay allowed — they're load-bearing for correctness verification.
     //
-    // Placed before the cas_root check so the gate fires even if CAS isn't
+    // Placed before the cas_root check so the gate fires even if Cassy isn't
     // initialized in the supervisor's cwd (belt-and-suspenders; should never
     // happen in factory mode).
     // ========================================================================
@@ -183,7 +183,7 @@ pub fn handle_pre_tool_use(
     //
     // This gate runs before the cas_root check because it only needs the
     // factory role env/snapshot and must still fire when hook dispatch cannot
-    // resolve a CAS root.
+    // resolve a Cassy root.
     // ========================================================================
     if is_factory_agent && tool_name == "AskUserQuestion" {
         let prefix = crate::harness_policy::own_tool_prefix();
@@ -257,7 +257,7 @@ pub fn handle_pre_tool_use(
     // from the hook's role snapshot with an env fallback (no store access
     // required), we fire the allow here to rescue the cas_root=None case — the
     // scenario the user hit in the BUG-factory-write-permission-deadlock
-    // report where a supervisor session runs the hook without a CAS root
+    // report where a supervisor session runs the hook without a Cassy root
     // resolved at dispatch time.
     //
     // Invariant preservation: protection gates (.env deny, credential
@@ -277,7 +277,7 @@ pub fn handle_pre_tool_use(
         ));
     }
 
-    // Check if CAS is initialized
+    // Check if Cassy is initialized
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
@@ -325,9 +325,9 @@ pub fn handle_pre_tool_use(
         .unwrap_or_default();
 
     // ========================================================================
-    // FACTORY MODE: Auto-route SendMessage → CAS coordination (cas-f32b)
+    // FACTORY MODE: Auto-route SendMessage → Cassy coordination (cas-f32b)
     //
-    // In factory mode, agents communicate through CAS coordination (push-based
+    // In factory mode, agents communicate through Cassy coordination (push-based
     // via the Director/TUI). The built-in SendMessage tool bypasses this system
     // and would cause messages to be lost.
     //
@@ -338,7 +338,7 @@ pub fn handle_pre_tool_use(
     // (observed 2026-04-23 in gabber-studio).
     //
     // New behaviour: parse the SendMessage call, enqueue the message on the
-    // CAS prompt queue directly (same path `mcp__cas__coordination
+    // Cassy prompt queue directly (same path `mcp__cas__coordination
     // action=message` uses), notify the daemon, then return `allow` with an
     // `additionalContext` success receipt (cas-73c8) so agents see tool
     // success — not a deny/`<error>` envelope — and stop retrying.
@@ -426,8 +426,8 @@ pub fn handle_pre_tool_use(
     // ========================================================================
     let worktrees_enabled = stores.config().worktrees_enabled();
 
-    // Factory workers manage their own worktrees — skip CAS worktree enforcement
-    // to avoid conflicting redirects (factory uses per-worker worktrees, CAS uses per-epic)
+    // Factory workers manage their own worktrees — skip Cassy worktree enforcement
+    // to avoid conflicting redirects (factory uses per-worker worktrees, Cassy uses per-epic)
     let is_factory_worker_for_wt = std::env::var("CAS_AGENT_ROLE")
         .map(|role| role.to_lowercase() == "worker")
         .unwrap_or(false);
@@ -765,7 +765,7 @@ pub fn handle_pre_tool_use(
         let Some(tool_input) = input.tool_input.as_ref() else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "task-verifier spawn requires a prompt naming exactly one CAS task.",
+                "task-verifier spawn requires a prompt naming exactly one Cassy task.",
             ));
         };
         let prompt = tool_input
@@ -775,7 +775,7 @@ pub fn handle_pre_tool_use(
         let Some(task_id) = unique_existing_task_id(prompt, stores.tasks()) else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "task-verifier prompt must name exactly one existing CAS task ID.",
+                "task-verifier prompt must name exactly one existing Cassy task ID.",
             ));
         };
         let dispatch_id = match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
@@ -861,7 +861,7 @@ pub fn handle_pre_tool_use(
     //     }
     //     function L6$(){ ... return teamName && selfAgentId && !UG9(); }
     //
-    // CAS gives the supervisor agentId `supervisor@<team>` and workers
+    // Cassy gives the supervisor agentId `supervisor@<team>` and workers
     // `<worker-name>@<team>` — neither is the literal string `"team-lead"`,
     // so `UG9()` returns false for every factory agent, `L6$()` returns true,
     // and every Write/Edit/Bash permission check routes to the leader. The
@@ -886,7 +886,7 @@ pub fn handle_pre_tool_use(
     // win — .env / credential writes are denied before we reach here.
     //
     // cas-7f33: a second copy of this gate runs ABOVE the cas_root=None
-    // early return to rescue factory sessions where CAS isn't initialized
+    // early return to rescue factory sessions where Cassy isn't initialized
     // in the supervisor's cwd at hook-dispatch time. That hoisted copy
     // fires only when cas_root is None (so no protection gates apply
     // anyway). When cas_root is Some the flow reaches HERE, preserving
@@ -1674,7 +1674,7 @@ fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix
             && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
 }
 
-/// Return the single existing CAS task ID named in a verifier prompt.
+/// Return the single existing Cassy task ID named in a verifier prompt.
 ///
 /// Ambiguous prompts fail closed: authority must bind to one exact task, not
 /// whichever task ID happens to be encountered first.
@@ -1788,7 +1788,7 @@ fn reap_stranded_native_send_message_copies() {
     }
 }
 
-/// Auto-route a factory-mode `SendMessage` tool call onto the CAS prompt
+/// Auto-route a factory-mode `SendMessage` tool call onto the Cassy prompt
 /// queue so the message actually reaches its recipient, then return an
 /// `allow` + `additionalContext` success receipt (cas-73c8). Returning
 /// `deny` wrapped the ✅ receipt in Claude Code's `<error>` envelope, which
@@ -1809,7 +1809,7 @@ fn auto_route_send_message(
             "deny",
             &format!(
                 "🚫 SendMessage is disabled in factory mode.\n\n\
-                 Use CAS coordination instead:\n\
+                 Use Cassy coordination instead:\n\
                  {prefix}coordination action=message target=<agent-name> message=\"...\" summary=\"<brief summary>\"\n\n\
                  This ensures messages are routed through the factory Director."
             ),
@@ -1911,7 +1911,7 @@ fn auto_route_send_message(
         message_id,
         source = display_name.as_str(),
         target = target.as_str(),
-        "SendMessage auto-routed onto CAS prompt queue"
+        "SendMessage auto-routed onto Cassy prompt queue"
     );
 
     let prefix = crate::harness_policy::own_tool_prefix();
@@ -1937,13 +1937,13 @@ fn auto_route_send_message(
     // `reap_stranded_native_send_message_copies` (called from the factory
     // branch of this handler) makes those cross-tree strays inert.
     let receipt = format!(
-        "✅ AUTO-ROUTED via CAS coordination (message id {message_id}).\n\n\
+        "✅ AUTO-ROUTED via Cassy coordination (message id {message_id}).\n\n\
          Message delivered to `{target}`. DO NOT retry this SendMessage call.\n\n\
          For future messages, call `{prefix}coordination action=message target=<name> message=\"...\" summary=\"...\"` directly — skip SendMessage."
     );
     HookOutput::with_pre_tool_permission_and_context(
         "allow",
-        "CAS auto-routed SendMessage",
+        "Cassy auto-routed SendMessage",
         &receipt,
     )
 }
@@ -2834,7 +2834,7 @@ mod worker_commit_guard_tests {
         input.tool_use_id = Some("tool-use-verifier-6939".to_string());
         input.tool_input = Some(serde_json::json!({
             "subagent_type": "task-verifier",
-            "prompt": "Review CAS task cas-hook-capability"
+            "prompt": "Review Cassy task cas-hook-capability"
         }));
 
         let denied = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool denial");
@@ -2976,7 +2976,7 @@ mod worker_commit_guard_tests {
         other_pre_tool.tool_use_id = Some("tool-use-unrelated-6939".to_string());
         other_pre_tool.tool_input = Some(serde_json::json!({
             "subagent_type": "task-verifier",
-            "prompt": "Review CAS task cas-hook-unrelated"
+            "prompt": "Review Cassy task cas-hook-unrelated"
         }));
         assert_eq!(
             serde_json::to_value(

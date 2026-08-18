@@ -14,9 +14,9 @@ status: open
 Freshly built binary at HEAD `c133b94` exits immediately on startup:
 
 ```
-[CAS] Serve panic log: .../.cas/logs/cas-serve-2026-07-06.log
-[CAS] Daemon socket listening at ".../.cas/daemon.sock"
-[CAS] Running initial cloud sync (push stale + pull)...
+[Cassy] Serve panic log: .../.cas/logs/cas-serve-2026-07-06.log
+[Cassy] Daemon socket listening at ".../.cas/daemon.sock"
+[Cassy] Running initial cloud sync (push stale + pull)...
 [ERROR] eager store init failed at 'task_store'
 ```
 

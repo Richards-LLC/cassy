@@ -1,12 +1,12 @@
 ---
 name: cas-task-tracking
-description: Use when work needs persistent CAS task tracking, dependencies, progress notes, or cross-session continuity.
+description: Use when work needs persistent Cassy task tracking, dependencies, progress notes, or cross-session continuity.
 managed_by: cas
 ---
 
-# CAS Task Tracking
+# Cassy Task Tracking
 
-Use `mcp__cs__task` instead of built-in TodoWrite. CAS tasks persist across sessions.
+Use `mcp__cs__task` instead of built-in TodoWrite. Cassy tasks persist across sessions.
 
 ## Core Workflow
 

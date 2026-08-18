@@ -132,7 +132,7 @@ mod tests {
             slugify_for_branch("Version 2.0 Release"),
             "version-2-0-release"
         );
-        assert_eq!(slugify_for_branch("CAS v1"), "cas-v1");
+        assert_eq!(slugify_for_branch("Cassy v1"), "cassy-v1");
     }
 
     // ========================================================================

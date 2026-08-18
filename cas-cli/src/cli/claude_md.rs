@@ -1,7 +1,7 @@
 //! `cas claude-md` — Evaluate and optimize CLAUDE.md files for token efficiency.
 //!
 //! Analyzes CLAUDE.md files against best practices and provides actionable
-//! optimization recommendations. Works without a CAS project (user-level).
+//! optimization recommendations. Works without a Cassy project (user-level).
 
 use std::path::{Path, PathBuf};
 

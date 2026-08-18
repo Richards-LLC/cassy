@@ -7,7 +7,7 @@ branch (children cas-0344, cas-a63e, cas-6538, cas-bdab, cas-9d74)
 
 The trigger was a concrete friction Daniel and Ben hit during feel-driven UI
 iteration: a pass that a human can evaluate by *looking at localhost* in about
-**11 minutes** was taking roughly **50 minutes** when it went through CAS's full
+**11 minutes** was taking roughly **50 minutes** when it went through Cassy's full
 close rigor — verification jail, the P0 code-review / supervisor-review gate, and
 the worker's pre-close self-checks. For logic work that rigor is exactly what you
 want. For "is the spacing right, does this feel better?" work, the machine has

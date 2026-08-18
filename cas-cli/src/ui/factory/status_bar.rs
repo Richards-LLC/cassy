@@ -553,7 +553,7 @@ impl StatusBar {
 
         // Responsive priority, lowest to highest: shortcut hints, the
         // network-derived latest-release badge, focused Claude account, then
-        // the compiled/running CAS identity. `trim_spans_from_front` sheds
+        // the compiled/running Cassy identity. `trim_spans_from_front` sheds
         // that list in the same order. Mode and error indicators stay on the
         // untrimmed left and therefore win when a terminal is too narrow to
         // render every meaningful status.
@@ -570,7 +570,7 @@ impl StatusBar {
         }
         right_spans.push(Span::raw(" │ "));
         right_spans.push(Span::styled(
-            format!("CAS v{}", env!("CARGO_PKG_VERSION")),
+            format!("Cassy v{}", env!("CARGO_PKG_VERSION")),
             styles.text_accent.add_modifier(Modifier::BOLD),
         ));
         right_spans.push(Span::raw(" "));
@@ -941,7 +941,7 @@ mod tests {
     }
 
     fn running_version_label() -> String {
-        format!("CAS v{}", env!("CARGO_PKG_VERSION"))
+        format!("Cassy v{}", env!("CARGO_PKG_VERSION"))
     }
 
     #[test]

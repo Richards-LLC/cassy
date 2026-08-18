@@ -8,9 +8,9 @@ use crate::cli::config_tui::{ConfigTuiApp, ViewMode};
 impl ConfigTuiApp {
     pub(crate) fn render_header(&self, frame: &mut Frame, area: Rect) {
         let title = if self.has_unsaved {
-            " CAS Configuration [*unsaved] "
+            " Cassy Configuration [*unsaved] "
         } else {
-            " CAS Configuration "
+            " Cassy Configuration "
         };
 
         let header = Paragraph::new(title)
@@ -286,7 +286,7 @@ impl ConfigTuiApp {
 
     pub(crate) fn render_help_overlay(&self, frame: &mut Frame, area: Rect) {
         let help_text = r#"
-  CAS Configuration Editor - Help
+  Cassy Configuration Editor - Help
 
   Navigation:
     ↑/k       Move up

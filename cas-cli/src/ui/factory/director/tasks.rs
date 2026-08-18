@@ -30,7 +30,7 @@ impl ScopedTaskView {
         // cas-6185c: apply the same session-visibility gate the FACTORY-panel
         // overview uses (epic_is_renderable_source_blind) — without it this
         // hint leaked a cross-project epic's id/title whenever the session
-        // shared a CAS project's task DB with another session/project.
+        // shared a Cassy project's task DB with another session/project.
         let unfocused_live_epics = if focused_epic_id.is_none() {
             epic_groups
                 .iter()
@@ -100,7 +100,7 @@ pub(crate) fn task_assigned_to_session_agent(task: &TaskSummary, data: &Director
 /// An epic is "source-blind renderable" only if every one of its live
 /// subtasks is either unassigned or assigned to a session agent — i.e. the
 /// session has SOME claim to it. Without this gate, a factory session
-/// sharing a CAS project's task DB with other, unrelated sessions/projects
+/// sharing a Cassy project's task DB with other, unrelated sessions/projects
 /// (cas-4181) can surface a cross-project epic's id/title in the UI.
 ///
 /// Originally lived only in `factory_radar.rs` (cas-582d, FACTORY-panel

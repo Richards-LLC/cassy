@@ -1,5 +1,5 @@
 //! Tests for cas-f32b / cas-73c8: PreToolUse `SendMessage` auto-route onto
-//! the CAS prompt queue in factory mode.
+//! the Cassy prompt queue in factory mode.
 //!
 //! Before cas-f32b, the hook denied `SendMessage` with guidance telling the
 //! agent to call `mcp__cas__coordination action=message` instead. Claude
@@ -7,7 +7,7 @@
 //! so they often retried the denied call instead of switching tools —
 //! wedging workers on a deny loop (observed 2026-04-23, gabber-studio).
 //!
-//! cas-f32b: parse the call, enqueue onto the CAS prompt queue, notify the
+//! cas-f32b: parse the call, enqueue onto the Cassy prompt queue, notify the
 //! daemon. cas-73c8: return `allow` + `additionalContext` with an
 //! "AUTO-ROUTED — do not retry" receipt so success is not wrapped in
 //! Claude Code's `<error>` envelope (deny always surfaces as tool error).

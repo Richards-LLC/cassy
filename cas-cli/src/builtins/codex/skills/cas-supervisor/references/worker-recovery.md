@@ -146,20 +146,20 @@ Workers fail in production. These are recurring observed failure modes and their
 
 ### Legacy Verification Jail Deadlock (stale binary)
 
-**Signature:** A worker cannot use unrelated tools or work on another task while one task awaits verification. Current CAS gates only the named task's close/update-to-closed transition, so this symptom proves the running binary is stale.
+**Signature:** A worker cannot use unrelated tools or work on another task while one task awaits verification. Current Cassy gates only the named task's close/update-to-closed transition, so this symptom proves the running binary is stale.
 
-**Note:** Factory workers are exempt from verification jail as of commit `bba6fbf`. If this failure mode appears, the running CAS binary is older than that fix.
+**Note:** Factory workers are exempt from verification jail as of commit `bba6fbf`. If this failure mode appears, the running Cassy binary is older than that fix.
 
 **Diagnosis:**
 1. Confirm the worker is actually jailed (not just reporting a stale error)
 2. Check whether the running `cas` binary includes the jail exemption fix: verify the binary was rebuilt after `bba6fbf` landed
 
 **Recovery (binary is current — exemption should apply):**
-1. Rebuild CAS: `~/.cargo/bin/cargo build --release` and restart the `cas serve` process
+1. Rebuild Cassy: `~/.cargo/bin/cargo build --release` and restart the `cas serve` process
 2. Respawn workers — they will pick up the new binary
 
 **Recovery (binary is outdated or rebuild is not feasible mid-session):**
-1. Close the jailed task with an audit trail: `mcp__cs__task action=close id=<task-id> reason="Supervisor close — verification jail deadlock. Work verified at <commit-sha>. Worker jailed, CAS binary predates bba6fbf exemption fix."`
+1. Close the jailed task with an audit trail: `mcp__cs__task action=close id=<task-id> reason="Supervisor close — verification jail deadlock. Work verified at <commit-sha>. Worker jailed, Cassy binary predates bba6fbf exemption fix."`
 2. If `close` is also blocked, use direct sqlite as last resort:
    ```sql
    UPDATE tasks SET status='closed', pending_verification=0 WHERE id='cas-XXXX';

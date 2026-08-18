@@ -10,7 +10,7 @@ managed_by: cas
 `tools/list` count. Correctness is one real call. Every rule below exists because
 those three were confused.
 
-Field-tested source: Viktor (autonomous agent operator), 2026-08-14, plus the CAS
+Field-tested source: Viktor (autonomous agent operator), 2026-08-14, plus the Cassy
 session that registered him. Full symptom tables in
 [references/diagnosis.md](references/diagnosis.md).
 
@@ -56,7 +56,7 @@ captured at process start, so exporting it afterwards changes nothing, and a
 GUI/daemon/supervisor-spawned process never reads your shell rc at all. When you
 see 401, dump what was actually sent before suspecting the key.
 
-## Scope choice — and the CAS worktree consequence
+## Scope choice — and the Cassy worktree consequence
 
 `claude mcp add -s <scope>`: `local` (this user, **this directory path**),
 `project` (committed `.mcp.json` — everyone who clones, plus CI), `user` (all
@@ -150,7 +150,7 @@ these in writing first:
    pass `cas_task_id` and worker id in the request, require them echoed back in the
    response schema, and log both sides.
 2. **What is the ceiling and who enforces it?** If the provider has no per-key spend
-   cap, **denial must live in CAS**: a budget ledger, per-task and fleet-wide daily
+   cap, **denial must live in Cassy**: a budget ledger, per-task and fleet-wide daily
    caps, and a refusal that is a hard error rather than a warning.
 3. **What does one bad loop cost?** Not one mistaken call — an autonomous worker
    retrying overnight, times N workers. Compute that number before handing out the
@@ -186,7 +186,7 @@ Detect capability per harness and **degrade explicitly**: a worker without an MC
 client must report "no MCP client, routing via supervisor", never silently skip the
 step.
 
-**Centralise transport translation.** CAS ships `cas serve` and an optional proxy —
+**Centralise transport translation.** Cassy ships `cas serve` and an optional proxy —
 make that the single place holding credentials, speaking streamable HTTP upstream,
 exposing stdio downstream, and enforcing the tool allowlist, fleet concurrency cap
 and budget ledger. One credentialed hop is far easier to verify, rotate and revoke

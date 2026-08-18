@@ -84,7 +84,7 @@ pub fn execute(args: &ChangelogArgs, cli: &Cli) -> anyhow::Result<()> {
     let mut out = std::io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme);
 
-    fmt.subheading("CAS changelog")?;
+    fmt.subheading("Cassy changelog")?;
     fmt.field(
         "Source",
         &format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases"),

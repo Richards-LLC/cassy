@@ -4,7 +4,7 @@ topic: cas-web-ticket-explorer
 focus: web-based ticket/task explorer for Petra Stella team members, hosted on petra-stella-cloud
 ---
 
-# Ideation: CAS Web Ticket Explorer (Team Surface)
+# Ideation: Cassy Web Ticket Explorer (Team Surface)
 
 The user's complaint that started this — "I can't see what's in tickets and I can't interact with them in the TUI" — is real, but the answer is *not* a localhost browser tab for a single operator. The answer is a **team-facing surface on petra-stella-cloud** where any Petra Stella team member can find, view, comment on, and close any task across any of the team's projects.
 
@@ -23,7 +23,7 @@ The user's complaint that started this — "I can't see what's in tickets and I 
 
 ## Grounding Summary
 
-**Project shape.** CAS is a Rust monorepo at `cas-src/` with `cas-cli` and 16+ crates under `crates/`. SQLite at `.cas/cas.db` is the local source of truth. Petra Stella Cloud is a Next.js app deployed on Vercel that already serves as the team-collaboration backend.
+**Project shape.** Cassy is a Rust monorepo at `cas-src/` with `cas-cli` and 16+ crates under `crates/`. SQLite at `.cas/cas.db` is the local source of truth. Petra Stella Cloud is a Next.js app deployed on Vercel that already serves as the team-collaboration backend.
 
 **Task model** (`crates/cas-types/src/task.rs`): `id`, `title`, `description`, `design`, `acceptance_criteria`, `notes`, `status` (Open / InProgress / Blocked / Closed / PendingSupervisorReview), `priority` (P0–P4), `task_type` (Task / Bug / Feature / Epic / Chore / Spike), `assignee`, `labels`, timestamps, `branch`, `worktree_id`, `deliverables` (`files_changed`, `commit_hash`, `merge_commit`, `review_envelope`), `external_ref`, `demo_statement`, `execution_note`, `epic_verification_owner`, `pending_verification`, `pending_worktree_merge`, `team_id`. Dependency graph in a separate table.
 
@@ -61,7 +61,7 @@ This isn't a list of alternatives anymore — it's the cohesive feature, broken 
 6. **`POST /api/uploads/signed-url`** — issues a Vercel Blob signed URL for client-direct upload. Returns `{ uploadUrl, publicUrl }`.
 7. **Privacy decision** — extend the existing memory privacy filter to tasks: filter `execution_note` and any field flagged `agent-internal` from team responses unless the requester is the assignee. Mirror the `?exclude_user_type` opt-out.
 
-### B. CAS CLI (`cas-src`)
+### B. Cassy CLI (`cas-src`)
 
 1. **Push tasks on `cas cloud sync`** — extend the team push pipeline (`cas-cli/src/cloud/syncer/team_push.rs`) to include `entity_type='task'` rows alongside memories.
 2. **Pull task changes** — extend `pull.rs` to handle task entity type with LWW merge against local SQLite.

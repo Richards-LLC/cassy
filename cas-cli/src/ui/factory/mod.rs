@@ -1,7 +1,7 @@
-//! Factory TUI - Native terminal multiplexer for CAS factory mode
+//! Factory TUI - Native terminal multiplexer for Cassy factory mode
 //!
 //! Spawns and manages worker/supervisor agents directly using cas-mux,
-//! with an integrated Director panel for monitoring CAS tasks/agents/activity.
+//! with an integrated Director panel for monitoring Cassy tasks/agents/activity.
 //!
 //! # Architecture
 //!
@@ -119,7 +119,7 @@ use crossterm::{execute, terminal::SetTitle};
 
 /// Build the terminal title string for factory mode
 ///
-/// Format: "CAS Factory - [Project] - [Epic]" or "CAS Factory - [Project]" if no epic
+/// Format: "Cassy Factory - [Project] - [Epic]" or "Cassy Factory - [Project]" if no epic
 fn build_terminal_title(project_dir: &Path, epic_title: Option<&str>) -> String {
     let project_name = project_dir
         .file_name()
@@ -127,8 +127,8 @@ fn build_terminal_title(project_dir: &Path, epic_title: Option<&str>) -> String 
         .unwrap_or("Unknown");
 
     match epic_title {
-        Some(epic) => format!("CAS Factory - {project_name} - {epic}"),
-        None => format!("CAS Factory - {project_name}"),
+        Some(epic) => format!("Cassy Factory - {project_name} - {epic}"),
+        None => format!("Cassy Factory - {project_name}"),
     }
 }
 

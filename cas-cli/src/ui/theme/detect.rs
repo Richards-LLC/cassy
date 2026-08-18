@@ -1,6 +1,6 @@
 //! Terminal background auto-detection for theme selection
 //!
-//! Detects whether the terminal has a dark or light background so CAS
+//! Detects whether the terminal has a dark or light background so Cassy
 //! "just works" without explicit theme configuration.
 //!
 //! Detection priority:

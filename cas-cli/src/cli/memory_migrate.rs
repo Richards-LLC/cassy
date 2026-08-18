@@ -12,7 +12,7 @@ use clap::Args;
 
 use crate::memory_migration::{self, DbLabel, MigrationConfig, SourceDb};
 
-/// Ledger location relative to the project CAS root.
+/// Ledger location relative to the project Cassy root.
 const DEFAULT_LEDGER_SUBDIR: &str = "migration/cas-b129";
 
 #[derive(Debug, Clone, Args)]
@@ -25,7 +25,7 @@ pub struct MemoryMigrateArgs {
     #[arg(long, value_parser = ["project", "global", "both"], default_value = "both")]
     pub scope: String,
 
-    /// Override the project CAS root (default: the detected one).
+    /// Override the project Cassy root (default: the detected one).
     ///
     /// `cas_root` detection honours `CAS_ROOT` *before* the working directory
     /// (`store/detect.rs:53`), so `cd`-ing into a copy of a `.cas` tree does
@@ -36,7 +36,7 @@ pub struct MemoryMigrateArgs {
     #[arg(long)]
     pub project_root: Option<PathBuf>,
 
-    /// Override the global CAS root (default: `~/.cas`).
+    /// Override the global Cassy root (default: `~/.cas`).
     #[arg(long)]
     pub global_root: Option<PathBuf>,
 
@@ -162,7 +162,7 @@ pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> 
     };
 
     // Say out loud which databases are about to be read and written. This
-    // command reads a legacy store and writes pages back into the same CAS
+    // command reads a legacy store and writes pages back into the same Cassy
     // root, so a mis-resolved root is a mutation of live data, not a bad
     // report — the operator gets to see the paths before that happens.
     println!(

@@ -10,7 +10,7 @@ This Markdown file is the normative architecture decision. The adjacent HTML fil
 
 ## Decision
 
-Commander is a browser-only viewer and control surface over one per-machine CAS hub. It does not own agents, create model calls, or proxy a fleet through a central server.
+Commander is a browser-only viewer and control surface over one per-machine Cassy hub. It does not own agents, create model calls, or proxy a fleet through a central server.
 
 Each browser profile designates exactly one paired hub as its **controller origin**. Commander is loaded from that origin, and that origin's browser storage contains the profile's machine catalog and device credentials. The browser connects directly from the controller origin to every other paired hub. Target hubs authorize that exact origin during pairing. Visiting a different hub origin creates a separate, empty browser security domain; catalogs and credentials are never silently copied, merged, or synchronized.
 
@@ -33,7 +33,7 @@ The design must withstand:
 - concurrent viewers and competing controllers;
 - abrupt daemon death, including a signal such as `SIGILL`.
 
-The host OS account and the controller origin are explicit trust boundaries. A process already executing as the CAS account, or script execution inside the controller origin, can exercise that account's active authority. Commander reduces persistence, replay, and cross-origin exposure, but does not claim to isolate mutually hostile processes running under one Unix UID or to survive arbitrary same-origin code execution.
+The host OS account and the controller origin are explicit trust boundaries. A process already executing as the Cassy account, or script execution inside the controller origin, can exercise that account's active authority. Commander reduces persistence, replay, and cross-origin exposure, but does not claim to isolate mutually hostile processes running under one Unix UID or to survive arbitrary same-origin code execution.
 
 ## Options considered
 
@@ -91,24 +91,24 @@ this traffic.
 
 ## Normative trust boundaries and topology
 
-1. A machine runs at most one Commander hub instance for its CAS account. The hub is an authorization and multiplexing boundary; it is not an agent runtime.
+1. A machine runs at most one Commander hub instance for its Cassy account. The hub is an authorization and multiplexing boundary; it is not an agent runtime.
 2. The controller hub serves the static Commander application. It does not proxy target-hub control traffic, persist the remote machine catalog, or cache remote session data.
 3. Page-initiated pairing alone may use the reviewed external relay for create, poll, and acknowledge. The controller hub and hosted static origin do not implement or proxy those routes; hub invitation exchange and control stay direct.
 4. The browser profile stores its catalog and credentials only under the chosen controller origin. A newly visited origin starts empty and must be paired explicitly.
 5. Each target hub records the exact controller origin as part of the paired device authorization. Scheme, host, and effective port must match; suffix, wildcard, substring, reflected-origin, and `null` matches are forbidden.
 6. Optional discovery may provide endpoint hints only. Discovery cannot establish identity, add a machine to the trusted catalog, grant a scope, or bypass pairing.
 7. Each hub opens exactly one Commander-owned upstream daemon WebSocket per daemon/session, independent of the number of viewers, windows, or panes. Downstream fan-out is performed inside the hub.
-8. Commander must not cause a model request, create a second logical CAS session for a viewed session, or import the t3 agent-owning server/runtime.
+8. Commander must not cause a model request, create a second logical Cassy session for a viewed session, or import the t3 agent-owning server/runtime.
 
 ## Hub-local state
 
 Hub security state lives under `~/.cas/hub/`, never in a project database or project checkout.
 
-- `~/.cas/hub/` must be owned by the CAS user and mode `0700`.
-- Machine identity and private key material, paired-device records, token hashes, revocation state, and audit files must be owned by the CAS user and mode `0600`.
+- `~/.cas/hub/` must be owned by the Cassy user and mode `0700`.
+- Machine identity and private key material, paired-device records, token hashes, revocation state, and audit files must be owned by the Cassy user and mode `0600`.
 - Creation and replacement must be atomic, must not follow symlinks, and must reject unexpected ownership, file type, or broader permissions. The hub must fail closed rather than repair ambiguous state silently.
 - Secrets, raw pairing codes, raw WebSocket tickets, HTTP authorization headers, and DPoP proofs must never appear in logs, crash reports, URLs, project databases, or analytics.
-- A different OS user is excluded by filesystem permissions. A malicious process already running as the CAS user is considered an OS-account compromise and is outside Commander's isolation claim; its actions remain attributable where the OS exposes useful identity.
+- A different OS user is excluded by filesystem permissions. A malicious process already running as the Cassy user is considered an OS-account compromise and is outside Commander's isolation claim; its actions remain attributable where the OS exposes useful identity.
 
 ## Browser credential and storage model
 
@@ -195,7 +195,7 @@ The colon-form names above are the canonical authorization-policy vocabulary.
 Commander JSON wire surfaces, including the hub API and relay wire-v1, encode
 the same enum values in kebab form (`machine-read`, `session-read`, and so on).
 That spelling boundary is a one-to-one serialization translation only; it does
-not create aliases with different authority. CAS accepts colon spellings at
+not create aliases with different authority. Cassy accepts colon spellings at
 operator-facing CLI input for compatibility, converts immediately to `Scope`,
 and emits the kebab wire spelling. Commander displays the received wire spelling
 without cosmetic rewriting.
@@ -276,7 +276,7 @@ These IDs are acceptance tests, not optional examples. H7 owns assembled-system 
 | H1-MUX-03 | H1 | Two windows viewing three panes in one session produce exactly one Commander-owned daemon WS; pane-tagged output reaches only subscribed viewers. |
 | H1-BP-04 | H1 | Saturating one viewer's queue disconnects/resyncs only that viewer without blocking upstream reads or opening another upstream. |
 | H1-DEATH-05 | H1 | Fixture exits by zero, `SIGILL`, another signal, and unknown transport loss produce distinct typed diagnostics with no fabricated fields. |
-| H1-ZERO-06 | H1 | Viewing/reconnecting does not change model-call count or logical CAS session count. |
+| H1-ZERO-06 | H1 | Viewing/reconnecting does not change model-call count or logical Cassy session count. |
 | H2-PERM-01 | H2 `cas-00b3` | Fresh state has `0700`/`0600`; loose mode, wrong owner/type, or symlink causes startup failure; no credential appears in project DB/logs. |
 | H2-PAIR-02 | H2 | A 256-bit challenge succeeds once inside ten minutes only for its bound origin/scope ceiling; replay, expiry, origin mismatch, and rate-limit cases fail generically. |
 | H2-DPOP-03 | H2 | Valid proof passes; reused `jti`, wrong key/URI/method/`ath`, expired/revoked credential, and excessive clock skew fail. |

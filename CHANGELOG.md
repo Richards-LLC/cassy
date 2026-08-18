@@ -7,14 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-18
+
 ### Added
 - **`cas init` stops scaffolding your home directory by accident.** Run in `$HOME` (or at the filesystem root) it now names what it would create and asks before writing anything; non-interactive runs refuse outright and point at `--allow-non-project` for automation that means it. Project directories, including non-git ones, are unaffected.
+- **The Codex account picker remains useful when there is only one account.** An interactive bare `cas codex` launch now offers that account and a `+ Log in a new account…` row, so adding a named account does not require a hidden command.
 
 ### Changed
+- **CAS now presents itself as Cassy wherever people see it.** Commander, pairing email, installation and documentation copy, CLI help and banners, and Factory startup now use Cassy; commands, paths, environment variables, and code-level CAS names remain unchanged.
+- **Factory runs keep the selected Codex account attached to the decision.** Availability checks and explicit `config_dir` preflight inspect that account's `CODEX_HOME`, and launch or attach output names the account home in use.
+- **Factory worker guidance now asks for a concise, shaped response to the user.** The runtime prompt carries the response contract instead of leaving worker handoff prose implicit.
 - **Signing in to the cloud is a once-per-machine act.** Credentials live in `~/.cas/cloud.json`, so `cas login` works from any directory and every project on the machine is signed in; `cas logout` signs all of them out.
 - **Your team is picked up automatically — no setup command to discover.** When you are logged in and CAS can tell which team you are on, `cas cloud sync` scopes the project to that team and registers it, instead of syncing in personal scope until you happen to run a team command. It says which team it adopted and how to undo it; `cas cloud team auto off` keeps a project personal for good, `cas cloud team set` still pins a specific team, and if you belong to several teams with no default CAS asks you to pick rather than guessing.
 
 ### Fixed
+- **An unavailable explicit Codex profile offers the next login step.** On an interactive terminal, `cas codex --profile <name>` now offers `cas codex login <name>` instead of leaving the account unusable without recovery guidance.
+- **`cas claude --workers 0` no longer errors.** The zero-worker path now shares the normal account-selection flow.
 - **A successful cloud sync now means your project really is connected to your team.** `cas cloud sync` confirms the project is registered with the active team before reporting success, registers it when it is missing, and stops with the actual reason — including the exact server exchange that failed — instead of printing green checkmarks over a project the team never received. Previously a machine with nothing queued to send registered nothing, so `cas cloud team-memories` answered "this project hasn't been synced to the team yet" right after a clean sync. That message now names the project, team, and endpoint involved instead of repeating the command that just ran.
 - **`cas cloud team show` and `cas cloud team auto` agree on which team you are on.** Both resolve the team slug from your cached memberships, so a team set by UUID no longer displays as `<not resolved>` in one command while the other names it.
 - **Browser login no longer produces a broken approval link,** and ordinary polling survives a rate limit instead of ending the login with a server-error message.

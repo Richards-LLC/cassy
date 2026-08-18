@@ -8,7 +8,7 @@ priority: P2
 
 ## What we need
 
-A **framework-level CAS skill** for writing Playwright E2E tests against Nuxt 3 applications. We built a project-specific version at `.claude/skills/cas-nuxt-playwright/SKILL.md` in the Ozer repo after burning hours on patterns that should be documented once and reused everywhere.
+A **framework-level Cassy skill** for writing Playwright E2E tests against Nuxt 3 applications. We built a project-specific version at `.claude/skills/cas-nuxt-playwright/SKILL.md` in the Ozer repo after burning hours on patterns that should be documented once and reused everywhere.
 
 ## Why
 
@@ -20,7 +20,7 @@ Every Nuxt 3 project will hit the same issues:
 - `storageState` not capturing auth tokens stored in IndexedDB
 - `page.goto()` vs SPA navigation patterns
 
-These are framework-level patterns, not project-specific. A generic skill would prevent every CAS-managed Nuxt project from rediscovering them.
+These are framework-level patterns, not project-specific. A generic skill would prevent every Cassy-managed Nuxt project from rediscovering them.
 
 ## Proposed scope
 
@@ -65,7 +65,7 @@ Our project-specific skill is at:
 ~/Petrastella/ozer/.claude/skills/cas-nuxt-playwright/SKILL.md
 ```
 
-It's Ozer-specific (references our test accounts, staging URLs, specific selectors) but the patterns are generic. The CAS skill should extract the framework-level knowledge and make it reusable across projects.
+It's Ozer-specific (references our test accounts, staging URLs, specific selectors) but the patterns are generic. The Cassy skill should extract the framework-level knowledge and make it reusable across projects.
 
 ## Lessons learned the hard way (2026-05-26)
 
@@ -77,7 +77,7 @@ It's Ozer-specific (references our test accounts, staging URLs, specific selecto
 
 ## Delivery preference
 
-A CAS skill file at `~/.claude/skills/cas-nuxt-playwright/SKILL.md` (global, not project-scoped) that any Nuxt 3 project can reference. Should be auto-invoked when:
+A Cassy skill file at `~/.claude/skills/cas-nuxt-playwright/SKILL.md` (global, not project-scoped) that any Nuxt 3 project can reference. Should be auto-invoked when:
 - Editing or creating files under `tests/` in a Nuxt 3 project
 - Debugging Playwright test failures in a Nuxt 3 project
 - The `cas-playwright-debug` skill detects a Nuxt project (presence of `nuxt.config.ts`)

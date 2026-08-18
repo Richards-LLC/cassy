@@ -25,7 +25,7 @@ Worker `staging-sync` continued fresh verification and re-close work on **cas-a6
 |--------|--------|
 | Date | 2026-07-11 |
 | Project | Ozer (`/home/pippenz/Petrastella/ozer`) |
-| CAS version | `2.27.0 (9f86e08-dirty)` |
+| Cassy version | `2.27.0 (9f86e08-dirty)` |
 | Supervisor | `eager-marten-46` |
 | Worker | `staging-sync` |
 | Worker session | `df9cb221-aa27-4e69-8f62-628982cbdde7` |
@@ -83,7 +83,7 @@ Worker `staging-sync` continued fresh verification and re-close work on **cas-a6
 /home/pippenz/.claude/teams/ozer-zealous-otter-25/staging-sync-settings.json
 ```
 
-Ozer CAS task record: **cas-a651** (query notes + close history).
+Ozer Cassy task record: **cas-a651** (query notes + close history).
 
 Related prior report (same symptom class): `completed/BUG-stale-message-sequencing-2026-07-07.md`.
 
@@ -107,7 +107,7 @@ Related prior report (same symptom class): `completed/BUG-stale-message-sequenci
 
 ---
 
-Reporting-only relay. No CAS or Ozer source modified to produce this file.
+Reporting-only relay. No Cassy or Ozer source modified to produce this file.
 
 ---
 

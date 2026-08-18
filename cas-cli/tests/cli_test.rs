@@ -28,7 +28,9 @@ fn test_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Multi-agent coding factory"));
+        .stdout(predicate::str::contains(
+            "Cassy — a multi-agent coding factory with persistent memory and task coordination",
+        ));
 }
 
 #[test]
@@ -50,7 +52,7 @@ fn test_init_yes_flag() {
         .args(["init", "--yes"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("CAS initialized"));
+        .stdout(predicate::str::contains("Cassy initialized"));
 
     assert!(temp.path().join(".cas").exists());
     assert!(temp.path().join(".cas/cas.db").exists());
@@ -184,7 +186,7 @@ fn test_init_force_reinit() {
         .args(["init", "--yes", "--force"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("CAS initialized"));
+        .stdout(predicate::str::contains("Cassy initialized"));
 }
 
 /// EPIC cas-8888 (cas-6f46, Phase 5): a pre-existing `.grok/` dir (the
@@ -866,7 +868,7 @@ fn test_doctor_fix_initializes_project() {
         .assert()
         .success()
         .stdout(predicate::str::contains("auto-fix"))
-        .stdout(predicate::str::contains("Initialized CAS at"));
+        .stdout(predicate::str::contains("Initialized Cassy at"));
 }
 
 #[test]
@@ -917,7 +919,7 @@ fn test_noninteractive_factory_includes_preflight_hints() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Initialize CAS first with `cas doctor --fix` (or `cas init`).",
+            "Initialize Cassy first with `cas doctor --fix` (or `cas init`).",
         ));
 }
 

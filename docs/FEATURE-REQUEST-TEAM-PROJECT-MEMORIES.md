@@ -1,4 +1,4 @@
-# Feature Request: Team Project Memories (CAS CLI Side)
+# Feature Request: Team Project Memories (Cassy CLI Side)
 
 **From:** Petra Stella Cloud team
 **Date:** 2026-04-02
@@ -12,11 +12,11 @@
 
 Petra Stella Cloud now supports **team project memories**. When a developer joins a project that teammates have been working on, they can pull down the team's collective learnings (architectural decisions, bug fixes, conventions, domain knowledge) — with personal preferences automatically excluded.
 
-The server-side is complete and deployed. This document describes what the CAS CLI needs to implement to complete the feature end-to-end.
+The server-side is complete and deployed. This document describes what the Cassy CLI needs to implement to complete the feature end-to-end.
 
 ---
 
-## What Already Exists in CAS CLI
+## What Already Exists in Cassy CLI
 
 1. **`project_canonical_id`** — `cas-cli/src/cloud/config.rs:24-53` normalizes the git remote URL and includes it in push payloads. This is the project key server-side.
 
@@ -115,7 +115,7 @@ Update project display name. Any team member can rename.
 
 **Request body:**
 ```json
-{ "name": "CAS CLI" }
+{ "name": "Cassy CLI" }
 ```
 
 **Response (200):**
@@ -123,7 +123,7 @@ Update project display name. Any team member can rename.
 {
   "id": "550e8400-...",
   "canonical_id": "github.com/petrastella/cas",
-  "name": "CAS CLI",
+  "name": "Cassy CLI",
   "created_by": "user-uuid",
   "created_at": "2026-04-02T10:00:00.000Z"
 }
@@ -178,7 +178,7 @@ cas cloud projects --team <slug>     # Specify team (defaults to active team)
 ```
 Team: petrastella
 
-  CAS CLI                    github.com/petrastella/cas          3 contributors   147 memories
+  Cassy CLI                    github.com/petrastella/cas          3 contributors   147 memories
   Petra Stella Cloud         github.com/petrastella/cloud        2 contributors    89 memories
   Gabber Studio              github.com/petrastella/gabber       1 contributor     34 memories
 ```

@@ -14,7 +14,7 @@ export function createPairingDraft(controllerOrigin: string): PairingDraft {
   return {
     hubUrl: controllerOrigin,
     machineLabel: "",
-    deviceLabel: "Commander browser",
+    deviceLabel: "Cassy Commander browser",
     operatorLabel: "",
     scopes: [...DEFAULT_PAIRING_SCOPES],
     email: "",

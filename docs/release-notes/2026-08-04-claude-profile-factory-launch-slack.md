@@ -9,10 +9,10 @@ as a bare Claude Code launcher. That was not the intended surface.
 
 Live on main — **User**
 
-Picking your second Claude account should start CAS, not just open a chat window. `cas claude alt` now launches the full factory — supervisor and workers — signed in as your alt subscription.
+Picking your second Claude account should start Cassy, not just open a chat window. `cas claude alt` now launches the full factory — supervisor and workers — signed in as your alt subscription.
 
-- **Was → Now:** `cas claude alt` opened a plain Claude Code session with no CAS around it → `cas claude alt` starts CAS with a Claude supervisor running on the alt account, and every worker it spawns stays on that same account.
-- **Was → Now:** choosing an account and choosing to run CAS were two different commands you had to combine by hand with an environment variable → one command does both, and it prints which account directory it picked before anything starts.
+- **Was → Now:** `cas claude alt` opened a plain Claude Code session with no Cassy around it → `cas claude alt` starts Cassy with a Claude supervisor running on the alt account, and every worker it spawns stays on that same account.
+- **Was → Now:** choosing an account and choosing to run Cassy were two different commands you had to combine by hand with an environment variable → one command does both, and it prints which account directory it picked before anything starts.
 - **Was → Now:** typing `cas claude` with no account name printed a list instead of starting anything → it starts the factory on whatever account you are already using, matching how `cas codex` and `cas grok` behave. The account list moved to `cas claude --list-profiles`.
 - Still want just a chat window on a chosen account? `cas claude alt --bare` does exactly that, and passes your flags straight through.
 

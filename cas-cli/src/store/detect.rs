@@ -1,6 +1,6 @@
 //! Store detection and factory functions
 //!
-//! CAS uses project-scoped storage in `./.cas/` directories.
+//! Cassy uses project-scoped storage in `./.cas/` directories.
 //! Each project requires `cas init` before use.
 
 use std::path::{Path, PathBuf};
@@ -142,7 +142,7 @@ fn announce_root_override_once(env_root: &Path, start: &Path) {
 ///
 /// Detection priority:
 /// 1. CAS_ROOT env var (explicit override)
-/// 2. CAS worktree detection (path contains .cas/worktrees/)
+/// 2. Cassy worktree detection (path contains .cas/worktrees/)
 /// 3. Git worktree detection (parse .git file)
 /// 4. Directory walk (walk up looking for .cas/)
 pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
@@ -161,14 +161,14 @@ pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
 }
 
 /// The root `start` resolves to when `CAS_ROOT` is not consulted at all:
-/// CAS worktree detection, then git-worktree detection, then a directory walk.
+/// Cassy worktree detection, then git-worktree detection, then a directory walk.
 ///
 /// Split out for cas-b69a (GH #157) so the detect layer can answer "what would
 /// this location have resolved to on its own?" and name it when `CAS_ROOT`
 /// overrides it. The resolution order is byte-for-byte the pre-existing one —
 /// only its call site moved.
 fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
-    // Check if we're inside a CAS worktree (.cas/worktrees/<name>/).
+    // Check if we're inside a Cassy worktree (.cas/worktrees/<name>/).
     // This is the most reliable detection for factory workers because it
     // doesn't depend on git state or .git file parsing.
     if let Some(cas_dir) = find_cas_root_from_cas_worktree(start) {
@@ -203,10 +203,10 @@ fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     Err(CasError::NotInitialized)
 }
 
-/// Detect if `start` is inside a CAS factory worktree (.cas/worktrees/<name>/)
+/// Detect if `start` is inside a Cassy factory worktree (.cas/worktrees/<name>/)
 /// and return the parent repo's .cas/ directory.
 ///
-/// CAS factory worktrees are always created under `<project>/.cas/worktrees/<worker>/`.
+/// Cassy factory worktrees are always created under `<project>/.cas/worktrees/<worker>/`.
 /// By detecting the `.cas/worktrees/` path component, we can resolve directly to the
 /// parent `.cas/` directory without relying on git state.
 fn find_cas_root_from_cas_worktree(start: &Path) -> Option<PathBuf> {
@@ -784,7 +784,7 @@ mod tests {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
         // Simulate a git worktree structure:
-        // /main_repo/.cas/       <- CAS directory
+        // /main_repo/.cas/       <- Cassy directory
         // /main_repo/.git/       <- Main git directory
         // /main_repo/.git/worktrees/wt1/  <- Worktree git data
         // /worktrees/wt1/.git    <- File pointing to main repo
@@ -858,8 +858,8 @@ mod tests {
     fn test_find_cas_root_from_cas_worktree() {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
-        // Simulate a CAS factory worktree structure:
-        // /project/.cas/          <- CAS directory with cas.db
+        // Simulate a Cassy factory worktree structure:
+        // /project/.cas/          <- Cassy directory with cas.db
         // /project/.cas/worktrees/fox/  <- Worker worktree
         let temp = TempDir::new().unwrap();
         let project = temp.path().join("project");
@@ -869,7 +869,7 @@ mod tests {
         let worktree = project.join(".cas/worktrees/fox");
         std::fs::create_dir_all(&worktree).unwrap();
 
-        // Should find .cas from CAS worktree via path pattern detection
+        // Should find .cas from Cassy worktree via path pattern detection
         let found = find_cas_root_from_cas_worktree(&worktree);
         assert_eq!(found, Some(project.join(".cas")));
 
@@ -879,7 +879,7 @@ mod tests {
         let found = find_cas_root_from_cas_worktree(&subdir);
         assert_eq!(found, Some(project.join(".cas")));
 
-        // find_cas_root_from should use CAS worktree detection
+        // find_cas_root_from should use Cassy worktree detection
         let found = find_cas_root_from(&worktree).unwrap();
         assert_eq!(found, project.join(".cas"));
 

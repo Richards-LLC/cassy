@@ -10,7 +10,7 @@ duplicate_of: docs/requests/completed/SHIPPED-worker-pane-mouse-wheel-alt-screen
 
 # BUG: Worker pane mouse wheel / touch scroll does nothing while inner TUI is in alt-screen (Claude Code)
 
-**Filed:** 2026-05-07 (originally as Penguinz task cas-c08d, P1; moved to this inbox 2026-07-27 — CAS-tooling issue, wrong board)
+**Filed:** 2026-05-07 (originally as Penguinz task cas-c08d, P1; moved to this inbox 2026-07-27 — Cassy-tooling issue, wrong board)
 **Affected version:** `cas 2.13.0 (7450278 2026-05-06)`
 **Status:** RESOLVED — duplicate, see Resolution below.
 **Prior history:** the "prior fix attempt [that] did not land the behavior" referenced by the original 2026-05-07 report is `53a7bf4` (cas-d5fa) — it forwarded arrow-key bytes, which landed in Claude Code's prompt-input history instead of scrolling the transcript. It was superseded seven days later by `678f75b` (cas-f93a), which switched to PgUp/PgDn bytes and was empirically A/B confirmed by the user to work. This report was re-filed on 2026-07-27 reusing the original's stale `cas 2.13.0` text without checking whether f93a had already landed — see Resolution.
@@ -65,7 +65,7 @@ Clicking a worker pane focuses it (correctly), but **mouse wheel on desktop and 
 
 Worker panes run Claude Code — a **fullscreen TUI in alt-screen mode**. Alt-screen has no scrollback, so wheel events routed to `Pane::scroll → ghostty_vt::scroll_viewport` have nothing to scroll into: silent no-op (or the error path). The classic alt-screen scroll trap — see tmux#3705 and Konsole's "Alternate Screen buffer scrolling" workaround (translate wheel → arrow keys so the inner app paginates itself).
 
-**Right behavior for CAS:** when the focused pane's inner process is in alt-screen, **forward wheel events to the inner process as `MouseEvent::ScrollUp/ScrollDown`** (Claude Code consumes these and scrolls its own transcript) instead of consuming them for `Pane::scroll`. The keyboard forwarding path (`ClientMessage::Input`) already exists — this is plumbing wheel events through it, gated on alt-screen state (ghostty_vt exposes the active screen).
+**Right behavior for Cassy:** when the focused pane's inner process is in alt-screen, **forward wheel events to the inner process as `MouseEvent::ScrollUp/ScrollDown`** (Claude Code consumes these and scrolls its own transcript) instead of consuming them for `Pane::scroll`. The keyboard forwarding path (`ClientMessage::Input`) already exists — this is plumbing wheel events through it, gated on alt-screen state (ghostty_vt exposes the active screen).
 
 ### Secondary issue (don't lose)
 
@@ -81,7 +81,7 @@ Even for non-alt-screen panes, `Failed to scroll focused pane: …` implies `Pan
 
 1. Worker pane (Claude Code, alt-screen), focused, wheel up → Claude's transcript scrolls. Same for PgUp.
 2. Termux two-finger swipe over SSH → same as #1.
-3. Shell pane (no alt-screen), wheel up → CAS pane scrollback scrolls (no regression).
+3. Shell pane (no alt-screen), wheel up → Cassy pane scrollback scrolls (no regression).
 4. Sidecar j/k scroll → no regression.
 5. No `Failed to scroll focused pane:` / `Failed to scroll terminal: code …` at RUST_LOG=info under these repros.
 6. F1 help text matches observed behavior.

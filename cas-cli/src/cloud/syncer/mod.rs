@@ -292,7 +292,7 @@ impl SyncConflict {
     #[cfg(debug_assertions)]
     pub fn log(&self) {
         eprintln!(
-            "[CAS sync] Conflict resolved: {} {} local={} remote={} strategy={:?} action={:?}",
+            "[Cassy sync] Conflict resolved: {} {} local={} remote={} strategy={:?} action={:?}",
             self.entity_type,
             self.entity_id,
             self.local_updated.format("%H:%M:%S"),
@@ -360,7 +360,7 @@ pub struct CloudSyncer {
     config: CloudSyncerConfig,
     queue: Arc<SyncQueue>,
     cloud_config: CloudConfig,
-    /// Explicit project scope for callers that already own a concrete CAS
+    /// Explicit project scope for callers that already own a concrete Cassy
     /// root. Legacy callers leave this unset and retain cwd-based resolution.
     push_project_canonical_id: Option<String>,
     /// Optional normalized `origin` identity sent with personal pushes.
@@ -411,7 +411,7 @@ impl CloudSyncer {
             .or_else(crate::cloud::get_project_canonical_id)
             .ok_or_else(|| {
                 crate::error::CasError::Other(
-                    "Cannot sync: not inside a CAS project directory".to_string(),
+                    "Cannot sync: not inside a Cassy project directory".to_string(),
                 )
             })
     }

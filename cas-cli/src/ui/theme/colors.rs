@@ -1,4 +1,4 @@
-//! Base color definitions for CAS themes
+//! Base color definitions for Cassy themes
 
 use ratatui::style::Color;
 

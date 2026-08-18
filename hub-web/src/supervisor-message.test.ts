@@ -9,7 +9,7 @@ const session = (supervisor: string): HubSession => ({
   liveness: "live",
 });
 
-describe("Commander supervisor composer targeting", () => {
+describe("Cassy Commander supervisor composer targeting", () => {
   it("targets the selected session supervisor exactly", () => {
     expect(supervisorTarget(session("patient-lynx-59"))).toBe("patient-lynx-59");
     expect(supervisorMessage("patient-lynx-59", "Please review the mobile state"))

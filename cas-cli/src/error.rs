@@ -1,4 +1,4 @@
-//! Error types for CAS
+//! Error types for Cassy
 //!
 //! Provides detailed error messages with suggestions for resolution.
 
@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CasError {
-    #[error("CAS not initialized")]
+    #[error("Cassy not initialized")]
     NotInitialized,
 
     #[error("not found: {0}")]
@@ -134,7 +134,7 @@ impl CasError {
     pub fn suggestion(&self) -> Option<&'static str> {
         match self {
             CasError::NotInitialized => Some(
-                "Run 'cas init' to initialize CAS in this directory.\n\
+                "Run 'cas init' to initialize Cassy in this directory.\n\
                  This creates a .cas/ directory with the SQLite database.",
             ),
             CasError::EntryNotFound(_) => Some(

@@ -4,9 +4,9 @@ description: Use when facts, preferences, learnings, decisions, or context shoul
 managed_by: cas
 ---
 
-# CAS Memory Management
+# Cassy Memory Management
 
-Store memories proactively — don't wait to be asked. Before creating a new memory, check whether CAS already has one on the same topic (see Overlap Detection below); the cheapest duplicate is the one you never write.
+Store memories proactively — don't wait to be asked. Before creating a new memory, check whether Cassy already has one on the same topic (see Overlap Detection below); the cheapest duplicate is the one you never write.
 
 ## When to Remember
 
@@ -34,7 +34,7 @@ Use a global memory tagged `host:<hostname>` for machine-specific constraints th
 
 ## Two Modes: Legacy and Structured
 
-CAS memories support two frontmatter modes. Both are valid; structured mode is preferred for new memories but never required.
+Cassy memories support two frontmatter modes. Both are valid; structured mode is preferred for new memories but never required.
 
 ### Legacy mode (backward compatible)
 
@@ -79,7 +79,7 @@ Full templates, per-section guidance, and the bug-vs-knowledge decision table: *
 
 ## Overlap Detection
 
-Before you create a new memory, run the overlap check. The goal is to catch the case where CAS already has a memory about this problem — silent duplication is the primary way the memory set decays over time.
+Before you create a new memory, run the overlap check. The goal is to catch the case where Cassy already has a memory about this problem — silent duplication is the primary way the memory set decays over time.
 
 High-level workflow:
 

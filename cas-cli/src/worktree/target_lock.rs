@@ -13,7 +13,7 @@
 //! one repository, hash to distinct keys and therefore never contend — merges
 //! that cannot possibly interfere are never serialized against each other.
 //!
-//! This is an advisory OS file lock, so it only orders *CAS-mediated* merges.
+//! This is an advisory OS file lock, so it only orders *Cassy-mediated* merges.
 //! It deliberately does not attempt to stop a human running `git commit`
 //! directly; that case is caught by the compare-and-swap of `receipt.target_sha`
 //! and by the post-merge first-parent check in the caller.
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
-/// Domain separator so this hash can never collide with another CAS digest
+/// Domain separator so this hash can never collide with another Cassy digest
 /// that happens to run over the same bytes.
 const DOMAIN: &str = "cas-0a21/delivery-target-lock/v1";
 
@@ -79,7 +79,7 @@ pub fn delivery_target_key(canonical_repo: &Path, target_ref: &str) -> String {
 /// blocking until it is available.
 ///
 /// `cas_root` only decides where the lock file lives — the *identity* comes
-/// entirely from `canonical_repo` + `target_ref`, so two CAS roots pointed at
+/// entirely from `canonical_repo` + `target_ref`, so two Cassy roots pointed at
 /// one repository still serialize correctly as long as they share a root.
 pub fn lock_delivery_target(
     cas_root: &Path,

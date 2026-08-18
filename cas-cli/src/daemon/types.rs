@@ -21,7 +21,7 @@ pub struct DaemonConfig {
     pub apply_decay: bool,
     /// Model for AI tasks
     pub model: String,
-    /// Path to CAS root
+    /// Path to Cassy root
     pub cas_root: PathBuf,
     /// Enable entity summary generation
     pub update_entity_summaries: bool,

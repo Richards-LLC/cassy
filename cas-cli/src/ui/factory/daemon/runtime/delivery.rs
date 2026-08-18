@@ -24,7 +24,7 @@ use super::super::FactoryDaemon;
 /// The result of a delivery that may carry a wake nudge (cas-7a01, GH #155).
 ///
 /// `outcome` is the transport answer the caller has always acted on. `wake` is
-/// the answer the caller could never get: whether CAS actually woke the
+/// the answer the caller could never get: whether Cassy actually woke the
 /// recipient, tried and failed, or never tried. Keeping them in one value makes
 /// it impossible for a delivery site to record transport state while silently
 /// dropping the wake state, which is precisely how three GH incidents produced

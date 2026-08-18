@@ -12,13 +12,13 @@ priority: P2
 
 ## What we need
 
-A **framework-level CAS skill** that generates and maintains a single, self-contained `DESIGN.md` for a project — the design-system analog of what `codemap` is for code structure and `project-overview` is for the domain model. It captures the project's *visual* language (tokens + patterns + guardrails) as one machine- **and** human-readable file that FE workers and the design-reviewer all consume, so AI-generated UI stays on-brand and consistent across sessions and workers.
+A **framework-level Cassy skill** that generates and maintains a single, self-contained `DESIGN.md` for a project — the design-system analog of what `codemap` is for code structure and `project-overview` is for the domain model. It captures the project's *visual* language (tokens + patterns + guardrails) as one machine- **and** human-readable file that FE workers and the design-reviewer all consume, so AI-generated UI stays on-brand and consistent across sessions and workers.
 
 Prototype already built by hand in the Gabber repo: `apps/frontend/DESIGN.md` (see it for the target shape).
 
 ## Why
 
-Right now CAS has no design counterpart to `codemap`/`project-overview`, and it shows:
+Right now Cassy has no design counterpart to `codemap`/`project-overview`, and it shows:
 - When we ran a multi-persona design review on a pricing page, the design-reviewer agent had to **grep the `.vue` + locale files to *reconstruct* the design intent** (tokens, which plan should be emphasized, the accent color, the do/don't rules). A `DESIGN.md` would have handed it all of that.
 - Every FE worker re-derives the same things: which CSS token to use, what the selected-state pattern is, the mobile breakpoint, the framework gotchas (e.g. "use `--g-*` not Quasar `--q-*`; hardcoded-white surfaces render light on a dark theme"). These are project-stable facts that belong in one file.
 - The existing hand-written `DESIGN_SYSTEM.md` (a `@nuxt/content` dev-onboarding doc) was **8 months stale** and documented tokens in prose, not as normative machine-readable values — so it had drifted from the live `app.scss` `--g-*` vars.
@@ -41,7 +41,7 @@ A `design-spec` (or `designmd`) skill that:
 - Read a few canonical components (modals, cards, primary buttons, inputs, badges, selected/hover states) to populate the **Components** section with concrete, project-specific patterns + the file they live in — not generic advice.
 
 ### 3. Captures project guardrails (Do's & Don'ts)
-- Mine framework gotchas + prior corrections (CAS memories tagged design/CSS/UI, recurring review findings) into a Do's/Don'ts list. E.g. Gabber's: `--g-*` over `--q-*`, no pure-white-on-dark, Quasar overlay-drawer scroll-lock leak, carousel `height:auto` override, Nuxt auto-import silent-fail.
+- Mine framework gotchas + prior corrections (Cassy memories tagged design/CSS/UI, recurring review findings) into a Do's/Don'ts list. E.g. Gabber's: `--g-*` over `--q-*`, no pure-white-on-dark, Quasar overlay-drawer scroll-lock leak, carousel `height:auto` override, Nuxt auto-import silent-fail.
 
 ### 4. Freshness gate + memory pointer (mirror `codemap`)
 - SessionStart/PreToolUse staleness signal when token files / theme config drift since `DESIGN.md` was last updated.

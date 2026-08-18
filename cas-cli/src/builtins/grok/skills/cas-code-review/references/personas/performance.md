@@ -22,7 +22,7 @@ Hunt for code that will be slower, more wasteful, or less scalable than a reason
 ## In scope
 
 - **N+1 queries.** A loop that issues a query per element where a single batched query would work. Include the loop location and the query call site in `evidence`.
-- **Unbounded queries or unbounded collections.** `SELECT` without `LIMIT` on a growing table, `find_all` with no pagination, channel with no backpressure, vector pushed in an unbounded loop. Cite the CAS store-perf audit memory if the pattern matches a known family of bugs.
+- **Unbounded queries or unbounded collections.** `SELECT` without `LIMIT` on a growing table, `find_all` with no pagination, channel with no backpressure, vector pushed in an unbounded loop. Cite the Cassy store-perf audit memory if the pattern matches a known family of bugs.
 - **Missing or wrong indexes.** A new query filters or joins on a column with no supporting index, a new index duplicates an existing one, an index is created on a low-cardinality column with no partial predicate.
 - **Blocking work on an async runtime.** `std::fs`, `std::thread::sleep`, synchronous CPU-heavy work, or blocking lock acquisition inside a `tokio::main` / async handler. Applies to both Rust and Node.
 - **Lock contention and await-while-holding-lock.** Holding a `Mutex` across an `.await`, holding a write lock during I/O, fine-grained locks that serialize the hot path.

@@ -48,7 +48,7 @@ pub fn handle_user_prompt_submit(
 ) -> Result<HookOutput, MemError> {
     // === FACTORY TURN-START CONTEXT (cas-55ac reminder + cas-7a01 surfacing) ===
     //
-    // cas-7a01 (GH #155): this is the *only* place in CAS that reads the
+    // cas-7a01 (GH #155): this is the *only* place in Cassy that reads the
     // prompt queue back and puts it in front of a recipient. Before it existed
     // the daemon's delivery had no counterpart, so a non-urgent message to an
     // idle Claude worker was written to an inbox file and never surfaced —
@@ -123,7 +123,7 @@ fn handle_user_prompt_submit_capture(
     cas_root: Option<&Path>,
     prompt_text: &str,
 ) -> Result<HookOutput, MemError> {
-    // Check if CAS is initialized (needed for all operations)
+    // Check if Cassy is initialized (needed for all operations)
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),

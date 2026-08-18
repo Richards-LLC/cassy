@@ -41,7 +41,7 @@ is **11 rows, all in the GLOBAL database** (verified read-only:
 | Delete the 994 test-fixture rows | cas-78c8 / GH #156 |
 | Improve retrieval quality | Nothing on this epic measures it. §8 |
 | Touch the Tantivy index | Deliberately never touched. §5 step 4 |
-| Migrate the other CAS roots on this machine | Only the project root and `~/.cas` |
+| Migrate the other Cassy roots on this machine | Only the project root and `~/.cas` |
 
 ---
 
@@ -235,7 +235,7 @@ command. Rehearsals must pass explicit roots.
 
 Stage the copies on **disk, not `/tmp`**. `/tmp` is tmpfs on this host (RAM), and
 each database is ~90 MB — copying both plus their ledgers is a quarter-gigabyte
-of memory, and CAS warns above a 1 GiB tmpfs threshold. The approved staging
+of memory, and Cassy warns above a 1 GiB tmpfs threshold. The approved staging
 location is `/mnt/datacube/staging`.
 
 Make copies with `VACUUM INTO` from a read-only connection — never `cp` a live
@@ -380,7 +380,7 @@ running a binary built before the widening** — stop and rebuild.
 
 ### V2 — Pages written where they belong
 
-Rows land in the knowledge store of their **own** CAS root — project rows into
+Rows land in the knowledge store of their **own** Cassy root — project rows into
 the project root, global rows into `~/.cas`:
 
 ```
@@ -765,7 +765,7 @@ the proper nouns, so none was added. Both directions are locked by unit tests in
 `memory_migration/routing.rs`.
 
 Three of the 39 are genuine cas-src memories caught because they *mention* the
-other project's paths in their bodies (`Local CAS project layout`, `CAS Cloud
+other project's paths in their bodies (`Local Cassy project layout`, `Cassy Cloud
 auth env vars`, and Ben Richards' Slack profile). Quarantine is
 stay-entry-in-place, so they are not lost — only not promoted. That is the
 accepted cost of matching content as well as title.

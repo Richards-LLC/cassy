@@ -619,7 +619,7 @@ pub fn run_code_index_cycle(
             WatchEvent::Modified(_path) => {}
             WatchEvent::Deleted(path) => deleted_paths.push(path),
             WatchEvent::Error(message) => {
-                eprintln!("[CAS] Watcher error: {message}");
+                eprintln!("[Cassy] Watcher error: {message}");
                 result.errors.push(format!("Watcher: {message}"));
             }
         }

@@ -28,7 +28,7 @@ mod unscoped_test_guard;
 ///
 /// This delegates to `crate::hooks::test_env_lock()` so that test modules
 /// outside `handlers_tests` (e.g. `pre_tool::worker_commit_guard_tests`)
-/// that also mutate CAS env vars use the same underlying mutex.
+/// that also mutate Cassy env vars use the same underlying mutex.
 ///
 /// Usage in a submodule: `let _g = super::env_lock();`
 pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {

@@ -335,7 +335,7 @@ pub(crate) fn run_probe_comm_with_parent(
     };
     guard_active_parent_root(&run_root, parent_cas_root, allow_active_cas_root)?;
     fs::create_dir_all(&run_root)
-        .with_context(|| format!("failed to create isolated CAS root {}", run_root.display()))?;
+        .with_context(|| format!("failed to create isolated Cassy root {}", run_root.display()))?;
 
     let mut writer = BufWriter::new(
         File::create(&jsonl)
@@ -1106,7 +1106,7 @@ fn guard_active_parent_root(
 
     if equivalent_paths(run_root, parent) {
         bail!(
-            "refusing to run probe-comm in the active parent CAS root {}; pass the explicit safe override only for disposable roots",
+            "refusing to run probe-comm in the active parent Cassy root {}; pass the explicit safe override only for disposable roots",
             run_root.display()
         );
     }
@@ -1458,7 +1458,7 @@ mod tests {
 
         let err = run_probe_comm_with_parent(config, Some(&parent_root))
             .expect_err("active parent root should be rejected");
-        assert!(err.to_string().contains("active parent CAS root"));
+        assert!(err.to_string().contains("active parent Cassy root"));
     }
 
     #[test]

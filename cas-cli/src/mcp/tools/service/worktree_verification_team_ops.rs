@@ -165,7 +165,7 @@ impl CasService {
 
             if !cloud_config.is_logged_in() {
                 return Ok(Self::success(
-                    "Not logged in to CAS Cloud.\n\n\
+                    "Not logged in to Cassy Cloud.\n\n\
                  Use `cas cloud login` to connect to your account and access team features.",
                 ));
             }
@@ -190,7 +190,7 @@ impl CasService {
                     "To set a user-wide team default, run `cas cloud team default <slug>`.\n",
                 );
                 output.push_str("For a per-project override, use `cas cloud team set <uuid>`.\n");
-                output.push_str("To view all your teams, visit the CAS Cloud web dashboard.");
+                output.push_str("To view all your teams, visit the Cassy Cloud web dashboard.");
             }
 
             Ok(Self::success(output))
@@ -209,7 +209,7 @@ impl CasService {
             })?;
 
             if !cloud_config.is_logged_in() {
-                return Ok(Self::success("Not logged in to CAS Cloud."));
+                return Ok(Self::success("Not logged in to Cassy Cloud."));
             }
 
             let team_id = req
@@ -321,7 +321,7 @@ impl CasService {
             })?;
 
             if !cloud_config.is_logged_in() {
-                return Ok(Self::success("Not logged in to CAS Cloud."));
+                return Ok(Self::success("Not logged in to Cassy Cloud."));
             }
 
             let team_id = req
@@ -329,14 +329,14 @@ impl CasService {
                 .or(cloud_config.team_id.clone())
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "team_id required"))?;
 
-            // Team member management is available through the CAS Cloud web interface.
+            // Team member management is available through the Cassy Cloud web interface.
             // The CLI API focuses on sync operations. Use the web dashboard for:
             // - Viewing team members and their roles
             // - Inviting new members
             // - Managing permissions
             let output = format!(
                 "Team Members ({})\n\n\
-             Team member management is available through the CAS Cloud web dashboard.\n\n\
+             Team member management is available through the Cassy Cloud web dashboard.\n\n\
              Visit: {}/org/*/team/{}\n\n\
              The CLI focuses on sync operations. Use `team show` for team statistics\n\
              or `team sync` to synchronize shared resources.",
@@ -364,7 +364,7 @@ impl CasService {
 
             if !cloud_config.is_logged_in() {
                 return Ok(Self::success(
-                    "Not logged in to CAS Cloud. Use `cas cloud login` first.",
+                    "Not logged in to Cassy Cloud. Use `cas cloud login` first.",
                 ));
             }
 
@@ -427,12 +427,12 @@ impl CasService {
             output.push_str("\nPulling team data...\n");
             // cas-53d5: pull_team now takes project_id explicitly for
             // per-(team, project) watermark scoping. Resolve at the
-            // caller; bail if we're not inside a CAS project (same
+            // caller; bail if we're not inside a Cassy project (same
             // contract as the syncer's prior internal resolve).
             let project_id = crate::cloud::get_project_canonical_id().ok_or_else(|| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
-                    "Team pull failed: not inside a CAS project directory".to_string(),
+                    "Team pull failed: not inside a Cassy project directory".to_string(),
                 )
             })?;
             let pull_result = syncer

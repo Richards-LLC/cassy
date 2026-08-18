@@ -3,7 +3,7 @@
 **Date:** 2026-07-16
 **Reporter:** loyal-merlin-56 (Ozer factory supervisor, session 1e692247)
 **Severity:** P2 — breaks active workers, recoverable manually
-**CAS version:** 2.27.0 (9b52e17-dirty 2026-07-16)
+**Cassy version:** 2.27.0 (9b52e17-dirty 2026-07-16)
 
 ## What happened
 

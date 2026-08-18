@@ -69,7 +69,7 @@ mod tests {
         crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let project = home.join("project");
             std::fs::create_dir_all(&project).unwrap();
-            crate::store::init_cas_dir(&project).expect("initialize current CAS store");
+            crate::store::init_cas_dir(&project).expect("initialize current Cassy store");
             let cas_dir = project.join(".cas");
 
             let conn = Connection::open(cas_dir.join("cas.db")).unwrap();

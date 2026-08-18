@@ -54,7 +54,7 @@ pub fn handle_permission_request(
         ));
     }
 
-    // Check if CAS is initialized
+    // Check if Cassy is initialized
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
@@ -143,7 +143,7 @@ pub fn handle_notification(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // Check if CAS is initialized
+    // Check if Cassy is initialized
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
@@ -265,7 +265,7 @@ pub fn handle_pre_compact(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // Check if CAS is initialized
+    // Check if Cassy is initialized
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
@@ -523,7 +523,7 @@ pub(crate) fn checkpoint_worker_before_compaction(
          You are resuming task `{task_id}` on branch `{branch}`.\n\
          Working directory: `{}`\n\
          Intent: {intent}.\n\
-         Before starting any other task, continue this assigned task and read its CAS task record.",
+         Before starting any other task, continue this assigned task and read its Cassy task record.",
         if cwd.is_empty() { "unknown" } else { cwd }
     )))
 }
@@ -888,7 +888,7 @@ mod pre_compact_flush_tests {
         let cas = setup_cas();
         add_inprogress_task(&cas.root, "cas-b4t7");
 
-        // Simulate a worker that has findings but an empty CAS store
+        // Simulate a worker that has findings but an empty Cassy store
         // (no high-importance memories → context_parts would be empty → old
         // code would have returned before flushing).
         let findings = vec![

@@ -1,4 +1,4 @@
-# Slack draft — CAS vX.Y.Z runtime release
+# Slack draft — Cassy vX.Y.Z runtime release
 
 Channel: #cas-internal (C0B44GUKDK2)
 

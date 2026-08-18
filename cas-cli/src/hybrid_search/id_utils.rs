@@ -1,10 +1,10 @@
 use regex::Regex;
 
-/// Extract CAS ID patterns from a query string
+/// Extract Cassy ID patterns from a query string
 /// Returns (extracted_ids, remaining_query)
 /// Matches patterns like: cas-XXXX, cas-sk0a, rule-041, etc.
 pub fn extract_id_patterns(query: &str) -> (Vec<String>, String) {
-    // Match CAS-style IDs: cas-XXXX, rule-XXX, cas-skXX, etc.
+    // Match Cassy-style IDs: cas-XXXX, rule-XXX, cas-skXX, etc.
     // Pattern: word boundary + (cas|rule|skill) + hyphen + alphanumeric
     let re = match Regex::new(
         r"\b(cas-[0-9a-f]{16}|(?i:cas-[a-z0-9]{2,8}|rule-[a-z0-9]{2,6}|skill-[a-z0-9]{2,6}))\b",

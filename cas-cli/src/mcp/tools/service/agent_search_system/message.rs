@@ -122,7 +122,7 @@ pub(crate) fn lifecycle_relay_is_stale_at_inbox_pop(
 ///
 /// The two fields answer different questions and the failure the issue reported
 /// lives precisely in their disagreement, so an operator must not have to
-/// derive it. `wake_attempt` is what CAS did; `wake` is whether a turn
+/// derive it. `wake_attempt` is what Cassy did; `wake` is whether a turn
 /// demonstrably carried the content. `nudge_fired` + `unobserved` is the
 /// GH #155 signature and is called out by name — that combination used to be
 /// completely invisible.
@@ -137,16 +137,16 @@ pub(crate) fn wake_attempt_narrative(
              (hook surfacing receipt)."
         }
         (WakeAttempt::Fired, ObservationStatus::Unobserved) => {
-            "wake evidence: CAS DID nudge this recipient's pane, and no turn is recorded as \
+            "wake evidence: Cassy DID nudge this recipient's pane, and no turn is recorded as \
              having carried this message — the nudge landed but the harness surfaced nothing \
              (GH #155 signature)."
         }
         (WakeAttempt::Failed, ObservationStatus::Unobserved) => {
-            "wake evidence: CAS ATTEMPTED a wake and it FAILED (see wake_attempt_detail); the \
+            "wake evidence: Cassy ATTEMPTED a wake and it FAILED (see wake_attempt_detail); the \
              recipient was never nudged for this message."
         }
         (WakeAttempt::NotAttempted, ObservationStatus::Unobserved) => {
-            "wake evidence: CAS never attempted a wake for this message — the idle gate \
+            "wake evidence: Cassy never attempted a wake for this message — the idle gate \
              declined it, or the recipient's channel needs no nudge."
         }
     };
@@ -177,7 +177,7 @@ pub(crate) fn recipient_transport_warning(
     }
     Some(
         "recipient_transport: MISSING — this row reports stage=delivered with no \
-         per-recipient transport stamp. Either it was delivered before CAS \
+         per-recipient transport stamp. Either it was delivered before Cassy \
          recorded them, or the stamp and the stage have diverged; treat the \
          delivery as unproven and re-send.\n",
     )
@@ -1732,12 +1732,12 @@ impl CasService {
         }
 
         // cas-45c4 (GH #102): say what an ack actually proves. It is the
-        // caller's claim that it received this message — not evidence CAS
+        // caller's claim that it received this message — not evidence Cassy
         // observed the content being surfaced, and not a guarantee for anyone
         // else's copy of a broadcast.
         Ok(Self::success(format!(
             "Message {notification_id} acknowledged by this session (confirmation_source: \
-             explicit_ack). This records YOUR claim to have received it; CAS does not \
+             explicit_ack). This records YOUR claim to have received it; Cassy does not \
              independently observe that the content was surfaced. Use message_status to see \
              transport handoff, wake/reaction observations, and confirmation provenance \
              separately."
@@ -1840,7 +1840,7 @@ impl CasService {
                         if r.confirmation_source.is_recipient_claim() {
                             " — the recipient's own claim about this message"
                         } else {
-                            " — CAS inferred this from later activity; the recipient never \
+                            " — Cassy inferred this from later activity; the recipient never \
                              claimed to have read THIS message"
                         }
                     ),
@@ -1858,8 +1858,8 @@ impl CasService {
                 .unwrap_or("");
                 // cas-7a01 (GH #155): `wake: unobserved` used to be a
                 // hardcoded constant with no backing column — three incidents
-                // read it and learned nothing, because it could not tell "CAS
-                // never nudged this recipient" from "CAS nudged it and the
+                // read it and learned nothing, because it could not tell "Cassy
+                // never nudged this recipient" from "Cassy nudged it and the
                 // harness started a turn without surfacing the message".
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
@@ -1963,7 +1963,7 @@ mod inbox_poll_identity_tests {
     }
 
     /// cas-7a01 (GH #155): the combination that used to be completely
-    /// invisible — CAS nudged the pane and no turn ever carried the message —
+    /// invisible — Cassy nudged the pane and no turn ever carried the message —
     /// must be named, not left for an operator to infer from two fields.
     #[test]
     fn a_fired_nudge_with_no_surfacing_is_called_out() {
@@ -2310,13 +2310,13 @@ mod cas_89e1_post_merge_message_type_tests {
         let repo = project.path();
         git(repo, &["init", "-q", "-b", "main"]);
         git(repo, &["config", "user.email", "cas-test@example.invalid"]);
-        git(repo, &["config", "user.name", "CAS Test"]);
-        std::fs::create_dir(repo.join(".cas")).expect("CAS directory");
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        std::fs::create_dir(repo.join(".cas")).expect("Cassy directory");
         std::fs::write(
             repo.join(".cas/config.toml"),
             "[project]\ncanonical_id = \"cas-89e1-message-test\"\n",
         )
-        .expect("CAS config");
+        .expect("Cassy config");
         std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
         git(repo, &["add", "."]);
         git(repo, &["commit", "-qm", "base"]);

@@ -1,6 +1,6 @@
 //! Formatter — styled output abstraction for CLI rendering
 //!
-//! The Formatter is the core output primitive for all CAS CLI display. It:
+//! The Formatter is the core output primitive for all Cassy CLI display. It:
 //! - Auto-detects TTY vs piped output
 //! - Respects the NO_COLOR environment variable
 //! - Queries terminal width via crossterm

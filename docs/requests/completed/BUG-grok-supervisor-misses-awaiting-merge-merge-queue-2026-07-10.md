@@ -72,7 +72,7 @@ Please treat this as a **cas-src / Grok Build factory harness** bug, not an Ozer
 
 ## Situation (plain language)
 
-We ran a normal CAS factory epic on Ozer with **Grok Build as supervisor** and **Grok workers**.
+We ran a normal Cassy factory epic on Ozer with **Grok Build as supervisor** and **Grok workers**.
 
 Workers did their jobs correctly:
 
@@ -122,12 +122,12 @@ That is Phase 3 of factory workflow. Grok supervisor repeatedly skipped it.
 | Project | Ozer Health (`/home/pippenz/Petrastella/ozer`) |
 | Epic | **cas-4c77** — General dosha recipes — dual-mode generation + standalone recipes page |
 | Epic branch | `epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77` |
-| Factory session (CAS) | `ozer-happy-cobra-8` (focus epic cas-4c77) |
+| Factory session (Cassy) | `ozer-happy-cobra-8` (focus epic cas-4c77) |
 | Supervisor agent | `zealous-koala-34` (Grok Build, primary) |
 | Supervisor session id | `0869ce7c-11c1-4c74-baf7-e068e7f69781` |
 | Workers | `recipe-be` (session `b023b0a7-eeee-4315-a106-2d9c17f1534d`), `recipe-fe` (session `aa6a1071-d8c5-4f99-b874-7b182e96cb36`) |
 | Worker model | `cli=grok model=grok-4.5 effort=medium isolate=true` |
-| CAS version | `2.27.0 (9f86e08-dirty 2026-07-10)` |
+| Cassy version | `2.27.0 (9f86e08-dirty 2026-07-10)` |
 
 ### Tasks stuck on merge gate (until human forced action)
 
@@ -145,7 +145,7 @@ Eventually merges did land (supervisor acted late under pressure). Epic tip afte
 
 All paths are on the operator machine (Petrastella host). Open these first.
 
-### 1. CAS factory session log (today)
+### 1. Cassy factory session log (today)
 
 ```
 /home/pippenz/Petrastella/ozer/.cas/logs/factory-session-2026-07-10.log
@@ -197,13 +197,13 @@ Remote branches (evidence work was pushed while supervisor still idle):
 - `origin/factory/recipe-fe`
 - `origin/epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77`
 
-### 4. CAS task records (notes show MERGE REQUIRED + re-ping)
+### 4. Cassy task records (notes show MERGE REQUIRED + re-ping)
 
-Task IDs (query via CAS in ozer project):
+Task IDs (query via Cassy in ozer project):
 
 - `cas-4c77` (epic)
 - `cas-8eff`, `cas-caec`, `cas-a5ff` (children)
-- Tracker for this bug in ozer CAS: **cas-760e**
+- Tracker for this bug in ozer Cassy: **cas-760e**
 
 Task notes on the children document:
 
@@ -277,6 +277,6 @@ rg -n 'recipe-fe|recipe-be|cas-4c77|awaiting_merge' \
 
 - Filed by: Grok supervisor session on Ozer at operator request, 2026-07-10
 - Operator: human driving factory for epic cas-4c77
-- Related ozer CAS tracker task: **cas-760e**
+- Related ozer Cassy tracker task: **cas-760e**
 
 **Please pick this up in cas-src.** Fix belongs in Grok factory supervisor prompt/skill/harness so merge-queue stalls cannot recur without a human screaming.

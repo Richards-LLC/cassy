@@ -178,7 +178,7 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
 
     if load.truncated {
         eprintln!(
-            "[CAS] Only the first {} indexed symbols were loaded; code module pages are left untouched this pass (raise --max-symbols).",
+            "[Cassy] Only the first {} indexed symbols were loaded; code module pages are left untouched this pass (raise --max-symbols).",
             args.max_symbols
         );
     }

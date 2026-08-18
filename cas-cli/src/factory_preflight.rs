@@ -464,18 +464,18 @@ fn classify_binary(facts: BinaryFacts, findings: &mut Vec<PreflightFinding>) -> 
         findings.push(warning(
             "binary.expected_sha_invalid",
             "binary",
-            "Configured CAS deployment SHA is invalid.",
+            "Configured Cassy deployment SHA is invalid.",
             &remediation,
             None,
         ));
         (ComponentState::Stale, Some(remediation))
     } else if running_clean == "unknown" || dirty {
         let remediation =
-            "Rebuild CAS from a clean source checkout and restart `cas serve`.".to_string();
+            "Rebuild Cassy from a clean source checkout and restart `cas serve`.".to_string();
         findings.push(warning(
             "binary.identity_untrusted",
             "binary",
-            "Running CAS binary identity is unknown or dirty.",
+            "Running Cassy binary identity is unknown or dirty.",
             &remediation,
             None,
         ));
@@ -487,29 +487,29 @@ fn classify_binary(facts: BinaryFacts, findings: &mut Vec<PreflightFinding>) -> 
         findings.push(warning(
             "binary.source_probe_timed_out",
             "binary",
-            "CAS source identity did not complete within the shared preflight deadline.",
+            "Cassy source identity did not complete within the shared preflight deadline.",
             &remediation,
             None,
         ));
         (ComponentState::Stale, Some(remediation))
     } else if expected.is_none() {
-        let remediation = "Run preflight from the CAS source checkout, set CAS_SOURCE_DIR, or set CAS_EXPECTED_DEPLOYMENT_SHA."
+        let remediation = "Run preflight from the Cassy source checkout, set CAS_SOURCE_DIR, or set CAS_EXPECTED_DEPLOYMENT_SHA."
             .to_string();
         findings.push(warning(
             "binary.source_evidence_missing",
             "binary",
-            "No CAS source or configured deployment SHA is available for comparison.",
+            "No Cassy source or configured deployment SHA is available for comparison.",
             &remediation,
             None,
         ));
         (ComponentState::Stale, Some(remediation))
     } else if !matches {
         let remediation =
-            "Rebuild CAS from the expected source commit and restart `cas serve`.".to_string();
+            "Rebuild Cassy from the expected source commit and restart `cas serve`.".to_string();
         findings.push(warning(
             "binary.deployment_stale",
             "binary",
-            "Running CAS binary SHA differs from expected deployment/source SHA.",
+            "Running Cassy binary SHA differs from expected deployment/source SHA.",
             &remediation,
             None,
         ));
@@ -552,7 +552,7 @@ fn classify_repository(
                 ),
                 RepositoryFailure::Wrong => (
                     "repository.wrong",
-                    "The active checkout and resolved CAS project identify different repositories.",
+                    "The active checkout and resolved Cassy project identify different repositories.",
                     "Change to the intended project checkout and rerun preflight before spawning workers.",
                 ),
                 RepositoryFailure::Ambiguous => (
@@ -601,7 +601,7 @@ fn classify_mcp(facts: McpFacts, findings: &mut Vec<PreflightFinding>) -> CasMcp
         Some("Run `cas init` in the intended project, then rerun preflight.".to_string())
     } else if !missing.is_empty() {
         Some(
-            "Rebuild/reinstall CAS with the complete MCP tool registry, then restart `cas serve`."
+            "Rebuild/reinstall Cassy with the complete MCP tool registry, then restart `cas serve`."
                 .to_string(),
         )
     } else {
@@ -618,7 +618,7 @@ fn classify_mcp(facts: McpFacts, findings: &mut Vec<PreflightFinding>) -> CasMcp
             },
             "cas_mcp",
             if !facts.cas_initialized {
-                "CAS is not initialized in the resolved project."
+                "Cassy is not initialized in the resolved project."
             } else if missing.is_empty() {
                 "CAS MCP is neither live-observed nor correctly registered."
             } else {

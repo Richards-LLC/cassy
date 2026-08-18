@@ -24,7 +24,7 @@ fn handle_post_tool_use_with_guardrail(
         None => return Ok(HookOutput::empty()),
     };
 
-    // Check if CAS is initialized
+    // Check if Cassy is initialized
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
@@ -582,7 +582,7 @@ pub fn format_bash_command(
         "sed", "grep", "rg", "find", "fd", "ag", "true", "false", "test", "[",
     ];
 
-    // CAS dev build prefixes (always skip, not configurable)
+    // Cassy dev build prefixes (always skip, not configurable)
     let dev_prefixes = ["./target/release/cas ", "./target/debug/cas "];
 
     // Git readonly commands with extended set (always skip)
@@ -788,7 +788,7 @@ fn check_ripple_consistency(stores: &mut ToolHookStores, input: &HookInput) -> O
 /// fails — e.g. the file does not exist yet — falls back to a lexical
 /// `starts_with` check on the original paths.
 ///
-/// Exported for unit testing; not part of the public CAS API.
+/// Exported for unit testing; not part of the public Cassy API.
 pub(crate) fn is_file_within_project(
     file_path: &std::path::Path,
     project_root: &std::path::Path,

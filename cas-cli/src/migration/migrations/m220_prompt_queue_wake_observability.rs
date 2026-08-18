@@ -2,7 +2,7 @@
 //!
 //! cas-7a01 (GH #155). The receipt table recorded THAT a row was surfaced but
 //! not BY WHICH path, so an `inbox_poll` drain (the recipient chose to look)
-//! and a turn-start hook injection (CAS put the message in front of a
+//! and a turn-start hook injection (Cassy put the message in front of a
 //! recipient that did not know to look) were indistinguishable. Only the
 //! second is evidence that the delivery bug this task fixes was actually
 //! repaired for a given message, which is why `message_status` now reports an
@@ -30,7 +30,7 @@
 //!
 //! `source` is deliberately NOT back-filled to `'inbox_poll'`. Every existing
 //! receipt did come from that path, but a NULL meaning "provenance unknown" is
-//! safer than a value asserting provenance CAS never actually recorded.
+//! safer than a value asserting provenance Cassy never actually recorded.
 
 use crate::migration::{Migration, Subsystem};
 

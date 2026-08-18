@@ -225,7 +225,7 @@ export class HubConnectionSupervisor {
       if (stage === "auth") {
         this.blockAuthentication(
           "needs-pairing",
-          "Hub is reachable but this Commander is no longer paired. Re-pair to continue.",
+          "Hub is reachable but this Cassy Commander is no longer paired. Re-pair to continue.",
         );
         return;
       }
@@ -569,7 +569,7 @@ export class HubConnectionSupervisor {
           catch { protocolFailure("Machine protocol mismatch: hub returned an invalid handshake"); return; }
           if (hello.proto !== 2) {
             const supported = hello.error?.supported;
-            protocolFailure(`Machine protocol mismatch: Commander requires proto 2${supported ? `; hub supports ${supported}` : ""}`);
+            protocolFailure(`Machine protocol mismatch: Cassy Commander requires proto 2${supported ? `; hub supports ${supported}` : ""}`);
             return;
           }
           clearTimers();

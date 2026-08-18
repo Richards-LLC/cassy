@@ -174,7 +174,7 @@ impl Drop for InboxFileLock<'_> {
         if let Err(error) = fs2::FileExt::unlock(self.file) {
             // Never panic in Drop: this may run while propagating the
             // serialize/write error that caused us to leave the critical
-            // section. A second panic during unwinding would abort CAS.
+            // section. A second panic during unwinding would abort Cassy.
             tracing::error!(
                 inbox_path = %self.path.display(),
                 error = %error,
@@ -239,7 +239,7 @@ pub(crate) fn teams_root_dir() -> PathBuf {
 ///
 /// WHY THIS EXISTS. The `SendMessage` auto-route
 /// ([`crate::hooks::handlers::handlers_events::pre_tool`]) enqueues the message
-/// onto the CAS prompt queue and then returns `permissionDecision = "allow"`
+/// onto the Cassy prompt queue and then returns `permissionDecision = "allow"`
 /// (cas-73c8, so the sender sees a success receipt instead of an `<error>`
 /// envelope). Allow means the harness's own `SendMessage` ALSO runs and appends
 /// its own row to `$CLAUDE_CONFIG_DIR/teams/{team}/inboxes/{target}.json` —
@@ -731,7 +731,7 @@ impl TeamsManager {
     /// `Agent` is here for cas-62b0 (GH #152): the review gate's cost lives in
     /// the persona fan-out, and a worker that spawns those personas itself
     /// reaches the pipeline without touching `Skill` or `Workflow`. `Agent` is
-    /// the current spelling of that tool and appeared in no matcher CAS
+    /// the current spelling of that tool and appeared in no matcher Cassy
     /// generated, so the fan-out had no seam at all. It is intercept-only for
     /// exactly one purpose — `pre_tool.rs` refuses a review dispatch and then
     /// returns no decision for every other `Agent` call, so adding it here does
@@ -935,7 +935,7 @@ impl TeamsManager {
 
         let config = TeamConfig {
             name: self.team_name.clone(),
-            description: format!("CAS factory session {}", self.team_name),
+            description: format!("Cassy factory session {}", self.team_name),
             created_at: now,
             lead_agent_id: self.agent_id_for("supervisor"),
             lead_session_id: lead_session_id.to_string(),
@@ -1551,13 +1551,13 @@ impl TeamsManager {
     /// Shell-form (`#!/bin/sh`) per the cas-7ecd scar — exec-form hooks trip
     /// Claude Code's /doctor validator regardless of Anthropic #58441 state.
     pub const WORKER_PRE_COMMIT_HOOK: &'static str = "#!/bin/sh
-# CAS factory worker guard — installed by `cas factory` when spawning isolated workers.
+# Cassy factory worker guard — installed by `cas factory` when spawning isolated workers.
 # Workers may ONLY commit on their own factory/<name> branch. All other branches
 # (main, master, staging, epic/*, arbitrary branches, and detached HEAD) are denied.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"
 if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ]; then
-  echo \"CAS COMMIT GUARD: worker '$CAS_AGENT_NAME' cannot commit from '$branch'.\" >&2
+  echo \"Cassy COMMIT GUARD: worker '$CAS_AGENT_NAME' cannot commit from '$branch'.\" >&2
   echo \"Expected the exact worker branch '$expected'. The checkout may belong to another worker.\" >&2
   exit 1
 fi
@@ -1567,9 +1567,9 @@ case \"$branch\" in
     ;;
   *)
     if [ -z \"$branch\" ]; then
-      echo \"CAS COMMIT GUARD: HEAD is detached — cannot determine branch.\" >&2
+      echo \"Cassy COMMIT GUARD: HEAD is detached — cannot determine branch.\" >&2
     else
-      echo \"CAS COMMIT GUARD: Cannot commit on '$branch'.\" >&2
+      echo \"Cassy COMMIT GUARD: Cannot commit on '$branch'.\" >&2
     fi
     echo \"Workers may only commit on their factory/<name> branch.\" >&2
     exit 1
@@ -1581,37 +1581,37 @@ esac
     /// the ordinary model-visible path; this hook rechecks at Git's own push
     /// boundary, after any preceding command in a compound shell invocation.
     pub const WORKER_PRE_PUSH_HOOK: &'static str = "#!/bin/sh
-# CAS factory worker push guard — installed by cas factory in the worker-private hooksPath.
+# Cassy factory worker push guard — installed by cas factory in the worker-private hooksPath.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"
 if [ -z \"$CAS_AGENT_NAME\" ]; then
-  echo \"CAS PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns.\" >&2
+  echo \"Cassy PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns.\" >&2
   exit 1
 fi
 if [ \"$branch\" != \"$expected\" ]; then
-  echo \"CAS PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch'.\" >&2
+  echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch'.\" >&2
   echo \"Expected the exact worker branch '$expected'. Refusing to graft the current HEAD onto another branch.\" >&2
   exit 1
 fi
 while read local_ref local_sha remote_ref remote_sha; do
   if [ \"$remote_ref\" != \"refs/heads/$expected\" ]; then
-    echo \"CAS PUSH GUARD: worker '$CAS_AGENT_NAME' may push only to 'refs/heads/$expected', not '$remote_ref'.\" >&2
+    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' may push only to 'refs/heads/$expected', not '$remote_ref'.\" >&2
     exit 1
   fi
 done
 exit 0
 ";
 
-    /// Marker string that identifies a CAS-installed guard hook (any version).
-    const GUARD_MARKER: &'static str = "CAS factory worker guard";
+    /// Marker string that identifies a Cassy-installed guard hook (any version).
+    const GUARD_MARKER: &'static str = "Cassy factory worker guard";
 
     /// The exact block header [`Self::write_guard_alongside`] appends when
     /// chaining the guard onto a pre-existing project hook. Also used by
-    /// [`Self::cleanup_legacy_shared_guard`] to find where a chained CAS
+    /// [`Self::cleanup_legacy_shared_guard`] to find where a chained Cassy
     /// block begins so it can be stripped without touching the project
     /// hook's own content. Keep these two in sync.
     const GUARD_SOURCING_HEADER: &'static str =
-        "\n# CAS factory worker guard (sourced by cas factory — do not remove)\n";
+        "\n# Cassy factory worker guard (sourced by cas factory — do not remove)\n";
 
     /// Resolve an absolute path from a `git -C <dir> rev-parse --git-path <arg>`
     /// (or `--git-dir`) invocation. Relative results (as returned for plain,
@@ -1686,7 +1686,7 @@ exit 0
         Ok(())
     }
 
-    /// Put the CAS pre-push guard before an existing project hook. Guard-first
+    /// Put the Cassy pre-push guard before an existing project hook. Guard-first
     /// ordering is intentional: a project hook may exit successfully, which
     /// must not bypass the worker-identity check.
     fn write_push_guard_alongside(
@@ -1712,7 +1712,7 @@ exit 0
         Ok(())
     }
 
-    /// Detect and remove a legacy CAS worker guard that a pre-cas-2491 build
+    /// Detect and remove a legacy Cassy worker guard that a pre-cas-2491 build
     /// wrote directly into the SHARED/common hooks directory.
     ///
     /// Before the worktree-scoping fix, `install_worker_pre_commit_hook`
@@ -1724,13 +1724,13 @@ exit 0
     /// that would have removed it. This is a one-time migration: it runs
     /// every time a worker guard is (re)installed, targets the COMMON dir
     /// (not the worktree-private one), and is a no-op once the shared hook
-    /// has been cleaned or never had a CAS guard to begin with.
+    /// has been cleaned or never had a Cassy guard to begin with.
     ///
     /// - If the shared hook is guard-only (no evidence of a chained project
     ///   hook), the file is deleted outright — that matches exactly what the
     ///   pre-fix installer wrote when no project hook pre-existed.
     /// - If the guard was chained onto a project hook (contains
-    ///   [`Self::GUARD_SOURCING_HEADER`]), only the appended CAS block is
+    ///   [`Self::GUARD_SOURCING_HEADER`]), only the appended Cassy block is
     ///   stripped and the sibling `pre-commit-cas-guard` file is removed;
     ///   the original project hook content is left untouched.
     fn cleanup_legacy_shared_guard(worktree_path: &std::path::Path) -> anyhow::Result<()> {
@@ -1746,7 +1746,7 @@ exit 0
             Err(_) => return Ok(()), // unreadable — not ours to touch
         };
         if !content.contains(Self::GUARD_MARKER) {
-            return Ok(()); // not a CAS guard (or already cleaned) — leave alone
+            return Ok(()); // not a Cassy guard (or already cleaned) — leave alone
         }
 
         if let Some(idx) = content.find(Self::GUARD_SOURCING_HEADER) {
@@ -1759,7 +1759,7 @@ exit 0
                 let _ = std::fs::remove_file(&sibling);
             }
             tracing::info!(
-                "cas-2491 migration: stripped legacy CAS guard chained onto project hook at {:?}",
+                "cas-2491 migration: stripped legacy Cassy guard chained onto project hook at {:?}",
                 shared_hook_path
             );
         } else {
@@ -1774,7 +1774,7 @@ exit 0
         Ok(())
     }
 
-    /// Install the CAS worker pre-commit guard, scoped to `worktree_path` alone.
+    /// Install the Cassy worker pre-commit guard, scoped to `worktree_path` alone.
     ///
     /// # Why not just `git rev-parse --git-path hooks` (cas-2491)
     ///
@@ -1824,7 +1824,7 @@ exit 0
         // Migration (cas-2491): remove any guard a pre-fix build left behind
         // directly in the shared/common hooks dir, BEFORE inspecting that
         // location for a "pre-existing project hook" to preserve below —
-        // otherwise a legacy CAS guard would be mistaken for one and chained
+        // otherwise a legacy Cassy guard would be mistaken for one and chained
         // into the new private hook instead of being cleaned up.
         Self::cleanup_legacy_shared_guard(worktree_path)?;
 
@@ -1847,21 +1847,21 @@ exit 0
                 .unwrap_or_default()
                 .contains(Self::GUARD_MARKER)
         {
-            tracing::debug!("CAS pre-commit guard already installed at {:?}", hook_path);
+            tracing::debug!("Cassy pre-commit guard already installed at {:?}", hook_path);
         } else {
             let preexisting_project_hook = effective_hooks_dir.join("pre-commit");
             if preexisting_project_hook != hook_path && preexisting_project_hook.exists() {
                 let existing = std::fs::read_to_string(&preexisting_project_hook)?;
                 Self::write_guard_alongside(&private_hooks_dir, &hook_path, &existing)?;
                 tracing::info!(
-                    "Installed CAS worker pre-commit guard at {:?} (chained to existing project hook {:?})",
+                    "Installed Cassy worker pre-commit guard at {:?} (chained to existing project hook {:?})",
                     hook_path,
                     preexisting_project_hook
                 );
             } else {
                 std::fs::write(&hook_path, Self::WORKER_PRE_COMMIT_HOOK)?;
                 std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
-                tracing::info!("Installed CAS worker pre-commit guard at {:?}", hook_path);
+                tracing::info!("Installed Cassy worker pre-commit guard at {:?}", hook_path);
             }
         }
 
@@ -1869,10 +1869,10 @@ exit 0
         if push_hook_path.exists()
             && std::fs::read_to_string(&push_hook_path)
                 .unwrap_or_default()
-                .contains("CAS factory worker push guard")
+                .contains("Cassy factory worker push guard")
         {
             tracing::debug!(
-                "CAS pre-push guard already installed at {:?}",
+                "Cassy pre-push guard already installed at {:?}",
                 push_hook_path
             );
         } else {
@@ -1881,7 +1881,7 @@ exit 0
                 let existing = std::fs::read_to_string(&preexisting_project_hook)?;
                 Self::write_push_guard_alongside(&private_hooks_dir, &push_hook_path, &existing)?;
                 tracing::info!(
-                    "Installed CAS worker pre-push guard at {:?} (chained to existing project hook {:?})",
+                    "Installed Cassy worker pre-push guard at {:?} (chained to existing project hook {:?})",
                     push_hook_path,
                     preexisting_project_hook
                 );
@@ -1889,7 +1889,7 @@ exit 0
                 std::fs::write(&push_hook_path, Self::WORKER_PRE_PUSH_HOOK)?;
                 std::fs::set_permissions(&push_hook_path, std::fs::Permissions::from_mode(0o755))?;
                 tracing::info!(
-                    "Installed CAS worker pre-push guard at {:?}",
+                    "Installed Cassy worker pre-push guard at {:?}",
                     push_hook_path
                 );
             }
@@ -3654,7 +3654,7 @@ mod tests {
     #[test]
     fn worker_pre_commit_hook_content_has_marker() {
         assert!(
-            TeamsManager::WORKER_PRE_COMMIT_HOOK.contains("CAS factory worker guard"),
+            TeamsManager::WORKER_PRE_COMMIT_HOOK.contains("Cassy factory worker guard"),
             "hook content must contain the guard marker for idempotent install"
         );
     }
@@ -3730,7 +3730,7 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            stderr.contains("CAS COMMIT GUARD") || stderr.contains("protected branch"),
+            stderr.contains("Cassy COMMIT GUARD") || stderr.contains("protected branch"),
             "hook stderr should mention the guard: {stderr}"
         );
     }
@@ -3809,7 +3809,7 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            stderr.contains("CAS COMMIT GUARD"),
+            stderr.contains("Cassy COMMIT GUARD"),
             "hook stderr should mention the guard: {stderr}"
         );
     }
@@ -3834,7 +3834,7 @@ mod tests {
             if rp.is_absolute() { rp.to_path_buf() } else { p.join(rp) }
         };
         let content = std::fs::read_to_string(hooks_dir.join("pre-commit")).unwrap();
-        let count = content.matches("CAS factory worker guard").count();
+        let count = content.matches("Cassy factory worker guard").count();
         assert_eq!(
             count, 1,
             "guard marker must appear exactly once after two installs; found {count} occurrences"
@@ -3898,7 +3898,7 @@ mod tests {
             "existing hook content must be preserved in the merged hook"
         );
         assert!(
-            final_content.contains("CAS factory worker guard"),
+            final_content.contains("Cassy factory worker guard"),
             "guard marker must be appended"
         );
     }
@@ -4001,7 +4001,7 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&wt_commit.stderr);
         assert!(
-            stderr.contains("CAS COMMIT GUARD"),
+            stderr.contains("Cassy COMMIT GUARD"),
             "hook stderr should mention the guard: {stderr}"
         );
 
@@ -4092,7 +4092,7 @@ mod tests {
             "foreign HEAD push must be refused"
         );
         let stderr = String::from_utf8_lossy(&rejected.stderr);
-        assert!(stderr.contains("CAS PUSH GUARD"), "{stderr}");
+        assert!(stderr.contains("Cassy PUSH GUARD"), "{stderr}");
         assert!(stderr.contains("support-triage"), "{stderr}");
         assert!(stderr.contains("credit-repairs"), "{stderr}");
 
@@ -4211,9 +4211,9 @@ mod tests {
 
     /// Same migration as above, but the legacy guard was chained onto a
     /// pre-existing project hook (the `write_guard_alongside` shape): the
-    /// shared `pre-commit` has the project's own content followed by the CAS
+    /// shared `pre-commit` has the project's own content followed by the Cassy
     /// sourcing block, plus a sibling `pre-commit-cas-guard` file. Cleanup
-    /// must strip only the CAS-appended portion and remove the sibling,
+    /// must strip only the Cassy-appended portion and remove the sibling,
     /// leaving the project's own hook content intact.
     #[test]
     fn install_worker_pre_commit_hook_cleans_up_legacy_guard_chained_onto_project_hook() {
@@ -4272,8 +4272,8 @@ mod tests {
             "project hook content must survive cleanup: {remaining:?}"
         );
         assert!(
-            !remaining.contains("CAS factory worker guard"),
-            "CAS guard block must be fully stripped: {remaining:?}"
+            !remaining.contains("Cassy factory worker guard"),
+            "Cassy guard block must be fully stripped: {remaining:?}"
         );
 
         // The owner's commit on main must succeed (the remaining project

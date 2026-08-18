@@ -18,7 +18,7 @@ for operator review rather than risking data owned by other projects.
 | Confidence | High |
 | Scope | Entries, tasks, rules, skills, knowledge pages, and the live sync queue |
 | Data window | Baseline and repair pulls on 2026-08-09; five-pull close-gate series 13:39:11–13:39:36 EDT |
-| Author | CAS factory worker `loyal-koala-52`, task `cas-1037` |
+| Author | Cassy factory worker `loyal-koala-52`, task `cas-1037` |
 
 ## Baseline
 

@@ -37,7 +37,7 @@ If the main checkout has unrelated uncommitted edits (common during active facto
 
 ### Preconditions
 
-1. A factory project with isolated worker worktrees under `.cas/worktrees/<name>` (standard CAS factory layout: `cas_root` = `<repo>/.cas`, parent = repo root).
+1. A factory project with isolated worker worktrees under `.cas/worktrees/<name>` (standard Cassy factory layout: `cas_root` = `<repo>/.cas`, parent = repo root).
 2. Main project checkout at the repo root on branch `staging` (or any branch) with **unrelated dirty tracked files** — e.g. WIP on `apps/frontend/pages/home.vue` and `apps/frontend/pages/home.spec.ts` for a coordinated-tile-reveal feature (`cas-387d` follow-up) that is **not** part of the worker's epic.
 3. A worker isolated worktree on `factory/<worker>` with task commits pushed and merged into the epic branch; worker worktree `git diff HEAD` is empty.
 
@@ -59,7 +59,7 @@ If the main checkout has unrelated uncommitted edits (common during active facto
 
 ### Simulated lint (reproduces reported line numbers)
 
-Running the lint's consecutive-`//` heuristic against `git diff --unified=0 HEAD` in the **main staging checkout** (not the worker worktree) yields exactly the failures reported by CAS close:
+Running the lint's consecutive-`//` heuristic against `git diff --unified=0 HEAD` in the **main staging checkout** (not the worker worktree) yields exactly the failures reported by Cassy close:
 
 ```
 Violation: Lines +91–+97: 7 consecutive // lines (in apps/frontend/pages/home.spec.ts)
@@ -153,8 +153,8 @@ Mirror `test_additive_only_uses_worker_branch_not_main_worktree`:
 
 ## Notes
 
-- Reporting-only relay. No CAS source was modified to produce this file.
-- Downstream identifiers (ozer, cas-0262, cas-ac4b, branch names) are included because they are the concrete reproduction; CAS maintainers can inspect the live worktrees listed above.
+- Reporting-only relay. No Cassy source was modified to produce this file.
+- Downstream identifiers (ozer, cas-0262, cas-ac4b, branch names) are included because they are the concrete reproduction; Cassy maintainers can inspect the live worktrees listed above.
 - Workaround applied downstream: tasks left in `awaiting_merge` / blocked on lint; no main-checkout stash was performed (to avoid losing unrelated WIP and to preserve repro state).
 
 

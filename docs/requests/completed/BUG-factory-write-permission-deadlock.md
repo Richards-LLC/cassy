@@ -28,7 +28,7 @@ The filesystem-tool auto-approve in `cas-cli/src/hooks/handlers/handlers_events/
 
 ## Repro
 
-1. Spawn a factory session where the supervisor *is* the team lead (no separate `team-lead` member — standard CAS factory layout).
+1. Spawn a factory session where the supervisor *is* the team lead (no separate `team-lead` member — standard Cassy factory layout).
 2. As supervisor, call `Write` to create a file in the project.
 3. Claude Code surfaces modal: `* Waiting for team lead approval` with `Permission request sent to team "<name>" leader`. The lead is the supervisor, which has no UX path to self-approve. Hangs indefinitely.
 4. Working around with `Bash(cp /tmp/foo /home/.../foo)` succeeds immediately.
@@ -54,7 +54,7 @@ Yet Claude Code still surfaced the team-mode approval modal, implying either (a)
 
 ## Suspected failure modes (unconfirmed — needs a maintainer with a debug build)
 
-1. **Early return on `cas_root = None`** at `pre_tool.rs:61-64`: if the hook invocation resolves `cas_root` as `None` for any reason (CAS not yet initialized in the supervisor's cwd at hook-dispatch time, symlink issue, race), the handler short-circuits to `empty()` before the factory bypass at line 768. The `Agent(isolation)` block above this check is hoisted specifically to avoid this class of miss — the factory-auto-approve block is not.
+1. **Early return on `cas_root = None`** at `pre_tool.rs:61-64`: if the hook invocation resolves `cas_root` as `None` for any reason (Cassy not yet initialized in the supervisor's cwd at hook-dispatch time, symlink issue, race), the handler short-circuits to `empty()` before the factory bypass at line 768. The `Agent(isolation)` block above this check is hoisted specifically to avoid this class of miss — the factory-auto-approve block is not.
 2. **Classifier order inside Claude Code**: the PreToolUse hook `permissionDecision:"allow"` may not pre-empt the team-mode leader-escalation path the way the fix assumes. The comment on line 749 already notes this suspicion for the settings-file path; the hook-level fix may share the same fate on some Claude Code builds.
 3. **Hook transport**: the Claude Code harness may not propagate the `agent_role` field or read `CAS_AGENT_ROLE` into the hook process env on every invocation (tmux-backed long-lived sessions in particular).
 

@@ -889,7 +889,7 @@ impl CasCore {
         let agent_store = self.open_agent_store()?;
         let task_store = self.open_task_store()?;
 
-        // Use the current CAS agent identity (session-based in factory/Codex mode).
+        // Use the current Cassy agent identity (session-based in factory/Codex mode).
         let agent_id = self.get_agent_id()?;
         let agent_name = agent_store
             .get(&agent_id)

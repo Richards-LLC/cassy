@@ -4,8 +4,8 @@ pub(crate) const CAS_SECTION_BEGIN: &str =
     "<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->";
 pub(crate) const CAS_SECTION_END: &str = "<!-- CAS:END -->";
 
-/// CAS directive content (MCP tools)
-const CAS_DIRECTIVE_CONTENT: &str = r#"# IMPORTANT: USE CAS FOR TASK AND MEMORY MANAGEMENT
+/// Cassy directive content (MCP tools)
+const CAS_DIRECTIVE_CONTENT: &str = r#"# IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT
 
 **DO NOT USE BUILT-IN TOOLS (TodoWrite, EnterPlanMode) FOR TASK TRACKING.**
 
@@ -17,17 +17,17 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__
 - `mcp__cas__memory` with action: remember - Store memories and learnings
 - `mcp__cas__search` with action: search - Search all context
 
-CAS provides persistent context across sessions. Built-in tools are ephemeral.
+Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
 Release notes: every PR merged to `staging` or `main` must be announced in Slack per `docs/release-notes/RUBRIC.md` (run the `release-notes` skill; it installs the rubric if missing)."#;
 
-/// Build the full CAS section with markers
+/// Build the full Cassy section with markers
 pub(crate) fn build_cas_section() -> String {
     format!("{CAS_SECTION_BEGIN}\n{CAS_DIRECTIVE_CONTENT}\n{CAS_SECTION_END}")
 }
 
 /// Returns true if any ancestor directory of `project_root` (from its parent
-/// up to and including `$HOME`) already contains a CLAUDE.md with the CAS
+/// up to and including `$HOME`) already contains a CLAUDE.md with the Cassy
 /// managed block.
 ///
 /// If `project_root` IS `$HOME`, returns false immediately — the root is
@@ -76,7 +76,7 @@ fn ancestor_has_cas_block(project_root: &Path) -> bool {
     false
 }
 
-/// Update or create CLAUDE.md with CAS directive section
+/// Update or create CLAUDE.md with Cassy directive section
 /// Returns Ok(true) if file was modified, Ok(false) if no changes needed
 pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
     // Skip injection when an ancestor already carries the managed block.
@@ -117,8 +117,8 @@ pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
         }
 
         // Check for old-style directive (migration path)
-        if content.contains("IMPORTANT: USE CAS FOR TASK AND MEMORY MANAGEMENT") {
-            let new_content = if content.starts_with("# IMPORTANT: USE CAS") {
+        if content.contains("IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT") {
+            let new_content = if content.starts_with("# IMPORTANT: USE Cassy") {
                 if let Some(pos) = content.find("---\n\n") {
                     format!("{}\n\n{}", new_section, &content[pos + 5..])
                 } else if let Some(pos) = content.find("---\n") {
@@ -144,7 +144,7 @@ pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
 }
 
 // ============================================================================
-// CAS skill generation
+// Cassy skill generation
 // ============================================================================
 
 pub(crate) const CAS_SKILL: &str = r#"---
@@ -153,13 +153,13 @@ description: Coding Agent System - unified memory, tasks, rules, and skills. Use
 managed_by: cas
 ---
 
-# CAS - Coding Agent System
+# Cassy - Coding Agent System
 
 **IMPORTANT: Use CAS MCP tools instead of built-in tools for task and memory management.**
 
-CAS provides persistent memory and task management across sessions. Built-in tools like TodoWrite are ephemeral and don't persist.
+Cassy provides persistent memory and task management across sessions. Built-in tools like TodoWrite are ephemeral and don't persist.
 
-## WHEN TO USE CAS (ALWAYS)
+## WHEN TO USE Cassy (ALWAYS)
 
 - **Task tracking**: Use `mcp__cas__task` with action: create instead of TodoWrite
 - **Planning tasks**: Use `mcp__cas__task` with action: create and blocked_by for dependencies
@@ -224,7 +224,7 @@ Use `mcp__cas__rule` and `mcp__cas__skill` with different actions:
 - skill action: list - Show enabled skills
 "#;
 
-/// Check if a file is managed by CAS (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
 pub(crate) fn is_skill_managed_by_cas(content: &str) -> bool {
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {
@@ -236,7 +236,7 @@ pub(crate) fn is_skill_managed_by_cas(content: &str) -> bool {
     false
 }
 
-/// Check if a file is the old CAS skill (for migration)
+/// Check if a file is the old Cassy skill (for migration)
 pub(crate) fn is_old_cas_skill(content: &str) -> bool {
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {
@@ -247,7 +247,7 @@ pub(crate) fn is_old_cas_skill(content: &str) -> bool {
     false
 }
 
-/// Generate CAS skill file
+/// Generate Cassy skill file
 pub fn generate_cas_skill(project_root: &Path) -> anyhow::Result<bool> {
     let skill_dir = project_root.join(".claude/skills/cas");
     let skill_path = skill_dir.join("SKILL.md");
@@ -310,8 +310,8 @@ mod tests {
         );
     }
 
-    /// GH #65: the CAS-managed block must breadcrumb the release-notes rubric
-    /// so every CAS project inherits the "announce every staging/main merge"
+    /// GH #65: the Cassy-managed block must breadcrumb the release-notes rubric
+    /// so every Cassy project inherits the "announce every staging/main merge"
     /// expectation instead of it living only in one project's hand-edited
     /// CLAUDE.md.
     #[test]
@@ -355,7 +355,7 @@ mod tests {
         });
     }
 
-    /// An ancestor directory already has the CAS block → injection is skipped.
+    /// An ancestor directory already has the Cassy block → injection is skipped.
     /// FAILING before fix: current code writes the block regardless of ancestors.
     #[test]
     fn test_ancestor_has_block_skips_injection() {

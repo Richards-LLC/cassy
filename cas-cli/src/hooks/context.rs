@@ -765,7 +765,7 @@ fn call_claude_for_selection(prompt: &str, model: &str) -> Result<String, MemErr
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Fetch personal patterns from CAS Cloud and format as context section.
+/// Fetch personal patterns from Cassy Cloud and format as context section.
 ///
 /// Returns empty string if not logged in, no patterns, or on any error.
 /// Failures are silent — personal patterns are optional enhancement.
@@ -857,7 +857,7 @@ fn fetch_personal_patterns_for_context() -> Result<String, MemError> {
     Ok(section)
 }
 
-/// Fetch new team suggestions from CAS Cloud and format as context section.
+/// Fetch new team suggestions from Cassy Cloud and format as context section.
 ///
 /// Only shows pending (not yet adopted/dismissed) suggestions.
 /// Returns empty string if not in a team, no suggestions, or on any error.

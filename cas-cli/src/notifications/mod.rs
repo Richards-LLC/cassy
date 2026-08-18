@@ -1,6 +1,6 @@
-//! Notification system for CAS TUI
+//! Notification system for Cassy TUI
 //!
-//! Provides real-time notifications for CAS events like task creation,
+//! Provides real-time notifications for Cassy events like task creation,
 //! memory additions, and rule promotions.
 
 mod channel;

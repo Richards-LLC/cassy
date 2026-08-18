@@ -94,7 +94,7 @@ impl CloudCoordinator {
     /// Create a new cloud coordinator from config
     pub fn new(config: CloudConfig) -> Result<Self, CasError> {
         if !config.is_logged_in() {
-            return Err(CasError::Other("Not logged in to CAS Cloud".to_string()));
+            return Err(CasError::Other("Not logged in to Cassy Cloud".to_string()));
         }
 
         Ok(Self {

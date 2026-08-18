@@ -2,7 +2,7 @@
 //!
 //! # Why this file exists
 //!
-//! CAS had a delivery path and no surfacing path. The daemon wrote a message
+//! Cassy had a delivery path and no surfacing path. The daemon wrote a message
 //! into a Claude teammate's inbox file, stamped the queue row
 //! `stage=delivered`, and stopped — nothing anywhere read that queue back and
 //! put it in front of the recipient. Every hook handler in `hooks/` touched the
@@ -77,7 +77,7 @@ fn factory_session() -> Option<String> {
 
 /// Drain and render this agent's unread mail for the turn that is starting.
 ///
-/// `None` when there is nothing to surface, when CAS is not initialised, or
+/// `None` when there is nothing to surface, when Cassy is not initialised, or
 /// when the agent has no resolvable factory identity. Every failure is silent
 /// by design: a hook that errors is a hook the harness may disable, and losing
 /// prompt capture to a queue problem would be a worse bug than the one this
@@ -211,7 +211,7 @@ mod tests {
     ///
     /// The payload literal below is the CONTRACT: it is the shape Claude Code
     /// actually sends on `UserPromptSubmit`, submitted text under the key
-    /// **`prompt`**. CAS's `HookInput` matched only `user_prompt`/`userPrompt`,
+    /// **`prompt`**. Cassy's `HookInput` matched only `user_prompt`/`userPrompt`,
     /// so on every real turn `user_prompt` deserialized to `None`,
     /// `handle_user_prompt_submit` hit its empty-prompt early return, and the
     /// surfacing block never ran — which is why `acked_via = 'hook_surfaced'`

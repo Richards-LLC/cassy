@@ -1,5 +1,5 @@
 //! `cas purge-test-fixtures` — remove the integration-suite fixture memories
-//! that leaked into real CAS stores (cas-78c8 / GH #156).
+//! that leaked into real Cassy stores (cas-78c8 / GH #156).
 //!
 //! For months the integration suite wrote its five literal fixture strings into
 //! the developer's `~/.cas/cas.db` and the cas-src project database instead of
@@ -37,11 +37,11 @@ pub struct PurgeFixturesArgs {
     #[arg(long, value_parser = ["project", "global", "both"], default_value = "both")]
     pub scope: String,
 
-    /// Override the project CAS root (default: the detected one).
+    /// Override the project Cassy root (default: the detected one).
     #[arg(long)]
     pub project_root: Option<PathBuf>,
 
-    /// Override the global CAS root (default: `~/.cas`).
+    /// Override the global Cassy root (default: `~/.cas`).
     #[arg(long)]
     pub global_root: Option<PathBuf>,
 
@@ -313,7 +313,7 @@ pub fn render_plan(plan: &DbPlan) -> String {
 
 /// Default snapshot location for `db_path`, honouring `--backup-dir`.
 ///
-/// `label` prefixes the name under `--backup-dir` because every CAS database
+/// `label` prefixes the name under `--backup-dir` because every Cassy database
 /// is called `cas.db`: without it the global snapshot and the project snapshot
 /// collide in a shared directory, and the second purge would abort on the
 /// "backup already exists" rail after the first had already deleted.
@@ -730,7 +730,7 @@ mod tests {
     #[test]
     fn backup_dir_disambiguates_two_databases_with_the_same_file_name() {
         let dir = Path::new("/tmp/backups");
-        // Every CAS database is called `cas.db`, and both of these live in a
+        // Every Cassy database is called `cas.db`, and both of these live in a
         // directory called `.cas` — only the label tells them apart.
         let a = backup_path_for("global", Path::new("/home/u/.cas/cas.db"), Some(dir));
         let b = backup_path_for("project", Path::new("/home/u/proj/.cas/cas.db"), Some(dir));

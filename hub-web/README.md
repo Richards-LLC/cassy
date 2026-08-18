@@ -1,6 +1,6 @@
-# CAS Commander web client
+# Cassy Commander web client
 
-Commander is a controller-origin SPA embedded in `cas hub`. Build it with `npm ci && npm run build`.
+Cassy Commander is a controller-origin SPA embedded in `cas hub`. Build it with `npm ci && npm run build`.
 The checked-in `dist/` is the Cargo input so ordinary Rust builds remain offline and do not require Node.
 
 Page-initiated pairing uses one explicit external relay boundary. The reviewed
@@ -9,7 +9,7 @@ Page-initiated pairing uses one explicit external relay boundary. The reviewed
 go there with credentials omitted. They never resolve against the controller
 hub or the optional static host. The invitation exchange and every authenticated
 `/v1/*` request or WebSocket remain direct browser-to-target-hub traffic. If the
-metadata is absent or is not an HTTPS origin, Commander hides the create action
+metadata is absent or is not an HTTPS origin, Cassy Commander hides the create action
 and legacy `cas hub pair` fragments remain available. Changing the relay origin
 requires a reviewed source and `dist/` rebuild rather than deployment-time HTML
 mutation.

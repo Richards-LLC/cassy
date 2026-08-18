@@ -1,6 +1,6 @@
 //! Configuration metadata registry
 //!
-//! Provides comprehensive metadata for all CAS configuration options including:
+//! Provides comprehensive metadata for all Cassy configuration options including:
 //! - Descriptions and documentation
 //! - Types and validation constraints
 //! - Default values

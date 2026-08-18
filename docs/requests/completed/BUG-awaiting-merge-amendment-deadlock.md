@@ -46,7 +46,7 @@ The original report covers merged-then-amendment-required. This variant never me
 
 The task must become actionable again for a redraw, but:
 
-- `task start` — rejected, task is `awaiting_merge` (worker attempted; CAS suggested `start` as the remedy in its own MERGE REQUIRED text, which is misleading when the merge was refused rather than pending).
+- `task start` — rejected, task is `awaiting_merge` (worker attempted; Cassy suggested `start` as the remedy in its own MERGE REQUIRED text, which is misleading when the merge was refused rather than pending).
 - `task reopen` — rejected: *"Task is already awaiting_merge (only closed or blocked tasks can be reopened)"*. The error then suggests `task update status=open`, which is also refused — see below.
 
 This is arguably the more common case than amendment-after-merge: any review that rejects work outright lands here.

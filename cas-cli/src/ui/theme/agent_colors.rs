@@ -5,7 +5,7 @@
 //!
 //! Factory agents register their Teams color at spawn time via
 //! `register_agent_color()`. Non-factory agents auto-assign from the
-//! same palette in order, ensuring visual consistency between the CAS
+//! same palette in order, ensuring visual consistency between the Cassy
 //! TUI and Claude Code's internal agent rendering.
 
 use ratatui::style::Color;

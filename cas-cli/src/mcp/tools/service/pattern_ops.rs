@@ -664,7 +664,7 @@ impl CasService {
             if !cloud_config.is_logged_in() {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    "Not logged in to CAS Cloud. Use `cas login` to authenticate.",
+                    "Not logged in to Cassy Cloud. Use `cas login` to authenticate.",
                 ));
             }
 

@@ -1,6 +1,6 @@
 //! Migration: Add `factory_session` column to `spawn_queue`.
 //!
-//! Factory hosts sharing a CAS project must not consume each other's
+//! Factory hosts sharing a Cassy project must not consume each other's
 //! spawn/shutdown requests.  The nullable column preserves legacy rows:
 //! `NULL` remains processable by any daemon.
 

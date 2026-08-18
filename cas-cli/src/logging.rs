@@ -1,4 +1,4 @@
-//! Logging infrastructure for CAS
+//! Logging infrastructure for Cassy
 //!
 //! Provides structured logging using tracing-subscriber with multiple layers:
 //! - Console layer: only when --verbose, writes to stderr
@@ -108,7 +108,7 @@ impl Drop for ActiveLogFile {
             // Do not emit through tracing while dropping tracing's own file
             // writer. That can recurse into this writer during rotation or
             // shutdown; stderr is the safe visible fallback.
-            eprintln!("ERROR: Failed to release CAS log file lock: {error}");
+            eprintln!("ERROR: Failed to release Cassy log file lock: {error}");
         }
     }
 }
@@ -214,7 +214,7 @@ impl DailyLogGuard {
                 // Keep the old append handle live so a transient rotation
                 // failure cannot discard the log record. The atomic deadline
                 // allows another attempt after the bounded check interval.
-                eprintln!("Warning: Failed to rotate CAS log to {date}: {error}");
+                eprintln!("Warning: Failed to rotate Cassy log to {date}: {error}");
             }
         }
     }

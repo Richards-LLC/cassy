@@ -15,7 +15,7 @@ green at exact public `v2.62.0`; historical `v2.61.1` failure evidence remains p
 **Live on production · User · v2.62.0**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
-one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
+one phone-friendly view of your paired Cassy machines, with live panes and deliberate, secure control.
 
 - Pair a machine once, then see its sessions and terminal output directly over your private network.
 - Once you use Commander's private HTTPS address, your browser remembers to stay on HTTPS for future
@@ -33,7 +33,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 **Live on production · Dev · v2.62.0**
 
-Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
+Was: Cassy exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
 daemon session, and bounded downstream fan-out.
 
@@ -64,7 +64,7 @@ daemon session, and bounded downstream fan-out.
 - Release acceptance covers two real machines, a 390×844 Chrome viewport, hostile browser cases,
   restart/crash truthfulness, old/new compatibility, portable x86_64 ISA, and unchanged model/session
   counts.
-- The Linux artifact uses CAS's selected ring TLS provider only. The unused AWS-LC provider (including
+- The Linux artifact uses Cassy's selected ring TLS provider only. The unused AWS-LC provider (including
   its post-quantum-capable and AVX-512 runtime-dispatch code) is no longer linked, and the exact staged
   executable must pass the strict no-EVEX audit before upload. BLAKE3 keeps its SSE through AVX2
   accelerated paths; an audited 1.8.6 build override prevents its upstream runtime-only `no_avx512`
@@ -80,7 +80,7 @@ daemon session, and bounded downstream fan-out.
       asset, tag peel, installed binary, and selected absolute app CLI are recorded.
 - [x] On stock prowl with no wrapper or stray PATH entry, rerun only macOS hub restart plus the Serve
       spot check: the upgrade row failed on the legacy receipt shape and reached HTTPS `502`; the hub
-      was restored only after an explicitly recorded manual reset of the exact CAS-owned stale mapping.
+      was restored only after an explicitly recorded manual reset of the exact Cassy-owned stale mapping.
 - [x] Publish immutable `v2.61.1` containing backward-compatible legacy-receipt parsing; do not move
       `v2.61.0` or any earlier tag.
 - [x] Rerun the stock prowl upgrade restart and require zero manual reset, stable

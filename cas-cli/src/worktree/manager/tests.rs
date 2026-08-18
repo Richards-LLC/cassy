@@ -308,7 +308,7 @@ fn test_remove_single_worker() {
 #[test]
 fn test_slugify_title() {
     assert_eq!(slugify_title("Add User Auth"), "add-user-auth");
-    assert_eq!(slugify_title("CAS v1"), "cas-v1");
+    assert_eq!(slugify_title("Cassy v1"), "cassy-v1");
     assert_eq!(slugify_title("Fix bug #123"), "fix-bug-123");
     assert_eq!(slugify_title("  Multiple   Spaces  "), "multiple-spaces");
     assert_eq!(
@@ -987,7 +987,7 @@ fn test_create_epic_branch_honors_configured_epic_base_branch() {
 
 // --- cas-006c: merge/removal dirty-check classification --------------------
 
-/// AC1: a worktree whose only dirty entry is the CAS-generated
+/// AC1: a worktree whose only dirty entry is the Cassy-generated
 /// `.husky/_/` artifact merges WITHOUT force: true.
 #[test]
 fn merge_and_cleanup_husky_artifact_only_merges_without_force() {
@@ -1143,7 +1143,7 @@ fn remove_worker_modified_tracked_file_blocks_and_names_path() {
 /// first cut of this fix made untracked-only dirt warning-only everywhere,
 /// including on the removal path, which would have silently destroyed a
 /// worker's uncommitted-but-not-yet-`git add`-ed file. `remove_worker` must
-/// still refuse on a bare untracked non-CAS file, and the file must survive
+/// still refuse on a bare untracked non-Cassy file, and the file must survive
 /// the refusal.
 #[test]
 fn remove_worker_untracked_non_cas_file_blocks_and_file_survives() {
@@ -1161,7 +1161,7 @@ fn remove_worker_untracked_non_cas_file_blocks_and_file_survives() {
 
     let err = manager
         .remove_worker("untracked-remove", false)
-        .expect_err("an untracked non-CAS file must still block removal — it would be destroyed");
+        .expect_err("an untracked non-Cassy file must still block removal — it would be destroyed");
 
     assert!(
         err.to_string().contains("new_module.rs"),
@@ -1200,7 +1200,7 @@ fn attempt_remove_worker_untracked_non_cas_file_defers_and_file_survives() {
 
 /// Same regression via `merge_and_cleanup(cleanup=true)` — the merge
 /// succeeds (the branch itself has nothing to lose), but the worktree
-/// directory removal must still refuse while an untracked non-CAS file
+/// directory removal must still refuse while an untracked non-Cassy file
 /// sits in it.
 #[test]
 fn merge_and_cleanup_untracked_non_cas_file_blocks_when_cleanup_true() {

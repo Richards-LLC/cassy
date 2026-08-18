@@ -77,5 +77,5 @@ by whether a thread ts was passed.
 
 A supervisor should spawn a worker with this as its task rather than blocking its
 own turn on `codex exec`. Blocking wastes the supervisor turn and leaves the
-operator staring at a silent session. See the CAS memory
+operator staring at a silent session. See the Cassy memory
 "Supervisor: spawn workers, don't block on codex exec shell-outs".

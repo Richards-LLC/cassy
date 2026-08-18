@@ -1,7 +1,7 @@
 //! Long-lived local helper server for external orchestration tools.
 //!
 //! This is intended to replace repeated `cas ... --json` subprocess calls with a single
-//! long-running process that reads/writes CAS stores directly.
+//! long-running process that reads/writes Cassy stores directly.
 
 mod factory;
 mod http;
@@ -69,7 +69,7 @@ pub fn serve(args: &ServeArgs, cli: &Cli) -> Result<()> {
         println!("{}", serde_json::to_string(&info)?);
         let _ = std::io::stdout().flush();
     } else {
-        println!("CAS Bridge Server");
+        println!("Cassy Bridge Server");
         println!("  Base URL: {base_url}");
         if let Some(ref t) = token {
             println!("  Token:    {t}");

@@ -59,7 +59,7 @@ Health check before routing to Grok: credits/quota available, auth valid, throug
 | `claude` | `opus` (full Anthropic ids also ok) | Supervisor docs only expose Opus for exceptional architecture/safety/rescue/challenge; Sonnet is not a normal worker lane. |
 | `grok` | `grok-4.5`, `grok-composer-2.5-fast` | From live `grok models`. Composer is a **model id on the Grok harness** — never invent `cli=cursor`. |
 
-### Effort vocabulary (CAS-wide)
+### Effort vocabulary (Cassy-wide)
 
 Accepted values: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`).
 

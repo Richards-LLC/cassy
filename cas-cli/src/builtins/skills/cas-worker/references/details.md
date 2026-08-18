@@ -16,7 +16,7 @@ See the `cas-search` skill for detailed search guidance including code symbol se
 
 ## Report / Evidence Tasks
 
-Start with sources that cannot mutate the live CAS DB:
+Start with sources that cannot mutate the live Cassy DB:
 
 - MCP task/search/coordination surfaces for task records, notes, already-surfaced messages, and searchable project context
 - `.cas/logs/*.log` for daemon and lifecycle timelines

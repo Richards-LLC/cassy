@@ -1,4 +1,4 @@
-# Spike: Drop Claude Code agent-teams enrollment for CAS factory workers
+# Spike: Drop Claude Code agent-teams enrollment for Cassy factory workers
 
 **Task:** cas-19fe (P3 spike, characterization-first)
 **Author:** mighty-stork-36 (factory worker)
@@ -9,7 +9,7 @@
 
 **DROP** (with one carve-out, see §6).
 
-Agent-teams enrollment provides exactly one load-bearing capability today: **the harness polls `~/.claude/teams/<team>/inboxes/<agent>.json` and surfaces inbox messages into the active conversation**. Every other claimed capability is either (a) implemented natively by CAS, (b) cargo-cult metadata that no caller reads, or (c) actively harmful (the SendMessage interceptor hook, the team-mode UG9 deadlock, and the per-role settings hack that only exists to work around UG9).
+Agent-teams enrollment provides exactly one load-bearing capability today: **the harness polls `~/.claude/teams/<team>/inboxes/<agent>.json` and surfaces inbox messages into the active conversation**. Every other claimed capability is either (a) implemented natively by Cassy, (b) cargo-cult metadata that no caller reads, or (c) actively harmful (the SendMessage interceptor hook, the team-mode UG9 deadlock, and the per-role settings hack that only exists to work around UG9).
 
 The one load-bearing capability is itself flaky per multiple Anthropic issues — `#23415` (closed `NOT_PLANNED` 2026-03-20, i.e. won't-fix; bug still real), `#34668` (open), `#51959` (open) — and we already have a working substitute on the codex code path (PTY-stdin injection gated on pane-readiness, see `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs:241–252`). Folding Claude workers onto the same path costs us one harness-side push channel but buys us: deletion of the SendMessage hook, deletion of the per-role settings allowlist hack (because the deadlock only exists in team-mode), exit from an experimental Anthropic surface that is being actively re-shaped, and ~700 lines of `teams.rs` reduced to a thin worktree-boundary write.
 
@@ -65,7 +65,7 @@ State legend: `OPEN` = currently open; `NOT_PLANNED` = closed without fix (Anthr
 ### context7
 Not used — agent-teams is Claude Code-internal, not a third-party library.
 
-### CAS memory (read via `mcp__cas__search`)
+### Cassy memory (read via `mcp__cas__search`)
 Repo-side memory `project_session_start_truncation` confirms the SessionStart additionalContext payload (which arrives via the team-mode harness bridge in 2.1.x) silently truncates >2KB. Memory `project_claude_code_bun_pin` documents that we pin Claude Code to 2.1.116 because newer versions added Ink Box/Text crashes in agent-teams mode. Both reinforce that agent-teams is an unstable surface for us.
 
 ---
@@ -89,24 +89,24 @@ These are the observable effects of writing `~/.claude/teams/<session>/config.js
 
 ---
 
-## 3. CAS-equivalence map
+## 3. Cassy-equivalence map
 
-For each capability above: does CAS already have a native substitute?
+For each capability above: does Cassy already have a native substitute?
 
-| Cap | CAS-native equivalent | File pointer | Status |
+| Cap | Cassy-native equivalent | File pointer | Status |
 |---|---|---|---|
 | **A** Daemon→Worker push | `mux.inject(&name, prompt)` writes to PTY stdin; gated on `pane_ready_for_injection` (5s output + grace window after first-byte) | `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs:242–252, 397–404`; `crates/cas-mux/src/pane/` | **Yes — already used for codex workers; teams branch is the divergence** |
 | **B** `SendMessage` tool | `mcp__cas__coordination action=message target=<name> message="..." summary="..."` — routes via `prompt_queue_store::enqueue_full` → daemon delivery loop | `cas-cli/src/mcp/tools/service/agent_search_system/message.rs`; `cas-cli/src/store/prompt_queue.rs` | **Yes — and is already the canonical path; the SendMessage hook just bridges agents who default to the wrong tool** |
 | **C** Per-role settings allowlist | The `permissions.allow` block exists *solely* because `--teammate-mode` triggers the team-lead escalation. Without team-mode there is no UG9, no escalation, no allowlist requirement. The factory can still use `--dangerously-skip-permissions` (already passed) + the existing `cas hook PreToolUse` for path-based guards. | `crates/cas-pty/src/pty.rs:174` (already passes `--dangerously-skip-permissions`); `pre_tool.rs:81–92` (`is_factory_agent` auto-approve already exists) | **Yes — and the workaround would become unnecessary** |
 | **D** Pane layout | Owned end-to-end by cas-mux | `crates/cas-mux/src/mux.rs`, `pane/mod.rs` | **Yes** |
 | **E** Agent visibility | Owned by `cas-cli/src/ui/factory/` (TUI/GUI/web) | `cas-cli/src/ui/factory/app/render_and_ops/`, factory daemon `worker_status` | **Yes** |
-| **F** TeammateIdle hook | `coordination.factory.worker_activity` + factory event-detector `last_state` resets surface idle/busy/wedged states; the supervisor's TUI shows them | `cas-cli/src/ui/factory/daemon/runtime/event_detector*` (observed via cas-7f57 dedup work); `mcp__cas__coordination action=worker_activity` | **Yes — partial; TaskCreated/TaskCompleted are CAS-side events already** |
-| **G** Idle notifications | Same as F — and CAS already receives idle-state events via the pane buffer scanner, not via harness emission | factory event detector | **Yes — and CAS-side detection works whereas #23415 / #51959 say harness-side does not** |
+| **F** TeammateIdle hook | `coordination.factory.worker_activity` + factory event-detector `last_state` resets surface idle/busy/wedged states; the supervisor's TUI shows them | `cas-cli/src/ui/factory/daemon/runtime/event_detector*` (observed via cas-7f57 dedup work); `mcp__cas__coordination action=worker_activity` | **Yes — partial; TaskCreated/TaskCompleted are Cassy-side events already** |
+| **G** Idle notifications | Same as F — and Cassy already receives idle-state events via the pane buffer scanner, not via harness emission | factory event detector | **Yes — and Cassy-side detection works whereas #23415 / #51959 say harness-side does not** |
 | **H** Context inheritance | Not provided by agent-teams either; n/a | — | **Tied** |
 | **I** `members[]` registry | `cas_types::Agent` table + `agent_store` | `cas-cli/src/store/agent.rs`; `mcp__cas__coordination action=agent_list` | **Yes** |
 | **J** Parent-session analytics | We don't consume this. | — | **N/a — Anthropic-side only** |
 
-**Net:** Of the ten capabilities, **CAS already has a native substitute for 9**. The tenth (parent-session analytics) is internal to Anthropic and we don't read it. The only one with a debatable gap is (A) push delivery — and CAS already runs that gap closed for codex, with empirical proof in this very repo.
+**Net:** Of the ten capabilities, **Cassy already has a native substitute for 9**. The tenth (parent-session analytics) is internal to Anthropic and we don't read it. The only one with a debatable gap is (A) push delivery — and Cassy already runs that gap closed for codex, with empirical proof in this very repo.
 
 ---
 
@@ -117,8 +117,8 @@ For each capability above: does CAS already have a native substitute?
 | **A** Daemon→Worker push (inbox-file polling) | **Nice-to-have** — not load-bearing because PTY injection is the documented fallback path used by codex factory mode and explicitly designed for in `pane_ready_for_injection` (`queue_and_events.rs:241–252`). Inbox path is preferred when it works (richer JSON, no readline-eating risk) but is broken per #23415, #51959 on the tmux backend we ship. **Cost-of-port: zero — the fallback is already there.** |
 | **B** `SendMessage` tool auto-surface | **Negative-value** — when surfaced, agents pick it over `mcp__cas__coordination` because the harness's system-reminder tells them to. The PreToolUse hook then has to deny each call, producing a phantom "tool error" in the transcript (~2-300 tokens of agent context per occurrence) and training the agent that messaging produced an error. *Removing this is a strict win.* |
 | **C** Per-role settings hack | **Negative-value** — only exists because `--teammate-mode` triggers UG9. No team-mode → no UG9 → no allowlist file required. Removing is a strict win. |
-| **D, E, I** Pane layout / agent visibility / member registry | **Cargo-cult on the harness side** — CAS owns these end-to-end. The harness-side equivalents are duplicated metadata that nothing reads. |
-| **F, G** TeammateIdle / TaskCreated / TaskCompleted hooks + idle pop-ups | **Cargo-cult** — we don't currently subscribe to these hooks (no usage in `cas hook` handler), and they fire less reliably than CAS event-detector signals. Per #23415, #51959, idle pop-ups don't even trigger on tmux backend. |
+| **D, E, I** Pane layout / agent visibility / member registry | **Cargo-cult on the harness side** — Cassy owns these end-to-end. The harness-side equivalents are duplicated metadata that nothing reads. |
+| **F, G** TeammateIdle / TaskCreated / TaskCompleted hooks + idle pop-ups | **Cargo-cult** — we don't currently subscribe to these hooks (no usage in `cas hook` handler), and they fire less reliably than Cassy event-detector signals. Per #23415, #51959, idle pop-ups don't even trigger on tmux backend. |
 | **H** Context inheritance | **N/a** — agent-teams doesn't provide this either |
 | **J** Parent-session analytics | **Cargo-cult** — Anthropic-side only |
 
@@ -146,7 +146,7 @@ These are concrete tax items that disappear if we drop enrollment:
 The `--settings <path>` argv flag itself is *not* agent-teams-specific and is a useful capability for shipping a per-worker `permissions.allow` list. But its current contents (`permissions.allow` + `PreToolUse|PermissionRequest` hooks) only exist because team-mode triggers the UG9 deadlock. Once team-mode is gone:
 
 - The factory already passes `--dangerously-skip-permissions` (`crates/cas-pty/src/pty.rs:174`), so all-tool auto-approve is in place.
-- The CAS `cas hook PreToolUse` handler already auto-approves filesystem tools for factory agents via env-var-driven `is_factory_agent` detection (`pre_tool.rs:81–92`), without needing a per-worker settings file.
+- The Cassy `cas hook PreToolUse` handler already auto-approves filesystem tools for factory agents via env-var-driven `is_factory_agent` detection (`pre_tool.rs:81–92`), without needing a per-worker settings file.
 
 **Recommendation:** keep `--settings <path>` capability in cas-pty for future use, but stop generating the per-role files as part of factory boot. They become opt-in for non-factory deployments that genuinely need a per-process permissions allowlist.
 

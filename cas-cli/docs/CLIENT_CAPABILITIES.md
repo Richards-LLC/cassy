@@ -1,6 +1,6 @@
 # Factory Protocol Client Capabilities
 
-This document describes the client capability negotiation system in the CAS Factory Protocol and provides a matrix of features supported by each client type.
+This document describes the client capability negotiation system in the Cassy Factory Protocol and provides a matrix of features supported by each client type.
 
 ## Overview
 

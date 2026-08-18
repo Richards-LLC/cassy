@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CAS Installer — install the CAS binary from GitHub Releases.
+# Cassy Installer — install the Cassy binary from GitHub Releases.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
@@ -54,7 +54,7 @@ detect_platform() {
     Linux)  os="unknown-linux-gnu" ;;
     *)
       error "Unsupported OS: $os"
-      error "CAS currently only supports Linux. macOS/Windows support is planned."
+      error "Cassy currently only supports Linux. macOS/Windows support is planned."
       exit 1
       ;;
   esac
@@ -63,7 +63,7 @@ detect_platform() {
     x86_64|amd64) arch="x86_64" ;;
     *)
       error "Unsupported architecture: $arch"
-      error "CAS currently only supports x86_64. ARM64 support is planned."
+      error "Cassy currently only supports x86_64. ARM64 support is planned."
       exit 1
       ;;
   esac
@@ -180,7 +180,7 @@ download_and_install() {
   local asset_name="cas-${PLATFORM}.tar.gz"
   local download_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
 
-  info "Downloading CAS ${VERSION} for ${PLATFORM}..."
+  info "Downloading Cassy ${VERSION} for ${PLATFORM}..."
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -238,7 +238,7 @@ verify_install() {
   fi
 
   echo ""
-  bold "CAS installed successfully!"
+  bold "Cassy installed successfully!"
   echo ""
   info "Version:  $installed_version"
   info "Location: ${INSTALL_DIR}/${BINARY_NAME}"
@@ -256,7 +256,7 @@ verify_install() {
 
 main() {
   echo ""
-  bold "CAS Installer"
+  bold "Cassy Installer"
   echo ""
 
   detect_platform

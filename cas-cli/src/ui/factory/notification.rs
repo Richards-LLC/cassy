@@ -211,7 +211,7 @@ impl Notifier {
         notification
             .summary(title)
             .body(body)
-            .appname("CAS Factory")
+            .appname("Cassy Factory")
             .timeout(Timeout::Milliseconds(5000));
 
         // Set icon and urgency (only effective on Linux)

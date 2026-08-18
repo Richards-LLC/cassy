@@ -1,4 +1,4 @@
-//! CAS - Coding Agent System
+//! Cassy - Coding Agent System
 //!
 //! A library for AI agents to build persistent memory across sessions.
 //!

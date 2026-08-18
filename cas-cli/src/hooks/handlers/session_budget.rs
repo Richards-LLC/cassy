@@ -360,7 +360,7 @@ mod tests {
         // Base: Cassy header + real supervisor guidance (protected) followed by
         // the progressive-disclosure listings (degradable).
         let protected_base = format!(
-            "## 📋 Cassy Context\n**Session:** `7d3511aa-9cf5-44d8-921d-0289bd66fe0a`\n\n{}",
+            "## 📋 CAS Context\n**Session:** `7d3511aa-9cf5-44d8-921d-0289bd66fe0a`\n\n{}",
             crate::builtins::supervisor_guidance()
         );
         let listings = format!(
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn base_split_is_lossless_and_only_marks_listing_sections_degradable() {
-        let base = "## 📋 Cassy Context\nheader line\n\n# Factory Supervisor\n\
+        let base = "## 📋 CAS Context\nheader line\n\n# Factory Supervisor\n\
                     ## Hard Rules\nnever break these\n\n\
                     ## Ready Tasks (5/5 shown)\n- cas-1234 do the thing\n";
         let segments = split_base_context(base);
@@ -522,7 +522,7 @@ mod tests {
     /// heading) and names the command that brings the detail back.
     #[test]
     fn compacted_listings_keep_counts_and_name_the_command() {
-        let base = "## 📋 Cassy Context\nheader\n\n## Ready Tasks (5/5 shown, ~100tk)\n"
+        let base = "## 📋 CAS Context\nheader\n\n## Ready Tasks (5/5 shown, ~100tk)\n"
             .to_string()
             + &(0..40)
                 .map(|i| format!("- cas-{i:04} a ready task with a long-ish title\n"))

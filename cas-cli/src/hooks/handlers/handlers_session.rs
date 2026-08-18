@@ -658,7 +658,7 @@ mod large_artifact_staging_tests {
 
         let prefix = crate::harness_policy::own_tool_prefix();
         for required in [
-            "## 📋 Cassy Context",
+            "## 📋 CAS Context",
             &format!("`{prefix}task`"),
             &format!("`{prefix}memory`"),
             &format!("`{prefix}search`"),

@@ -156,15 +156,17 @@ fn profile_for(
 ///
 /// Gating on DETECTED rather than confirmed-logged-in profiles is deliberate: a
 /// probe failure must not silently collapse the picker into a default launch.
-/// An explicit profile always wins, and pipe/script launches are left alone — a
-/// prompt there would hang or eat input meant for the provider CLI.
+/// Even one detected account needs the picker because its new-login row is the
+/// discoverable path for adding the first named profile. An explicit profile
+/// always wins, and pipe/script launches are left alone — a prompt there would
+/// hang or eat input meant for the provider CLI.
 pub(crate) fn should_prompt_for_profile(
     explicit_profile: Option<&str>,
     profiles: &[Profile],
     stdin_is_terminal: bool,
     stdout_is_terminal: bool,
 ) -> bool {
-    explicit_profile.is_none() && stdin_is_terminal && stdout_is_terminal && profiles.len() > 1
+    explicit_profile.is_none() && stdin_is_terminal && stdout_is_terminal && !profiles.is_empty()
 }
 
 /// One selectable row in the account picker.
@@ -487,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn prompting_needs_an_interactive_terminal_and_a_real_choice() {
+    fn prompting_needs_an_interactive_terminal_but_not_multiple_profiles() {
         let profiles = vec![
             Profile {
                 name: "main".to_string(),
@@ -507,7 +509,7 @@ mod tests {
         assert!(!should_prompt_for_profile(None, &profiles, false, true));
         assert!(!should_prompt_for_profile(None, &profiles, true, false));
         assert!(!should_prompt_for_profile(Some("alt"), &profiles, true, true));
-        assert!(!should_prompt_for_profile(None, &profiles[..1], true, true));
+        assert!(should_prompt_for_profile(None, &profiles[..1], true, true));
     }
 
     #[test]

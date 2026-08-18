@@ -146,6 +146,7 @@ fn bare_claude_launches_factory_without_touching_account() {
         .stderr(predicate::str::contains(
             "Factory mode requires an interactive terminal",
         ))
+        .stderr(predicate::str::contains("Choose Claude account").not())
         .stderr(predicate::str::contains("Using Claude account config:").not());
 }
 

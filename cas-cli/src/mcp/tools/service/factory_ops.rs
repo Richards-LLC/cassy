@@ -8838,7 +8838,7 @@ mod tests {
             "{warning}"
         );
         assert!(
-            warning.contains("policy default claude/sonnet/high"),
+            warning.contains("policy default claude/opus/high"),
             "{warning}"
         );
     }

@@ -466,6 +466,8 @@ EOF
     require_text "$summary_output" '47 hits / 4 misses' 'warm lane summary reports hits and misses'
     require_text "$summary_output" 'hit rate 92%' 'warm lane summary reports a hit rate'
     require_text "$summary_output" 'cache v2' 'warm lane summary names the configured backend'
+    require_text "$summary_output" 'written to the job summary' 'the lane states that its stats reached the job summary, not just the log'
+    require_text "$(<"$stats_tmp/summary.md")" '| Hit rate | 92% |' 'the job summary file itself carries the rendered table'
 
     run_summary cold "PATH=$stats_tmp/bin:$PATH" SCCACHE_GHA_ENABLED=true CAS_SCCACHE_MIN_HIT_RATE=95
     require_text "$summary_output" '::warning title=sccache cold lane::' 'a lane below the hit-rate floor is annotated, not failed'

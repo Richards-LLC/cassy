@@ -11,6 +11,11 @@
 # `set -e` and always exits 0: a broken stats probe is a reporting bug, not a
 # reason to redden a lane that compiled and tested fine.
 #
+# sccache-action's own post hook emits a bare one-line notice annotation. This
+# is not that: it renders a table into the job summary, names the backend the
+# lane actually resolved, warns on a cold or unconfigured lane, and still says
+# something useful when sccache is missing or its stats are unreadable.
+#
 # Usage: scripts/ci-sccache-summary.sh "<lane label>"
 
 set -uo pipefail
@@ -27,6 +32,18 @@ emit() {
     printf '%s\n' "$1"
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
         printf '%s\n' "$1" >>"$GITHUB_STEP_SUMMARY"
+    fi
+}
+
+# A log line alone cannot distinguish "rendered into the job summary" from
+# "printed to stdout", so state which one happened. Every caller ends with this.
+report_destination() {
+    if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        echo "sccache stats printed to the log only: GITHUB_STEP_SUMMARY is unset."
+    elif [[ -s "${GITHUB_STEP_SUMMARY}" ]]; then
+        echo "sccache stats written to the job summary ($(wc -c <"$GITHUB_STEP_SUMMARY" | tr -d '[:space:]') bytes at $GITHUB_STEP_SUMMARY)."
+    else
+        echo "sccache stats could not be written to the job summary at $GITHUB_STEP_SUMMARY."
     fi
 }
 
@@ -47,6 +64,7 @@ report_unavailable() {
     emit ""
     emit "Backend: $(backend_label)"
     echo "::warning title=sccache stats unavailable::${lane}: $1 — this lane compiled without measured cache reuse."
+    report_destination
     exit 0
 }
 
@@ -143,4 +161,5 @@ elif [[ -n "$rate_value" && "$requests" != "?" ]] \
     echo "::warning title=sccache cold lane::${lane} hit rate ${rate} is below ${min_hit_rate}% over ${requests} compile requests; this lane paid a cold/seed compile penalty."
 fi
 
+report_destination
 exit 0

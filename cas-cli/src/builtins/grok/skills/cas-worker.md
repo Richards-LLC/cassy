@@ -94,7 +94,8 @@ cas__coordination action=message target=supervisor \
 - **Use the literal string `supervisor` as `target`** and include both `summary` and `message`.
 - **You may ONLY message the supervisor.** Ask them to relay peer requests.
 - Use `cas__coordination action=message`, not built-in `SendMessage`.
-- Use task notes for ongoing updates (`note_type=progress|blocker|decision|discovery`); the supervisor sees these in the TUI. Message them when you complete a task or need help.
+- Put detail in task notes (`note_type=progress|blocker|decision|discovery`); the supervisor reads them in the TUI. Message them when you finish or need help.
+- **Pane output is a triage line, not a report.** Answer first, then 1-2 bullets that read at a glance — the note already holds the detail. Blockers and merge requests stay complete.
 
 ## Blockers
 
@@ -114,20 +115,16 @@ For env-reading code, check the clean-CI shape with `make -C cas-cli test-clean-
 
 ## References
 
-Open only what the situation needs:
-
-- [Reminder discipline](cas-supervisor/references/reminders.md) for bounded checkpoint and recovery timing.
-
 - [close-gate.md](cas-worker/references/close-gate.md) before a deep-task close (six checks, review/P0 handling, simplification).
 - [recovery.md](cas-worker/references/recovery.md) for errors, verification jail, reassignment, worktree/MCP trouble, exhaustion, or a silent supervisor.
 - [discipline.md](cas-worker/references/discipline.md) before >2-minute work; backgrounding, test-loop, checkpoint, and reporting-style rules.
-- [reminders.md](../cas-supervisor/references/reminders.md) for the shared push-first reminder decision table and cleanup contract.
+- [reminders.md](../cas-supervisor/references/reminders.md) for bounded checkpoint/recovery timing, the shared push-first decision table, and the cleanup contract.
 - [details.md](cas-worker/references/details.md) for exact fields/actions, sync, production pulls, and store-access details.
 
 ## Context budgeting
 
 Three layers (`project_session_start_truncation.md`):
-- **Immutable Core** — skill body; 12 KB component ceiling (`test_worker_guidance_under_12kb`). The *assembled* payload has a tighter 9 KB budget (`SESSION_START_BUDGET_BYTES`, cas-b114): over it, degradable listings (ready tasks, memories, skills) collapse deterministically to a heading plus the command that reprints them, while role guidance is protected and emitted verbatim. Nothing is cut mid-sentence.
+- **Immutable Core** — skill body; 12 KB component ceiling (`test_worker_guidance_under_12kb`). The *assembled* payload has a tighter 9 KB budget (`SESSION_START_BUDGET_BYTES`, cas-b114): over it, degradable listings collapse to a heading plus their reprint command while role guidance stays verbatim. Nothing is cut mid-sentence.
 - **Task Context** — EPIC/task/memories, on demand.
 - **Ephemeral** — outputs, transcript; expendable.
 

@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- **`cas init` stops scaffolding your home directory by accident.** Run in `$HOME` (or at the filesystem root) it now names what it would create and asks before writing anything; non-interactive runs refuse outright and point at `--allow-non-project` for automation that means it. Project directories, including non-git ones, are unaffected.
+
+### Changed
+- **Signing in to the cloud is a once-per-machine act.** Credentials live in `~/.cas/cloud.json`, so `cas login` works from any directory and every project on the machine is signed in; `cas logout` signs all of them out.
+- **Browser login no longer produces a broken approval link,** and ordinary polling survives a rate limit instead of ending the login with a server-error message.
+
 ## [2.72.0] - 2026-08-17
 
 ### Added

@@ -880,6 +880,8 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
         let mut fmt = Formatter::stdout(&mut out, theme);
         fmt.write_raw("  ")?;
         fmt.success("Logged in to CAS Cloud")?;
+        fmt.write_muted("  Scope: this machine — every CAS project here is signed in")?;
+        fmt.newline()?;
     }
 
     Ok(())
@@ -1172,6 +1174,8 @@ fn print_login_success(fmt: &mut Formatter, email: Option<&str>) -> io::Result<(
         fmt.write_primary(email)?;
         fmt.newline()?;
     }
+    fmt.write_muted("  Scope:  this machine — every CAS project here is signed in")?;
+    fmt.newline()?;
 
     fmt.newline()?;
     fmt.write_muted("  Quick start:")?;

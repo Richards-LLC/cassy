@@ -28,7 +28,7 @@ fn requester_account_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
 
 /// Resolve and validate an explicit Claude config directory before its spawn
 /// request reaches the daemon.  A partial profile otherwise starts a PTY that
-/// cannot load CAS' worker contract, then fails sixty seconds later with no
+/// cannot load Cassy' worker contract, then fails sixty seconds later with no
 /// actionable cause (GH #270).
 fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
     let trimmed = raw.trim();
@@ -730,7 +730,7 @@ fn format_assigned_task_info(
 /// Render the undelivered-lifecycle-relay banner for `worker_status`
 /// (cas-7787, GH #160).
 ///
-/// Each row is a moment CAS told the supervisor a lane was parked behind them
+/// Each row is a moment Cassy told the supervisor a lane was parked behind them
 /// and the message did not arrive. In the reported session four of these went
 /// completely unrecorded, so the supervisor's `worker_status` looked healthy
 /// while three finished lanes waited on a human to notice.
@@ -873,7 +873,7 @@ fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String
 ///    a branch in this project's task store. Any failure is terminal.
 /// 2. An explicit branch is used as-is.
 /// 3. The current session's pinned/default epic is used only after its
-///    `project_dir` is proven to match this CAS root's project.
+///    `project_dir` is proven to match this Cassy root's project.
 /// 4. With no focused epic, use the local repository's default branch.
 ///
 /// There is deliberately no "first ready/in-progress epic" fallback: task
@@ -2487,9 +2487,9 @@ impl CasService {
                     .unwrap_or(false)
                     || in_progress_assignees.contains(agent.name.as_str())
                     || in_progress_assignees.contains(agent.id.as_str());
-                // cas-a653: hook-less harnesses (Codex) only emit CAS events
+                // cas-a653: hook-less harnesses (Codex) only emit Cassy events
                 // on their own MCP calls — fold in the transcript's own mtime
-                // so this doesn't freeze at the age of the last CAS call
+                // so this doesn't freeze at the age of the last Cassy call
                 // while the worker keeps working via exec_command/apply_patch.
                 // Reuses the same transcript path already resolved above for
                 // context_info/in_flight_tool_call, and the same
@@ -2838,7 +2838,7 @@ impl CasService {
         // cas-a568: `worker_activity` is the supervisor's corroborating view
         // for worker_status's STALLED verdict, so it must consume the same
         // corrected signal. In particular, Codex tool calls update the rollout
-        // but usually do not emit a CAS event. Resolve the same concrete path
+        // but usually do not emit a Cassy event. Resolve the same concrete path
         // as worker_status (including cas-fa69's Resolved-only Codex rule) and
         // add a transcript-backed row only when it is fresher than that
         // worker's event-store signal. This augments the event feed rather
@@ -2963,7 +2963,7 @@ impl CasService {
     ///    with it) instead of reading the dead pre-reset file forever.
     ///
     /// If step 4 does not land inside the window the call returns an **error**
-    /// naming exactly what was and was not observed. A reset CAS cannot prove
+    /// naming exactly what was and was not observed. A reset Cassy cannot prove
     /// is never reported as a success.
     pub(super) async fn factory_clear_context(
         &self,
@@ -3031,7 +3031,7 @@ impl CasService {
                         ErrorCode::INVALID_PARAMS,
                         format!(
                             "No live agent named '{target}' — cannot reset the context of an \
-                             agent CAS cannot see. Check `worker_status`."
+                             agent Cassy cannot see. Check `worker_status`."
                         ),
                     )
                 })?;
@@ -3057,7 +3057,7 @@ impl CasService {
             .unwrap_or_else(|_| "unknown".to_string());
 
         // Pre-flight every recipient BEFORE queueing anything: an unsupported
-        // harness or an unlocatable transcript directory means CAS could never
+        // harness or an unlocatable transcript directory means Cassy could never
         // confirm the reset, so it must not claim one.
         struct PendingReset {
             agent: cas_types::Agent,
@@ -3079,7 +3079,7 @@ impl CasService {
             }
             let Some(clone_path) = agent.metadata.get("clone_path").cloned() else {
                 refusals.push(format!(
-                    "{}: no clone_path recorded for this worker, so CAS cannot locate its session \
+                    "{}: no clone_path recorded for this worker, so Cassy cannot locate its session \
                      transcripts and could not verify a reset. Refusing rather than reporting an \
                      unverifiable success.",
                     agent.name
@@ -3089,7 +3089,7 @@ impl CasService {
             let dirs = reset::transcript_dirs_for(&clone_path);
             if dirs.is_empty() {
                 refusals.push(format!(
-                    "{}: no Claude project directory found for {clone_path} under {}. CAS could \
+                    "{}: no Claude project directory found for {clone_path} under {}. Cassy could \
                      not verify a reset, so it did not attempt one.",
                     agent.name,
                     reset::claude_config_roots()
@@ -3158,7 +3158,7 @@ impl CasService {
                             .cc_session_id
                             .clone()
                             .unwrap_or_else(|| item.agent.id.clone());
-                        // Point CAS's transcript resolution at the live session
+                        // Point Cassy's transcript resolution at the live session
                         // so worker_status/worker_activity/is-wedged stop
                         // reading the pre-reset file (AC4).
                         let mut updated = item.agent.clone();
@@ -3779,7 +3779,7 @@ impl CasService {
         }
         if !host_registry_pids.is_empty() {
             let db = crate::store::known_repos::host_cas_dir().join("cas.db");
-            out.push_str("\nProcesses with the host registry DB/WAL/SHM open (review for orphaned CAS children):\n");
+            out.push_str("\nProcesses with the host registry DB/WAL/SHM open (review for orphaned Cassy children):\n");
             for pid in &host_registry_pids {
                 let command = process_command_line(*pid);
                 out.push_str(&format!("  - PID {pid}: {command}\n"));
@@ -4276,7 +4276,7 @@ impl CasService {
             req.force.unwrap_or(false) && req.dry_run == Some(false);
 
         // cas-b7dd (GH #88): orphan processes use that same double gate, and
-        // for a stronger reason — this path sends SIGKILL to processes CAS did
+        // for a stronger reason — this path sends SIGKILL to processes Cassy did
         // not start. A killed dev server cannot be un-killed, so `force=true`
         // alone stays a preview here exactly as it does for warm caches.
         // The scan is re-run now rather than reusing the report's snapshot, and
@@ -4364,7 +4364,7 @@ impl CasService {
             ));
         }
         // Always show WHY a candidate was left alone — a silently filtered
-        // orphan is indistinguishable from one CAS never saw, and that is the
+        // orphan is indistinguishable from one Cassy never saw, and that is the
         // difference between "the port is free" and a wasted morning.
         if !orphan_processes.is_empty() {
             output.push_str(&orphan_processes.render());
@@ -5640,13 +5640,13 @@ pub(crate) fn last_worker_activity_secs(
 ///
 /// HISTORY: cas-a653 originally gated this on
 /// `!HarnessCapabilities::supports_hooks` (Codex only), reasoning that
-/// hook-capable harnesses (Claude, Grok) always get a CAS event recorded
+/// hook-capable harnesses (Claude, Grok) always get a Cassy event recorded
 /// for their real work. That reasoning was falsified live, on this
 /// factory, on the shipped binary: Claude worker `interrupt-fixer` was
 /// reported `last activity: 401s ago ⚠ STALLED` at 2026-07-27T21:29:20Z
 /// while its transcript's last record was 21:29:18.757Z — two seconds
 /// earlier — with tool calls in every single minute since 21:22 (cas-c2c2).
-/// The real defect was never "Codex has no hooks"; it's that CAS's
+/// The real defect was never "Codex has no hooks"; it's that Cassy's
 /// **event store** only gets a row for the specific tool-use classes its
 /// hooks are wired to translate into `WorkerFileEdited`/`WorkerGitCommit`/
 /// subagent events (see `hooks::handlers`). A worker whose whole stretch of
@@ -5848,7 +5848,7 @@ fn format_assigned_unstarted_status(
 }
 
 /// cas-e728 (GH #105): does this harness publish an authoritative turn-start
-/// artifact CAS can read?
+/// artifact Cassy can read?
 ///
 /// All supported harnesses now publish a readable turn-start artifact:
 /// Codex and Grok use rollout/signals records, while Claude uses top-level
@@ -5874,7 +5874,7 @@ const WORKER_INBOX_PEEK_LIMIT: usize = 200;
 /// cas-f08d (GH #147): a live, not-yet-due reminder the worker is waiting on.
 ///
 /// This is the receipt for the wait pattern every worker is told to follow —
-/// act once, arm a reminder, end the turn — and it is the only evidence CAS
+/// act once, arm a reminder, end the turn — and it is the only evidence Cassy
 /// has that a silent Claude worker went quiet ON PURPOSE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingReminderWait {
@@ -6060,7 +6060,7 @@ fn format_due_in(secs: i64) -> String {
 /// cas-e728 (GH #105): the honest replacement for `⚠ STALLED` on a
 /// turn-unobservable worker that is still heartbeating.
 ///
-/// States only what is known. CAS cannot see Claude turn boundaries at all
+/// States only what is known. Cassy cannot see Claude turn boundaries at all
 /// (the same row says `harness turn: unobserved` two lines down), so this must
 /// not assert that no turn is running — a worker twenty minutes into a
 /// `cargo build` would read as free, and the supervisor's natural response is
@@ -6076,15 +6076,15 @@ fn format_between_turns_status(
     };
     match last_activity {
         Some((secs, phase)) => format!(
-            "\n    between turns since {secs}s ago (last: {phase}); {mail}. Turn-based worker: CAS cannot see Claude turn boundaries, so quiet is not evidence either way"
+            "\n    between turns since {secs}s ago (last: {phase}); {mail}. Turn-based worker: Cassy cannot see Claude turn boundaries, so quiet is not evidence either way"
         ),
         None => format!(
-            "\n    between turns: no activity in last 10m; {mail}. Turn-based worker: CAS cannot see Claude turn boundaries, so quiet is not evidence either way"
+            "\n    between turns: no activity in last 10m; {mail}. Turn-based worker: Cassy cannot see Claude turn boundaries, so quiet is not evidence either way"
         ),
     }
 }
 
-/// cas-e728 (GH #105): the real stall signal for a harness whose turns CAS
+/// cas-e728 (GH #105): the real stall signal for a harness whose turns Cassy
 /// cannot observe.
 ///
 /// Silence alone proves nothing about a Claude worker — but silence *after it
@@ -6639,11 +6639,11 @@ fn resolve_grok_transcript(
 // cas-c655: Codex rollout resolution.
 //
 // Codex does NOT use Claude's `~/.claude/projects/<escaped-cwd>/<session>.jsonl`
-// layout. Factory workers get a CAS session id of the form
+// layout. Factory workers get a Cassy session id of the form
 // `codex-<name>-<uuid>` (see `PtyConfig::codex`), but on-disk rollouts live at:
 //   ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<rollout-uuid>.jsonl
 // with `session_meta.payload.cwd` equal to the worker's clone_path and a
-// different rollout UUID than the CAS session id. Matching is therefore by
+// different rollout UUID than the Cassy session id. Matching is therefore by
 // cwd (primary) and by rollout UUID substring in the filename (secondary —
 // useful only when the caller already knows the rollout id).
 // ---------------------------------------------------------------------------
@@ -7221,7 +7221,7 @@ fn format_context_usage(usage: ContextUsage) -> String {
 /// worker is still heads-down rather than merely having an old checkpoint.
 ///
 /// No equivalent automatic state is claimed for Codex/Grok because those
-/// harnesses do not publish a PreCompact event to CAS.
+/// harnesses do not publish a PreCompact event to Cassy.
 pub(crate) fn format_context_checkpoint_status(
     metadata: &std::collections::HashMap<String, String>,
 ) -> String {
@@ -7802,7 +7802,7 @@ mod spawn_lifecycle_tests {
             Some("quiet-lynx-3"),
             SpawnLifecycleState::Failed,
             200,
-            Some("did not register with CAS within 120 seconds"),
+            Some("did not register with Cassy within 120 seconds"),
         )]);
         assert!(out.contains("request 417"), "{out}");
         assert!(out.contains("quiet-lynx-3"), "{out}");
@@ -9260,7 +9260,7 @@ effort = "high"
         assert!(rendered.contains("cas-unstarted"), "{rendered}");
     }
 
-    /// cas-e728 review follow-up: the row must not assert something CAS cannot
+    /// cas-e728 review follow-up: the row must not assert something Cassy cannot
     /// know. The same row says `harness turn: unobserved`; claiming "no turn is
     /// in flight" beside it would send a supervisor to reset a worker that is
     /// twenty minutes into a build.
@@ -9857,7 +9857,7 @@ effort = "high"
 
     // --- cas-a653 / cas-c2c2: last_worker_activity_secs_with_transcript -----
     //
-    // Reproduction of the reported defect: a worker whose last CAS event is
+    // Reproduction of the reported defect: a worker whose last Cassy event is
     // far in the past (frozen clock) but whose transcript is being actively
     // written. Before cas-a653, `worker_status` fed ONLY the event-store age
     // into the "last activity" line — indistinguishable from a genuinely
@@ -9867,7 +9867,7 @@ effort = "high"
     // see the superseding-tests block further down for why "hook-capable"
     // was never the right gate.
 
-    /// Codex, no CAS events at all, but a transcript that was JUST written —
+    /// Codex, no Cassy events at all, but a transcript that was JUST written —
     /// must report the transcript's freshness, not `None`. This is the
     /// literal reported symptom: "last activity: none / frozen" while the
     /// worker's rollout kept recording tool calls every minute.
@@ -9889,9 +9889,9 @@ effort = "high"
         assert_eq!(phase, "activity");
     }
 
-    /// Codex with a STALE CAS event (e.g. 20 minutes old, well past any
+    /// Codex with a STALE Cassy event (e.g. 20 minutes old, well past any
     /// stall threshold) but a transcript mtime of just a few seconds ago —
-    /// the exact "heads-down between CAS calls" shape from the ozer repro.
+    /// the exact "heads-down between Cassy calls" shape from the ozer repro.
     /// The fresher (transcript) signal must win, not the frozen event age.
     #[test]
     fn last_worker_activity_with_transcript_codex_prefers_fresher_transcript_over_stale_event() {
@@ -9910,12 +9910,12 @@ effort = "high"
         .expect("must resolve an age");
         assert!(
             elapsed < 60,
-            "fresher transcript mtime must win over a 20m-stale CAS event; got {elapsed}s"
+            "fresher transcript mtime must win over a 20m-stale Cassy event; got {elapsed}s"
         );
         assert_eq!(phase, "activity");
     }
 
-    /// Codex with a FRESH CAS event and a stale transcript — the event-store
+    /// Codex with a FRESH Cassy event and a stale transcript — the event-store
     /// signal is still the fresher one here, so it (and its richer phase
     /// label) must win, not be discarded.
     #[test]
@@ -9976,7 +9976,7 @@ effort = "high"
     // stale age even with a fresh transcript present). That assumption was
     // falsified live on this factory: a Claude worker (`interrupt-fixer`,
     // hooks fully wired) was reported `⚠ STALLED` at 401s while its own
-    // transcript had a record 2 seconds prior — because the CAS event store
+    // transcript had a record 2 seconds prior — because the Cassy event store
     // only gets a row when a hook translates a SPECIFIC tool-use shape
     // (Edit/Write → WorkerFileEdited, git commit → WorkerGitCommit, ...)
     // into an event; a worker whose whole stretch is e.g. `Bash`-driving a
@@ -9987,14 +9987,14 @@ effort = "high"
     // These two tests are intentionally REWRITTEN (not deleted) to assert
     // the new, correct behavior: transcript freshness is now folded in for
     // every harness, and a fresh transcript must be able to rescue a
-    // stale/absent CAS-event reading for Claude and Grok exactly as it
+    // stale/absent Cassy-event reading for Claude and Grok exactly as it
     // already did for Codex. The old assertions (`is_none()` / stale-wins)
     // would now be WRONG, not merely obsolete — keeping them would silently
     // pin the cas-c2c2 defect back in place.
 
     /// Was `last_worker_activity_with_transcript_claude_ignores_fresh_transcript`
     /// (asserted `is_none()`). Now asserts the opposite on purpose: this is
-    /// the literal shape of the interrupt-fixer incident — no CAS event
+    /// the literal shape of the interrupt-fixer incident — no Cassy event
     /// at all (its Bash-loop work never touched the event store), but a
     /// transcript being written right now. Must surface that freshness.
     #[test]
@@ -10008,7 +10008,7 @@ effort = "high"
         )
         .expect(
             "cas-c2c2: a fresh transcript must rescue a Claude worker with zero \
-             CAS events, not report None (the interrupt-fixer STALLED-at-401s symptom)",
+             Cassy events, not report None (the interrupt-fixer STALLED-at-401s symptom)",
         );
         assert!(elapsed <= 5, "expected a near-zero age, got {elapsed}s");
         assert_eq!(phase, "activity");
@@ -10032,7 +10032,7 @@ effort = "high"
         assert_eq!(phase, "activity");
     }
 
-    /// Direct repro of the reported incident shape for Claude: a CAS event
+    /// Direct repro of the reported incident shape for Claude: a Cassy event
     /// far in the past (well past any stall threshold) alongside a
     /// transcript mtime of just a few seconds ago. The fresher signal must
     /// win — this is what makes cas-c2c2's fix (AC#2) actually true.
@@ -10053,7 +10053,7 @@ effort = "high"
         .expect("must resolve an age");
         assert!(
             elapsed < 60,
-            "fresher transcript mtime must win over a 401s-stale CAS event \
+            "fresher transcript mtime must win over a 401s-stale Cassy event \
              (the exact interrupt-fixer reading); got {elapsed}s"
         );
         assert_eq!(phase, "activity");
@@ -10531,7 +10531,7 @@ effort = "high"
         let rel =
             "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
         let (_tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
-        // CAS session id is NOT the rollout UUID — resolution must use cwd.
+        // Cassy session id is NOT the rollout UUID — resolution must use cwd.
         let cas_session = "codex-worker-android-2f828ac6-deadbeefcafe";
         let got = resolve_transcript(
             Some(&sessions),
@@ -10890,7 +10890,7 @@ effort = "high"
         .expect("rollout mtime is activity evidence");
         assert!(
             age <= 5,
-            "fresh rollout must beat the stale CAS event: {age}"
+            "fresh rollout must beat the stale Cassy event: {age}"
         );
 
         let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
@@ -11794,7 +11794,7 @@ effort = "high"
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(dir)
             .output()
             .unwrap();
@@ -11862,7 +11862,7 @@ effort = "high"
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&project)
             .output()
             .unwrap();
@@ -11933,7 +11933,7 @@ effort = "high"
         let path = repo.path();
         run_git_ok(path, &["init", "-b", "main"]);
         run_git_ok(path, &["config", "user.email", "test@cas"]);
-        run_git_ok(path, &["config", "user.name", "CAS Test"]);
+        run_git_ok(path, &["config", "user.name", "Cassy Test"]);
 
         std::fs::write(path.join("shared.txt"), "base\n").unwrap();
         run_git_ok(path, &["add", "."]);

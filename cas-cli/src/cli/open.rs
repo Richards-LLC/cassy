@@ -27,7 +27,7 @@ pub struct ProjectEntry {
     pub name: String,
     /// Full path to the project
     pub path: PathBuf,
-    /// Whether a CAS factory session is currently running for this project
+    /// Whether a Cassy factory session is currently running for this project
     pub has_running_session: bool,
 }
 

@@ -522,7 +522,7 @@ pub(crate) fn verify_isolated_worker_branch(
 pub struct FactoryApp {
     /// The terminal multiplexer
     pub mux: Mux,
-    /// CAS directory for data loading
+    /// Cassy directory for data loading
     cas_dir: PathBuf,
     /// Cached store handles (avoid re-opening on every 2s refresh)
     director_stores: Option<DirectorStores>,
@@ -598,11 +598,11 @@ pub struct FactoryApp {
     pub feedback_category: super::input::FeedbackCategory,
     /// Feedback text buffer
     pub feedback_buffer: String,
-    /// Last CAS data refresh time
+    /// Last Cassy data refresh time
     last_refresh: Instant,
-    /// Refresh interval for CAS data
+    /// Refresh interval for Cassy data
     refresh_interval: Duration,
-    /// Last observed CAS DB file fingerprint used for cheap change detection
+    /// Last observed Cassy DB file fingerprint used for cheap change detection
     last_db_fingerprint: Option<CasDbFingerprint>,
     /// Last git refresh time
     last_git_refresh: Instant,
@@ -652,7 +652,7 @@ pub struct FactoryApp {
     pane_grid: PaneGrid,
     /// Currently selected pane in pane select mode
     selected_pane: Option<String>,
-    /// Event detector for CAS state changes
+    /// Event detector for Cassy state changes
     event_detector: DirectorEventDetector,
     /// Notification manager
     notifier: Notifier,
@@ -918,7 +918,7 @@ impl FactoryApp {
         }
     }
 
-    /// Check if we should refresh CAS data
+    /// Check if we should refresh Cassy data
     pub fn should_refresh(&self) -> bool {
         self.last_refresh.elapsed() >= self.refresh_interval
     }
@@ -1146,7 +1146,7 @@ impl FactoryApp {
         self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf()
     }
 
-    /// Refresh CAS data from stores and detect state changes
+    /// Refresh Cassy data from stores and detect state changes
     ///
     /// Returns the detected events. Prompt generation happens later, at
     /// delivery time, against a fresh snapshot (see
@@ -1836,7 +1836,7 @@ impl FactoryApp {
         &self.director_data
     }
 
-    /// Get the CAS directory path
+    /// Get the Cassy directory path
     pub fn cas_dir(&self) -> &std::path::Path {
         &self.cas_dir
     }
@@ -2081,7 +2081,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
         // but its stdout is ignored, so the SessionStart-additionalContext
         // bundle injection Claude relies on does NOT reach a Grok
         // supervisor (see EPIC cas-8888 delta #2) — the real fix (injecting
-        // the CAS context bundle at launch via --agents/--rules/
+        // the Cassy context bundle at launch via --agents/--rules/
         // --system-prompt-override) is Phase 2's job (PtyConfig::grok).
         // Until then, queue an explicit startup prompt the same shape as
         // Codex's (no-hooks-context-injection posture) but naming Grok's
@@ -2255,7 +2255,7 @@ pub(crate) fn queue_codex_worker_intro_prompt(
         // spawnable yet.
         cas_mux::SupervisorCli::Grok => {
             let prompt = format!(
-                "You are a CAS factory worker ({worker_name}).\n\
+                "You are a Cassy factory worker ({worker_name}).\n\
                  \n\
                  Check your assigned tasks: `cas__task action=mine`\n\
                  \n\
@@ -5336,7 +5336,7 @@ mod spawn_isolation_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(dir)
             .output()
             .unwrap();

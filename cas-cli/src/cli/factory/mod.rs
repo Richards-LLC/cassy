@@ -272,7 +272,7 @@ pub struct FactoryArgs {
     #[arg(skip)]
     pub supervisor_cli_explicit: bool,
 
-    /// Disable cloud phone-home (push factory state to CAS Cloud)
+    /// Disable cloud phone-home (push factory state to Cassy Cloud)
     #[arg(long, global = true)]
     pub no_phone_home: bool,
 
@@ -378,7 +378,7 @@ pub enum FactoryCommands {
 
     /// Run the bounded unified factory readiness report without spawning workers
     Preflight {
-        /// Explicit CAS root (.cas directory)
+        /// Explicit Cassy root (.cas directory)
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -480,7 +480,7 @@ pub enum FactoryCommands {
         attachable_only: bool,
     },
 
-    /// Show agent status for a session (reads CAS AgentStore; does not attach)
+    /// Show agent status for a session (reads Cassy AgentStore; does not attach)
     Agents {
         /// Session name (default: most recent attachable session for this project)
         #[arg(long)]
@@ -494,12 +494,12 @@ pub enum FactoryCommands {
         #[arg(long)]
         all: bool,
 
-        /// Explicit CAS root (.cas directory) to use instead of resolving from project_dir/session metadata
+        /// Explicit Cassy root (.cas directory) to use instead of resolving from project_dir/session metadata
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
 
-    /// Show recent activity events for a session (reads CAS EventStore)
+    /// Show recent activity events for a session (reads Cassy EventStore)
     Activity {
         /// Session name (default: most recent attachable session for this project)
         #[arg(long)]
@@ -517,7 +517,7 @@ pub enum FactoryCommands {
         #[arg(long, default_value = "50")]
         limit: usize,
 
-        /// Explicit CAS root (.cas directory) to use instead of resolving from project_dir/session metadata
+        /// Explicit Cassy root (.cas directory) to use instead of resolving from project_dir/session metadata
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -536,7 +536,7 @@ pub enum FactoryCommands {
         #[arg(long, default_value = "20")]
         activity_limit: usize,
 
-        /// Explicit CAS root (.cas directory) to use instead of resolving from project_dir/session metadata
+        /// Explicit Cassy root (.cas directory) to use instead of resolving from project_dir/session metadata
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -586,7 +586,7 @@ pub enum FactoryCommands {
         #[arg(long, default_value = "5000")]
         timeout_ms: u64,
 
-        /// Explicit CAS root (.cas directory) to use instead of resolving from project_dir/session metadata
+        /// Explicit Cassy root (.cas directory) to use instead of resolving from project_dir/session metadata
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -607,7 +607,7 @@ pub enum FactoryCommands {
         #[arg(long)]
         jsonl: std::path::PathBuf,
 
-        /// Disposable CAS root to use for the probe; defaults to a temp root
+        /// Disposable Cassy root to use for the probe; defaults to a temp root
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
 
@@ -615,7 +615,7 @@ pub enum FactoryCommands {
         #[arg(long)]
         artifact_root: Option<std::path::PathBuf>,
 
-        /// Explicitly permit using the active parent CAS root
+        /// Explicitly permit using the active parent Cassy root
         #[arg(long)]
         allow_active_cas_root: bool,
 
@@ -676,7 +676,7 @@ pub enum FactoryCommands {
         #[arg(long)]
         json: bool,
 
-        /// Explicit CAS root (.cas directory) to use instead of the default
+        /// Explicit Cassy root (.cas directory) to use instead of the default
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -690,7 +690,7 @@ pub enum FactoryCommands {
         #[arg(long, default_value = "20")]
         tail: usize,
 
-        /// Explicit CAS root
+        /// Explicit Cassy root
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -716,7 +716,7 @@ pub enum FactoryCommands {
         #[arg(long)]
         force: bool,
 
-        /// Explicit CAS root
+        /// Explicit Cassy root
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
     },
@@ -1343,7 +1343,7 @@ pub fn execute_attach(args: &AttachArgs) -> Result<()> {
     attach(name)
 }
 
-/// Validate CAS is initialized in the current project
+/// Validate Cassy is initialized in the current project
 fn validate_cas_root(
     cwd: &std::path::Path,
     cas_root: Option<&std::path::Path>,
@@ -1367,8 +1367,8 @@ fn validate_cas_root(
 
             if !is_in_cwd && !is_git_root_ancestor {
                 bail!(
-                    "CAS is not initialized in this project.\n\n\
-                    Found CAS at: {}\n\
+                    "Cassy is not initialized in this project.\n\n\
+                    Found Cassy at: {}\n\
                     Current directory: {}\n\n\
                     Run 'cas init' in this project first.",
                     root.display(),
@@ -1379,9 +1379,9 @@ fn validate_cas_root(
         }
         None => {
             bail!(
-                "CAS is not initialized in this directory.\n\n\
-                Factory mode requires CAS for task coordination.\n\n\
-                Run 'cas init' first to initialize CAS."
+                "Cassy is not initialized in this directory.\n\n\
+                Factory mode requires Cassy for task coordination.\n\n\
+                Run 'cas init' first to initialize Cassy."
             );
         }
     }
@@ -1395,7 +1395,7 @@ fn noninteractive_factory_hints(
     let mut hints = Vec::new();
 
     if validate_cas_root(cwd, cas_root).is_err() {
-        hints.push("Initialize CAS first with `cas doctor --fix` (or `cas init`).".to_string());
+        hints.push("Initialize Cassy first with `cas doctor --fix` (or `cas init`).".to_string());
     }
 
     if args.workers > 0 && !args.no_worktrees {
@@ -1505,7 +1505,7 @@ fn preflight_factory_launch(
     let resolved_cas_root = match validate_cas_root(cwd, cas_root) {
         Ok(path) => Some(path),
         Err(_) => {
-            failures.push("CAS is not initialized in this project. Run `cas init`.".to_string());
+            failures.push("Cassy is not initialized in this project. Run `cas init`.".to_string());
             missing_cas = true;
             None
         }
@@ -1652,7 +1652,7 @@ fn preflight_factory_launch(
                 missing_claude_commit = true;
             } else {
                 notices.push(
-                    ".claude/ directory is not committed. Commit it before spawning workers: git add .claude/ CLAUDE.md .mcp.json .gitignore && git commit -m \"Configure CAS\""
+                    ".claude/ directory is not committed. Commit it before spawning workers: git add .claude/ CLAUDE.md .mcp.json .gitignore && git commit -m \"Configure Cassy\""
                         .to_string(),
                 );
             }
@@ -1709,7 +1709,7 @@ fn preflight_factory_launch(
         }
         if missing_claude_commit {
             steps.push("git add .claude/ CLAUDE.md .mcp.json .gitignore".to_string());
-            steps.push("git commit -m \"Configure CAS\"".to_string());
+            steps.push("git commit -m \"Configure Cassy\"".to_string());
         }
         if missing_mcp_commit && !missing_claude_commit {
             steps.push("git add .mcp.json".to_string());

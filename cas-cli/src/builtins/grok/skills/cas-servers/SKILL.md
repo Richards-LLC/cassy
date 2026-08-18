@@ -11,14 +11,14 @@ friends are the ambient-orphan pattern: nothing records that the process exists,
 knows which task it belongs to, and nothing can stop it except hunting through `ps` and
 `lsof`.
 
-Start it through CAS instead:
+Start it through Cassy instead:
 
 ```
 cas__coordination action=server_start command="npm run dev" port=5173 task_id=<your task>
 ```
 
 **Registered servers are the only ones that survive worker teardown.** When a worker is torn
-down, CAS kills its entire process group *and* its containment cgroup — including descendants
+down, Cassy kills its entire process group *and* its containment cgroup — including descendants
 that detached themselves with `setsid` (which is what Node's `spawn(..., {detached: true})`
 does, and therefore what Playwright's `webServer` and most `npm run dev` wrappers do). An
 unregistered server has no way to escape that. A registered one is placed outside the
@@ -65,7 +65,7 @@ cas__coordination action=server_list task_id=cas-1234
 Answers "what is listening, and who started it" — name, pid, the ports actually bound, the
 owning task and worker, the command, the cwd, and whether the entry survives teardown.
 Recently stopped and dead entries stay visible as history so "what happened to it?" has an
-answer. A pid that has gone away is reported dead; CAS never restarts anything on its own.
+answer. A pid that has gone away is reported dead; Cassy never restarts anything on its own.
 
 ### Stop
 
@@ -76,7 +76,7 @@ cas__coordination action=server_stop id=dev-web
 Takes the name or the id from `server_list`. Stops the whole server, not just its wrapper
 script — `npm run dev` is a launcher whose real server is a child process.
 
-CAS refuses to signal a pid it cannot prove is still the process it started (pid reuse
+Cassy refuses to signal a pid it cannot prove is still the process it started (pid reuse
 happens on long-lived machines). If you see that refusal, the server is already gone; the
 registry entry is marked dead and nothing was killed.
 

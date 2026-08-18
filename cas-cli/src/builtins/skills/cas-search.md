@@ -1,12 +1,12 @@
 ---
 name: cas-search
-description: Use when you need to find CAS context, code, a symbol, a file pattern, or a prior task, memory, rule, or skill.
+description: Use when you need to find Cassy context, code, a symbol, a file pattern, or a prior task, memory, rule, or skill.
 managed_by: cas
 ---
 
-# CAS Search
+# Cassy Search
 
-Use `mcp__cas__search` to find information across CAS content and code. Choose the right action for the job:
+Use `mcp__cas__search` to find information across Cassy content and code. Choose the right action for the job:
 
 ## Which Action to Use
 

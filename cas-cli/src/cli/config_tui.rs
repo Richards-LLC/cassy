@@ -1,6 +1,6 @@
 //! TUI Config Editor - Interactive terminal configuration editor
 //!
-//! Provides a full-screen terminal UI for browsing and editing CAS configuration
+//! Provides a full-screen terminal UI for browsing and editing Cassy configuration
 //! options, organized by sections with real-time preview and validation.
 //!
 //! # Integration Status

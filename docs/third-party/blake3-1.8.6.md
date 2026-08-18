@@ -1,6 +1,6 @@
 # BLAKE3 1.8.6 build override
 
-CAS vendors the exact crates.io `blake3` 1.8.6 package under
+Cassy vendors the exact crates.io `blake3` 1.8.6 package under
 `vendor/blake3-1.8.6` and overrides it with `[patch.crates-io]`. The upstream
 package checksum was
 `76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77`.
@@ -10,7 +10,7 @@ skips the AVX-512 assembly/intrinsics compilation branch.
 
 Upstream's `no_avx512` feature only makes runtime detection return false. Its
 build script still creates and links `libblake3_avx512_assembly.a` whenever the
-C compiler accepts AVX-512 flags. That inactive code still violates CAS's
+C compiler accepts AVX-512 flags. That inactive code still violates Cassy's
 portable Linux artifact policy, which rejects every EVEX/AVX-512 instruction
 in the final executable.
 

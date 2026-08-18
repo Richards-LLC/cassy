@@ -19,7 +19,7 @@ If the branch **conflicts**, there is no exit:
 - The worker cannot fix it — `task start` is refused *because* the task is `awaiting_merge`:
   ```
   Blocked: `task start cas-8cbc` was rejected because the task is already `awaiting_merge`;
-  CAS says worker work is complete and the supervisor must merge the factory branch, then retry close.
+  Cassy says worker work is complete and the supervisor must merge the factory branch, then retry close.
   ```
 - No other action transitions it.
 
@@ -55,7 +55,7 @@ A state that means "finished" and a state that means "stuck with unfinished work
 ## Resolution (cas-5054, 2026-07-29)
 
 Resolved by making conflict rework an explicit, narrow exit from `awaiting_merge`.
-An assigned worker may restart a parked task only when CAS has recorded a genuine
+An assigned worker may restart a parked task only when Cassy has recorded a genuine
 merge conflict; cleanly mergeable tasks remain parked with guidance to wait for
 the supervisor. Restarting records a conflict-rework decision and atomically
 clears the prior factory anchor, parked branch, and conflict flag so the next

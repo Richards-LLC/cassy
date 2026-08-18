@@ -55,7 +55,7 @@ job re-creates exactly the problem backgrounding solved.
 ### Recipe 2 — servers and anything that listens
 
 Never `npm run dev &` by hand: a raw background process dies with your worker teardown or,
-worse, outlives it unowned. Use the CAS server registry — the only supported way to keep a
+worse, outlives it unowned. Use the Cassy server registry — the only supported way to keep a
 server alive across worker lifetime:
 
 ```

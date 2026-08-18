@@ -1,6 +1,6 @@
 //! Full-text search using Tantivy
 //!
-//! This module provides comprehensive search capabilities for CAS:
+//! This module provides comprehensive search capabilities for Cassy:
 //!
 //! - **BM25 Search** - Traditional text search using Tantivy
 //! - **Hybrid Search** - Combines BM25 with semantic embeddings
@@ -57,10 +57,10 @@ pub mod artifacts;
 // Query and results caching
 pub mod cache;
 
-// CAS-specific code search (wires up generic CodeSearch with concrete types)
+// Cassy-specific code search (wires up generic CodeSearch with concrete types)
 pub mod code;
 
-// Entity/temporal/graph search modules (CAS-specific)
+// Entity/temporal/graph search modules (Cassy-specific)
 pub mod entity_search;
 pub mod graph;
 pub use cas_core::search::temporal;
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(remaining, "search for rust programming");
 
         // Case insensitive
-        let (ids, _) = extract_id_patterns("CAS-ABCD cas-1234");
+        let (ids, _) = extract_id_patterns("Cassy-ABCD cas-1234");
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"cas-abcd".to_string()));
         assert!(ids.contains(&"cas-1234".to_string()));

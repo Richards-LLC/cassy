@@ -632,7 +632,7 @@ fn resolve_session(
 fn cas_root_for_session(session: &SessionInfo) -> Result<std::path::PathBuf> {
     let Some(project_dir) = session.metadata.project_dir.as_ref() else {
         bail!(
-            "Session '{}' has no project_dir in metadata; cannot resolve CAS root",
+            "Session '{}' has no project_dir in metadata; cannot resolve Cassy root",
             session.name
         );
     };

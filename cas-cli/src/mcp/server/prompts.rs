@@ -141,10 +141,10 @@ impl CasCore {
                 .unwrap_or_else(|_| "No context available".to_string());
 
                 Ok(GetPromptResult {
-                    description: Some("Session start context from CAS".to_string()),
+                    description: Some("Session start context from Cassy".to_string()),
                     messages: vec![PromptMessage::new_text(
                         PromptMessageRole::User,
-                        format!("Here is the current context from CAS:\n\n{context}"),
+                        format!("Here is the current context from Cassy:\n\n{context}"),
                     )],
                 })
             }
@@ -274,7 +274,7 @@ impl CasCore {
                 }
 
                 let prompt = format!(
-                    "Search CAS for: {query}\n\nUse the cas_search tool to find relevant memories, tasks, rules, and skills."
+                    "Search Cassy for: {query}\n\nUse the cas_search tool to find relevant memories, tasks, rules, and skills."
                 );
 
                 Ok(GetPromptResult {

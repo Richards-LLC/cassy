@@ -212,7 +212,7 @@ fn recorded_stage_statuses(
         StageStatusEvidence {
             stage: "enqueued".to_string(),
             status: "UNKNOWN".to_string(),
-            provenance: "recorded adapter artifacts do not contain CAS enqueue evidence"
+            provenance: "recorded adapter artifacts do not contain Cassy enqueue evidence"
                 .to_string(),
         },
         StageStatusEvidence {

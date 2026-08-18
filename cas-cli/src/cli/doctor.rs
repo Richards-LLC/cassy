@@ -22,7 +22,7 @@ use crate::cli::Cli;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
-    /// Attempt safe automatic fixes (initialize CAS and apply pending schema migrations)
+    /// Attempt safe automatic fixes (initialize Cassy and apply pending schema migrations)
     #[arg(long)]
     pub fix: bool,
 
@@ -179,13 +179,13 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                         checks.push(Check {
                             name: "auto-fix".to_string(),
                             status: CheckStatus::Ok,
-                            message: format!("Initialized CAS at {}", path.display()),
+                            message: format!("Initialized Cassy at {}", path.display()),
                         });
                     } else {
                         checks.push(Check {
                             name: "auto-fix".to_string(),
                             status: CheckStatus::Warning,
-                            message: "Initialization ran but CAS root could not be resolved."
+                            message: "Initialization ran but Cassy root could not be resolved."
                                 .to_string(),
                         });
                     }
@@ -194,7 +194,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     checks.push(Check {
                         name: "auto-fix".to_string(),
                         status: CheckStatus::Error,
-                        message: format!("Failed to initialize CAS: {e}"),
+                        message: format!("Failed to initialize Cassy: {e}"),
                     });
                     return output_checks(&checks, cli);
                 }
@@ -1024,7 +1024,7 @@ fn truncate(text: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-/// Resolve every known local CAS root to its canonical id + repository
+/// Resolve every known local Cassy root to its canonical id + repository
 /// identity, for the collision check.
 ///
 /// Returns `Err` when the host known-repos registry cannot be read. It is

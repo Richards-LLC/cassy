@@ -1,6 +1,6 @@
-//! High-level worktree manager that integrates git operations with CAS storage
+//! High-level worktree manager that integrates git operations with Cassy storage
 //!
-//! This module coordinates between git worktree operations and CAS's epic/task system.
+//! This module coordinates between git worktree operations and Cassy's epic/task system.
 //! Worktrees are scoped to epics, allowing multiple tasks within an epic to share
 //! a single development environment and git branch.
 
@@ -197,7 +197,7 @@ impl WorktreeManager {
     /// Shared dirty-check gate for force-free merge/removal (cas-006c).
     ///
     /// Always blocks on tracked modified/added/deleted paths, naming each
-    /// with its status. CAS-generated artifacts (`.husky/_/`) never block.
+    /// with its status. Cassy-generated artifacts (`.husky/_/`) never block.
     ///
     /// Untracked paths are handled according to `will_remove`, per a
     /// supervisor review finding on the first cut of this fix: a merge that
@@ -351,7 +351,7 @@ impl WorktreeManager {
             .create_worktree(&worktree_path, &branch_name, Some(&parent_branch))?;
 
         // Mark tracked config files as skip-worktree so workers can't
-        // accidentally commit CAS-synced changes (rules, skills, settings).
+        // accidentally commit Cassy-synced changes (rules, skills, settings).
         let _ = self.git.mark_config_skip_worktree(&worktree_path);
 
         // Symlink gitignored config (.mcp.json, .claude/) into the worktree
@@ -609,7 +609,7 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// List all worktrees (git + CAS context)
+    /// List all worktrees (git + Cassy context)
     pub fn list_git_worktrees(&self) -> WorktreeResult<Vec<super::git::WorktreeInfo>> {
         Ok(self.git.list_worktrees()?)
     }
@@ -664,7 +664,7 @@ impl WorktreeManager {
 /// These files are typically gitignored (`.mcp.json` contains API keys, `.claude/`
 /// and `.codex/` contain local settings), so `git worktree add` doesn't check
 /// them out. The pinned `.context/zig/` toolchain is likewise gitignored. Without
-/// these links, workers lose CAS configuration, Codex's native hook policy, or
+/// these links, workers lose Cassy configuration, Codex's native hook policy, or
 /// the compiler required by the vendored Ghostty build.
 ///
 /// Safe to call on worktrees where the files are already present (tracked in git):
@@ -674,7 +674,7 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
     {
         use std::os::unix::fs::symlink;
 
-        // .mcp.json — MCP server definitions (CAS, Context7, etc.)
+        // .mcp.json — MCP server definitions (Cassy, Context7, etc.)
         let mcp_src = repo_root.join(".mcp.json");
         let mcp_dst = worktree_path.join(".mcp.json");
         if mcp_src.exists() && !mcp_dst.exists() {
@@ -688,7 +688,7 @@ pub fn symlink_project_config(repo_root: &Path, worktree_path: &Path) {
             let _ = symlink(&claude_src, &claude_dst);
         }
 
-        // .codex/ — project MCP config plus CAS-native hooks. This must be the
+        // .codex/ — project MCP config plus Cassy-native hooks. This must be the
         // same source path as the project copy: Codex records hook trust by the
         // absolute hooks.json source path, so copying would create an untrusted
         // second hook identity for every factory worktree.
@@ -763,7 +763,7 @@ pub fn node_modules_setup_instruction(worktree_path: &Path) -> Option<String> {
     Some(format!(
         "Isolated worktree dependency prerequisite: this worktree has package.json but no \
          node_modules. Before running any JS/TS test or build command, run `{command}` in this \
-         worktree. CAS intentionally does not share node_modules across worktrees because each \
+         worktree. Cassy intentionally does not share node_modules across worktrees because each \
          branch may require lockfile- and path-specific dependencies."
     ))
 }

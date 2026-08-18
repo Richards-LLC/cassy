@@ -180,14 +180,14 @@ NOT ((data->>'type' = 'user') OR (data->>'entry_type' = 'Preference'))
 
 Rename a project. Any team member can rename.
 
-**Request:** `{ "name": "CAS CLI" }`
+**Request:** `{ "name": "Cassy CLI" }`
 
 **Response:**
 ```json
 {
   "id": "550e8400-...",
   "canonical_id": "cas-src",
-  "name": "CAS CLI",
+  "name": "Cassy CLI",
   "created_by": "user-uuid",
   "created_at": "2026-04-12T10:00:00.000Z"
 }
@@ -508,7 +508,7 @@ pub enum ConflictResolution {
 
 | Dependency | Status | Blocks |
 |------------|--------|--------|
-| Sync queue drain fix (BUG-CLOUD-SYNC-QUEUE-NEVER-DRAINS.md) | **In progress** — CAS team implementing | Everything. No data flows to cloud without this. |
+| Sync queue drain fix (BUG-CLOUD-SYNC-QUEUE-NEVER-DRAINS.md) | **In progress** — Cassy team implementing | Everything. No data flows to cloud without this. |
 | `project_canonical_id` = folder name (SCOPE-PROJECT-ID-REQUIRED.md Phase 1) | **Shipped** in CLI | None — already merged |
 | Server rejects NULL `project_canonical_id` | **Shipped** in cloud (cloud-d656) | None — already deployed |
 | Server returns `{ inserted, updated, skipped }` | **Shipped** in cloud (cloud-f645) | CLI response parsing (non-blocking) |

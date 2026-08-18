@@ -6,9 +6,9 @@ priority: P2
 
 # ZERO-COMMIT guard rejects the close of every task that was merged before closing
 
-## Resolution (CAS v2.33.0)
+## Resolution (Cassy v2.33.0)
 
-The reported merge-before-close path is fixed when CAS captured the task's
+The reported merge-before-close path is fixed when Cassy captured the task's
 commit anchor before the merge:
 
 - `cas-cli/src/hooks/handlers/handlers_events/attribution.rs:207-230` resolves
@@ -21,7 +21,7 @@ commit anchor before the merge:
   ancestry shape: the task commit is on the epic, the synchronized worker
   branch is zero commits ahead, and close proceeds.
 
-For an existing repository, upgrade to CAS v2.33.0 and run `cas update`.
+For an existing repository, upgrade to Cassy v2.33.0 and run `cas update`.
 Claude users should ensure the generated/global `PostToolUse` hook is active.
 Codex users must also review the installed hook with `/hooks`, then add and
 commit `.codex/hooks.json` before spawning worker worktrees so each worktree
@@ -29,7 +29,7 @@ receives the commit-attribution hook.
 
 There is one residual case: already-merged work with no captured task anchor
 still produces the ZERO-COMMIT rejection. Branch-tip ancestry alone cannot
-safely distinguish that state from a task that produced no commit, so CAS
+safely distinguish that state from a task that produced no commit, so Cassy
 does not guess. The task-attributed commit-receipt fix is tracked as
 `cas-26bb`. Until it lands, a supervisor should audit the task commit's
 reachability from both the local and origin target branch before using the
@@ -98,13 +98,13 @@ Notably, the workers diagnosed this correctly themselves each time — including
 
 ## Related observations from the same session
 
-Three other CAS bookkeeping signals disagreed with git during the same epic. Git was correct in every case:
+Three other Cassy bookkeeping signals disagreed with git during the same epic. Git was correct in every case:
 
 - **`epic_status` reported false stranded commits.** It claimed two child tasks carried stranded factory commits; `git log <epic>..factory/*` was empty for both — they were fully merged.
 - **A task closed CLEAN with its code unmerged.** `cas-3f2e` closed with no MERGE REQUIRED prompt at all while its fix existed only on the factory branch. This is the dangerous inverse: an `awaiting_merge` task stays visible and keeps prompting, but a *closed* task is invisible and nothing will ever surface it. It was caught only because the worker checked ancestry on its own initiative after the clean close.
 - **The verification jail refused `task action=start`** on a new task, citing "unverified task: cas-8a6b", when cas-8a6b was already closed.
 
-Taken together: CAS's merge bookkeeping is unreliable in **both** directions — it invents strandedness for merged work, and it clean-closes unmerged work. Suggest treating git ancestry as the single source of truth for merge state, and deriving all three of these signals from it.
+Taken together: Cassy's merge bookkeeping is unreliable in **both** directions — it invents strandedness for merged work, and it clean-closes unmerged work. Suggest treating git ancestry as the single source of truth for merge state, and deriving all three of these signals from it.
 
 ## Sharper framing: one hardcoded notion of "merged", failing in both directions
 

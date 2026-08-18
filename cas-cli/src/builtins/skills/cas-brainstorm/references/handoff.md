@@ -46,7 +46,7 @@ If the direct-to-work gate is not satisfied, **omit that option entirely** — d
 ### "Proceed to planning"
 
 1. Make sure the requirements doc is committed/saved.
-2. Create a CAS task (or epic) referencing the requirements doc:
+2. Create a Cassy task (or epic) referencing the requirements doc:
    ```
    mcp__cas__task action=create task_type=epic title="<topic>" description="See docs/brainstorms/YYYY-MM-DD-<topic>-requirements.md for full requirements." labels=brainstormed
    ```
@@ -55,7 +55,7 @@ If the direct-to-work gate is not satisfied, **omit that option entirely** — d
 ### "Proceed directly to work"
 
 1. Make sure the requirements doc (if any) is committed/saved.
-2. Create a CAS task referencing the requirements doc, with explicit acceptance criteria copied from the Success Criteria section:
+2. Create a Cassy task referencing the requirements doc, with explicit acceptance criteria copied from the Success Criteria section:
    ```
    mcp__cas__task action=create title="<topic>" description="<scope summary>" acceptance_criteria="<from doc>"
    ```
@@ -101,7 +101,7 @@ Planning is blocked by:
 Resume by re-invoking cas-brainstorm when ready to resolve these before planning.
 ```
 
-Also store a CAS memory pointing at the doc and the blockers, so future sessions can find them:
+Also store a Cassy memory pointing at the doc and the blockers, so future sessions can find them:
 
 ```
 mcp__cas__memory action=remember title="Brainstorm paused: <topic>" content="Doc: <path>. Blocked by: <list>." tags=brainstorm,blocked,<topic>

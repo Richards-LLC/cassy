@@ -2011,7 +2011,7 @@ impl FactoryApp {
 
         let cas_dir = self.cas_dir().to_path_buf();
 
-        // Mark agent as shutdown in CAS first; this must succeed so supervisor sees errors
+        // Mark agent as shutdown in Cassy first; this must succeed so supervisor sees errors
         // instead of silently leaving stale idle agents in director panels.
         let agent_store = open_agent_store(self.cas_dir())?;
         let agents = agent_store.list(None)?;
@@ -2024,7 +2024,7 @@ impl FactoryApp {
                 .map(|a| a.name.clone())
                 .collect();
             anyhow::anyhow!(
-                "Cannot shutdown worker '{}': no exact CAS agent record found. Known worker records: {}",
+                "Cannot shutdown worker '{}': no exact Cassy agent record found. Known worker records: {}",
                 name,
                 if known_workers.is_empty() {
                     "(none)".to_string()
@@ -2077,7 +2077,7 @@ impl FactoryApp {
         }
         if !retirement_failures.is_empty() {
             anyhow::bail!(
-                "Failed to retire all CAS identities for worker '{name}': {}",
+                "Failed to retire all Cassy identities for worker '{name}': {}",
                 retirement_failures.join("; ")
             );
         }
@@ -2480,7 +2480,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(dir)
             .output()
             .unwrap();
@@ -2943,7 +2943,7 @@ mod spawn_base_tests {
         );
     }
 
-    /// CAS #413: an explicit task WorkTarget is the same delivery authority
+    /// Cassy #413: an explicit task WorkTarget is the same delivery authority
     /// that `worktree_merge` uses. A worker must therefore start on that
     /// branch, not on ambient trunk or the supervisor's focused epic.
     #[test]
@@ -2967,7 +2967,7 @@ mod spawn_base_tests {
         let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
         assert_eq!(
             base, "staging",
-            "CAS #413: a task WorkTarget must outrank trunk and pinned focus"
+            "Cassy #413: a task WorkTarget must outrank trunk and pinned focus"
         );
         let receipt = spawn_base_provenance_notice(&base, &source, Some("epic/unrelated"));
         assert!(receipt.contains("WorkTarget"), "{receipt}");
@@ -3001,7 +3001,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -3057,7 +3057,7 @@ mod spawn_base_tests {
         );
     }
 
-    /// CAS #413: WorkTarget spawns must use the freshly fetched remote tip
+    /// Cassy #413: WorkTarget spawns must use the freshly fetched remote tip
     /// even when the matching local branch exists but is stale. This is the
     /// regression shape that otherwise starts a worker before the bug exists.
     #[test]
@@ -3162,7 +3162,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -3207,7 +3207,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -3690,7 +3690,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -3831,7 +3831,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&repo)
             .output()
             .unwrap();
@@ -3913,7 +3913,7 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
+            .args(["config", "user.name", "Cassy Test"])
             .current_dir(&repo)
             .output()
             .unwrap();

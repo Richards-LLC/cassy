@@ -480,7 +480,7 @@ fn stage_page(
         sources,
         locked: false,
         updated: Some(page.updated_at.to_rfc3339()),
-        // Keys CAS does not own survive the round trip.
+        // Keys Cassy does not own survive the round trip.
         passthrough: merge::parse_frontmatter(&existing_body).passthrough,
     };
     let body = merge::compose_body(&meta, &fragments);

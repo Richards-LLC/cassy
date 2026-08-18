@@ -1,6 +1,6 @@
 # cas-78c8 / GH #156 — fixture-memory purge receipts
 
-The integration suite wrote five literal fixture strings into the real CAS
+The integration suite wrote five literal fixture strings into the real Cassy
 stores for months: 994 of 1705 rows at purge time. The leak is fixed by the
 `CAS_TEST_PROTECTED_DBS` tripwire in `cas_store::shared_db` (commit 90f94d0d,
 merged as 08dcb1f9); these files are the receipt for the one-time cleanup of

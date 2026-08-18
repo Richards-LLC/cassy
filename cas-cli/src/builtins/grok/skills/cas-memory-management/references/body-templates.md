@@ -2,7 +2,7 @@
 managed_by: cas
 ---
 
-# CAS Memory Body Templates
+# Cassy Memory Body Templates
 
 Choose the template matching the memory's track. The track is determined by `problem_type` (see `references/schema.yaml`).
 

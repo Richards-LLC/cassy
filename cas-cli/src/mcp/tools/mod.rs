@@ -1,4 +1,4 @@
-//! MCP Tools for CAS
+//! MCP Tools for Cassy
 //!
 //! This module contains MCP tools organized by category:
 //! - Memory tools (12): Entry management

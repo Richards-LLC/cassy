@@ -86,7 +86,7 @@ fn print_help_text(
     let mut stdout = io::stdout();
     let mut fmt = Formatter::stdout(&mut stdout, theme);
 
-    Header::h1("CAS Configuration Reference").render(&mut fmt)?;
+    Header::h1("Cassy Configuration Reference").render(&mut fmt)?;
     fmt.newline()?;
     fmt.info("Use 'cas config <key> <value>' to set options.")?;
     fmt.info("Use 'cas config describe <key>' for detailed info.")?;
@@ -129,7 +129,7 @@ fn print_help_markdown(
 ) -> io::Result<()> {
     let mut stdout = io::stdout();
 
-    writeln!(stdout, "# CAS Configuration Reference")?;
+    writeln!(stdout, "# Cassy Configuration Reference")?;
     writeln!(stdout)?;
     writeln!(stdout, "Use `cas config <key> <value>` to set options.")?;
     writeln!(
@@ -182,14 +182,14 @@ fn print_help_man(
 
     writeln!(
         stdout,
-        ".TH CAS-CONFIG 7 \"2024\" \"CAS\" \"Configuration Reference\""
+        ".TH Cassy-CONFIG 7 \"2024\" \"Cassy\" \"Configuration Reference\""
     )?;
     writeln!(stdout, ".SH NAME")?;
-    writeln!(stdout, "cas-config \\- CAS configuration options")?;
+    writeln!(stdout, "cas-config \\- Cassy configuration options")?;
     writeln!(stdout, ".SH DESCRIPTION")?;
     writeln!(
         stdout,
-        "This manual page documents the configuration options for CAS (Coding Agent System)."
+        "This manual page documents the configuration options for Cassy."
     )?;
     writeln!(stdout)?;
 

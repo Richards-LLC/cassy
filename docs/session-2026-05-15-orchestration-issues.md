@@ -1,8 +1,8 @@
 # Session 2026-05-15 — Orchestration & worker/supervisor issues
 
-Captured during a long supervisor session driving EPIC `cas-3933` (GHL conversation completeness, DomDMs). Multiple workers spawned, multiple tasks closed, real prod investigation. This doc lists the CAS / orchestration / worker-supervisor issues that surfaced during that session, ranked by impact.
+Captured during a long supervisor session driving EPIC `cas-3933` (GHL conversation completeness, DomDMs). Multiple workers spawned, multiple tasks closed, real prod investigation. This doc lists the Cassy / orchestration / worker-supervisor issues that surfaced during that session, ranked by impact.
 
-Goal: feed these into the CAS roadmap. Each entry has enough detail to reproduce.
+Goal: feed these into the Cassy roadmap. Each entry has enough detail to reproduce.
 
 ---
 
@@ -39,7 +39,7 @@ Their actual diffs were pure TypeScript with zero Rust macro patterns (confirmed
 
 **Suggested fix.** Language-aware patterns: scope the Rust-macro check to `*.rs` files. Or migrate the bare-pattern scan to a structured tokenizer that respects file type.
 
-(Filed separately in our project as `cas-caff` but the underlying CAS-side gate is what needs the fix.)
+(Filed separately in our project as `cas-caff` but the underlying Cassy-side gate is what needs the fix.)
 
 ---
 

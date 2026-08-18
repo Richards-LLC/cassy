@@ -17,15 +17,15 @@
 
 [Factory](#factory) · [Context System](#context-system) · [Knowledge](#knowledge) · [Quick Start](#quick-start) · [Installation](#installation) · [Architecture](#architecture) · [Contributing](CONTRIBUTING.md)
 
-<img src="casdemo.png" alt="CAS Factory TUI" width="800" />
+<img src="casdemo.png" alt="Cassy Factory TUI" width="800" />
 
 </div>
 
 ---
 
-## What is CAS?
+## What is Cassy?
 
-CAS is a multi-agent coding factory and persistent context system for AI coding agents. Three things live in one binary:
+Cassy is a multi-agent coding factory and persistent context system for AI coding agents. Three things live in one binary:
 
 1. **Factory** — a terminal UI that runs a supervisor agent and a fleet of worker agents in parallel on one repository, each worker in its own git worktree. Workers can be Claude Code, Codex, or Grok — mixed in the same session.
 2. **Context System** — an MCP server giving every agent persistent memory, tasks, rules, skills, entities and search, backed by SQLite and a Tantivy BM25 index.
@@ -103,7 +103,7 @@ configuration surface from `~/.codex` — `config.toml`, `AGENTS.md`, `agents/`,
 Credentials are never shared: `auth.json` stays a real per-profile file, and the
 seeder refuses it even if asked. Seeding is idempotent and never overwrites a
 file you have since diverged. Because the shared entries are links, editing
-config through one profile edits it for all of them by design (CAS' own Codex
+config through one profile edits it for all of them by design (Cassy's own Codex
 config writer resolves links before writing, so a managed link survives).
 
 Selecting an account also scrubs inherited `OPENAI_API_KEY`, `CODEX_API_KEY` and
@@ -235,7 +235,7 @@ cas claude|codex|grok # choose the supervisor harness (all factory flags pass th
 cas claude login alt  # isolate login to ~/.claude-alt (main stays untouched)
 cas codex login alt   # isolate login to ~/.codex-alt (main stays untouched)
 cas open              # interactive project picker
-cas init              # initialize CAS in the current project
+cas init              # initialize Cassy in the current project
 cas serve             # run the MCP server
 cas doctor            # diagnostics (see below)
 cas knowledge ...     # distilled project wiki
@@ -245,13 +245,13 @@ cas config list       # every setting, current vs default
 cas config describe cloud.auto_sync
 cas worktree sweep    # worktree diagnostics and cleanup (cas sweep-all for every repo)
 cas bridge serve      # local HTTP control/status API for external orchestrators
-cas login             # CAS Cloud (optional)
+cas login             # Cassy Cloud (optional)
 cas cloud sync        # push + pull (optional)
 ```
 
 ### Editor integration
 
-`cas init` wires this up for you. To do it by hand, add CAS to `.mcp.json` (Claude Code and Grok both read it) or your Claude Code settings:
+`cas init` wires this up for you. To do it by hand, add Cassy to `.mcp.json` (Claude Code and Grok both read it) or your Claude Code settings:
 
 ```json
 {
@@ -264,7 +264,7 @@ cas cloud sync        # push + pull (optional)
 }
 ```
 
-CAS ships builtin skills (`cas-code-review`, `cas-worker`, `cas-github-issues`, `codemap`, …) in Claude, Codex and Grok flavors, kept in lockstep by a parity test. If they crowd your context, Claude Code's `skillOverrides` in `settings.json` can set any skill to `"off"`, `"user-invocable-only"`, or `"name-only"` without disabling CAS.
+Cassy ships builtin skills (`cas-code-review`, `cas-worker`, `cas-github-issues`, `codemap`, …) in Claude, Codex and Grok flavors, kept in lockstep by a parity test. If they crowd your context, Claude Code's `skillOverrides` in `settings.json` can set any skill to `"off"`, `"user-invocable-only"`, or `"name-only"` without disabling Cassy.
 
 ## Diagnostics
 
@@ -318,7 +318,7 @@ Deeper material: [ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md) (crates, stores
 
 ## Cloud (optional)
 
-CAS is fully usable offline; the cloud adds sync across machines, semantic search and team sharing.
+Cassy is fully usable offline; the cloud adds sync across machines, semantic search and team sharing.
 
 ```bash
 cas login                        # browser device flow
@@ -350,7 +350,7 @@ With devices registered (`cas device`), `cas attach --remote <device>:<factory-i
 
 ## Contributing
 
-This repository is where CAS development happens; it began as a fork of a source-available upstream project and has moved a long way since. Bug reports and feature suggestions are welcome through [Issues](https://github.com/Richards-LLC/cassy/issues) and [Discussions](https://github.com/Richards-LLC/cassy/discussions); PRs are considered case by case.
+This repository is where Cassy development happens; it began as a fork of a source-available upstream project and has moved a long way since. Bug reports and feature suggestions are welcome through [Issues](https://github.com/Richards-LLC/cassy/issues) and [Discussions](https://github.com/Richards-LLC/cassy/discussions); PRs are considered case by case.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

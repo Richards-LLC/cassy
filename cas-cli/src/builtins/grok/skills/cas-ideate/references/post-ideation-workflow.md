@@ -95,7 +95,7 @@ Write the ideation artifact **after** the candidate set has been reviewed enough
    - `docs/ideation/YYYY-MM-DD-<kebab-topic>-ideation.md` when a focus exists
    - `docs/ideation/YYYY-MM-DD-open-ideation.md` when ideation is open-ended
 3. Write or update the ideation document using the template below.
-4. Also store a CAS memory so future sessions can find it:
+4. Also store a Cassy memory so future sessions can find it:
    ```
    cas__memory action=remember title="Ideation: <topic>" content="Doc: <path>. Top survivors: <short list>. Run on <date>." tags=ideation,<topic>
    ```
@@ -125,7 +125,7 @@ focus: <optional focus hint>
 **Downsides:** [Tradeoffs or costs]
 **Confidence:** [0-100%]
 **Complexity:** [Low / Medium / High]
-**Grounding:** [`repo/relative/path.rs` or CAS memory reference]
+**Grounding:** [`repo/relative/path.rs` or Cassy memory reference]
 **Status:** [Unexplored / Explored]
 
 ### 2. <Idea Title>
@@ -167,7 +167,7 @@ If the user picks an idea:
 - Mark that idea as `Explored` in the doc
 - Append a session log entry: `YYYY-MM-DD: Selected idea #N for brainstorming`
 - Invoke `cas-brainstorm` with the selected idea as the seed
-- Also create a CAS task pointing at both the ideation doc and the brainstorm-in-progress:
+- Also create a Cassy task pointing at both the ideation doc and the brainstorm-in-progress:
   ```
   cas__task action=create title="Brainstorm: <idea title>" description="Seed from docs/ideation/<file>.md idea #N" labels=brainstorm,from-ideation
   ```

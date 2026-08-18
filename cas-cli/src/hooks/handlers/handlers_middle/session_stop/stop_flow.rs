@@ -21,7 +21,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // decision: "block". The harness's documented loop-prevention contract is
     // that a Stop hook must not block again in that state — a blocker the model
     // cannot clear by continuing (e.g. draft rules it will not review) would
-    // otherwise re-block on every stop, forever. CAS blocks Stop in five places
+    // otherwise re-block on every stop, forever. Cassy blocks Stop in five places
     // below and, until this change, declared and read the field nowhere, so it
     // had no brake at all.
     //

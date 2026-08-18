@@ -1,4 +1,4 @@
-//! MCP Tools Service for CAS
+//! MCP Tools Service for Cassy
 //!
 //! This module exposes consolidated meta-tools:
 //! - cas_memory: All memory/entry operations
@@ -182,7 +182,7 @@ impl CasService {
         CasCore::error(code, message)
     }
 
-    /// Resolve proxy authority exclusively from the server's registered CAS
+    /// Resolve proxy authority exclusively from the server's registered Cassy
     /// identity and durable task leases. The dispatch payload never supplies
     /// any of these fields, so a caller cannot nominate a stronger role or a
     /// different task to an upstream policy.
@@ -193,7 +193,7 @@ impl CasService {
         let agent = agent_store.get(&agent_id).map_err(|_| {
             Self::error(
                 ErrorCode::INVALID_REQUEST,
-                "MCP proxy execution requires an authenticated registered CAS session.",
+                "MCP proxy execution requires an authenticated registered Cassy session.",
             )
         })?;
         let mut active_task_ids: Vec<String> = agent_store
@@ -212,7 +212,7 @@ impl CasService {
         Ok(cmcp_core::ProxyCaller {
             agent_id: agent.id.clone(),
             role: agent.role,
-            // Agent IDs are the canonical CAS session IDs. Keep this explicit
+            // Agent IDs are the canonical Cassy session IDs. Keep this explicit
             // in the proxy contract so policies do not have to infer it.
             session_id: agent.id,
             factory_session: agent.factory_session,
@@ -498,7 +498,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset CAS cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under CAS instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
     )]
     pub async fn coordination(
         &self,
@@ -653,7 +653,7 @@ impl CasService {
                     // separate `--worktrees` factory CLI flag instead, default
                     // on), so System-B worker worktrees exist and need merging
                     // regardless of `worktrees.enabled`. Blocking `merge` here
-                    // left supervisors with no CAS-tracked way to fold a spawned
+                    // left supervisors with no Cassy-tracked way to fold a spawned
                     // worker's branch back in — the reported fallback was manual
                     // `git worktree add` + merge + push, bypassing factory
                     // tracking/lease/cleanup entirely. `worktree_merge`'s own
@@ -670,7 +670,7 @@ impl CasService {
                     // System-B worktree outlives its worker unless `cleanup=true`
                     // was passed at merge time, and merge is the only action that
                     // ever removes one — so a worker that finished without it
-                    // leaves a worktree with no CAS-tracked removal path at all,
+                    // leaves a worktree with no Cassy-tracked removal path at all,
                     // and the reported workaround was a manual `git worktree
                     // remove` that bypasses tracking exactly like the manual merge
                     // cas-1d11 fixed. `worktree_cleanup`'s own handler resolves
@@ -838,7 +838,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "System operations. Actions: version (CAS version info), preflight (bounded unified factory readiness report), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
+        description = "System operations. Actions: version (Cassy version info), preflight (bounded unified factory readiness report), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit Cassy bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
     )]
     pub async fn system(
         &self,
@@ -1352,7 +1352,7 @@ mod tests {
 
         let names = svc.registered_tool_names();
 
-        // Sanity floor: 11 CAS meta-tools (without proxy) plus 2 proxy tools
+        // Sanity floor: 11 Cassy meta-tools (without proxy) plus 2 proxy tools
         // that compile-in regardless of feature gating. If this drops below
         // 11, the registry shrank and `cas serve`'s empty-registry guard is
         // the next line of defense.

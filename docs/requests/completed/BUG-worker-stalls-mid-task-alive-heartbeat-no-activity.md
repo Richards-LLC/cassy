@@ -51,7 +51,7 @@ Nothing in the system flagged this as a problem — the worker is "alive," so th
 
 ## Why this is a bug (gap, not just model flakiness)
 
-The underlying "Codex worker prints a plan then goes quiet" is a model/CLI reliability issue. But the **CAS-side gap** is what makes it costly:
+The underlying "Codex worker prints a plan then goes quiet" is a model/CLI reliability issue. But the **Cassy-side gap** is what makes it costly:
 
 1. **Heartbeat ≠ progress.** Liveness is measured by heartbeat, which keeps ticking even when the agent has produced no tokens/tool-calls/file-changes for many minutes. A worker mid-task with a fresh heartbeat but a flat activity timeline is indistinguishable from a healthy one to every automated consumer.
 2. **No stall detection / no supervisor alert.** The director notifies on `worker_idle` / `worker_blocked` / `worker_died`, but there is no `worker_stalled` signal for "alive + assigned + in_progress + no activity for N minutes." That's exactly the state that most needs a nudge, and it's the one state that stays silent.

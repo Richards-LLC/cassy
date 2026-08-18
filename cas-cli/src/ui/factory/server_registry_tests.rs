@@ -58,7 +58,7 @@ impl Drop for ProcessTreeGuard {
     }
 }
 
-/// cas-44d2: reproduce the incident command shape, including a CAS-like child
+/// cas-44d2: reproduce the incident command shape, including a Cassy-like child
 /// that survives TERM/HUP. `script` creates a new session for the workload;
 /// stopping only its registered wrapper pid used to return success while this
 /// child (and its own children) stayed alive.
@@ -263,7 +263,7 @@ fn refresh_marks_dead_pids_dead_and_never_resurrects_them() {
     assert!(wait_until_gone(record.pid));
 
     // Simulate the record still claiming Running (e.g. the server was killed
-    // by something outside CAS) and let refresh reconcile it.
+    // by something outside Cassy) and let refresh reconcile it.
     record.state = ServerState::Running;
     record.ended_at = None;
     record.ended_detail = None;

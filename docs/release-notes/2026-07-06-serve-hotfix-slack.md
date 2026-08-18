@@ -6,9 +6,9 @@ Channel: #cas-internal (`C0B44GUKDK2`) — two top-level posts.
 
 ## Post 1 — User
 
-Today's session-isolation release had a serious bug: upgrading the binary made CAS refuse to start on any **existing** project — it died instantly at startup with a one-line error and no explanation, taking the whole factory down with it. Fresh projects were fine, which is exactly why our tests missed it. Fixed within the hour.
+Today's session-isolation release had a serious bug: upgrading the binary made Cassy refuse to start on any **existing** project — it died instantly at startup with a one-line error and no explanation, taking the whole factory down with it. Fresh projects were fine, which is exactly why our tests missed it. Fixed within the hour.
 
-- Upgrading no longer breaks existing projects: CAS starts normally, and if your project's database needs a schema update it now **tells you exactly what to run** (`cas update --schema-only`) instead of silently failing.
+- Upgrading no longer breaks existing projects: Cassy starts normally, and if your project's database needs a schema update it now **tells you exactly what to run** (`cas update --schema-only`) instead of silently failing.
 - Startup errors now show the full cause instead of a vague one-liner — the report that caught this said "no further diagnostics," and that's fixed too.
 - If you hit this today: update, run `cas update --schema-only` once in each project, and you're back.
 

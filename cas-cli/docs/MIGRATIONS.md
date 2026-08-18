@@ -1,10 +1,10 @@
-# CAS Schema Migration System
+# Cassy Schema Migration System
 
-This document explains how CAS handles database schema migrations, updates, and upgrades.
+This document explains how Cassy handles database schema migrations, updates, and upgrades.
 
 ## Overview
 
-CAS uses a forward-only migration system with:
+Cassy uses a forward-only migration system with:
 - **Versioned migrations** tracked in `cas_migrations` table
 - **Bootstrap detection** for existing databases
 - **Explicit upgrade** via `cas update` command
@@ -157,7 +157,7 @@ Shows schema version and table details:
 
 ## Bootstrap Process
 
-When CAS encounters a database without migration tracking:
+When Cassy encounters a database without migration tracking:
 
 1. Creates `cas_migrations` table
 2. Runs detection query for each migration
@@ -183,7 +183,7 @@ This ensures existing databases upgrade smoothly without re-running migrations.
 
 ## Separate Database Files
 
-CAS uses multiple database files:
+Cassy uses multiple database files:
 
 | File | Contents | Migration Handling |
 |------|----------|-------------------|

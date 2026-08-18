@@ -10,7 +10,7 @@
 //! - All-ok / not-configured → doctor row with **status=Ok**.
 //! - Any [`super::types::IdState::Stale`] → **status=Warning** with a
 //!   `cas integrate <platform> refresh` hint. Stale never escalates to
-//!   `Error`: a missing remote ID is fixable by the user, not a CAS bug.
+//!   `Error`: a missing remote ID is fixable by the user, not a Cassy bug.
 //! - Any [`super::types::IdState::McpUnreachable`] → **status=Warning** with
 //!   a "skipped — MCP not configured" message. Critically *not* an error,
 //!   so a missing MCP server in CI doesn't fail the whole doctor run.

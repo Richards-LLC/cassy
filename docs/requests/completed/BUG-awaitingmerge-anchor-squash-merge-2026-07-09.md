@@ -74,7 +74,7 @@ The fix must preserve the original safety properties:
 ## Notes
 
 This is a canonical reporting request only. It documents the regression so the
-CAS fix can be implemented separately. Do not treat the audited status-close
+Cassy fix can be implemented separately. Do not treat the audited status-close
 recovery as the desired behavior; it is only the current escape hatch for a
 false rejection.
 

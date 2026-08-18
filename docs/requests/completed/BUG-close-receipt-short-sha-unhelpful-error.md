@@ -28,7 +28,7 @@ The same confusion recurred on cas-05e6, where the supervisor pre-emptively supp
 
 The failure mode is indistinguishable from MERGE REQUIRED. A worker that gets "invalid receipt" concludes its branch is not merged, sends a merge request for something already merged (see `BUG-stale-merge-request-messages.md`), and parks. The supervisor then has to prove the merge landed rather than simply saying "use the long form".
 
-Short SHAs are also what every ergonomic git command emits by default — `git log --oneline`, `git rev-parse --short`, and CAS's own `epic_status` table all display them — so reaching for one is the natural mistake.
+Short SHAs are also what every ergonomic git command emits by default — `git log --oneline`, `git rev-parse --short`, and Cassy's own `epic_status` table all display them — so reaching for one is the natural mistake.
 
 ## Suggested fixes
 

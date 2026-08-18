@@ -20,7 +20,7 @@ deserialization contract. This sweep asks the same question of every other hook 
 
 **Primary evidence: captured live payloads** (Claude Code **2.1.224**). Secondary: the harness's
 published contract — https://code.claude.com/docs/en/hooks. Deliberately **not** inferred from
-CAS's own structs, since that circularity is what hid GH #165. CAS side read from
+Cassy's own structs, since that circularity is what hid GH #165. Cassy side read from
 `crates/cas-core/src/hooks/types.rs`.
 
 ### How the capture was taken (reproducible, and safe to re-run)
@@ -30,7 +30,7 @@ An isolated Claude config dir was built at `/tmp/wirecap`:
 - `.credentials.json` copied from an already-authenticated config dir;
 - `settings.json` containing **only** a capture hook, registered for all 15 known events, whose
   command is a script that appends stdin to `payloads.jsonl` and exits 0;
-- **no CAS hooks and no MCP servers**, so the running fleet was never touched and no `cas hook`
+- **no Cassy hooks and no MCP servers**, so the running fleet was never touched and no `cas hook`
   ran during capture.
 
 Then two headless turns in a scratch cwd:
@@ -50,13 +50,13 @@ Every captured payload is reproduced verbatim as a test fixture in
 `crates/cas-core/src/hooks/types.rs` (`mod tests`), so the evidence lives in CI, not only here.
 
 Serde note that shapes every verdict below: unknown JSON keys are **ignored**, and every field is
-`#[serde(default)]`. So a key CAS does not declare is silently dropped, never an error. A missing
+`#[serde(default)]`. So a key Cassy does not declare is silently dropped, never an error. A missing
 declaration is therefore only a *defect* where a handler needs the value — which is exactly what
 makes this class of bug invisible.
 
 ## Table
 
-| Wire key | Event(s) | Evidence | CAS field | Verdict |
+| Wire key | Event(s) | Evidence | Cassy field | Verdict |
 |---|---|---|---|---|
 | `session_id` | all | WIRE | `session_id` (+alias `sessionId`) | OK |
 | `transcript_path` | all | WIRE | `transcript_path` (+alias `transcriptPath`) | OK |
@@ -133,7 +133,7 @@ applies `updatedMessage` per chunk — was not observed. The final-chunk gate is
 reading; if interactive capture later shows multi-chunk deltas, revisit whether a
 last-chunk-only transform is sufficient.
 
-## Finding 1 — `stop_hook_active` is never read, and CAS blocks Stop in five places (REAL)
+## Finding 1 — `stop_hook_active` is never read, and Cassy blocks Stop in five places (REAL)
 
 `stop_hook_active` is documented as `true` when Claude Code is **already continuing as the result
 of a stop hook**. It is the harness's loop-prevention signal, and the docs say to check it to avoid
@@ -142,17 +142,17 @@ infinite hook loops.
 Evidence:
 - `grep -rn "stop_hook_active"` over `crates/cas-core/src` and `cas-cli/src` → **zero hits.** The
   key is not declared on `HookInput` and is read nowhere.
-- CAS blocks Stop in five places:
+- Cassy blocks Stop in five places:
   `cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs:46` (`block_stop`) and
   `:584`, `:594`, `:604`, `:615` (`block_stop_with_context`).
 
-So CAS can block Stop repeatedly with no knowledge that it is already inside a stop-hook-induced
+So Cassy can block Stop repeatedly with no knowledge that it is already inside a stop-hook-induced
 continuation.
 
 **Honest severity bound.** Whether this actually loops depends on whether the blocking condition
 self-clears once Claude continues. If a blocker is satisfied by the extra work (e.g. the agent
 closes the open task it was blocked on), it terminates. If it is not (a condition Claude cannot
-clear by continuing), nothing else stops it — `stop_hook_active` is the only brake and CAS has not
+clear by continuing), nothing else stops it — `stop_hook_active` is the only brake and Cassy has not
 wired it. I did **not** reproduce a live loop; this is a code-level hazard with the mechanism named,
 not a measured incident. Do not report it as an observed loop.
 
@@ -232,9 +232,9 @@ enumerate a domain — these are single observations, not confirmations of the f
 
 ## Guard (deliverable 2) — implemented
 
-Convention adopted, and recorded as a CAS project rule so future hook tests inherit it:
+Convention adopted, and recorded as a Cassy project rule so future hook tests inherit it:
 **hook-payload tests must parse raw JSON in the real wire shape**, and the fixture must come from
-a captured live payload — never from docs, and never read off CAS's own structs. A test that
+a captured live payload — never from docs, and never read off Cassy's own structs. A test that
 builds `HookInput` by struct literal cannot catch a deserialization-contract bug: proven twice
 now, by GH #165 (seven green tests, dead feature, full release) and by Finding A above (four
 green tests, dead feature). Struct literals remain fine for tests about handler *logic*, once the

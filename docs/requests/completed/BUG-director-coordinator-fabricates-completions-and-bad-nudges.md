@@ -24,7 +24,7 @@ Resolved and moved to completed after verifying each acceptance criterion agains
 Running a 5-worker sprint, the `director` coordinator emitted, repeatedly:
 
 1. **Fabricated completion notices.** "Worker X has completed task Y" for cas-f8e3, cas-7f2c, cas-9db0, cas-61af, cas-c790, cas-c496, cas-6d6d, cas-e2e2, cas-34f7f — while the worker branch was still at the base commit with **0 commits and a clean tree**. At least 6 of these were provably false at emit time (`git -C .cas/worktrees/<w> rev-list --count main..HEAD` == 0). The director declared "completed cas-34f7f" and "completed cas-c496" for tasks that to this minute have no commit.
-2. **Wrong assignment guidance.** Every idle nudge says `Assign work: mcp__cas__task action=update id=<task-id> assignee=<worker-NAME>`. But a name-keyed assignee is invisible to the worker's `task mine` (which resolves on the worker's session id). Following the director's own instruction produces a task the worker can't see. Correct key is the worker's CAS session id.
+2. **Wrong assignment guidance.** Every idle nudge says `Assign work: mcp__cas__task action=update id=<task-id> assignee=<worker-NAME>`. But a name-keyed assignee is invisible to the worker's `task mine` (which resolves on the worker's session id). Following the director's own instruction produces a task the worker can't see. Correct key is the worker's Cassy session id.
 3. **Relentless idle/ready spam.** Multiple "worker is ready and waiting" + "worker is idle with no assigned tasks" per worker per minute, including for workers that are mid-edit (dirty worktree) and for the supervisor itself.
 
 ## Relationship to existing tickets

@@ -1,6 +1,6 @@
 //! Factory phone-home WebSocket client
 //!
-//! Connects the factory daemon to CAS Cloud via Phoenix channels over WebSocket.
+//! Connects the factory daemon to Cassy Cloud via Phoenix channels over WebSocket.
 //! Pushes factory state and events for remote monitoring.
 //!
 //! Protocol: Phoenix channel JSON wire format `[join_ref, ref, topic, event, payload]`
@@ -113,7 +113,7 @@ pub struct CloudClientConfig {
     pub factory_id: String,
     /// Device ID (from device registration)
     pub device_id: Option<String>,
-    /// CAS data directory (for writing to local queues on cloud commands)
+    /// Cassy data directory (for writing to local queues on cloud commands)
     pub cas_dir: Option<std::path::PathBuf>,
     /// Factory session name (for prompt queue isolation)
     pub factory_session: Option<String>,

@@ -164,7 +164,7 @@ fn worker_headless_inline_review_workflow_is_refused_cas_bcfb() {
     );
 }
 
-/// The gate must still fire when hook dispatch cannot resolve a CAS root —
+/// The gate must still fire when hook dispatch cannot resolve a Cassy root —
 /// the cas-865b default is supervisor-owned, so "no config" means refuse.
 #[test]
 fn the_gate_still_fires_without_a_cas_root_cas_bcfb() {

@@ -1,6 +1,6 @@
 ---
-from: CAS CLI team
-to: CAS Cloud team
+from: Cassy CLI team
+to: Cassy Cloud team
 date: 2026-08-06
 amended: 2026-08-07
 priority: P1
@@ -16,7 +16,7 @@ amendment_client: cas-cli @ 34d5279b (epic tip); migration reality pinned at 788
 >
 > **Read this box before §1.** The body below is unchanged except where a subsection is
 > marked ⟨A⟩; every original claim in it still holds. What changed is the *world around it*:
-> knowledge pages are becoming CAS's **memory system**, not only a distillation of a
+> knowledge pages are becoming Cassy's **memory system**, not only a distillation of a
 > repository, and that promotes three of the original open questions into requirements.
 >
 > | # | What changed | Where |
@@ -35,7 +35,7 @@ amendment_client: cas-cli @ 34d5279b (epic tip); migration reality pinned at 788
 
 ## What already shipped, and what is missing
 
-The **client half** of cloud knowledge is merged and released-ready. A CAS install that is
+The **client half** of cloud knowledge is merged and released-ready. A Cassy install that is
 logged in will, on every `cas cloud sync`:
 
 1. push distilled knowledge pages to `POST /api/sync/push` under a new entity key
@@ -93,7 +93,7 @@ Knowledge pages reuse the **existing** push envelope built by `push_sub_batch`
 - `knowledge_pages`: array of page records (the entity key; `KNOWLEDGE_ENTITY`,
   `knowledge.rs:39`)
 - `team_id`: present only when a team is configured (`push.rs:465-467`)
-- `project_canonical_id`: required; the client refuses to sync outside a CAS project
+- `project_canonical_id`: required; the client refuses to sync outside a Cassy project
   (`push.rs:469-474`)
 - `client_version`, `client_build` (`push.rs:549-558`)
 
@@ -195,7 +195,7 @@ Fixtures: `pulls_pages_and_preserves_a_locked_local_page` (`knowledge.rs:444-501
 `KnowledgePageRecord::into_page_write` (`knowledge.rs:96-112`):
 
 - `rel_path` is taken from the sender verbatim, deliberately: recomputing the slug would
-  let two CAS versions with different slug rules fork one page into two paths across
+  let two Cassy versions with different slug rules fork one page into two paths across
   machines (`knowledge.rs:98-101`).
 - `locked` is carried through (§3).
 - **`pending_embedding` is forced to `true`** (`knowledge.rs:107`). A vector computed on a
@@ -463,7 +463,7 @@ confirm the merge.
 
 ## 6. Migrated legacy memories arrive as pages
 
-CAS is collapsing its legacy `entries` memory store into knowledge pages (epic cas-b129).
+Cassy is collapsing its legacy `entries` memory store into knowledge pages (epic cas-b129).
 The migration's mapping spec is **normative**: "M3 implements this document literally; where
 it says MUST, a migration that does otherwise is wrong" (`cas-b129-mapping-spec.md:3-4`).
 
@@ -497,7 +497,7 @@ Three details that bite:
 
 ### 6.2 Hard requirement: do not re-serialize frontmatter
 
-CAS's frontmatter reader is **hand-rolled, not a YAML engine** (`merge.rs:117-120`; Rule C4,
+Cassy's frontmatter reader is **hand-rolled, not a YAML engine** (`merge.rs:117-120`; Rule C4,
 spec:104-109). It requires flat scalars, permits exactly one list block
 (`cas_legacy_tags`, emitted as flat `- item` lines), and supports no nested maps, no
 multi-line strings and no anchors.
@@ -608,7 +608,7 @@ below all happened *with* client-side filtering present somewhere.
    in **10 different databases** with byte-identical `SUM(LENGTH(notes)) = 756`
    (`docs/reports/2026-08-03-task-store-contamination-cas-de89.md:9-61`,
    `docs/requests/BUG-cross-project-task-replication-2026-08-06.md:20-46`).
-   Root cause, in the report's words: *"CAS task scope is determined by the database opened
+   Root cause, in the report's words: *"Cassy task scope is determined by the database opened
    by the caller. It is not stored as task provenance"* (`:9-13`) — **which is exactly the
    situation `knowledge_pages` is in today.**
 2. **Canonical-id collision.** Two different clients' books —
@@ -759,7 +759,7 @@ Numbered separately from §5, which stands. **§5.3 (opaque cursor) is now answe
 6. **How is a `global`-scope page addressed on the wire?** The migration writes global
    memories into the **global root's** knowledge store and project memories into the
    project's (`memory_migration/mod.rs:63-67`), preserving the scope split. But the sync
-   layer *requires* `project_canonical_id` and "the client refuses to sync outside a CAS
+   layer *requires* `project_canonical_id` and "the client refuses to sync outside a Cassy
    project" (§1.1) — and there is no global counterpart to a canonical id anywhere. **Today,
    global-scope pages appear to have no sync identity at all.** Is a global/account-scoped
    bucket something you can express? We are raising this as a question because we do not have

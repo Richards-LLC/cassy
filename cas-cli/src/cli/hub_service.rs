@@ -194,7 +194,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                     .args(["bootout", &domain])
                     .arg(&path)
                     .status();
-                fs::remove_file(&path).context("remove CAS launchd agent")?;
+                fs::remove_file(&path).context("remove Cassy launchd agent")?;
             }
             print_report(cli, report(platform, false, Some(false), Some(path), None)?)
         }
@@ -204,7 +204,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 let _ = Command::new("systemctl")
                     .args(["--user", "disable", "--now", SYSTEMD_UNIT])
                     .status();
-                fs::remove_file(&path).context("remove CAS systemd unit")?;
+                fs::remove_file(&path).context("remove Cassy systemd unit")?;
                 run_manager("systemctl", ["--user", "daemon-reload"], None)?;
             }
             print_report(cli, report(platform, false, Some(false), Some(path), None)?)
@@ -261,13 +261,13 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
         match report.supervision {
             "manual" => {
                 println!(
-                    "CAS hub supervision is manual: {}",
+                    "Cassy hub supervision is manual: {}",
                     report.instructions.unwrap_or_default()
                 );
             }
             manager => {
                 println!(
-                    "CAS hub service ({manager}) is {}{}",
+                    "Cassy hub service ({manager}) is {}{}",
                     if report.installed {
                         "installed"
                     } else {
@@ -318,12 +318,12 @@ fn service_binary() -> Result<PathBuf> {
     let binary = std::env::current_exe().context("cannot resolve the running cas binary")?;
     ensure!(
         binary.is_absolute(),
-        "CAS service requires an absolute installed binary path"
+        "Cassy service requires an absolute installed binary path"
     );
     ensure!(
         !binary.components().any(|part| part.as_os_str() == ".cas")
             || !binary.to_string_lossy().contains("/.cas/worktrees/"),
-        "refusing to install a hub service from a disposable CAS worktree; install a released cas binary first"
+        "refusing to install a hub service from a disposable Cassy worktree; install a released cas binary first"
     );
     Ok(binary)
 }
@@ -367,7 +367,7 @@ fn run_manager<const N: usize>(
     let status = child.status().with_context(|| format!("run {command}"))?;
     ensure!(
         status.success(),
-        "{command} refused the CAS hub service operation"
+        "{command} refused the Cassy hub service operation"
     );
     Ok(())
 }
@@ -413,7 +413,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=CAS Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -461,7 +461,7 @@ fn systemd_escape(value: &str) -> String {
 }
 
 fn manual_linux_instructions() -> &'static str {
-    "systemd --user is unavailable; run `cas hub start --tailscale-serve` from your distribution's rc script after networking and Tailscale, and use `cas hub status` to verify it. CAS cannot supervise reboot startup on this host."
+    "systemd --user is unavailable; run `cas hub start --tailscale-serve` from your distribution's rc script after networking and Tailscale, and use `cas hub status` to verify it. Cassy cannot supervise reboot startup on this host."
 }
 
 #[cfg(test)]

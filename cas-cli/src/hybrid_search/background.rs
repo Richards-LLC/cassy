@@ -44,7 +44,7 @@ pub struct BackgroundIndexer {
 }
 
 impl BackgroundIndexer {
-    /// Open a background indexer for the given CAS directory
+    /// Open a background indexer for the given Cassy directory
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let index_dir = cas_dir.join("index");
         let index = SearchIndex::open(&index_dir)?;

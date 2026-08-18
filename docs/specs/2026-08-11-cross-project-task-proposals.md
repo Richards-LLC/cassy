@@ -6,7 +6,7 @@ Status: cloud contract and CLI client implemented; cloud push-side provenance pr
 
 Date: 2026-08-11
 
-Audience: CAS CLI and Petra Stella Cloud maintainers
+Audience: Cassy CLI and Petra Stella Cloud maintainers
 
 Source task: `cas-a0ba` / GitHub issue `Richards-LLC/cassy#171`
 
@@ -14,7 +14,7 @@ Cloud contract: [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards
 
 ## Decision context
 
-Supervisors sometimes discover work owned by another CAS project. The current handoff is a markdown request that loses task priority, dependencies, lifecycle state, deduplication, and machine-readable completion. The desired experience is a tracked proposal that the target project can accept or reject, with an optional `blocked_by` edge that resolves when the accepted target task closes.
+Supervisors sometimes discover work owned by another Cassy project. The current handoff is a markdown request that loses task priority, dependencies, lifecycle state, deduplication, and machine-readable completion. The desired experience is a tracked proposal that the target project can accept or reject, with an optional `blocked_by` edge that resolves when the accepted target task closes.
 
 This is not a generic cross-project mutation capability. Only creation is in scope. Cross-project close, update, transfer, gate bypass, implicit target selection, and non-supervisor creation remain out of scope.
 
@@ -45,10 +45,10 @@ The new API is additive. Reversal means disabling proposal creation in the CLI a
 
 Authorization has two gates; both must pass.
 
-1. **CAS runtime gate:** only a registered `supervisor` or `director` session may call `task create project=...`. A worker or an unregistered/unknown role is refused before network I/O. The refusal must say: `Cross-project task creation requires a registered supervisor or director session.`
+1. **Cassy runtime gate:** only a registered `supervisor` or `director` session may call `task create project=...`. A worker or an unregistered/unknown role is refused before network I/O. The refusal must say: `Cross-project task creation requires a registered supervisor or director session.`
 2. **Cloud grant gate:** the bearer-token user must be a member of the selected team, and both the origin and target canonical projects must already resolve inside that same team. The target is never auto-registered by this endpoint. A missing grant is refused with: `Cross-project task creation requires membership in a team shared by the origin and target projects.`
 
-Team membership is the v1 grant. A future per-project allowlist may narrow it, but there is no ambient account-wide or cwd-derived grant. Cloud validation is authoritative for user/project access; the CAS role gate is authoritative for which local agent may exercise the user's grant.
+Team membership is the v1 grant. A future per-project allowlist may narrow it, but there is no ambient account-wide or cwd-derived grant. Cloud validation is authoritative for user/project access; the Cassy role gate is authoritative for which local agent may exercise the user's grant.
 
 The origin project is also explicit in the request body and verified against a registered project in the same team. The cloud does not derive either project from a push envelope, local path, current working directory, or session default.
 
@@ -74,7 +74,7 @@ The cloud stores two provenance classes so the UI never presents an asserted fie
 | Field | Meaning |
 | --- | --- |
 | `proposal_id` | Cloud-generated immutable proposal identity |
-| `target_task_id` | Cloud-reserved CAS task ID, returned at create time |
+| `target_task_id` | Cloud-reserved Cassy task ID, returned at create time |
 | `creator_user_id` | Identity from the validated bearer token |
 | `team_id` | Team whose membership grant authorized the request |
 | `origin_project_canonical_id` | Existing origin project resolved by the cloud |
@@ -87,11 +87,11 @@ The cloud stores two provenance classes so the UI never presents an asserted fie
 
 | Field | Meaning |
 | --- | --- |
-| `origin_session_id` | Registered local CAS session making the request |
+| `origin_session_id` | Registered local Cassy session making the request |
 | `origin_agent_id` | Registered local agent identity |
 | `origin_agent_name` | Human-readable local agent name, if present |
 | `origin_agent_role` | `supervisor` or `director`, checked by the CLI |
-| `client_version`, `client_build` | CAS binary identity |
+| `client_version`, `client_build` | Cassy binary identity |
 
 The cloud stamps server-attested fields from authentication, project lookup, and server time. It never accepts client overrides for them. Session and agent identity remain client assertions because the cloud does not own the local factory registry; the UI must label them accordingly.
 
@@ -153,7 +153,7 @@ The CLI successor adds a local external-dependency projection rather than a fore
 
 ## Scope truth for `task list scope=project`
 
-The local `tasks` table has no row-level `project_id`; its project boundary is the `.cas/cas.db` that owns it. Because pending proposals remain in a separate cloud inbox and foreign tasks are never inserted locally, `scope=project` can truthfully mean **the current CAS database, identified in output by its canonical project ID**. The CLI successor must:
+The local `tasks` table has no row-level `project_id`; its project boundary is the `.cas/cas.db` that owns it. Because pending proposals remain in a separate cloud inbox and foreign tasks are never inserted locally, `scope=project` can truthfully mean **the current Cassy database, identified in output by its canonical project ID**. The CLI successor must:
 
 - honor `scope=project` by naming that database/canonical ID in the response;
 - reject `scope=global` for tasks because global tasks are unsupported;
@@ -213,10 +213,10 @@ PLANNED: origin supervisor
 
 ## Open implementation questions
 
-- The cloud team should choose the server-side CAS task-ID generator, preserving the `cas-` prefix while making collision probability safe at team scale.
+- The cloud team should choose the server-side Cassy task-ID generator, preserving the `cas-` prefix while making collision probability safe at team scale.
 - Cursor shape for dependency reconciliation should reuse the cloud's server revision/cursor conventions rather than client wall clocks.
 - The receiving UI may expose triage in the web explorer as well as MCP; the API contract does not depend on that choice.
 
 ## Provenance
 
-Examined on 2026-08-11 against CAS commit `f96b5831` and the local Petra Stella Cloud `main` checkout. Commands used: `rg` over task lifecycle, syncing task store, team push/pull, cloud task mutation helpers, and both repositories' schemas; `nl -ba` for the cited line ranges. The cloud API implementation request is tracked as [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44).
+Examined on 2026-08-11 against Cassy commit `f96b5831` and the local Petra Stella Cloud `main` checkout. Commands used: `rg` over task lifecycle, syncing task store, team push/pull, cloud task mutation helpers, and both repositories' schemas; `nl -ba` for the cited line ranges. The cloud API implementation request is tracked as [Richards-LLC/petra-stella-cloud#44](https://github.com/Richards-LLC/petra-stella-cloud/issues/44).

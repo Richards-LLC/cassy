@@ -105,7 +105,7 @@ uses the same receipt command before any announcement digest is posted.
 If `coordination action=worktree_merge ... allow_trunk=true` encounters the
 ruleset first, it returns `PROTECTED_DEFAULT_BRANCH_REQUIRES_PR` with the
 source/target-specific form of these commands. Follow that handoff and retry
-the merge action after fetching the PR landing so CAS can reconcile delivery.
+the merge action after fetching the PR landing so Cassy can reconcile delivery.
 
 ### Shape (identical for both posts)
 
@@ -117,7 +117,7 @@ the merge action after fetching the PR landing so CAS can reconcile delivery.
 - **User post: ALWAYS plain language.** Describe what the user feels/sees. No jargon dumps.
 - **Dev post: may be more technical** — code/behavior level is fine.
 - **BOTH posts:**
-  - **No CAS-internal agent actions.** Do not narrate supervisor/worker/factory/director orchestration, task lifecycle bookkeeping, who-closed-what, epics, etc.
+  - **No Cassy-internal agent actions.** Do not narrate supervisor/worker/factory/director orchestration, task lifecycle bookkeeping, who-closed-what, epics, etc.
   - **No ticket numbers.** No `cas-xxxx`, no epic IDs. Describe the change, not the tracking artifact.
   - Lead with the before→after punch; keep it tight.
 
@@ -127,16 +127,16 @@ After any update to the Claude, Codex, or Grok changelog diary merges to `main`,
 publish one thread in **#cas-internal** (`C0B44GUKDK2`):
 
 1. **One top-level parent** — summarize the cross-harness sweep and lead with why
-   the changes matter to CAS users and maintainers.
+   the changes matter to Cassy users and maintainers.
 2. **Exactly three threaded replies**, in this order:
    1. **Grok**
    2. **Claude**
    3. **Codex**
 
 The parent and replies must use impact-first prose. Each harness reply names the
-version or version range reviewed, the notable CAS touchpoints, the resulting CAS
+version or version range reviewed, the notable Cassy touchpoints, the resulting Cassy
 verdict/action, and any source gaps (write `none` when there are none). Report what
-changed and what CAS users should expect; do not narrate how the diary work was
+changed and what Cassy users should expect; do not narrate how the diary work was
 assigned or executed.
 
 This is one shared three-harness thread even when only one diary changed. Use the
@@ -154,7 +154,7 @@ always presents one complete harness snapshot.
 ## Rules for every post and reply
 
 - Lead with impact, not mechanics or bookkeeping.
-- Include version ranges, CAS verdict/action, and source gaps in the diary thread.
+- Include version ranges, Cassy verdict/action, and source gaps in the diary thread.
 - Use **zero ticket/task/epic IDs** (including `cas-xxxx`).
 - Use **zero internal agent, worker, supervisor, director, or factory narration**.
 
@@ -193,7 +193,7 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 
 - [ ] One top-level parent in `C0B44GUKDK2` explains the cross-harness impact
 - [ ] Exactly three replies, ordered Grok → Claude → Codex
-- [ ] Each reply includes version range, CAS touchpoints, verdict/action, and source gaps
+- [ ] Each reply includes version range, Cassy touchpoints, verdict/action, and source gaps
 - [ ] Parent and replies contain zero ticket IDs and zero factory narration
 - [ ] Draft has a `## POSTED` receipt with UTC timestamp, channel, and every permalink
 - [ ] If runtime code also shipped, complete the runtime-release checklist too

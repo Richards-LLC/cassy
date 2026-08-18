@@ -6,7 +6,7 @@
 //!
 //! ```ignore
 //! Column::new()
-//!     .child(Header::h1("CAS Doctor"))
+//!     .child(Header::h1("Cassy Doctor"))
 //!     .child(Divider::new())
 //!     .child(Row::new()
 //!         .child(Column::new().child(Header::h2("Store")).child(kv_store))

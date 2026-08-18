@@ -1,4 +1,4 @@
-# CAS Code-History Search — Design Spec
+# Cassy Code-History Search — Design Spec
 
 - **Task:** cas-7ad6 (design-first; implementation split out after sign-off)
 - **Evidence dependency:** cas-9d92 (Phase 1 + Phase 2, merged to `main` as `f710fc3d`, report `docs/analysis/2026-08-07-comm-efficiency-mining.md`)
@@ -10,9 +10,9 @@
 
 ## 0. Executive summary, and the one thing that changes the shape
 
-The goal is to let CAS answer, as a query, *"when and why did this change, and is it still a problem?"* — by continuously indexing repository history and joining it to what CAS already owns.
+The goal is to let Cassy answer, as a query, *"when and why did this change, and is it still a problem?"* — by continuously indexing repository history and joining it to what Cassy already owns.
 
-**The survey found that the join CAS "already owns" is a schema with no data behind it.** Every table the brief names as the differentiator is empty or near-empty on the live database. This is the single most important input to the design, and it is measured, not inferred:
+**The survey found that the join Cassy "already owns" is a schema with no data behind it.** Every table the brief names as the differentiator is empty or near-empty on the live database. This is the single most important input to the design, and it is measured, not inferred:
 
 | Table | Purpose in the brief | Live rows |
 |---|---|---|
@@ -102,7 +102,7 @@ There is no `git2`/libgit2 dependency; everything is `std::process::Command::new
 
 `run_background_loop` at `cas-cli/src/mcp/daemon.rs:366`; intervals constructed `:429-444`; `tokio::select!` arms `:500-566`. A new periodic job is a new arm beside the `code_index_interval` arm at `:552-559`, with the body following `run_code_index_cycle` at `:630` (`spawn_blocking`, errors folded into `status.last_error`).
 
-**There is no post-commit or post-merge git hook.** The only git hook CAS installs is a `pre-commit` guard (`cas-cli/src/ui/factory/daemon/runtime/teams.rs:1269-1530`). All commit-time capture today is harness-hook-based (PostToolUse Bash → `attribution.rs:169`). The closest template for deferred work is the codemap pending-file drain (`codemap.rs:37`, writing `.cas/codemap-pending.json` JSONL).
+**There is no post-commit or post-merge git hook.** The only git hook Cassy installs is a `pre-commit` guard (`cas-cli/src/ui/factory/daemon/runtime/teams.rs:1269-1530`). All commit-time capture today is harness-hook-based (PostToolUse Bash → `attribution.rs:169`). The closest template for deferred work is the codemap pending-file drain (`codemap.rs:37`, writing `.cas/codemap-pending.json` JSONL).
 
 ### 1.9 Duplication verdict (AC2)
 
@@ -274,7 +274,7 @@ Rules, each with its reason:
 - **Primary: daemon tick.** New `tokio::select!` arm beside `daemon.rs:552-559`, default interval **300s**.
 - **Not gated on `is_idle()`.** The existing code-index arm is (`daemon.rs:552`), and the measured consequence is `code_files = 0` on a repo with 2,444 commits — on a busy factory the daemon is never idle, so the job never runs. A delta pass over ~80 commits/day is bounded work; it should be rate-limited, not idleness-gated. This is a deliberate divergence from the neighbouring code path, made because the neighbouring code path demonstrably never fires.
 - **Secondary: opportunistic drain.** The PostToolUse `git commit` detector (`attribution.rs:169`) appends the new SHA to a pending file, following the codemap template (`codemap.rs:37`). The daemon drains it. This is an optimisation for freshness; correctness never depends on it, because §4.2's `rev-list` from the watermark catches anything the hook missed.
-- **No git hook is installed.** CAS installs only a `pre-commit` guard today; adding `post-commit`/`post-merge` would collide with per-worktree private hooks dirs (`teams.rs:1510`) and with the factory's shared-hooks path (`:1406`). Rejected as not worth the blast radius.
+- **No git hook is installed.** Cassy installs only a `pre-commit` guard today; adding `post-commit`/`post-merge` would collide with per-worktree private hooks dirs (`teams.rs:1510`) and with the factory's shared-hooks path (`:1406`). Rejected as not worth the blast radius.
 
 ### 4.4 Embedding what, exactly (brief item 2)
 
@@ -381,7 +381,7 @@ an equality join against a hardcoded `substr(sha,1,8)`.
 
 Two of this feature's headline queries (§6.4 Q4, Q6) are only as good as the provenance edges. Milestone **M5** (§11) repairs `commit_links` population by moving the commit→session link off the harness-specific Bash-hook path and onto the daemon indexer itself: when the indexer ingests a commit, it resolves the session by joining `committed_at` + `branch` against `sessions` and `events.worker_git_commit`, and writes a `commit_links` row with an explicit `link_method` so a reconstructed link is never confused with an observed one.
 
-M5 is **optional for shipping M1–M4** and mandatory before any claim that CAS can answer "which prompt caused this line". Until M5 lands, the query surface must report `provenance_coverage` as a measured percentage (§10), not omit the field.
+M5 is **optional for shipping M1–M4** and mandatory before any claim that Cassy can answer "which prompt caused this line". Until M5 lands, the query surface must report `provenance_coverage` as a measured percentage (§10), not omit the field.
 
 **[CORRECTED 2026-08-08] M5's priority is raised by §5.2's re-measurement.** The draft could argue M5 was deferrable because a 10,279-row fallback edge would carry most queries in the meantime. That edge is 984 usable rows. There is no interim substitute for the repair: without M5, provenance answers rest on 229 exact anchors, and Q4 in particular should be regarded as *not yet supported* rather than merely degraded. Recommendation to sign-off (§12 Q1) is unchanged — keep M5 in the epic — but it should be sequenced as early as its dependencies allow rather than treated as a tail milestone.
 

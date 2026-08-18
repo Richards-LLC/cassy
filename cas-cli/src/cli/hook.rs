@@ -72,11 +72,11 @@ pub enum HookCommand {
     PreCompact,
     /// Handle MessageDisplay hook event (Ink-crash guard + assistant-text redaction, opt-in)
     MessageDisplay,
-    /// Remove duplicate CAS hooks from project-level .claude/settings.json files
+    /// Remove duplicate Cassy hooks from project-level .claude/settings.json files
     ///
-    /// When CAS hooks are configured globally in ~/.claude/settings.json,
+    /// When Cassy hooks are configured globally in ~/.claude/settings.json,
     /// project-level hooks cause duplicates (each hook runs twice per tool call).
-    /// This command strips CAS hook entries from project settings while preserving
+    /// This command strips Cassy hook entries from project settings while preserving
     /// non-hook settings like permissions and statusLine.
     #[command(name = "cleanup")]
     Cleanup {
@@ -142,7 +142,7 @@ fn execute_event(event: &str, cli: &Cli) -> anyhow::Result<()> {
 
 /// Initialize logging for hook execution
 fn init_hook_logging(verbose: bool) {
-    // Try to find CAS root and load config
+    // Try to find Cassy root and load config
     let cas_root = store::find_cas_root().ok();
     let logging_config = cas_root
         .as_ref()
@@ -154,12 +154,12 @@ fn init_hook_logging(verbose: bool) {
     let _ = crate::logging::init(cas_root.as_deref(), verbose, &logging_config);
 }
 
-/// Strip duplicate CAS hooks from project-level .claude/settings.json files
+/// Strip duplicate Cassy hooks from project-level .claude/settings.json files
 fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
     use config_gen::{config_dirs_missing_cas_hooks, known_claude_config_dirs};
 
     // Mass-stripping project hooks is only safe when EVERY config dir a session
-    // could run under already has global CAS hooks. With
+    // could run under already has global Cassy hooks. With
     // CLAUDE_CONFIG_DIR=~/.claude-alt and hooks only in ~/.claude, stripping
     // leaves alt-dir sessions with zero hooks (cas-5b96).
     let config_dirs = known_claude_config_dirs();
@@ -185,25 +185,25 @@ fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
             let mut stdout = io::stdout();
             let mut fmt = Formatter::stdout(&mut stdout, theme);
             if all_missing {
-                StatusLine::info("No CAS hooks found in global Claude settings")
+                StatusLine::info("No Cassy hooks found in global Claude settings")
                     .render(&mut fmt)?;
             } else {
                 StatusLine::info(
-                    "Some Claude config dirs have no global CAS hooks — refusing to strip project hooks",
+                    "Some Claude config dirs have no global Cassy hooks — refusing to strip project hooks",
                 )
                 .render(&mut fmt)?;
             }
             fmt.newline()?;
             for path in &missing_list {
-                fmt.bullet(&format!("missing CAS hooks: {path}"))?;
+                fmt.bullet(&format!("missing Cassy hooks: {path}"))?;
             }
             fmt.newline()?;
-            fmt.info("Nothing to clean up. Sessions using those config dirs rely on project-level hooks; add CAS hooks there first (or run 'cas hook configure' in the project).")?;
+            fmt.info("Nothing to clean up. Sessions using those config dirs rely on project-level hooks; add Cassy hooks there first (or run 'cas hook configure' in the project).")?;
         }
         return Ok(());
     }
 
-    // Find all project-level .claude/settings.json files with CAS hooks
+    // Find all project-level .claude/settings.json files with Cassy hooks
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
     let protected: Vec<std::path::PathBuf> = config_dirs
         .iter()
@@ -220,7 +220,7 @@ fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
             let theme = ActiveTheme::default();
             let mut stdout = io::stdout();
             let mut fmt = Formatter::stdout(&mut stdout, theme);
-            StatusLine::success("No duplicate CAS hooks found in project settings").render(&mut fmt)?;
+            StatusLine::success("No duplicate Cassy hooks found in project settings").render(&mut fmt)?;
         }
         return Ok(());
     }
@@ -235,7 +235,7 @@ fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
 
     if !cli.json {
         Header::h1(&format!(
-            "CAS Hook Cleanup{}",
+            "Cassy Hook Cleanup{}",
             if dry_run { " (dry run)" } else { "" }
         ))
         .render(&mut fmt)?;
@@ -291,7 +291,7 @@ enum CleanupAction {
     Unchanged,
 }
 
-/// Clean up a single project-level settings file by stripping CAS hooks.
+/// Clean up a single project-level settings file by stripping Cassy hooks.
 fn cleanup_single_file(path: &Path, dry_run: bool) -> anyhow::Result<CleanupAction> {
     let content = std::fs::read_to_string(path)?;
     let mut settings: serde_json::Value = serde_json::from_str(&content)?;
@@ -300,7 +300,7 @@ fn cleanup_single_file(path: &Path, dry_run: bool) -> anyhow::Result<CleanupActi
         return Ok(CleanupAction::Unchanged);
     }
 
-    // Also strip CAS statusLine if present (global provides it)
+    // Also strip Cassy statusLine if present (global provides it)
     if let Some(obj) = settings.as_object_mut() {
         obj.remove("statusLine");
     }
@@ -345,7 +345,7 @@ fn cleanup_single_file(path: &Path, dry_run: bool) -> anyhow::Result<CleanupActi
     }
 }
 
-/// Recursively find .claude/settings.json files containing CAS hooks.
+/// Recursively find .claude/settings.json files containing Cassy hooks.
 ///
 /// `protected` lists global settings files (one per known Claude config dir)
 /// that must never be treated as project-level duplicates.
@@ -412,22 +412,22 @@ fn execute_configure(force: bool, cli: &Cli) -> anyhow::Result<()> {
                 let mut fmt = Formatter::stdout(&mut stdout, theme);
 
                 if created {
-                    StatusLine::success("Created .claude/settings.json with CAS hooks")
+                    StatusLine::success("Created .claude/settings.json with Cassy hooks")
                         .render(&mut fmt)?;
                     fmt.newline()?;
                     Header::h2("Hooks configured").render(&mut fmt)?;
                     fmt.bullet("SessionStart - Injects context at session start")?;
                     fmt.bullet("Stop - Generates session summary")?;
                     fmt.bullet("PostToolUse - Captures Write/Edit/Bash activity")?;
-                    fmt.bullet("StatusLine - Shows CAS status in Claude Code footer")?;
+                    fmt.bullet("StatusLine - Shows Cassy status in Claude Code footer")?;
                     fmt.newline()?;
                     Header::h2("Permissions configured (Claude Code 2.1.0+)").render(&mut fmt)?;
-                    fmt.bullet("Bash(cas :*) - All CAS commands auto-allowed")?;
+                    fmt.bullet("Bash(cas :*) - All Cassy commands auto-allowed")?;
                     fmt.newline()?;
                     StatusLine::info("Restart your Claude Code session for hooks to take effect.")
                         .render(&mut fmt)?;
                 } else {
-                    StatusLine::success("Updated .claude/settings.json with CAS hooks")
+                    StatusLine::success("Updated .claude/settings.json with Cassy hooks")
                         .render(&mut fmt)?;
                     fmt.newline()?;
                     StatusLine::info("Restart your Claude Code session for hooks to take effect.")
@@ -545,7 +545,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 /// Configure Claude Code hooks in .claude/settings.json
 ///
 /// This function creates or updates the settings.json file to include
-/// CAS hooks for SessionStart, Stop, and PostToolUse events.
+/// Cassy hooks for SessionStart, Stop, and PostToolUse events.
 ///
 /// Project settings are the canonical generated hook surface. Global settings
 /// may also carry hooks, but must never change the project file's generated
@@ -553,7 +553,7 @@ fn execute_status(cli: &Cli) -> anyhow::Result<()> {
 /// sessions used a different `CLAUDE_CONFIG_DIR` (cas-ce22).
 ///
 /// Returns Ok(true) if file was created, Ok(false) if updated.
-/// Configure CAS hooks, injecting an explicit home directory for the global-settings
+/// Configure Cassy hooks, injecting an explicit home directory for the global-settings
 /// check. Pass `None` for production (uses `dirs::home_dir()`); pass `Some(path)` in
 /// tests to avoid reading the real `~/.claude/settings.json` (cas-1888).
 pub(crate) fn configure_claude_hooks_with_home(
@@ -572,12 +572,12 @@ pub(crate) fn configure_claude_hooks_with_home(
     configure_claude_hooks_with_config_dirs(project_root, force, &config_dirs)
 }
 
-/// Configure CAS hooks against an explicit list of Claude config dirs.
+/// Configure Cassy hooks against an explicit list of Claude config dirs.
 ///
 /// Project-level hooks are only skipped/stripped when EVERY config dir in
-/// `config_dirs` already has CAS hooks — otherwise a session launched under a
+/// `config_dirs` already has Cassy hooks — otherwise a session launched under a
 /// hookless config dir (e.g. `CLAUDE_CONFIG_DIR=~/.claude-alt`) would end up
-/// with no CAS hooks at all (cas-5b96).
+/// with no Cassy hooks at all (cas-5b96).
 pub(crate) fn configure_claude_hooks_with_config_dirs(
     project_root: &Path,
     force: bool,
@@ -627,13 +627,13 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
             hooks_obj.insert(key.clone(), value.clone());
         }
 
-        // Add statusLine configuration (overwrite if exists - CAS owns this)
+        // Add statusLine configuration (overwrite if exists - Cassy owns this)
         let settings_obj = settings.as_object_mut().unwrap();
         if let Some(status_line) = cas_hooks.get("statusLine") {
             settings_obj.insert("statusLine".to_string(), status_line.clone());
         }
 
-        // Merge CAS Bash permissions (Claude Code 2.1.0+ wildcard patterns)
+        // Merge Cassy Bash permissions (Claude Code 2.1.0+ wildcard patterns)
         if let Some(cas_permissions) = cas_hooks.get("permissions") {
             let permissions = settings_obj
                 .entry("permissions")
@@ -643,7 +643,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
                     .entry("allow")
                     .or_insert_with(|| serde_json::json!([]));
                 if let Some(allow_arr) = allow.as_array_mut() {
-                    // Add CAS permissions if not already present
+                    // Add Cassy permissions if not already present
                     if let Some(cas_allow) = cas_permissions.get("allow").and_then(|a| a.as_array())
                     {
                         for pattern in cas_allow {
@@ -680,7 +680,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
     Ok(created)
 }
 
-/// Public API: configure CAS Claude hooks for a project.
+/// Public API: configure Cassy Claude hooks for a project.
 ///
 /// Delegates to [`configure_claude_hooks_with_home`] with `home_dir = None`
 /// (uses `dirs::home_dir()` to locate global settings). Call sites in

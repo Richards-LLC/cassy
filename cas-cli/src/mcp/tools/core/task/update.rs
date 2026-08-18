@@ -114,7 +114,7 @@ pub(crate) fn authorize_epic_owner_transfer_caller(
     if !has_identity {
         return Err(
             "epic_verification_owner transfer refused: caller identity is unknown \
-             (fail closed, cas-cc74). Present CAS agent id / CAS_AGENT_NAME / \
+             (fail closed, cas-cc74). Present Cassy agent id / CAS_AGENT_NAME / \
              CAS_SESSION_ID, or act as the current owner / a supervisor."
                 .to_string(),
         );
@@ -1635,7 +1635,7 @@ mod status_transition_tests {
         let repo = temp.path();
         git(repo, &["init", "-q", "-b", "main"]);
         git(repo, &["config", "user.email", "cas@example.com"]);
-        git(repo, &["config", "user.name", "CAS Test"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
         std::fs::write(repo.join("base.rs"), "// base\n").unwrap();
         git(repo, &["add", "base.rs"]);
         git(repo, &["commit", "-q", "-m", "base"]);

@@ -266,7 +266,7 @@ pub struct TaskCloseRequest {
     /// Task-attributed commit receipt for merged-before-close recovery.
     #[schemars(
         description = "Full commit SHA or unambiguous hexadecimal abbreviation produced by this \
-                       task. CAS resolves it to a full immutable commit ID, validates that it \
+                       task. Cassy resolves it to a full immutable commit ID, validates that it \
                        carries a non-empty diff and is an ancestor of the task's parent branch, \
                        and persists only the full ID."
     )]

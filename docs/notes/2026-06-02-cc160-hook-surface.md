@@ -3,7 +3,7 @@
 EPIC: **cas-2f29** · branch `epic/epic-exploit-claude-code-2-1-152-160-hook-skill-su-cas-2f29` · opened 2026-06-02
 
 Two perspectives tracked per item (release-post convention — user journey first, technical after):
-- 👤 **USER** — what changes for the person using CAS, plain English
+- 👤 **USER** — what changes for the person using Cassy, plain English
 - 🛠 **DEV** — technical change, files/gotchas
 
 **Release → Slack mapping:** at release, this becomes the standard #cas-internal **two-thread** post (per `feedback_slack_release_post_template`): Thread 1 = USER summary (parent) + USER details (reply, built from the 👤 lines below); Thread 2 = DEV summary (parent) + DEV details (reply, built from the 🛠 lines + Release mechanics: Cargo.toml bump, tag, commit SHAs). No `cas-xxxx` IDs in the Slack posts.
@@ -67,24 +67,24 @@ Branches: `factory/sturdy-fox-40` (cas-f9ad+cas-ae09), `factory/noble-jay-2` (ca
 - 🛠 DEV: new MessageDisplay handler + register event in get_cas_hooks_config (config_gen.rs ~:159); config flag default-off; default path is byte-identical passthrough (test-proven); reuses PreToolUse secret-redaction helper.
 
 ### cas-f97d — acceptEdits 160 regression spike ✅ NOT IMPACTED
-- 👤 USER: Confirmed the new 2.1.160 "confirm before writing sensitive config" prompt does NOT stall factory workers — they run in bypass-permissions mode so the check never fires. Nothing to fix. (Heads-up: a *non-factory* user in acceptEdits mode editing `.claude/`, `.mcp.json`, shell rc files, or git config will now see a confirmation prompt — that's intended Claude Code hardening, not a CAS bug.)
+- 👤 USER: Confirmed the new 2.1.160 "confirm before writing sensitive config" prompt does NOT stall factory workers — they run in bypass-permissions mode so the check never fires. Nothing to fix. (Heads-up: a *non-factory* user in acceptEdits mode editing `.claude/`, `.mcp.json`, shell rc files, or git config will now see a confirmation prompt — that's intended Claude Code hardening, not a Cassy bug.)
 - 🛠 DEV: characterization-first verdict — factory workers spawn with `--dangerously-skip-permissions` → `bypassPermissions`, which short-circuits the 160 `ORA`/`NX$` sensitive-file check (only fires in acceptEdits/default). Trigger set: shell init, git config, `.npmrc`/`.yarnrc`/`bunfig.toml`, `.bazelrc`/wrappers, `.pre-commit-config.yaml`/`lefthook.yml`/`.mcp.json`/`.devcontainer.json`, and sensitive dirs (`.git/`, `.claude/` w/ exceptions, `.cargo/`, etc.). NOT triggered: `Cargo.toml`, `package.json`, `.cas/config.toml`, `pyproject.toml`. No pre_tool.rs change. Memory 2026-06-02-7.
 
 ---
 
-## Strategic thread — #6: native Workflow / Agent Teams vs CAS factory
+## Strategic thread — #6: native Workflow / Agent Teams vs Cassy factory
 
-- 👤 USER: This is about where CAS spends its effort. Anthropic now ships its own multi-agent orchestration (Workflow tool, Agent Teams, the agents dashboard). The recommendation: CAS stops competing on *how to run agents* and doubles down on what it uniquely gives you — memory that survives across sessions, and quality gates that catch bad work. As a bonus, some CAS features (code review, deep research, ideate) get faster and cheaper by riding the native Workflow engine instead of the heavy factory.
+- 👤 USER: This is about where Cassy spends its effort. Anthropic now ships its own multi-agent orchestration (Workflow tool, Agent Teams, the agents dashboard). The recommendation: Cassy stops competing on *how to run agents* and doubles down on what it uniquely gives you — memory that survives across sessions, and quality gates that catch bad work. As a bonus, some Cassy features (code review, deep research, ideate) get faster and cheaper by riding the native Workflow engine instead of the heavy factory.
 - 🛠 DEV: 3-tier posture —
   - **A (keep in factory):** long-lived, human-supervised, cross-session EPIC work; workers that push back + accumulate context. Still differentiated (verification jail, merge-state SHA guards, multi-CLI incl. Codex, task-as-source-of-truth).
-  - **B (migrate to Workflow scripts called from CAS skills):** deterministic fan-out/verify patterns — `cas-code-review` (first), `deep-research`, `cas-ideate`, `session-learn`, duplicate-detector. Skill becomes a thin wrapper that authors the Workflow and writes results back into CAS memory/tasks.
-  - **C (substrate under native orchestration):** native subagents/teammates pull CAS context at spawn (SessionStart hook already does this) and write learnings back via MCP. CAS feeds native orchestration instead of competing with it.
+  - **B (migrate to Workflow scripts called from Cassy skills):** deterministic fan-out/verify patterns — `cas-code-review` (first), `deep-research`, `cas-ideate`, `session-learn`, duplicate-detector. Skill becomes a thin wrapper that authors the Workflow and writes results back into Cassy memory/tasks.
+  - **C (substrate under native orchestration):** native subagents/teammates pull Cassy context at spawn (SessionStart hook already does this) and write learnings back via MCP. Cassy feeds native orchestration instead of competing with it.
   - Open fork: is the orchestration layer a long-term differentiator, or a soon-commoditized mechanism to cede? Lean: cede mechanism, own knowledge + quality.
   - Proof spike (proposed, after the 5 land): re-implement `cas-code-review` dispatch as a Workflow script; measure token cost / latency / determinism vs the current path.
 
 ### #6 SPIKE RESULT — cas-2efa (golden-pelican-12), verdict: **HYBRID**
-- 👤 USER: A test of the idea showed cas-code-review can run meaningfully cheaper and more predictably on the native engine, while the CAS-specific smarts (task tracking, review routing, fix loops) stay in CAS. Roughly half the cost on the heavy part, with results that are reproducible run-to-run. Estimated, not yet measured live.
-- 🛠 DEV: Recommendation **HYBRID** — move dispatch+merge to a Workflow script; keep the skill as a ~50-line CAS-integration wrapper. CAS task integration (modes, task notes, fix loop, review→task routing) does NOT fit fire-and-return → stays in wrapper. Generalizes to cas-ideate / deep-research / session-learn / duplicate-detector. **Artifacts (commit 7464045):** `.claude/workflows/cas-code-review-prototype.js` + `docs/ideation/2026-06-02-cas-code-review-workflow-migration-spike.md`.
+- 👤 USER: A test of the idea showed cas-code-review can run meaningfully cheaper and more predictably on the native engine, while the Cassy-specific smarts (task tracking, review routing, fix loops) stay in Cassy. Roughly half the cost on the heavy part, with results that are reproducible run-to-run. Estimated, not yet measured live.
+- 🛠 DEV: Recommendation **HYBRID** — move dispatch+merge to a Workflow script; keep the skill as a ~50-line Cassy-integration wrapper. Cassy task integration (modes, task notes, fix loop, review→task routing) does NOT fit fire-and-return → stays in wrapper. Generalizes to cas-ideate / deep-research / session-learn / duplicate-detector. **Artifacts (commit 7464045):** `.claude/workflows/cas-code-review-prototype.js` + `docs/ideation/2026-06-02-cas-code-review-workflow-migration-spike.md`.
 
 ### #6 LIVE-MEASURED — cas-6a84 (golden-pelican-12), HYBRID confirmed, rationale REVISED
 - 👤 USER: We actually ran it. The earlier "half the cost" estimate was wrong — real cold-run cost is about the SAME as today (~16 min either way, ~16% cheaper, not ~54%). The real, big win is different: once a diff has been reviewed, re-reviewing it is **instant and free** ($0, 10ms) instead of paying full price again, and the findings come back in a strict validated shape. So the case for moving isn't "it's cheaper" — it's "it's reproducible, resumable, and the repeated review loop becomes free."
@@ -103,9 +103,9 @@ Branches: `factory/sturdy-fox-40` (cas-f9ad+cas-ae09), `factory/noble-jay-2` (ca
 
 ## Log
 - 2026-06-02 — EPIC cas-2f29 created (epic branch auto-made); 5 tasks filed; 4 isolated workers spawned + assigned; #6 strategic discussion opened.
-- 2026-06-02 — Workers booted idle and self-selected before honoring assignments; noble-jay-2 grabbed cas-5be8. Swapped cas-5be8↔cas-f97d (noble-jay-2 keeps cas-5be8, golden-pelican-12 takes cas-f97d spike) to avoid lock churn. Re-assigned all 4 on the teammate channel. Op note: SendMessage to teammates auto-routes through CAS coordination — use `mcp__cas__coordination action=message` directly.
+- 2026-06-02 — Workers booted idle and self-selected before honoring assignments; noble-jay-2 grabbed cas-5be8. Swapped cas-5be8↔cas-f97d (noble-jay-2 keeps cas-5be8, golden-pelican-12 takes cas-f97d spike) to avoid lock churn. Re-assigned all 4 on the teammate channel. Op note: SendMessage to teammates auto-routes through Cassy coordination — use `mcp__cas__coordination action=message` directly.
 - 2026-06-02 — cas-f97d CLOSED, verdict NOT IMPACTED (factory bypassPermissions short-circuits the 160 sensitive-file check). golden-pelican-12 now idle.
 - 2026-06-02 — User greenlit the #6 proof spike for the idle worker. Created cas-2efa (standalone) and assigned golden-pelican-12: prototype cas-code-review dispatch as a Workflow script + measure tokens/latency/determinism vs current path. Evidence feeds the #6 fork.
 - 2026-06-02 — cas-5be8, cas-f9ad, cas-ae09 all CLOSED verified (≈26 new tests across the three). 4/5 cc160 tasks done; only cas-b39a remains. sturdy-fox-40 + noble-jay-2 idle → standby; integration batched until cas-b39a lands. Slack two-thread convention reconfirmed by user (already in feedback_slack_release_post_template).
 - 2026-06-02 — cas-b39a CLOSED (a883e58). All 5 cc160 tasks done. Integrated all 3 branches by SHA into epic (HEAD 1607e37) — zero merge conflicts. Full `cargo test`: 2021 pass, 1 fail = pre-existing `test_configure_merges_existing` flake (green 3/3 single-threaded; parallel-only race on real ~/.claude/settings.json). noble-jay-2 had self-selected + fixed this exact flake as cas-1888 (176383d) while idle.
-- 2026-06-02 — #6 spike cas-2efa CLOSED: verdict HYBRID (~−54% est. cost; Opus-in-loop→0; deterministic JS merge; CAS integration stays in skill wrapper). Artifacts at 7464045. Brought both decisions (flake fold-in + ship cc160; #6 fork direction) to user.
+- 2026-06-02 — #6 spike cas-2efa CLOSED: verdict HYBRID (~−54% est. cost; Opus-in-loop→0; deterministic JS merge; Cassy integration stays in skill wrapper). Artifacts at 7464045. Brought both decisions (flake fold-in + ship cc160; #6 fork direction) to user.

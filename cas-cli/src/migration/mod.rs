@@ -1,4 +1,4 @@
-//! Schema migration system for CAS
+//! Schema migration system for Cassy
 //!
 //! Provides versioned, trackable schema migrations that replace ad-hoc
 //! ALTER TABLE statements scattered across store init() functions.
@@ -188,7 +188,7 @@ impl Subsystem {
 /// assume that each ALTER migration's target table had already been created
 /// by some prior `Sqlite*Store::init`. On databases that have never had the
 /// matching store constructed (e.g. `cas doctor --fix` on a `.cas/cas.db`
-/// initialized by an older CAS version that didn't run every store init),
+/// initialized by an older Cassy version that didn't run every store init),
 /// the ALTER would fail with `no such table: …`. Calling this before the
 /// apply loop makes the bootstrap independent of which stores have been
 /// touched in the current process. Idempotent.
@@ -337,7 +337,7 @@ fn record_detected_migration(conn: &Connection, migration: &Migration) -> Result
     Ok(recorded)
 }
 
-/// Check migration status for a CAS directory
+/// Check migration status for a Cassy directory
 pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     let db_path = cas_dir.join("cas.db");
 
@@ -496,7 +496,7 @@ fn bootstrap_migrations_on_connection(conn: &Connection) -> Result<usize> {
     Ok(bootstrapped)
 }
 
-/// Return the table and column targeted by CAS's static
+/// Return the table and column targeted by Cassy's static
 /// `ALTER TABLE ... ADD COLUMN ...` migration grammar.
 ///
 /// Migration SQL is compiled into the binary rather than supplied by users,
@@ -535,7 +535,7 @@ fn apply_migration_statement(conn: &Connection, sql: &str) -> Result<()> {
 /// has already been recorded.
 ///
 /// Recorded-but-undetected repair is deliberately more conservative than a
-/// normal forward migration. CAS can prove additive columns are idempotent by
+/// normal forward migration. Cassy can prove additive columns are idempotent by
 /// inspecting the target column, and SQLite's `IF NOT EXISTS` grammar proves
 /// create statements are non-destructive. Everything else (DROP, rename,
 /// UPDATE/backfill, or an unfamiliar future statement) is surfaced as an
@@ -876,7 +876,7 @@ mod tests {
                   files_changed, prompt_ids, committed_at, author, scope)
              VALUES ('legacy-v225', 'session-v225', 'agent-v225', 'main',
                      'legacy observed commit', '[]', '[]',
-                     '2026-01-01T00:00:00Z', 'CAS', 'project');
+                     '2026-01-01T00:00:00Z', 'Cassy', 'project');
              UPDATE cas_migrations SET applied_at = 'BOOTSTRAP' WHERE id = 225;
              DROP INDEX IF EXISTS idx_knowledge_pages_rel_path;
              DROP INDEX IF EXISTS idx_knowledge_pages_type;
@@ -1335,7 +1335,7 @@ mod tests {
             let temp = home.join("proj");
             std::fs::create_dir_all(&temp).unwrap();
 
-            // Initialize CAS properly (creates base tables)
+            // Initialize Cassy properly (creates base tables)
             crate::store::init_cas_dir(&temp).unwrap();
 
             let result = run_migrations(&temp.join(".cas"), true).unwrap();
@@ -1557,9 +1557,9 @@ mod tests {
         assert_eq!(skills_count, 1);
     }
 
-    /// cas-bdb9: `run_migrations` on a CAS dir whose `.cas/cas.db` has only the
+    /// cas-bdb9: `run_migrations` on a Cassy dir whose `.cas/cas.db` has only the
     /// minimal base tables (no skills/agents — simulating a DB initialized by
-    /// an older CAS version) must succeed end-to-end, with the skills and
+    /// an older Cassy version) must succeed end-to-end, with the skills and
     /// agents tables bootstrapped and the ALTER migrations applied cleanly.
     #[test]
     fn test_run_migrations_bootstraps_missing_skills_and_agents_tables() {
@@ -1571,7 +1571,7 @@ mod tests {
             conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
             // Seed entries/rules/tasks with their real lazy-bootstrap shape so
             // `is_db_initialized` passes — mirroring the bug-doc scenario where
-            // an older CAS version initialized these stores but never touched
+            // an older Cassy version initialized these stores but never touched
             // skills/agents.
             conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
             conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
@@ -1759,7 +1759,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
-            // A DB from an older CAS version: entries/rules/tasks only.
+            // A DB from an older Cassy version: entries/rules/tasks only.
             conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
             conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
             conn.execute(
@@ -1818,7 +1818,7 @@ mod tests {
         crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let temp = home.join("proj");
             std::fs::create_dir_all(&temp).unwrap();
-            // Properly initialize CAS (runs every store init).
+            // Properly initialize Cassy (runs every store init).
             crate::store::init_cas_dir(&temp).unwrap();
             let cas_dir = temp.join(".cas");
 

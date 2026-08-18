@@ -84,7 +84,7 @@ impl CloudSyncer {
 
         // Include project_canonical_id (required for project scoping)
         let project_id = get_project_canonical_id().ok_or_else(|| {
-            CasError::Other("Cannot sync: not inside a CAS project directory".to_string())
+            CasError::Other("Cannot sync: not inside a Cassy project directory".to_string())
         })?;
 
         // cas-8ca5 / contract §5: include the normalized git remote so the
@@ -526,7 +526,7 @@ impl CloudSyncer {
                             "cas-8ca5: adopted server canonical project id"
                         );
                         eprintln!(
-                            "[CAS sync] adopted team canonical project id \
+                            "[Cassy sync] adopted team canonical project id \
                              '{adopted}' (matched git remote)"
                         );
                     }

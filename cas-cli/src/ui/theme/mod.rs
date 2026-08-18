@@ -1,4 +1,4 @@
-//! Theme system for CAS Terminal UI
+//! Theme system for Cassy Terminal UI
 //!
 //! Provides centralized theming with dark/light/high-contrast modes,
 //! semantic color tokens, and pre-composed styles.

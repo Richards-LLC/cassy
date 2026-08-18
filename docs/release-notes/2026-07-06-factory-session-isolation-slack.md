@@ -6,7 +6,7 @@ Channel: #cas-internal (`C0B44GUKDK2`) — two top-level posts.
 
 ## Post 1 — User
 
-Running two CAS factories on the same project used to be chaos: one session's workers would appear inside the other's terminal, a supervisor could accidentally shut down the *other* session's workers, and even a plain Claude session in the same folder would get poked by a factory it had nothing to do with. Now every factory session is its own sealed room.
+Running two Cassy factories on the same project used to be chaos: one session's workers would appear inside the other's terminal, a supervisor could accidentally shut down the *other* session's workers, and even a plain Claude session in the same folder would get poked by a factory it had nothing to do with. Now every factory session is its own sealed room.
 
 - Spin up as many sessions on one project as you like — each one only spawns, sees, messages, and shuts down its **own** workers.
 - A plain (non-factory) Claude session in the same project is invisible to factories: no more surprise nudges or status pings meant for someone else's workers.

@@ -1,6 +1,6 @@
 //! Migration: Create the `known_repos` table on the host `~/.cas/cas.db`.
 //!
-//! Registers every CAS-aware repo directory the host has touched so a
+//! Registers every Cassy-aware repo directory the host has touched so a
 //! cross-repo sweep (Unit 4 `cas sweep-all`, Unit 3's opportunistic sweep)
 //! can list every candidate without a filesystem scan. Writers: `cas init`,
 //! factory daemon startup, MCP server startup when `.cas/` exists in CWD.

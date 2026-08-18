@@ -397,7 +397,7 @@ impl GraphRetriever {
 ///
 /// Supports patterns like:
 /// - "person:Alice" -> (Person, "Alice")
-/// - "project:CAS" -> (Project, "CAS")
+/// - "project:Cassy" -> (Project, "Cassy")
 /// - "tool:Rust" -> (Tool, "Rust")
 pub fn parse_typed_entity(query: &str) -> Option<(EntityType, String)> {
     let parts: Vec<&str> = query.splitn(2, ':').collect();
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn test_extract_entity_candidates() {
         // Test capitalized words
-        let query = "What did Alice work on for the CAS project?";
+        let query = "What did Alice work on for the Cassy project?";
         let words: Vec<&str> = query
             .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
             .filter(|s| !s.is_empty())
@@ -438,7 +438,7 @@ mod tests {
 
         assert!(candidates.contains(&"What".to_string()));
         assert!(candidates.contains(&"Alice".to_string()));
-        assert!(candidates.contains(&"CAS".to_string()));
+        assert!(candidates.contains(&"Cassy".to_string()));
     }
 
     #[test]
@@ -465,11 +465,11 @@ mod tests {
         assert_eq!(etype, EntityType::Person);
         assert_eq!(name, "Alice");
 
-        let result = parse_typed_entity("project:CAS");
+        let result = parse_typed_entity("project:Cassy");
         assert!(result.is_some());
         let (etype, name) = result.unwrap();
         assert_eq!(etype, EntityType::Project);
-        assert_eq!(name, "CAS");
+        assert_eq!(name, "Cassy");
 
         // Invalid format
         let result = parse_typed_entity("no colon here");
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn test_extract_candidates_multi_word() {
         // Test multi-word entity extraction (consecutive capitalized words)
-        let query = "Alice Smith works on Project CAS";
+        let query = "Alice Smith works on Project Cassy";
         let words: Vec<&str> = query.split_whitespace().collect();
 
         let mut multi_word = Vec::new();
@@ -684,12 +684,12 @@ mod tests {
         }
 
         assert!(multi_word.contains(&"Alice Smith".to_string()));
-        assert!(multi_word.contains(&"Project CAS".to_string()));
+        assert!(multi_word.contains(&"Project Cassy".to_string()));
     }
 
     #[test]
     fn test_extract_candidates_with_punctuation() {
-        let query = "Check Alice work, or Bob code; maybe CAS?";
+        let query = "Check Alice work, or Bob code; maybe Cassy?";
         let words: Vec<&str> = query
             .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
             .filter(|s| !s.is_empty())
@@ -712,6 +712,6 @@ mod tests {
         assert!(candidates.contains(&"Check".to_string()));
         assert!(candidates.contains(&"Alice".to_string()));
         assert!(candidates.contains(&"Bob".to_string()));
-        assert!(candidates.contains(&"CAS".to_string()));
+        assert!(candidates.contains(&"Cassy".to_string()));
     }
 }

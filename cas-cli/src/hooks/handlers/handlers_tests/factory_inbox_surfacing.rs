@@ -378,7 +378,7 @@ fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
                 origin
             );
             let rendered = format!(
-                "CAS provenance: notification_id=123 origin={} queued_at=2026-08-15T20:45:40Z delivery=first-delivery\n\nGitHub check-run updatedAt changes only on state transitions; use status/conclusion and a known wall-clock bound before declaring CI stalled.",
+                "Cassy provenance: notification_id=123 origin={} queued_at=2026-08-15T20:45:40Z delivery=first-delivery\n\nGitHub check-run updatedAt changes only on state transitions; use status/conclusion and a known wall-clock bound before declaring CI stalled.",
                 match origin {
                     MachinePromptOrigin::AgentAuthored => "agent-authored",
                     MachinePromptOrigin::LifecycleRelay => "lifecycle-relay",

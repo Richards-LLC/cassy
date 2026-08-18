@@ -1661,7 +1661,7 @@ mod tests {
 
     #[test]
     fn emit_enqueues_once_and_suppresses_same_occurrence() {
-        // SAFETY: process-wide CAS env lock held for this test body.
+        // SAFETY: process-wide Cassy env lock held for this test body.
         // cas-acb4: one guard owns the shared env lock AND restores on
         // unwind. The previous save/restore pair leaked the variable to
         // every later test in this binary whenever an assertion panicked
@@ -1736,7 +1736,7 @@ mod tests {
         assert!(pending[0].prompt_delivered_at.is_some());
         assert_eq!(pq.pending_count().unwrap(), 1);
 
-        // SAFETY: restore env under the process-wide CAS env lock.
+        // SAFETY: restore env under the process-wide Cassy env lock.
     }
 
     #[test]

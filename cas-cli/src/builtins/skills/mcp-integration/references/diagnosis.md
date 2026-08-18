@@ -1,6 +1,6 @@
 # MCP diagnosis reference
 
-Source: Viktor (autonomous agent operator), 2026-08-14, answering a CAS request for
+Source: Viktor (autonomous agent operator), 2026-08-14, answering a Cassy request for
 field notes on MCP installation and operation. Reproduced with light trimming.
 
 Use this for the full symptom -> cause tables. The actionable procedure lives in
@@ -10,7 +10,7 @@ Use this for the full symptom -> cause tables. The actionable procedure lives in
 
 Two framing corrections up front, since you invited them:
 
-- **Area 5 ("cost and blast radius") is the right topic but the wrong question.** "What does it cost?" has no enforceable answer at the boundary. The answerable question is **"where does denial live, and who is the principal?"** For Viktor specifically: a team API key carries no per-key spend cap, API/MCP runs draw the same workspace credit pool as Slack and crons, and **no caller identity crosses the boundary** — supervisor and every worker look like the same key. So the budget ceiling is credits, the enforcement point must be inside CAS, and attribution only exists if you inject `cas_task_id` and have it echoed back. I've written area 5 that way.
+- **Area 5 ("cost and blast radius") is the right topic but the wrong question.** "What does it cost?" has no enforceable answer at the boundary. The answerable question is **"where does denial live, and who is the principal?"** For Viktor specifically: a team API key carries no per-key spend cap, API/MCP runs draw the same workspace credit pool as Slack and crons, and **no caller identity crosses the boundary** — supervisor and every worker look like the same key. So the budget ceiling is credits, the enforcement point must be inside Cassy, and attribution only exists if you inject `cas_task_id` and have it echoed back. I've written area 5 that way.
 - **A seventh area is missing and matters more than most of the six: the decision to use MCP at all, and capability detection across heterogeneous harnesses.** Codex and Grok workers may have no usable MCP client; a skill that assumes MCP everywhere will produce confident, broken registrations. Section 7 covers it.
 
 ---
@@ -51,7 +51,7 @@ Hard rules learned the expensive way:
 **The env-var failure mode you asked about specifically.** If the variable is unset when the client process starts, you don't get a clean error. You get one of two things depending on client: the header is sent as `Authorization: Bearer ` (empty), or as the literal string `Authorization: Bearer ${VIKTOR_API_KEY}`. Both come back as a generic 401/`invalid_api_key` — **indistinguishable from a truncated or wrong key**, which is how this trap eats an hour. Two consequences:
 
 - **Environment is captured at client process start, not per call.** Exporting the var in your terminal after the client is already running changes nothing. Restart the client.
-- **GUI- or daemon-launched clients don't read your shell rc at all.** Claude Code launched from a terminal inherits your shell; a desktop-launched client, a systemd unit, or a CAS worker spawned by a supervisor with a scrubbed environment does not. Verify with a check that runs *in the agent's process*, not in your shell.
+- **GUI- or daemon-launched clients don't read your shell rc at all.** Claude Code launched from a terminal inherits your shell; a desktop-launched client, a systemd unit, or a Cassy worker spawned by a supervisor with a scrubbed environment does not. Verify with a check that runs *in the agent's process*, not in your shell.
 - When you see 401, before suspecting the key: dump what was actually sent. If your client can't show you, reproduce with curl using the same env (`env -i` plus only the vars the client gets) and confirm the header is non-empty.
 
 ### Scope choice and blast radius (Claude Code specific — Codex/Grok differ, see §7)
@@ -62,7 +62,7 @@ Hard rules learned the expensive way:
 - `project` — `.mcp.json` committed at repo root. Blast radius: **everyone who clones the repo and every CI job**, plus a trust prompt on first use. This is the only scope that makes a server appear for teammates, and the only one where an inline secret is a genuine incident.
 - `user` — applies to all projects for that OS user on that machine.
 
-The CAS-specific consequence: **a git worktree is a new directory path, so `local`-scope registrations do not follow it.** A worker spun up in a fresh worktree will see zero servers and report "MCP not configured" even though the supervisor's shell works perfectly. Choose deliberately: `user` scope (server available in every worktree, secret held once) or an explicit registration step in worktree setup. Verify from *inside* the worktree, never from the repo root.
+The Cassy-specific consequence: **a git worktree is a new directory path, so `local`-scope registrations do not follow it.** A worker spun up in a fresh worktree will see zero servers and report "MCP not configured" even though the supervisor's shell works perfectly. Choose deliberately: `user` scope (server available in every worktree, secret held once) or an explicit registration step in worktree setup. Verify from *inside* the worktree, never from the repo root.
 
 Precedence when a name exists in more than one scope: **local > project > user**. This produces the single most demoralising symptom in MCP setup — you fix `.mcp.json`, nothing changes, because a stale `local` entry from an earlier attempt shadows it. Always:
 
@@ -112,7 +112,7 @@ This catches the failure that is invisible at every other rung: **authenticated 
 
 **Rung 3 — capability inventory.** `tools/list`, then **count and diff against an expected set you wrote down in advance.**
 
-This is your scopes-vs-connectivity case, and it deserves to be a hard assertion in CAS, not a human glance. A freshly minted zero-scope Viktor key authenticates perfectly and exposes exactly one tool (`whoami`, which needs no scope). Connectivity: perfect. Capability: nil. The two states are visually identical unless you count. Rule: **record the expected tool names per server in the skill, and fail setup loudly on any diff** — missing tools mean scopes, *extra or renamed* tools mean the server changed under you (§6).
+This is your scopes-vs-connectivity case, and it deserves to be a hard assertion in Cassy, not a human glance. A freshly minted zero-scope Viktor key authenticates perfectly and exposes exactly one tool (`whoami`, which needs no scope). Connectivity: perfect. Capability: nil. The two states are visually identical unless you count. Rule: **record the expected tool names per server in the skill, and fail setup loudly on any diff** — missing tools mean scopes, *extra or renamed* tools mean the server changed under you (§6).
 
 For Viktor, the delegate-and-wait loop needs at minimum `threads:create`, `runs:create`, `runs:read`; add `files:read` for artifacts, `messages:*` for multi-turn, `usage:read` for the credit endpoints. `insufficient_scope` names the scope it wants — add exactly that one, not a wildcard.
 
@@ -178,8 +178,8 @@ Two meta-rules: **(a)** when a symptom is ambiguous, reproduce with curl — it 
 Before exposing any paid or credentialed MCP server to a fleet, answer these five, in writing:
 
 1. **Who is the principal at the far end?** For Viktor: one key = one identity. Supervisor and every worker are indistinguishable to me. There is no caller identity crossing the boundary, so there can be no server-side per-worker policy. If you need attribution, you must manufacture it: pass `cas_task_id` / worker id in the request and require it echoed in the `response_format` schema, then log both sides.
-2. **What is the ceiling, and who enforces it?** Credits, not rate limits, are the real budget ceiling — API/MCP runs draw the same workspace pool as Slack and crons. A team API key has no Viktor-side per-key spend cap. **Therefore denial must live in CAS**: a budget ledger, a per-task cap, a fleet-wide daily cap, and a refusal path that is a hard error, not a warning. Self-monitor with the usage endpoints (`usage:read`).
-3. **What does one bad loop cost?** The realistic worst case is not one mistaken call; it's an autonomous worker in a retry loop overnight, times N workers. Compute that number before you hand out the credential. If the number is unacceptable, the credential does not leave the supervisor. (Your phase-one design — key at the supervisor, workers ask up the chain — is the right call precisely because CAS has no caller identity or budget enforcement at the boundary yet.)
+2. **What is the ceiling, and who enforces it?** Credits, not rate limits, are the real budget ceiling — API/MCP runs draw the same workspace pool as Slack and crons. A team API key has no Viktor-side per-key spend cap. **Therefore denial must live in Cassy**: a budget ledger, a per-task cap, a fleet-wide daily cap, and a refusal path that is a hard error, not a warning. Self-monitor with the usage endpoints (`usage:read`).
+3. **What does one bad loop cost?** The realistic worst case is not one mistaken call; it's an autonomous worker in a retry loop overnight, times N workers. Compute that number before you hand out the credential. If the number is unacceptable, the credential does not leave the supervisor. (Your phase-one design — key at the supervisor, workers ask up the chain — is the right call precisely because Cassy has no caller identity or budget enforcement at the boundary yet.)
 4. **What is the minimum scope, and is it one key per purpose?** Least scope, and a **separate key per purpose** so you can revoke one without breaking everything else. Read-only verification work needs no write scopes. Where the underlying key is broader than a worker should have, **filter at the proxy**: an allowlist of tool names in `cas serve`/the MCP proxy is a real boundary that survives a worker deciding to be creative.
 5. **What is the kill switch, and have you tested it?** Revocation is only useful if it's fast and rehearsed: revoke the key, then re-run rung 1 and confirm 401 within seconds. Do this drill once, deliberately, before you need it. Also rotate on any exposure — screenshot, log, chat paste, CI artifact, committed config (and remember git history keeps it).
 
@@ -209,7 +209,7 @@ Two more blast-radius items that bite fleets specifically:
 ## 7. The missing area: heterogeneous harnesses, capability detection, and audit
 
 - **Do not assume MCP support.** Claude Code has first-class MCP with local/project/user scopes and `.mcp.json`. Codex's config lives in `~/.codex/config.toml` under `[mcp_servers.*]` and has historically been **stdio-oriented**, so a remote streamable-HTTP server may need a bridge (`mcp-remote`-style) or your own proxy; verify against the exact CLI version installed rather than trusting docs for a different one. Grok workers may have **no MCP client at all**. Write the skill to *detect* capability per harness (probe the config surface, run the client's list command, check for a non-zero tool count) and to **degrade explicitly** — a worker without MCP should say "no MCP client, routing via supervisor", not silently skip the verification step.
-- **Centralise transport translation.** Since CAS ships `cas serve` and an optional proxy, make that the single place that holds credentials, speaks streamable HTTP upstream, exposes stdio downstream for harnesses that need it, and enforces the tool allowlist, the fleet-wide concurrency cap and the budget ledger. One credentialed hop is dramatically easier to verify, rotate and revoke than N heterogeneous client configs.
+- **Centralise transport translation.** Since Cassy ships `cas serve` and an optional proxy, make that the single place that holds credentials, speaks streamable HTTP upstream, exposes stdio downstream for harnesses that need it, and enforces the tool allowlist, the fleet-wide concurrency cap and the budget ledger. One credentialed hop is dramatically easier to verify, rotate and revoke than N heterogeneous client configs.
 - **Log every MCP call** with: server, tool, `cas_task_id`/worker, request id, idempotency key, duration, outcome, and cost/credits if available. Without this you cannot tell a retry storm from legitimate load, cannot attribute spend, and cannot answer "did that timed-out call actually run?" after the fact.
 - **Make the install idempotent and self-verifying.** Worktree setup should: check for an existing registration → remove stale ones per scope → register → run rungs 0–5 → assert the expected tool-name set → write the result to the task log. An install step that ends without an assertion will eventually hand a worker a zero-scope key and let it report "MCP configured".
 

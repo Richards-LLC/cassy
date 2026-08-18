@@ -60,11 +60,11 @@ impl DbLabel {
     }
 }
 
-/// One legacy database and the CAS root it belongs to.
+/// One legacy database and the Cassy root it belongs to.
 ///
 /// The destination is the knowledge store of the row's **own** root: global
 /// memories become global knowledge pages and project memories become project
-/// ones, preserving the scope split CAS already has.
+/// ones, preserving the scope split Cassy already has.
 #[derive(Debug, Clone)]
 pub struct SourceDb {
     pub label: DbLabel,

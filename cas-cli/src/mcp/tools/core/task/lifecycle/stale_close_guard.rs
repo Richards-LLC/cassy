@@ -28,7 +28,7 @@ pub const HALT_TASK_WORK_GEN_META: &str = "halt_task_work_gen";
 /// Durable prompt id for the exact urgent exchange that armed the halt.
 ///
 /// This makes the release condition evidence-bound: a response may only
-/// discharge the halt after CAS has confirmed this particular prompt was
+/// discharge the halt after Cassy has confirmed this particular prompt was
 /// surfaced and answered. Legacy flags without this key retain the safe
 /// `task start` recovery path.
 pub const HALT_TASK_WORK_PROMPT_META: &str = "halt_task_work_prompt_id";
@@ -250,7 +250,7 @@ pub fn looks_like_close_or_verify_guidance(text: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
-/// Whether a byte can be part of a CAS task-id run (`cas-<hex>`): ASCII
+/// Whether a byte can be part of a Cassy task-id run (`cas-<hex>`): ASCII
 /// alphanumeric or `-`. Used to reject prefix/suffix near-matches so that
 /// `cas-5c02x` (trailing alnum) or `xcas-5c02` (leading alnum) do NOT count as
 /// a mention of `cas-5c02`.

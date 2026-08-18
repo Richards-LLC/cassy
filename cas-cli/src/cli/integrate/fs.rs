@@ -503,7 +503,7 @@ mod tests {
         let inner = tmp.path().join("a/b");
         fs::create_dir_all(&inner).unwrap();
         // Skip if git accidentally finds an outer parent repo (e.g. running
-        // inside a CAS worktree). We can detect that by checking whether
+        // inside a Cassy worktree). We can detect that by checking whether
         // git's --show-toplevel would succeed — if it does, this test isn't
         // exercising the marker-walk path.
         let git_finds_outer = Command::new("git")

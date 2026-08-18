@@ -1,6 +1,6 @@
 //! Authentication CLI commands
 //!
-//! Provides login, logout, and whoami commands using CAS Cloud device flow.
+//! Provides login, logout, and whoami commands using Cassy Cloud device flow.
 
 use std::io;
 
@@ -23,7 +23,7 @@ use crate::ui::theme::{ActiveTheme, Icons};
 /// Authentication commands
 #[derive(Subcommand, Clone)]
 pub enum AuthCommands {
-    /// Log in to CAS Cloud
+    /// Log in to Cassy Cloud
     Login(LoginArgs),
 
     /// Log out and clear credentials
@@ -85,7 +85,7 @@ fn parse_endpoint(s: &str) -> Result<String, String> {
 /// Build the URL that opens the device-authorization page in a browser.
 ///
 /// The `/device/code` response may already carry the user code — either as
-/// RFC 8628's `verification_uri_complete`, or (as CAS Cloud does today) baked
+/// RFC 8628's `verification_uri_complete`, or (as Cassy Cloud does today) baked
 /// into `verification_uri` itself. Appending `?code=` unconditionally produced
 /// `…/device?code=FEUE-NMWQ?code=FEUE-NMWQ`, and the page then read the whole
 /// blob as the code and failed (cas-046d).
@@ -211,7 +211,7 @@ pub(crate) fn parse_retry_after(header: Option<&str>) -> Option<u64> {
     value.parse::<u64>().ok().filter(|secs| *secs > 0)
 }
 
-/// The status field of a device-token response, tolerating both the CAS Cloud
+/// The status field of a device-token response, tolerating both the Cassy Cloud
 /// `status` spelling and RFC 8628's `error`.
 fn body_status(body: &serde_json::Value) -> &str {
     body["status"]
@@ -506,21 +506,21 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
     let response = ureq::post(&code_url)
         .set("Content-Type", "application/json")
         .send_json(serde_json::json!({
-            "client_name": "CAS CLI"
+            "client_name": "Cassy CLI"
         }));
 
     let device_response: serde_json::Value = match response {
         Ok(resp) => resp.into_json()?,
         Err(e) => {
             if cli.json {
-                println!(r#"{{"status":"error","message":"Failed to connect to CAS Cloud"}}"#);
+                println!(r#"{{"status":"error","message":"Failed to connect to Cassy Cloud"}}"#);
             } else {
                 let mut err = io::stderr();
                 let theme = ActiveTheme::default();
                 let mut fmt = Formatter::stdout(&mut err, theme);
                 fmt.newline()?;
                 fmt.write_raw("  ")?;
-                fmt.error("Failed to connect to CAS Cloud")?;
+                fmt.error("Failed to connect to Cassy Cloud")?;
                 fmt.write_raw(&format!("    {e}"))?;
                 fmt.newline()?;
             }
@@ -830,12 +830,12 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
             anyhow::bail!("Invalid API token");
         }
         Err(e) => {
-            anyhow::bail!("Failed to connect to CAS Cloud: {e}");
+            anyhow::bail!("Failed to connect to Cassy Cloud: {e}");
         }
     }
 
     // Credentials live at user level (`~/.cas/cloud.json`), so this works from
-    // any directory — including outside a CAS project — and logs the whole
+    // any directory — including outside a Cassy project — and logs the whole
     // machine in once (cas-046d / Ben #3, #4).
     store_login_credentials(endpoint, token, None, None)?;
 
@@ -879,8 +879,8 @@ fn execute_login_with_token(token: &str, endpoint: &str, cli: &Cli) -> anyhow::R
         let theme = ActiveTheme::default();
         let mut fmt = Formatter::stdout(&mut out, theme);
         fmt.write_raw("  ")?;
-        fmt.success("Logged in to CAS Cloud")?;
-        fmt.write_muted("  Scope: this machine — every CAS project here is signed in")?;
+        fmt.success("Logged in to Cassy Cloud")?;
+        fmt.write_muted("  Scope: this machine — every Cassy project here is signed in")?;
         fmt.newline()?;
     }
 
@@ -1174,7 +1174,7 @@ fn print_login_success(fmt: &mut Formatter, email: Option<&str>) -> io::Result<(
         fmt.write_primary(email)?;
         fmt.newline()?;
     }
-    fmt.write_muted("  Scope:  this machine — every CAS project here is signed in")?;
+    fmt.write_muted("  Scope:  this machine — every Cassy project here is signed in")?;
     fmt.newline()?;
 
     fmt.newline()?;

@@ -8,7 +8,7 @@ pub(super) fn register_notifications(registry: &mut ConfigRegistry) {
             key: "notifications.enabled",
             section: "notifications",
             name: "Enable Notifications",
-            description: "Enable TUI notifications for CAS events like task creation, completion, and memory additions.",
+            description: "Enable TUI notifications for Cassy events like task creation, completion, and memory additions.",
             value_type: ConfigType::Bool,
             default: "true",
             constraint: Constraint::None,
@@ -17,7 +17,7 @@ pub(super) fn register_notifications(registry: &mut ConfigRegistry) {
             keywords: &["notifications", "alerts", "tui", "events", "popup"],
             use_cases: &[
                 "Disable for distraction-free mode",
-                "Enable to stay informed of CAS activity",
+                "Enable to stay informed of Cassy activity",
             ],
         });
 

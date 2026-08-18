@@ -27,10 +27,10 @@ pub struct ServeArgs {
     #[arg(long, default_value = "0")]
     pub port: u16,
 
-    /// Optional explicit CAS root directory (path to a `.cas/` dir).
+    /// Optional explicit Cassy root directory (path to a `.cas/` dir).
     ///
     /// This is used as a fallback when a session has no `project_dir` metadata, or when
-    /// CAS root detection fails for that `project_dir`.
+    /// Cassy root detection fails for that `project_dir`.
     #[arg(long)]
     pub cas_root: Option<std::path::PathBuf>,
 

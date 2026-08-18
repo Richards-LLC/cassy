@@ -532,17 +532,17 @@ fn format_working_mode(data: &StatusLineData, use_color: bool) -> String {
         parts.push(update_part);
     }
 
-    // Format: "CAS │ ▸ cas-ca75: Implement PreToolUse... │ P1 │ 👥 +2 agents"
+    // Format: "Cassy │ ▸ cas-ca75: Implement PreToolUse... │ P1 │ 👥 +2 agents"
     if use_color {
         format!(
-            "{}CAS{}{}{}",
+            "{}Cassy{}{}{}",
             colors::BOLD,
             colors::RESET,
             sep,
             parts.join(&sep)
         )
     } else {
-        format!("CAS{}{}", sep, parts.join(&sep))
+        format!("Cassy{}{}", sep, parts.join(&sep))
     }
 }
 
@@ -771,22 +771,22 @@ fn format_idle_mode(data: &StatusLineData, use_color: bool) -> String {
     };
     parts.push(health_indicator);
 
-    // Format: "CAS │ 128 ready tasks │ 28 blocked │ 993 memories │ 3 rules │ ✓ healthy"
+    // Format: "Cassy │ 128 ready tasks │ 28 blocked │ 993 memories │ 3 rules │ ✓ healthy"
     if use_color {
         format!(
-            "{}CAS{}{}{}",
+            "{}Cassy{}{}{}",
             colors::BOLD,
             colors::RESET,
             sep,
             parts.join(&sep)
         )
     } else {
-        format!("CAS{}{}", sep, parts.join(&sep))
+        format!("Cassy{}{}", sep, parts.join(&sep))
     }
 }
 
 fn format_minimal(data: &StatusLineData, use_color: bool) -> String {
-    // Compact but readable: "CAS │ 4a │ 128r 2w 28b │ 993m │ 3ru │ ✓"
+    // Compact but readable: "Cassy │ 4a │ 128r 2w 28b │ 993m │ 3ru │ ✓"
     let mut parts = Vec::new();
 
     // Agents (only if multi-agent)
@@ -896,7 +896,7 @@ fn format_minimal(data: &StatusLineData, use_color: bool) -> String {
             .unwrap_or_default();
 
         format!(
-            "{}CAS{} {}│{} {}{} {}│{} {}m {}│{} {}ru {}│{} {}{}",
+            "{}Cassy{} {}│{} {}{} {}│{} {}m {}│{} {}ru {}│{} {}{}",
             colors::BOLD,
             colors::RESET,
             colors::DIM,
@@ -922,7 +922,7 @@ fn format_minimal(data: &StatusLineData, use_color: bool) -> String {
         };
 
         format!(
-            "CAS │ {}{} │ {}m │ {}ru │ {}{}",
+            "Cassy │ {}{} │ {}m │ {}ru │ {}{}",
             agent_prefix,
             task_parts.join(" "),
             data.memories.total,

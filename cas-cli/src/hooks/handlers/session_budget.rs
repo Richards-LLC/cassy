@@ -16,7 +16,7 @@
 //! This module enforces the aggregate bound with **deterministic degradation**,
 //! never blind truncation:
 //!
-//! * Protected segments (role guidance + the CAS context header, plus safety
+//! * Protected segments (role guidance + the Cassy context header, plus safety
 //!   assertions such as the worker worktree warning) are emitted verbatim,
 //!   always, whatever the budget says.
 //! * Degradable segments carry a pre-authored *compact summary* — counts plus
@@ -136,10 +136,10 @@ pub(crate) struct SessionContextAssembler {
 }
 
 impl SessionContextAssembler {
-    /// Start from the base context (CAS header + role guidance + ready tasks +
+    /// Start from the base context (Cassy header + role guidance + ready tasks +
     /// memories + skills + MCP tools).
     ///
-    /// The base is split on its top-level section headings: the CAS context
+    /// The base is split on its top-level section headings: the Cassy context
     /// header and role guidance are protected verbatim, while the *listing*
     /// sections ([`DEGRADABLE_BASE_SECTIONS`]) degrade to their heading — which
     /// already carries the counts — plus the command that reproduces them. Any
@@ -227,7 +227,7 @@ impl SessionContextAssembler {
     /// Render the payload, degrading variable sections until it fits.
     ///
     /// Returns the assembled string. When protected content alone exceeds the
-    /// budget the result can still be over — by design: guidance and the CAS
+    /// budget the result can still be over — by design: guidance and the Cassy
     /// context header are never truncated. A diagnostic is written to stderr in
     /// that case so the overflow is attributable instead of mysterious.
     pub(crate) fn render(mut self) -> String {
@@ -357,7 +357,7 @@ mod tests {
             render_wip_banner,
         };
 
-        // Base: CAS header + real supervisor guidance (protected) followed by
+        // Base: Cassy header + real supervisor guidance (protected) followed by
         // the progressive-disclosure listings (degradable).
         let protected_base = format!(
             "## 📋 CAS Context\n**Session:** `7d3511aa-9cf5-44d8-921d-0289bd66fe0a`\n\n{}",
@@ -459,7 +459,7 @@ mod tests {
         // every compacted section still names its remediation command.
         assert!(
             payload.contains(&protected_base),
-            "supervisor guidance / CAS context header must never be truncated"
+            "supervisor guidance / Cassy context header must never be truncated"
         );
         assert!(
             payload.contains("198 structural change"),

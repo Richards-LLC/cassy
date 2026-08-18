@@ -1,6 +1,6 @@
-//! Cloud sync module for CAS
+//! Cloud sync module for Cassy
 //!
-//! Provides automatic synchronization of CAS data with CAS Cloud.
+//! Provides automatic synchronization of Cassy data with Cassy Cloud.
 //!
 //! # Components
 //!

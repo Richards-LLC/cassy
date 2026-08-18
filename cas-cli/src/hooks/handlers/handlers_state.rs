@@ -55,7 +55,7 @@ pub(crate) fn extract_activity_entity_id(tool_name: &str, input: &HookInput) -> 
 /// Track a file access for session-aware context boosting
 ///
 /// Records files being worked on so they can influence context selection.
-/// Uses a simple JSON file in the CAS directory.
+/// Uses a simple JSON file in the Cassy directory.
 pub(crate) fn track_session_file(cas_root: &std::path::Path, file_path: &str) {
     let session_files_path = cas_root.join("session_files.json");
 
@@ -93,9 +93,9 @@ pub fn get_session_files(cas_root: &std::path::Path) -> Vec<String> {
 /// Prefer the session_id (canonical agent ID) and fall back to PPID-based
 /// computation when the session_id is missing.
 pub(crate) fn current_agent_id(input: &HookInput) -> String {
-    // Codex's native hook `session_id` is its thread UUID, not CAS's
+    // Codex's native hook `session_id` is its thread UUID, not Cassy's
     // registered factory-agent ID. Factory hook processes inherit the
-    // canonical CAS session ID from the worker environment.
+    // canonical Cassy session ID from the worker environment.
     if std::env::var("CAS_FACTORY_MODE").as_deref() == Ok("1") {
         if let Ok(session_id) = std::env::var("CAS_SESSION_ID") {
             if !session_id.is_empty() {
@@ -466,7 +466,7 @@ pub(crate) fn get_exit_blockers(
 ///
 /// IMPORTANT: The session_id in SubagentStop is the PARENT's session_id, not the
 /// subagent's. We do NOT have the subagent's agent ID, and subagents spawned via
-/// Task tool may not even be registered as CAS agents. Therefore, we do NOT
+/// Task tool may not even be registered as Cassy agents. Therefore, we do NOT
 /// perform any agent cleanup here - that would incorrectly shut down the parent!
 ///
 /// Only the parent's Stop hook should clean up agents and PID mappings.
@@ -551,7 +551,7 @@ pub fn handle_subagent_start(
         Some(child_id) => child_id,
         None => {
             return Ok(HookOutput::with_system_context(
-                "CAS task-verifier authority binding failed: SubagentStart did not provide a distinct official child agent_id."
+                "Cassy task-verifier authority binding failed: SubagentStart did not provide a distinct official child agent_id."
                     .to_string(),
             ));
         }
@@ -560,7 +560,7 @@ pub fn handle_subagent_start(
         Ok(store) => store,
         Err(_) => {
             return Ok(HookOutput::with_system_context(
-                "CAS agent registry is unavailable; verification will fail closed.".to_string(),
+                "Cassy agent registry is unavailable; verification will fail closed.".to_string(),
             ));
         }
     };
@@ -575,7 +575,7 @@ pub fn handle_subagent_start(
         }
         _ => {
             return Ok(HookOutput::with_system_context(
-                "CAS verifier issuer is anonymous, orphaned, or inactive; verification will fail closed."
+                "Cassy verifier issuer is anonymous, orphaned, or inactive; verification will fail closed."
                     .to_string(),
             ));
         }
@@ -586,7 +586,7 @@ pub fn handle_subagent_start(
             || existing.parent_id.as_deref() != Some(parent_id.as_str()))
     {
         return Ok(HookOutput::with_system_context(
-            "CAS verifier child identity conflicts with an existing registered session; verification will fail closed."
+            "Cassy verifier child identity conflicts with an existing registered session; verification will fail closed."
                 .to_string(),
         ));
     }
@@ -610,7 +610,7 @@ pub fn handle_subagent_start(
         Ok(_) => {}
         Err(_) => {
             return Ok(HookOutput::with_system_context(
-                    "CAS could not atomically register the verifier child and bind its exact active handoff; verification will fail closed."
+                    "Cassy could not atomically register the verifier child and bind its exact active handoff; verification will fail closed."
                         .to_string(),
             ));
         }

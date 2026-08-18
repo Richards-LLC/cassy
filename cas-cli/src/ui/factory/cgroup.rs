@@ -173,7 +173,7 @@ pub(super) fn own_scope_for_test() -> Option<PathBuf> {
 /// An MCP server invoked by a worker already runs *inside* that worker's
 /// `cas-worker-*` scope. Treating its current cgroup as the root nests a
 /// supposedly shared server below the worker, so the next worker teardown
-/// kills it. Ascend exactly one level for a recognized CAS worker scope; never
+/// kills it. Ascend exactly one level for a recognized Cassy worker scope; never
 /// ascend arbitrary host cgroups.
 fn containment_root(own: &Path) -> PathBuf {
     let is_worker_scope = own
@@ -421,7 +421,7 @@ pub(crate) fn remove_scope(dir: &Path) {
     );
 }
 
-/// Remove empty child cgroups before their CAS-owned parent. Private server
+/// Remove empty child cgroups before their Cassy-owned parent. Private server
 /// scopes are nested under worker scopes, so worker teardown legitimately
 /// leaves an empty hierarchy rather than a leaf.
 fn remove_empty_descendant_scopes(dir: &Path) {

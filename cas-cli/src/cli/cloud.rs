@@ -1,6 +1,6 @@
-//! Cloud sync commands for CAS
+//! Cloud sync commands for Cassy
 //!
-//! Enables syncing CAS data with CAS Cloud service.
+//! Enables syncing Cassy data with Cassy Cloud service.
 
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -1009,7 +1009,7 @@ fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdopti
             }
         }
         TeamScopeAdoption::NoResolvableTeam { membership_count } if *membership_count > 1 => {
-            // Genuinely ambiguous: CAS will not guess which of several teams a
+            // Genuinely ambiguous: Cassy will not guess which of several teams a
             // project belongs to, and silence here would reproduce exactly the
             // "why is nothing shared?" confusion this task exists to remove.
             if cli.json {
@@ -1574,7 +1574,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             let mut fmt = Formatter::stdout(&mut out, theme);
             let warning_color = fmt.theme().palette.status_warning;
             fmt.write_colored("  \u{25CF} ", warning_color)?;
-            fmt.write_raw("Not logged in to CAS Cloud")?;
+            fmt.write_raw("Not logged in to Cassy Cloud")?;
             fmt.newline()?;
             fmt.write_raw("  Run ")?;
             fmt.write_accent("cas login")?;
@@ -1619,7 +1619,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
 
                     fmt.newline()?;
                     fmt.write_colored("  \u{25CF} ", success_color)?;
-                    fmt.write_raw("CAS Cloud")?;
+                    fmt.write_raw("Cassy Cloud")?;
                     fmt.newline()?;
                     fmt.newline()?;
 
@@ -2026,7 +2026,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         anyhow::bail!("Not logged in. Run 'cas login' first");
     }
     let project_id = resolve_canonical_id(cas_root)
-        .ok_or_else(|| anyhow::anyhow!("Cannot sync: not inside a CAS project directory"))?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot sync: not inside a Cassy project directory"))?;
     let scope = if args.entries_only {
         PushScope::EntriesOnly
     } else if args.tasks_only {
@@ -3025,7 +3025,7 @@ pub fn execute_team_pull(
         None => {
             let _ = report_team_pull_error(
                 cli,
-                "Team pull skipped: not inside a CAS project directory",
+                "Team pull skipped: not inside a Cassy project directory",
             );
             return Ok(());
         }
@@ -3341,7 +3341,7 @@ fn execute_team_memories(
         .clone();
 
     let canonical_id = crate::cloud::get_project_canonical_id()
-        .ok_or_else(|| anyhow::anyhow!("Not inside a CAS project directory."))?;
+        .ok_or_else(|| anyhow::anyhow!("Not inside a Cassy project directory."))?;
 
     let token = config
         .token
@@ -3948,7 +3948,7 @@ fn execute_purge_foreign(
     }
 
     let project_id = get_project_canonical_id()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine project ID. Not inside a CAS project?"))?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine project ID. Not inside a Cassy project?"))?;
 
     // cas-7fbb: delete + re-pull must use local openers so the re-pull does
     // not re-feed SyncQueue.

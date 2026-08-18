@@ -1,12 +1,12 @@
 ---
 title: Release Notes Rubric — #cas-internal two-thread announcement
 managed_by: cas
-audience: anyone authoring a CAS release announcement
+audience: anyone authoring a Cassy release announcement
 ---
 
 # Release Notes Rubric
 
-Standard for the CAS release announcement posted to the **#cas-internal** Slack
+Standard for the Cassy release announcement posted to the **#cas-internal** Slack
 channel after a version bump. The announcement is **two independent top-level
 threads**, each with exactly one detail reply (4 messages total).
 

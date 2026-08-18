@@ -2,7 +2,7 @@
 //!
 //! Factory worktrees intentionally keep independent Cargo target directories:
 //! sharing one target directory across concurrently-mutating branches is not a
-//! correctness boundary CAS can currently prove. This module therefore
+//! correctness boundary Cassy can currently prove. This module therefore
 //! reclaims only regenerable `target/` trees belonging to known factory
 //! worktrees, and only after conservative liveness, recency, containment, and
 //! filesystem-watermark checks.
@@ -133,7 +133,7 @@ pub fn inspect(
     let repo_root = cas_root.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "CAS root has no repository parent",
+            "Cassy root has no repository parent",
         )
     })?;
     let capacity = capacity_status(repo_root, policy)?;
@@ -198,7 +198,7 @@ pub fn inspect(
         selected_bytes,
         reclaimed_bytes: 0,
         dry_run,
-        remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; CAS revalidates liveness, recency, and path containment immediately before each rename.".to_string(),
+        remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates liveness, recency, and path containment immediately before each rename.".to_string(),
         caches: records,
     })
 }

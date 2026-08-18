@@ -9,7 +9,7 @@
 
 ## Problem
 
-The CAS CLI sends `project_canonical_id` on push payloads, but only for a small subset of entity types. In production:
+The Cassy CLI sends `project_canonical_id` on push payloads, but only for a small subset of entity types. In production:
 
 | Entity Type | Has project_id | Missing | % covered |
 |---|---|---|---|
@@ -20,7 +20,7 @@ The CAS CLI sends `project_canonical_id` on push payloads, but only for a small 
 | rule | 0 | 19 | 0% |
 | skill | 0 | 3 | 0% |
 
-This means entities from different projects (CAS, gabber-studio, accounting, etc.) all mix together in the same user bucket. Pull responses return everything regardless of which project the user is working in. Team project memories are effectively broken for most entity types.
+This means entities from different projects (Cassy, gabber-studio, accounting, etc.) all mix together in the same user bucket. Pull responses return everything regardless of which project the user is working in. Team project memories are effectively broken for most entity types.
 
 ---
 
@@ -38,15 +38,15 @@ Rationale:
 - Stable across remote changes (fork, transfer, rename)
 - Works for non-git projects (the `local:` hash prefix is opaque and not human-readable)
 - Human-readable in logs, UI, and team project lists
-- The folder name is always known — CAS always runs inside a project directory
+- The folder name is always known — Cassy always runs inside a project directory
 
 ### Derivation Logic
 
 ```
-project_canonical_id = basename of the CAS project root directory
+project_canonical_id = basename of the Cassy project root directory
 ```
 
-Where "CAS project root" is the directory containing `.cas/` (or the git root if `.cas/` is at git root). This is already resolved in the CLI for other purposes.
+Where "Cassy project root" is the directory containing `.cas/` (or the git root if `.cas/` is at git root). This is already resolved in the CLI for other purposes.
 
 Examples:
 - `/home/user/projects/petra-stella-cloud/.cas/` -> `petra-stella-cloud`
@@ -55,7 +55,7 @@ Examples:
 
 ---
 
-## Where to Change in CAS CLI
+## Where to Change in Cassy CLI
 
 ### 1. Project ID derivation (`cas-cli/src/cloud/config.rs`)
 
@@ -84,7 +84,7 @@ To:
 
 ```rust
 let project_id = config.project_canonical_id()
-    .ok_or_else(|| anyhow!("Cannot sync: not inside a CAS project directory"))?;
+    .ok_or_else(|| anyhow!("Cannot sync: not inside a Cassy project directory"))?;
 payload["project_canonical_id"] = json::Value::String(project_id);
 ```
 
@@ -176,10 +176,10 @@ The server is ready. No server changes needed for Phase 1.
 |---|---|
 | `cas-cli/src/cloud/config.rs` | Replaced `get_project_canonical_id()` — now returns `basename(parent(.cas))` instead of normalized git remote URL or `local:<sha256>` hash. Removed `get_project_id_from_git_remote()`, `get_project_id_from_path()`, `normalize_git_remote()`. Extracted `canonical_id_from_cas_root(&Path) -> Option<String>` for testability (the main fn uses `OnceLock` so can only init once per process). Removed `std::process::Command` import (no longer shells out to `git`). |
 | `cas-cli/src/cloud/mod.rs` | Removed `normalize_git_remote` from re-exports (no external callers). |
-| `cas-cli/src/cloud/syncer/push.rs` | `push_sessions()` and `push_sub_batch()`: changed `if let Some(project_id)` to `ok_or_else(|| "Cannot sync: not inside a CAS project directory")?` — push now fails early if no project ID. |
+| `cas-cli/src/cloud/syncer/push.rs` | `push_sessions()` and `push_sub_batch()`: changed `if let Some(project_id)` to `ok_or_else(|| "Cannot sync: not inside a Cassy project directory")?` — push now fails early if no project ID. |
 | `cas-cli/src/cloud/syncer/team_push.rs` | `push_team()`: same optional-to-required change as above. |
 | `cas-cli/src/cloud/syncer/pull.rs` | Updated fallback from `"local:unknown"` to `"unknown"` in client-side entity filtering. Pull remains optional (no breaking change). |
-| `cas-cli/src/cli/cloud.rs` | Updated error message from "Not in a git repository with a remote" to "Not inside a CAS project directory". |
+| `cas-cli/src/cli/cloud.rs` | Updated error message from "Not in a git repository with a remote" to "Not inside a Cassy project directory". |
 
 ### Tests
 

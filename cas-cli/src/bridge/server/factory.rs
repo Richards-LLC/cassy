@@ -40,7 +40,7 @@ pub(crate) fn handle_factory_start(
         }
     }
 
-    // Ensure CAS is initialized in the project (create ./project/.cas if missing).
+    // Ensure Cassy is initialized in the project (create ./project/.cas if missing).
     if !project_dir.join(".cas").exists() {
         let exe = std::env::current_exe()?;
         let status = Command::new(&exe)

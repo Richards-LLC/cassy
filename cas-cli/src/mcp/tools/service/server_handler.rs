@@ -33,7 +33,7 @@ impl ServerHandler for CasService {
                 website_url: None,
             },
             instructions: Some(
-                "CAS (Coding Agent System) provides unified memory, tasks, rules, and skills."
+                "Cassy provides unified memory, tasks, rules, and skills."
                     .to_string(),
             ),
         }
@@ -163,7 +163,7 @@ impl ServerHandler for CasService {
                     Err(rmcp::ErrorData {
                         code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                         message: format!(
-                            "Tool '{}' timed out after 55s. This is a CAS server bug — please report it.",
+                            "Tool '{}' timed out after 55s. This is a Cassy server bug — please report it.",
                             tool_name
                         ).into(),
                         data: None,

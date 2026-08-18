@@ -9,7 +9,7 @@
 //!
 //! # Why this is the most dangerous code in the factory
 //!
-//! Every other GC in CAS marks a record, renames a directory, or abandons a
+//! Every other GC in Cassy marks a record, renames a directory, or abandons a
 //! queue row. This one sends signals to processes it did not start. Two
 //! failure modes matter, and they pull in opposite directions:
 //!
@@ -413,7 +413,7 @@ impl OrphanReport {
             }
             out.push_str(
                 "Reclaim with gc_cleanup force=true dry_run=false (both are required; \
-                 CAS revalidates each process's fingerprint immediately before signalling).\n",
+                 Cassy revalidates each process's fingerprint immediately before signalling).\n",
             );
         }
         out

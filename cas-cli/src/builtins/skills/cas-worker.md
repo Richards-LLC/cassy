@@ -1,6 +1,6 @@
 ---
 name: cas-worker
-description: Use when acting as a factory worker on an assigned CAS task, including progress reporting, blocker handling, delivery, and supervisor handoff.
+description: Use when acting as a factory worker on an assigned Cassy task, including progress reporting, blocker handling, delivery, and supervisor handoff.
 managed_by: cas
 disallowed-tools:
   - TodoWrite
@@ -52,7 +52,7 @@ Null means use judgment; other values are invalid.
 
 ## Rules of Engagement
 
-- **Cross-team routing.** Report CAS defects to `Richards-LLC/cassy`; file Richards-LLC team requests on its issue board, not its checkout. Save a memory receipt (URL, ask, date); `docs/requests` is legacy-only.
+- **Cross-team routing.** Report Cassy defects to `Richards-LLC/cassy`; file Richards-LLC team requests on its issue board, not its checkout. Save a memory receipt (URL, ask, date); `docs/requests` is legacy-only.
 
 - **Never self-dispatch.** Start only a task assigned by `action=mine` or named explicitly by the supervisor. `ready`/`available` are backlog *visibility*, never authorization to `start` a task yourself. Idle means wait.
 - **One task at a time.** Complete the current task before taking another.

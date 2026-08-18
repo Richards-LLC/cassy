@@ -1,10 +1,10 @@
-# TencentDB-Agent-Memory review — what CAS should steal
+# TencentDB-Agent-Memory review — what Cassy should steal
 
 Date: 2026-08-06. Source: repo zip extracted to
 `~/Petrastella/research/tencentdb-agent-memory/TencentDB-Agent-Memory-feat-server_team/`
 (Tencent's open-source agent-memory system, feat-server_team branch, ~840 files, TS/Node).
 Five read-only spike agents reviewed MemoryCore, MemoryKnowledge, MemoryProxy, the
-SDK/plugin integration surface, and mapped the CAS baseline for comparison. No code was
+SDK/plugin integration surface, and mapped the Cassy baseline for comparison. No code was
 installed or run; all claims below were verified at file:line by the spikes.
 
 ## System shape
@@ -37,7 +37,7 @@ Less vector wizardry than the marketing implies, but real techniques:
   predicate pushdown).
 - **Hybrid = RRF k=60**, FTS + vector in parallel, each leg independently degradable.
   **No re-ranker, no recency/decay in ranking** — their `priority` field and timestamps
-  are stored and rendered but never scored. (CAS's decay/stability model is ahead here.)
+  are stored and rendered but never scored. (Cassy's decay/stability model is ahead here.)
 - **DB-per-namespace + LRU connection pool** (MemoryKnowledge): one `index.db` per wiki
   next to its markdown; RAM bounded by open connections × page cache, not corpus size
   (replaced an in-heap index that OOM'd at 20GB). Pooled readers; ephemeral
@@ -107,14 +107,14 @@ Two drifting RRF implementations. Dead `communities` API + unused Louvain dep. N
 persistent job queue in MemoryKnowledge (in-memory only; restart = mark failed).
 `priority`/recency dead weight in ranking. Deployment doc is a major version stale.
 
-## CAS gap map → ranked adoption list
+## Cassy gap map → ranked adoption list
 
-CAS baseline (verified in cas-src): local semantic search is a stub returning empty
+Cassy baseline (verified in cas-src): local semantic search is a stub returning empty
 (`cas-cli/src/hybrid_search/hybrid.rs:599`) yet the scorer still allocates Conceptual
 queries 60% to it; dedup/consolidation purely lexical (tag-grouped consolidation);
 auto-pipelines (session-learn, learning/rule review, dup detection) all default off;
 retrieval feedback recorded but never feeds ranking; global-scope injection disabled.
-What CAS is ahead on: per-entry decay/stability/spaced-repetition, tiering, entity-graph
+What Cassy is ahead on: per-entry decay/stability/spaced-repetition, tiering, entity-graph
 channel, rules/skills promotion + filesystem sync.
 
 1. **Make no-embeddings a first-class mode** (small, immediate). Stop advertising a
@@ -154,5 +154,5 @@ channel, rules/skills promotion + filesystem sync.
 Zeitgeist takeaway: the current wave is *not* vectors-everywhere — Tencent ships
 BM25-only by default and spends its engineering on prompt-cache-shaped injection,
 LLM-in-the-loop distillation/dedup with strict acceptance gates, and capture hygiene.
-CAS's cloud-only semantic split isn't behind the times; our real gaps are injection
+Cassy's cloud-only semantic split isn't behind the times; our real gaps are injection
 shape, dedup quality, extractor safety, and the feedback loop.

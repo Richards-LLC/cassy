@@ -13,7 +13,7 @@
 //!   - Negative: CAS_AGENT_ROLE unset → no bypass, falls through to
 //!     Claude Code's normal flow.
 //!   - Negative: factory agent + tool outside the allowlist → no bypass.
-//!   - Fires on both `cas_root=None` (no CAS initialized) and
+//!   - Fires on both `cas_root=None` (no Cassy initialized) and
 //!     `cas_root=Some` — intentionally asymmetric with the PreToolUse
 //!     hoist; see the block comment in notifications.rs for rationale.
 //!

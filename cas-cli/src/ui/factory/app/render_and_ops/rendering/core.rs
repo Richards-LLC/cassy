@@ -413,9 +413,9 @@ impl FactoryApp {
         let styles = &self.theme().styles;
         let mut spans = Vec::new();
 
-        // CAS badge
+        // Cassy badge
         spans.push(Span::styled(
-            " CAS ",
+            " Cassy ",
             Style::default()
                 .fg(palette.chip_fg)
                 .bg(palette.accent_dim)
@@ -655,7 +655,7 @@ impl FactoryApp {
                 get_agent_color(name)
             };
 
-            // Get status indicator from CAS data or spinner for pending
+            // Get status indicator from Cassy data or spinner for pending
             let status_icon: String = if is_pending {
                 let idx = (self
                     .pending_workers
@@ -803,7 +803,7 @@ impl FactoryApp {
         frame.render_widget(paragraph, area);
     }
 
-    /// Get a status icon for a worker based on their CAS task state
+    /// Get a status icon for a worker based on their Cassy task state
     pub(crate) fn get_worker_status_icon(&self, worker_name: &str) -> &'static str {
         // Check if worker has an in-progress task
         for task in &self.director_data.in_progress_tasks {

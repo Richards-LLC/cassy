@@ -1,4 +1,4 @@
-//! Storage abstraction for CAS
+//! Storage abstraction for Cassy
 //!
 //! This module re-exports storage implementations from `cas-store` crate
 //! and adds higher-level wrappers for notifications and syncing.
@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::CasError;
 
-/// Context for CAS operations, providing resolved paths and configuration.
+/// Context for Cassy operations, providing resolved paths and configuration.
 ///
 /// CasContext eliminates the need for global state lookups (like `find_cas_root()`)
-/// by resolving the CAS root once at entry points and passing it through.
+/// by resolving the Cassy root once at entry points and passing it through.
 /// This enables:
 /// - Deterministic behavior in tests (inject specific paths)
 /// - Parallel test execution without environment variable conflicts

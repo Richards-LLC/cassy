@@ -179,7 +179,7 @@ Source: `cas-cli/src/mcp/tools/core/agent_coordination/task_claiming.rs:408-465`
 
 ## Part 4 — Field evidence from session logs
 
-_Three parallel investigation agents mined recent worker and supervisor session JSONLs and project-local CAS SQLite DBs across **gabber-studio**, **cas-src**, and **ozer**. The picture got worse than the bug report described, and clearer about root cause._
+_Three parallel investigation agents mined recent worker and supervisor session JSONLs and project-local Cassy SQLite DBs across **gabber-studio**, **cas-src**, and **ozer**. The picture got worse than the bug report described, and clearer about root cause._
 
 ### 4.1 gabber-studio — confirms report, **incident count is higher**, and **NOT first occurrence**
 
@@ -251,7 +251,7 @@ Ozer hits the symptom (VJB, bypass-close) at higher volume than the other two pr
 1. **PR-merge-first**: merge `factory/<worker>` into `epic/<slug>` via `gh pr merge` BEFORE running bypass-close. By the time the task closes, the merge is already on origin.
 2. **Manual `git diff --stat` verification**: ozer memory file (`feedback_factory_workers_review_tasks_unreliable.md`) explicitly says _"Verify via `git diff --stat` against the parent branch before closing — confirms scope discipline matches close-notes."_ A human running the check the code should run.
 3. **Branch convention**: ozer uses `epic/<slug>` for child task branches; `factory/<worker>` exists only as ephemeral worktrees. Less surface area for stranding.
-4. **No CAS worktree-lease subsystem reliance**: `SELECT COUNT(*) FROM worktrees` = 0 in ozer's `cas.db`. Supervisor manages branches via `gh` directly — sidesteps the lease-divergence path entirely.
+4. **No Cassy worktree-lease subsystem reliance**: `SELECT COUNT(*) FROM worktrees` = 0 in ozer's `cas.db`. Supervisor manages branches via `gh` directly — sidesteps the lease-divergence path entirely.
 
 **Notable absences in ozer:**
 - 0 "Supervisors can only verify epics" rejections (that string only appears in cas-src and gabber-studio logs)
@@ -346,9 +346,9 @@ So the real story is:
 
 ### T2 design decision: hard gate AND callable command
 
-**Best for CAS robustness.** Three projects, three patterns: gabber-studio (no discipline → data loss), cas-src (release-pipeline discipline → no loss), ozer (PR-merge-first discipline → no loss). Only system-level enforcement covers all three.
+**Best for Cassy robustness.** Three projects, three patterns: gabber-studio (no discipline → data loss), cas-src (release-pipeline discipline → no loss), ozer (PR-merge-first discipline → no loss). Only system-level enforcement covers all three.
 
-- **Hard gate at epic close** — mirrors the existing `check_unmerged_epic_branches()` pattern at `close_ops.rs:161-182`. Today CAS already hard-blocks epic close on unmerged branches at the epic level; T2 extends the same principle from "epic branch" to "every child task's factory branch." Same shape, no precedent shift.
+- **Hard gate at epic close** — mirrors the existing `check_unmerged_epic_branches()` pattern at `close_ops.rs:161-182`. Today Cassy already hard-blocks epic close on unmerged branches at the epic level; T2 extends the same principle from "epic branch" to "every child task's factory branch." Same shape, no precedent shift.
 - **Callable command** — same logic exposed for in-flight diagnostics (rocketship's original ask). Cheap: same code, two call sites.
 
 Callable-only is strictly weaker than gate+callable. Discipline failed twice in 48 hours; the system should enforce.
@@ -357,6 +357,6 @@ Callable-only is strictly weaker than gate+callable. Discipline failed twice in 
 
 1. ~~`cas-9508` reconciliation~~ → **Retire and supersede.** Confirmed.
 2. ~~Ship T3 in this EPIC?~~ → **Already shipped in `8ee0c8f` / v2.10.0.** No work needed; converted to T7 audit.
-3. ~~`epic_status` auto-gate vs callable?~~ → **Both.** Hard gate at epic close + callable command for in-flight diagnostics. Best for CAS robustness.
+3. ~~`epic_status` auto-gate vs callable?~~ → **Both.** Hard gate at epic close + callable command for in-flight diagnostics. Best for Cassy robustness.
 
 Ready to create the EPIC and spawn workers.

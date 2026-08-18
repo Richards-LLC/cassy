@@ -756,7 +756,7 @@ mod tests {
         assert!(
             !crate::mcp::daemon::pid_alive(child_pid)
                 || process_state_and_group(child_pid).is_some_and(|(state, _)| state == 'Z'),
-            "worker teardown must kill a CAS child holding the registry"
+            "worker teardown must kill a Cassy child holding the registry"
         );
     }
 }

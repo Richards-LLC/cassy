@@ -687,6 +687,16 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub config_dir: Option<String>,
 
+    /// Per-worker spawn overrides as a JSON array. Entries are applied in
+    /// worker_names/count order after the batch cli/model/effort/config_dir
+    /// defaults, for example
+    /// `[{"name":"research","cli":"codex","config_dir":"~/.codex-work"}]`.
+    #[schemars(
+        description = "spawn_workers only: JSON array of per-worker {name?, cli?, model?, effort?, config_dir?} overrides. Entries align with worker_names (or count slots) and override the batch cli/model/effort/config_dir defaults; account directories stay provider-scoped (CLAUDE_CONFIG_DIR for Claude, CODEX_HOME for Codex)."
+    )]
+    #[serde(default)]
+    pub workers: Option<String>,
+
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
@@ -974,6 +984,14 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub config_dir: Option<String>,
 
+    /// Per-worker spawn overrides as a JSON array. Entries align with
+    /// worker_names/count slots and override batch spawn defaults.
+    #[schemars(
+        description = "spawn_workers only: JSON array of per-worker {name?, cli?, model?, effort?, config_dir?} overrides. Entries align with worker_names (or count slots) and override batch cli/model/effort/config_dir defaults."
+    )]
+    #[serde(default)]
+    pub workers: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -1155,6 +1173,7 @@ impl CoordinationRequest {
             model: self.model.clone(),
             effort: self.effort.clone(),
             config_dir: self.config_dir.clone(),
+            workers: self.workers.clone(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             port: self.port,

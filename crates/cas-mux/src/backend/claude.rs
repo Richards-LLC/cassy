@@ -42,7 +42,12 @@ impl Backend for Claude {
             launch.teams,
         );
         config.apply_claude_config_dir(launch.config_dir, launch.config_dir_source);
-        finish_worker_config(&mut config, launch.supervisor_cli, launch.active_workers);
+        finish_worker_config(
+            &mut config,
+            launch.supervisor_cli,
+            launch.active_workers,
+            launch.config_dir,
+        );
         config
     }
 

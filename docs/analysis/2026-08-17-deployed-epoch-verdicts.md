@@ -6,12 +6,22 @@ The distinction is deliberate. A merge or release tag establishes that a binary 
 
 ## Refreshing the v2.71.0 seed set after the normal v2.72 restart
 
-The live database available while this was built had no `history_epochs` table. Therefore this change does not publish invented v2.71 verdicts. After the normal epoch-capable `cas serve` rebuild/restart and sufficient observations, capture timestamped evidence and evaluated M2 candidates, then run:
+> **Corrected 2026-08-18 (cas-2332).** The "no `history_epochs` table" measurement
+> behind this deferral was taken against `~/.cas/cas.db`, which is the *global*
+> store (entries/rules/sessions) and never holds epochs. The epoch-capable
+> database is the project coordination DB — `<project>/.cas/cas.db` — which held
+> 1360 `daemon_start` epochs at the time of writing. The seed run has since been
+> executed against it; see
+> [2026-08-18-v2.71-deployed-epoch-seed-run.md](2026-08-18-v2.71-deployed-epoch-seed-run.md)
+> for the verdicts, and `scripts/seed_evidence_inputs.py` for the M1/M2 → M3
+> input join this command assumes.
+
+After the normal epoch-capable `cas serve` rebuild/restart and sufficient observations, capture timestamped evidence and evaluated M2 candidates, then run:
 
 ```bash
 python3 docs/analysis/scripts/deployed_epoch_verdicts.py \
   --seeds docs/analysis/v2.71.0-fix-wave-seeds.json \
-  --epochs-db "$HOME/.cas/cas.db" \
+  --epochs-db "$(git rev-parse --show-toplevel)/.cas/cas.db" \
   --evidence /path/to/reviewed-post-restart-evidence.json \
   --semantic-evidence /path/to/m2-evaluated-evidence-scores.json \
   --output-json /path/to/v2.71-deployed-epoch-verdicts.json \

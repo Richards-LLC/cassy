@@ -84,9 +84,20 @@ jobs:
       actions: read
       # Read-only PR metadata for the dedupe gate below. Nothing writes.
       pull-requests: read
+    # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
+    # push events) and cancel superseded runs. Keying on the head SHA put every
+    # push in its own group, so a rapid second push left the first run's full
+    # validation consuming runners for work that could never be merged —
+    # measured on PR #482, where macOS Check sat queued ~5min and the suite
+    # archive build ~8min behind superseded runs of the same PR. Cancelling is
+    # safe for required checks: merging requires the checks on the PR's CURRENT
+    # head, which the newest run supplies, and a cancelled run always belonged
+    # to a head that can no longer be merged. Keying by ref for pushes means a
+    # factory branch only ever cancels its own older commit, never another
+    # branch's.
     concurrency:
-      group: scoped-validation-${{ github.event.pull_request.head.sha || github.sha }}
-      cancel-in-progress: false
+      group: scoped-validation-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -283,10 +294,27 @@ jobs:
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
+      # Debug info is stripped from the archived test binaries (cas-59d3).
+      # Every shard downloads this whole artifact, so its size is multiplied by
+      # the shard count and lands directly on the PR critical path: measured at
+      # 4034 MB, the three shards spent 404s, 257s and 63s downloading it to
+      # run 108s, 105s and 101s of tests. The shards were never skewed — the
+      # download was. Stripping debug info measured 65% smaller binaries on
+      # this workspace (1344 MB of test binaries -> 476 MB with
+      # `strip --strip-debug`).
+      #
+      # The cost is that a CI failure's backtrace loses line numbers; the test
+      # name and assertion message are unaffected, and anyone who needs a
+      # symbolised trace reproduces locally, where the normal `dev` profile
+      # (debug = 1) still applies. This override is scoped to this job only.
       - name: Build full suite archive
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_DEV_STRIP: debuginfo
+          CARGO_PROFILE_TEST_STRIP: debuginfo
         run: cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
 
       # The archive carries test executables, but integration tests that spawn
@@ -477,9 +505,20 @@ jobs:
       - fast-validation-preflight
       - fast-validation-suite
       - fast-validation-docs
+    # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
+    # push events) and cancel superseded runs. Keying on the head SHA put every
+    # push in its own group, so a rapid second push left the first run's full
+    # validation consuming runners for work that could never be merged —
+    # measured on PR #482, where macOS Check sat queued ~5min and the suite
+    # archive build ~8min behind superseded runs of the same PR. Cancelling is
+    # safe for required checks: merging requires the checks on the PR's CURRENT
+    # head, which the newest run supplies, and a cancelled run always belonged
+    # to a head that can no longer be merged. Keying by ref for pushes means a
+    # factory branch only ever cancels its own older commit, never another
+    # branch's.
     concurrency:
-      group: fast-validation-${{ github.event.pull_request.head.sha || github.sha }}
-      cancel-in-progress: false
+      group: fast-validation-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Require every Fast Validation lane to pass
@@ -554,9 +593,20 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/')))
+    # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
+    # push events) and cancel superseded runs. Keying on the head SHA put every
+    # push in its own group, so a rapid second push left the first run's full
+    # validation consuming runners for work that could never be merged —
+    # measured on PR #482, where macOS Check sat queued ~5min and the suite
+    # archive build ~8min behind superseded runs of the same PR. Cancelling is
+    # safe for required checks: merging requires the checks on the PR's CURRENT
+    # head, which the newest run supplies, and a cancelled run always belonged
+    # to a head that can no longer be merged. Keying by ref for pushes means a
+    # factory branch only ever cancels its own older commit, never another
+    # branch's.
     concurrency:
-      group: macos-check-${{ github.event.pull_request.head.sha || github.sha }}
-      cancel-in-progress: false
+      group: macos-check-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
     # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
     # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.

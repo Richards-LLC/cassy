@@ -161,6 +161,8 @@ class EndToEndTest(unittest.TestCase):
         }
 
     def test_success_records_receipts_and_advances_artifact_state(self) -> None:
+        sources = (self.units, self.index, self.epochs, self.memories, self.seeds)
+        before = {path: path.read_bytes() for path in sources}
         report = sweep.run(self.config(), ["python", "operational_sweep.py", "run", "--config", "config.json"])
         payload = json.loads(report.with_name("report.json").read_text())
         self.assertTrue(payload["claims"])
@@ -176,6 +178,7 @@ class EndToEndTest(unittest.TestCase):
         markdown = report.read_text()
         self.assertIn("Top recurring failure narratives", markdown)
         self.assertIn("never auto-filed", markdown)
+        self.assertEqual({path: path.read_bytes() for path in sources}, before)
 
     def test_m2_gate_failure_is_fail_closed_and_does_not_advance_state(self) -> None:
         config = self.config()

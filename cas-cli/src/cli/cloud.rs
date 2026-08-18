@@ -976,6 +976,66 @@ fn print_personal_scope_notice(cli: &Cli, notice: &PersonalScopeNotice) {
     }
 }
 
+/// Report the automatic team-scope adoption (cas-c117).
+///
+/// Adoption promotes this project's memories, tasks, rules and skills from
+/// personal to team scope, so it is never silent: the user is told which team
+/// was adopted and how to undo it. The quiet outcomes (already scoped, opted
+/// out, not logged in) print nothing — routine syncs keep their output.
+fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdoption) {
+    use crate::cloud::TeamScopeAdoption;
+
+    match adoption {
+        TeamScopeAdoption::Adopted(team) => {
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "team_scope_adoption": {
+                            "status": "adopted",
+                            "team_id": team.team_id,
+                            "team_slug": team.team_slug,
+                            "team_name": team.team_name,
+                        }
+                    })
+                );
+            } else {
+                eprintln!(
+                    "  \u{2713} Team scope enabled for this project: {} ({})\n    \
+                     This project's memories, tasks and skills now sync to your team. \
+                     Run `cas cloud team auto off` to keep it personal.",
+                    team.team_name, team.team_slug
+                );
+            }
+        }
+        TeamScopeAdoption::NoResolvableTeam { membership_count } if *membership_count > 1 => {
+            // Genuinely ambiguous: CAS will not guess which of several teams a
+            // project belongs to, and silence here would reproduce exactly the
+            // "why is nothing shared?" confusion this task exists to remove.
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "team_scope_adoption": {
+                            "status": "ambiguous",
+                            "membership_count": membership_count,
+                        }
+                    })
+                );
+            } else {
+                eprintln!(
+                    "  \u{25CF} This project is personal: you belong to {membership_count} teams \
+                     and no default is set.\n    Run `cas cloud team default <slug>` to pick one, \
+                     or `cas cloud team auto off` to silence this."
+                );
+            }
+        }
+        other => {
+            tracing::debug!(outcome = ?other, "team scope adoption made no change");
+        }
+    }
+}
+
 /// Outcome of the eager slug-resolution flow run by `cas cloud team set`
 /// (cas-1ced).
 ///
@@ -1085,11 +1145,59 @@ pub(crate) fn check_bucket_ambiguity(
 fn team_show_json(cas_root: &Path) -> anyhow::Result<serde_json::Value> {
     let config = CloudConfig::load_from_cas_dir(cas_root)?;
     let canonical_id = crate::cloud::resolve_canonical_id(cas_root);
+    let team = resolve_team_display_for_show(&config);
     Ok(serde_json::json!({
-        "team_id": config.team_id,
-        "team_slug": config.team_slug,
+        "team_id": team.team_id,
+        "team_slug": team.team_slug,
+        "team_name": team.team_name,
         "canonical_id": canonical_id,
     }))
+}
+
+/// The team identity `cas cloud team show` displays, resolved exactly the
+/// way `cas cloud team auto` resolves it (cas-c117, field-report finding #6).
+struct ResolvedTeamDisplay {
+    team_id: Option<String>,
+    team_slug: Option<String>,
+    team_name: Option<String>,
+}
+
+/// Resolve the displayed team identity from the project config first and the
+/// user-level membership cache second.
+///
+/// Before this, `team show` printed only `config.team_slug`, which
+/// `cas cloud team set <uuid>` leaves as `None` (a raw UUID carries no slug —
+/// see `execute_team_set`). The result was `Team slug: <not resolved>`
+/// immediately after `cas cloud team auto on` had printed
+/// "Effective team: Petra Stella (petra-stella)" for the very same UUID,
+/// because `team auto` resolves through [`find_team_display`] and the
+/// user-level `teams[]` cache. Both surfaces now share that resolution.
+///
+/// The project-level `team_id` still wins over the user-level effective team
+/// so an explicit `cas cloud team set` is never hidden by the auto-promotion
+/// kill switch.
+fn resolve_team_display_for_show(config: &CloudConfig) -> ResolvedTeamDisplay {
+    let user_config = load_user_cloud_config_or_default();
+    let team_id = config
+        .team_id
+        .clone()
+        .or_else(|| config.active_team_id_with_user_config(Some(&user_config)));
+
+    match team_id {
+        Some(id) => {
+            let (slug, name) = find_team_display(&id, config, &user_config);
+            ResolvedTeamDisplay {
+                team_slug: slug.map(ToString::to_string),
+                team_name: name.map(ToString::to_string),
+                team_id: Some(id),
+            }
+        }
+        None => ResolvedTeamDisplay {
+            team_id: None,
+            team_slug: None,
+            team_name: None,
+        },
+    }
 }
 
 /// Test-only entrypoint that returns the rendered JSON string. `pub` so
@@ -1104,8 +1212,12 @@ pub fn execute_team_show_for_test(_cli: &Cli, cas_root: &Path) -> anyhow::Result
 
 fn execute_team_show(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = CloudConfig::load_from_cas_dir(cas_root)?;
+    // cas-c117 finding #6: resolve the slug the same way `team auto` does —
+    // project config first, user-level membership cache second — so the two
+    // commands can never disagree about the same UUID.
+    let resolved = resolve_team_display_for_show(&config);
 
-    match (&config.team_id, &config.team_slug) {
+    match (&resolved.team_id, &resolved.team_slug) {
         (Some(id), slug) => {
             // cas-f07a (AC2): use the full resolution chain so the slug is
             // never shown as "<not resolved>" for an active project.  The
@@ -1118,6 +1230,7 @@ fn execute_team_show(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 let out = serde_json::json!({
                     "team_id": id,
                     "team_slug": slug,
+                    "team_name": resolved.team_name,
                     "canonical_id": canonical_id,
                 });
                 println!("{}", out);
@@ -1130,7 +1243,21 @@ fn execute_team_show(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 fmt.write_raw(id)?;
                 fmt.newline()?;
                 fmt.write_muted("  Team slug:    ")?;
-                fmt.write_raw(slug.as_deref().unwrap_or("<not resolved>"))?;
+                match (slug.as_deref(), resolved.team_name.as_deref()) {
+                    (Some(slug), Some(name)) => {
+                        fmt.write_raw(slug)?;
+                        fmt.write_raw(" (")?;
+                        fmt.write_raw(name)?;
+                        fmt.write_raw(")")?;
+                    }
+                    (Some(slug), None) => fmt.write_raw(slug)?,
+                    // Unresolved now means the membership cache is stale, not
+                    // that the team is unknown — say so instead of leaving a
+                    // bare sentinel the user cannot act on.
+                    (None, _) => fmt.write_raw(
+                        "<not resolved — run `cas cloud login` to refresh team memberships>",
+                    )?,
+                }
                 fmt.newline()?;
                 fmt.write_muted("  Project slug: ")?;
                 fmt.write_raw(canonical_id.as_deref().unwrap_or("<not resolved>"))?;
@@ -1183,6 +1310,13 @@ fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
         } else {
             "No team was configured"
         })?;
+        fmt.newline()?;
+        // cas-c117: sync now adopts a resolvable team automatically, so
+        // clearing alone is not "make this project personal" — say so rather
+        // than letting the next sync silently re-adopt.
+        fmt.write_muted(
+            "  The next sync re-adopts your default team. Run `cas cloud team auto off` to keep this project personal.",
+        )?;
         fmt.newline()?;
     }
     Ok(())
@@ -2362,6 +2496,21 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     if !args.dry_run {
         let outcome = maybe_apply_team_backfill();
         print_backfill_notice(cli, &outcome);
+
+        // cas-c117 (operator directive): the team identity is already known
+        // locally by this point — `/api/me` filled `teams[]` and the backfill
+        // above set `default_team_id` — so a logged-in user must not have to
+        // run `cas cloud team set` / `team auto on` before their project is
+        // scoped to their team. Adopt it here, BEFORE the personal-scope
+        // notice (which then correctly says nothing) and before execute_push
+        // opens the syncing stores that read `active_team_id()`.
+        match crate::cloud::maybe_adopt_team_scope(cas_root) {
+            Ok(adoption) => print_team_scope_adoption(cli, &adoption),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not adopt the resolvable team scope");
+            }
+        }
+
         match maybe_mark_personal_scope_notice(cas_root) {
             Ok(Some(notice)) => print_personal_scope_notice(cli, &notice),
             Ok(None) => {}
@@ -2372,6 +2521,18 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
                 );
             }
         }
+    }
+
+    // cas-c117: make the project↔team registration explicit and verified
+    // BEFORE anything prints "✓ Push complete". Registration used to be a
+    // side effect of a non-empty team push, so a machine with nothing queued
+    // synced "successfully" while the server never learned about the project,
+    // and `cas cloud team-memories` then told the user to run the sync they
+    // had just run. This step either confirms the registration or fails the
+    // whole command with the real reason.
+    if !args.dry_run {
+        let cloud_config = CloudConfig::load()?;
+        ensure_team_project_registration(&cloud_config, cas_root, cli, args.full)?;
     }
 
     execute_push(
@@ -2422,6 +2583,166 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         }
     }
 
+    Ok(())
+}
+
+/// Metadata key recording a confirmed project↔team registration, so the
+/// steady-state sync pays no extra round-trip. Scoped by team AND canonical
+/// id: re-homing the project or switching teams must re-verify.
+fn team_registration_metadata_key(team_id: &str, canonical_id: &str) -> String {
+    format!("team_project_registered_{team_id}_{canonical_id}")
+}
+
+/// Ensure this project is registered with the active team before the sync
+/// reports success (cas-c117).
+///
+/// No-op when no team is configured, when the user is not logged in (the
+/// personal push that follows reports that far more clearly), or when a
+/// previous sync already confirmed the registration — unless `force` (i.e.
+/// `cas cloud sync --full`) asks for a fresh verification.
+///
+/// Contract, and the whole point of the task: this returns `Err` — failing
+/// the entire `cas cloud sync` with a non-zero exit — whenever the server
+/// does not end up listing the project. A green sync now implies the project
+/// is genuinely registered.
+///
+/// `pub` + `#[doc(hidden)]` so `cas-cli/tests/team_registration_test.rs` can
+/// drive it against a wiremock server. Not intended for external use.
+#[doc(hidden)]
+pub fn ensure_team_project_registration(
+    cloud_config: &CloudConfig,
+    cas_root: &Path,
+    cli: &Cli,
+    force: bool,
+) -> anyhow::Result<()> {
+    let Some(team_id) = cloud_config.active_team_id() else {
+        return Ok(());
+    };
+    let team_id = team_id.to_string();
+
+    let Some(token) = cloud_config.token.as_deref() else {
+        // Not logged in: `execute_push` reports this immediately after us with
+        // the canonical message. Registering is impossible either way, and
+        // duplicating the login error here would only be noise.
+        return Ok(());
+    };
+
+    // Same resolver the team push uses (`cloud/syncer/team_push.rs`), so the
+    // bucket we register is exactly the bucket rows are pushed into.
+    let canonical_id = crate::cloud::get_project_canonical_id().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot register this project with team {team_id}: no canonical project id could \
+             be resolved. Run `cas cloud project set <canonical-id>` (see `cas cloud projects`)."
+        )
+    })?;
+
+    // Best-effort cache. A queue that cannot be opened just means we verify
+    // over the network every sync — correctness never depends on the cache.
+    let queue = SyncQueue::open(cas_root).ok().and_then(|q| {
+        // `init()` is idempotent; without it a brand-new root has no
+        // sync_metadata table to read.
+        if let Err(e) = q.init() {
+            tracing::warn!(error = %e, "team registration: sync queue init failed; skipping cache");
+            return None;
+        }
+        Some(q)
+    });
+    let cache_key = team_registration_metadata_key(&team_id, &canonical_id);
+    if !force {
+        if let Some(q) = queue.as_ref() {
+            if matches!(q.get_metadata(&cache_key), Ok(Some(_))) {
+                return Ok(());
+            }
+        }
+    }
+
+    // cas-8ca5 contract §5 — same remote the team push sends, so the server's
+    // resolver maps us onto the team's existing bucket rather than forking a
+    // new one.
+    let git_remote = crate::store::find_cas_root()
+        .ok()
+        .and_then(|root| crate::cloud::normalized_git_remote_for_push(&root));
+
+    let registration = crate::cloud::TeamRegistration::new(
+        &cloud_config.endpoint,
+        token,
+        &team_id,
+        &canonical_id,
+    )
+    .with_git_remote(git_remote.as_deref());
+
+    match registration.ensure() {
+        Ok(outcome) => {
+            if let Some(q) = queue.as_ref() {
+                let _ = q.set_metadata(&cache_key, &chrono::Utc::now().to_rfc3339());
+            }
+            report_team_registration(cli, &team_id, &canonical_id, &outcome)?;
+            Ok(())
+        }
+        Err(failure) => {
+            tracing::error!(
+                team_id = %team_id,
+                canonical_id = %canonical_id,
+                interaction = %failure.interaction,
+                "project could not be registered with the team; failing the sync"
+            );
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "team_registration": {
+                            "team_id": team_id,
+                            "canonical_id": canonical_id,
+                            "registered": false,
+                            "reason": failure.reason,
+                            "interaction": failure.interaction,
+                        }
+                    })
+                );
+            }
+            Err(anyhow::anyhow!(
+                "Sync aborted: this project is not registered with your team, so team \
+                 memories and team pushes would silently do nothing.\n  {failure}"
+            ))
+        }
+    }
+}
+
+fn report_team_registration(
+    cli: &Cli,
+    team_id: &str,
+    canonical_id: &str,
+    outcome: &crate::cloud::RegistrationOutcome,
+) -> anyhow::Result<()> {
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "team_registration": {
+                    "team_id": team_id,
+                    "canonical_id": canonical_id,
+                    "registered": true,
+                    "newly_registered": outcome.newly_registered(),
+                    "project_uuid": outcome.project_uuid(),
+                }
+            })
+        );
+        return Ok(());
+    }
+
+    // Only the state change is worth a line; a project that was already
+    // registered stays quiet so routine syncs keep their current output.
+    if outcome.newly_registered() {
+        let theme = ActiveTheme::default();
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, theme);
+        let success_color = fmt.theme().palette.status_success;
+        fmt.write_colored("  \u{2713} ", success_color)?;
+        fmt.write_raw(&format!(
+            "Registered project {canonical_id} with team {team_id}"
+        ))?;
+        fmt.newline()?;
+    }
     Ok(())
 }
 
@@ -3076,8 +3397,18 @@ fn execute_team_memories(
             if prev_lines > 0 {
                 clear_inline(prev_lines)?;
             }
+            // cas-c117: the old wording ("run `cas cloud sync` to register
+            // it") was circular — the user reaches this line precisely after
+            // a green sync. Sync now registers the project or fails loudly,
+            // so the only remaining explanation is a bucket mismatch: name
+            // the ids involved instead of repeating the instruction.
             anyhow::bail!(
-                "This project hasn't been synced to the team yet. Run `cas cloud sync` while a team is configured (see `cas cloud team set <uuid>`) to register it."
+                "Project '{canonical_id}' is not registered with team {team_id} on {}. \
+                 `cas cloud sync` registers it (and now fails loudly if the server refuses), \
+                 so if a sync just succeeded this project is most likely pinned to a different \
+                 bucket than the team's. Compare `cas cloud team show` with `cas cloud projects` \
+                 and pin the right one with `cas cloud project set <canonical-id>`.",
+                config.endpoint
             );
         }
     };

@@ -31,16 +31,20 @@ pub(crate) mod me;
 mod sync_queue;
 mod syncer;
 pub mod task_proposals;
+// cas-c117: explicit, verified project↔team registration for `cas cloud sync`.
+pub mod team_registration;
 
 // T6: first-run backfill — `pub` so integration tests can call the inner seam.
 pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_backfill_inner};
 pub use config::{
     CanonicalIdCollision, CanonicalIdSource, CloudConfig, LocalRootIdentity, PersonalScopeNotice,
-    TeamInfo, canonical_id_from_cas_root, canonical_id_from_config_toml,
-    derive_canonical_id_from_git_remote, detect_canonical_id_collisions, get_project_canonical_id,
-    invalidate_cached_project_id, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
+    TeamInfo, TeamScopeAdoption, adopt_team_scope_for_configs, canonical_id_from_cas_root,
+    canonical_id_from_config_toml, clear_login_credentials, derive_canonical_id_from_git_remote,
+    detect_canonical_id_collisions, get_project_canonical_id, invalidate_cached_project_id,
+    maybe_adopt_team_scope, maybe_mark_personal_scope_notice, normalize_project_canonical_id,
     normalized_git_remote_for_push, personal_scope_notice_for_configs, resolve_canonical_id,
     resolve_canonical_id_with_source, set_canonical_id_in_config_toml, should_adopt_canonical_id,
+    store_login_credentials,
 };
 pub(crate) use config::{
     default_endpoint, is_acceptable_endpoint, normalize_git_remote_url, user_level_cloud_json_path,
@@ -57,6 +61,9 @@ pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
 pub use sync_queue::{EntityType, QueueHealth, QueuedSync, SyncOperation, SyncQueue};
+pub use team_registration::{
+    REGISTRATION_TIMEOUT, RegistrationFailure, RegistrationOutcome, TeamRegistration,
+};
 pub(crate) use syncer::entity_matches_project;
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

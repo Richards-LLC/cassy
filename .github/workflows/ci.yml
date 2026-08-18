@@ -56,6 +56,22 @@ jobs:
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
   # do not spend an additional runner on this redundant subset there.
+  #
+  # MERGE-LATENCY CONTRACT (cas-3e14). This lane is not a required check, but it
+  # is the last check to report on a factory PR, so a merge that waits for all
+  # checks waits for this one. Measured on PR #479: the push-event copy of this
+  # job spent 4m39s in `cargo check` and 3m49s in the scoped test binary on a
+  # docs-only diff — 8m28s of Rust work the required lanes had already
+  # classified as unnecessary — and the PR merged 9 seconds after it finished.
+  # Two things keep that from recurring, both fail-closed:
+  #   1. the same shared diff classifier the required lanes use, so a
+  #      Rust-unaffected diff skips Rust work here too; and
+  #   2. a dedupe gate that stands down only when an open PR's head is exactly
+  #      this SHA, i.e. the PR event is validating the identical commit.
+  # The factory/** push trigger itself stays. Factory branches are integrated
+  # into epic branches by a supervisor `git merge --no-ff` with no PR, so this
+  # push lane is the only validation those commits ever get; removing it would
+  # create a merge path with no validation at all.
   scoped-validation:
     name: Scoped Validation (factory/PR)
     if: >-
@@ -63,32 +79,94 @@ jobs:
       && github.base_ref != github.event.repository.default_branch)
       || (github.event_name == 'push'
       && startsWith(github.ref, 'refs/heads/factory/'))
+    permissions:
+      contents: read
+      actions: read
+      # Read-only PR metadata for the dedupe gate below. Nothing writes.
+      pull-requests: read
+    concurrency:
+      group: scoped-validation-${{ github.event.pull_request.head.sha || github.sha }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # Stand down only when the PR event is already validating this exact
+      # commit: for a default-branch PR that is the strictly stronger required
+      # Fast Validation tier, and for an epic-targeted PR it is this same lane.
+      # Anything else — no PR, a PR whose head has moved on, an unparseable
+      # answer, or an API failure — runs the lane. The guard absorbs those cases
+      # itself and always exits 0, so it deliberately does NOT fail open with
+      # `continue-on-error`: a guard that genuinely broke should redden this
+      # lane rather than quietly decide for itself.
+      - id: pr-dedupe
+        name: Skip when a pull request event validates this head SHA
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-ci-pr-event-coverage.sh
+
+      - id: classify-diff
+        if: steps.pr-dedupe.outputs.covered != 'true'
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - uses: ./.github/actions/setup-rust-linux
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         with:
           cache-key: scoped-validation
 
       - name: Install nextest
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
       - name: Check library and test targets
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas --lib --tests
 
       - name: Test library target (one binary)
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
 
+      - name: Report why no Rust work ran
+        if: >-
+          steps.pr-dedupe.outputs.covered == 'true'
+          || steps.classify-diff.outputs.rust-unaffected == 'true'
+        run: |
+          if [[ "${{ steps.pr-dedupe.outputs.covered }}" == "true" ]]; then
+            echo "Skipped: a pull request event is validating this exact head SHA." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Skipped: diff class '${{ steps.classify-diff.outputs.class }}' is Rust-unaffected." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Scoped Validation"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Scoped Validation"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Required checks always start: path selection happens in steps, never with
   # job-level `paths` filters, so their exact ruleset contexts keep reporting.
@@ -157,7 +235,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "Fast Validation — preflight"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Fast Validation — preflight"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Compile the workspace test graph once. The archive contains the binaries
   # and nextest metadata needed by the shard jobs below, avoiding three cold
@@ -225,7 +311,15 @@ jobs:
       # the single best predictor of the required critical path.
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "Fast Validation — suite archive build"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Fast Validation — suite archive build"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   fast-validation-suite-shards:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
@@ -356,7 +450,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "Fast Validation — doctests"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Fast Validation — doctests"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # The repository ruleset requires this exact check name. It reports success
   # only after preflight, all exhaustive nextest shards, and doctests pass.
@@ -430,7 +532,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.tree-dedupe.outputs.run-heavy != 'false'
-        run: ./scripts/ci-sccache-summary.sh "Clippy"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Clippy"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
@@ -528,7 +638,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "macOS Check"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "macOS Check"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # A receipt is trustworthy only after every per-tree PR lane passes. The
   # artifact name is the checked-out Git tree, so a merge commit with identical
@@ -618,7 +736,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.tree-dedupe.outputs.run-heavy != 'false'
-        run: ./scripts/ci-sccache-summary.sh "Test Compile Guard"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Test Compile Guard"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # EPIC cas-c351 / cas-9e02: run the A2/A3/B3 panic-isolation tests under the
   # release profiles to catch any future profile change that silently
@@ -657,7 +783,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Panic Isolation — release profile"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Panic Isolation — release profile"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   panic-isolation-release-fast:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
@@ -683,7 +817,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Panic Isolation — release-fast profile"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Panic Isolation — release-fast profile"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Build-time measurement only. This job executes no tests.
   #

@@ -115,6 +115,66 @@ pub struct InitArgs {
     /// Override the auto-detected GitHub `OWNER/REPO` (from `git remote -v`).
     #[arg(long, value_name = "OWNER/REPO")]
     pub github: Option<String>,
+
+    /// Initialize even when this directory is not a project directory (your
+    /// home directory or the filesystem root). For automation that really
+    /// means it; interactive runs are asked to confirm instead.
+    #[arg(long)]
+    pub allow_non_project: bool,
+}
+
+// ============================================================================
+// Non-project guard (cas-2962 / Ben #8b)
+// ============================================================================
+
+/// Why a directory looks like the wrong place to scaffold a project.
+///
+/// `cas init` writes `CLAUDE.md`, `.gitignore`, `.mcp.json`, `scripts/` and
+/// `.cas/` into the current directory. Run by accident in `$HOME` that litters
+/// the home directory with project files and no warning was given (Ben #8b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NonProjectDir {
+    /// The user's home directory.
+    Home,
+    /// The filesystem root.
+    FilesystemRoot,
+}
+
+impl NonProjectDir {
+    /// One line naming what the directory is.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            NonProjectDir::Home => "your home directory",
+            NonProjectDir::FilesystemRoot => "the filesystem root",
+        }
+    }
+
+    /// The full warning shown before anything is written.
+    pub(crate) fn warning(self, cwd: &Path) -> String {
+        format!(
+            "{} is {}, not a project directory.\n\
+             `cas init` would create .cas/, CLAUDE.md, .gitignore, .mcp.json and scripts/ here.",
+            cwd.display(),
+            self.describe()
+        )
+    }
+}
+
+/// Classify the directory `cas init` was invoked in.
+///
+/// Deliberately narrow: only the home directory and the filesystem root are
+/// refused. "Not a git repository" is NOT a signal — CAS supports non-git
+/// projects and derives a canonical id from the folder name, so refusing there
+/// would reject legitimate setups.
+pub(crate) fn classify_init_dir(cwd: &Path, home: Option<&Path>) -> Option<NonProjectDir> {
+    if cwd.parent().is_none() {
+        return Some(NonProjectDir::FilesystemRoot);
+    }
+    let home = home?;
+    // Compare canonicalized paths so `/home/me`, `/home/me/.`, and a symlinked
+    // spelling of the same directory all resolve alike.
+    let same = cwd.canonicalize().ok()? == home.canonicalize().ok()?;
+    same.then_some(NonProjectDir::Home)
 }
 
 // ============================================================================
@@ -268,6 +328,30 @@ impl WizardConfig {
 
 pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
+
+    // Ben #8b: refuse to litter $HOME (or /) with project scaffolding without
+    // saying so first. Interactive runs get a confirmation; non-interactive
+    // runs must opt in with --allow-non-project.
+    if !args.allow_non_project
+        && let Some(kind) = classify_init_dir(&cwd, dirs::home_dir().as_deref())
+    {
+        let non_interactive = cli.json || args.yes;
+        if non_interactive {
+            anyhow::bail!(
+                "{}\n\nRefusing to initialize here. `cd` into your project first, \
+                 or pass --allow-non-project if this is really what you want.",
+                kind.warning(&cwd)
+            );
+        }
+
+        println!();
+        print_colored(&format!("  ⚠  {}", kind.warning(&cwd)), colors::ORANGE)?;
+        println!();
+        if !interactive::confirm("  Initialize CAS here anyway", false)? {
+            println!("\n  Nothing was written. `cd` into your project and run `cas init` there.");
+            return Ok(());
+        }
+    }
 
     spawn_init_watchdog();
     info!(
@@ -1165,6 +1249,7 @@ mod integration_flag_tests {
             vercel: Some("prj_abc".to_string()),
             neon: Some("np_xyz".to_string()),
             github: Some("acme/widgets".to_string()),
+            allow_non_project: false,
         };
         let flags = integration_flags_from(&args);
         assert!(flags.disabled);
@@ -1234,5 +1319,95 @@ mod grok_agent_selection_tests {
         let selection = detect_agent_defaults(temp.path());
         assert!(!selection.grok);
         assert!(selection.claude);
+    }
+}
+
+#[cfg(test)]
+mod non_project_guard_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn home_directory_is_refused() {
+        // Ben #8b: `cas init` in $HOME scaffolded CLAUDE.md/.gitignore/
+        // .mcp.json/scripts/ with no warning at all.
+        let home = TempDir::new().unwrap();
+
+        assert_eq!(
+            classify_init_dir(home.path(), Some(home.path())),
+            Some(NonProjectDir::Home)
+        );
+    }
+
+    #[test]
+    fn a_project_under_home_is_allowed() {
+        let home = TempDir::new().unwrap();
+        let project = home.path().join("code").join("some-project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        assert_eq!(
+            classify_init_dir(&project, Some(home.path())),
+            None,
+            "only $HOME itself is refused, not everything inside it"
+        );
+    }
+
+    #[test]
+    fn a_non_git_project_directory_is_allowed() {
+        // CAS supports non-git projects (canonical id falls back to the folder
+        // name), so "no git repo" must not be treated as "not a project".
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        assert!(!project.path().join(".git").exists());
+
+        assert_eq!(classify_init_dir(project.path(), Some(home.path())), None);
+    }
+
+    #[test]
+    fn filesystem_root_is_refused() {
+        let home = TempDir::new().unwrap();
+
+        assert_eq!(
+            classify_init_dir(Path::new("/"), Some(home.path())),
+            Some(NonProjectDir::FilesystemRoot)
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_home_does_not_block_init() {
+        let project = TempDir::new().unwrap();
+
+        assert_eq!(
+            classify_init_dir(project.path(), None),
+            None,
+            "a machine with no resolvable home must still be able to init"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_spelling_of_home_is_still_home() {
+        let temp = TempDir::new().unwrap();
+        let real_home = temp.path().join("real-home");
+        std::fs::create_dir_all(&real_home).unwrap();
+        let link = temp.path().join("linked-home");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_home, &link).unwrap();
+
+        #[cfg(unix)]
+        assert_eq!(
+            classify_init_dir(&link, Some(&real_home)),
+            Some(NonProjectDir::Home),
+            "a symlinked path to $HOME must not slip past the guard"
+        );
+    }
+
+    #[test]
+    fn the_warning_names_the_directory_and_what_would_be_written() {
+        let warning = NonProjectDir::Home.warning(Path::new("/Users/ben"));
+
+        assert!(warning.contains("/Users/ben"), "names the directory");
+        assert!(warning.contains("home directory"), "names what it is");
+        assert!(warning.contains("CLAUDE.md"), "names what would be created");
+        assert!(warning.contains(".cas/"));
     }
 }

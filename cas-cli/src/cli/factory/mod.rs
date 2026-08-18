@@ -1144,6 +1144,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             effort_flag: llm
                 .reasoning_effort_for_role("worker")
                 .and_then(|s| s.parse().ok()),
+            config_dir_flag: None,
             worker_spec_jsons: args.worker_spec.clone(),
             supervisor_spec_json: None,
             user_config: None, // auto-resolve from home dir
@@ -1199,6 +1200,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             effort_flag: llm
                 .reasoning_effort_for_role("supervisor")
                 .and_then(|s| s.parse().ok()),
+            config_dir_flag: None,
             worker_spec_jsons: vec![],
             supervisor_spec_json: args.supervisor_spec.clone(),
             user_config: None, // auto-resolve from home dir

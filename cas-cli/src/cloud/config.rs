@@ -746,6 +746,81 @@ pub(crate) fn user_level_cloud_json_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".cas").join("cloud.json"))
 }
 
+/// Compare two config paths for identity, tolerating different spellings of
+/// the same file (`..`, symlinks) when both exist.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Persist a successful login at user level (`~/.cas/cloud.json`) so every
+/// project on the machine is logged in (cas-046d / Ben #3).
+///
+/// The project-level `.cas/cloud.json` is refreshed too when the caller is
+/// inside a project, because the MCP daemon and background syncers read that
+/// file directly; it is a cache of the user-level truth, and the write is
+/// best-effort so `cas login --token` still succeeds from `$HOME` (Ben #4).
+///
+/// Returns the project path that was also updated, if any.
+pub fn store_login_credentials(
+    endpoint: &str,
+    token: &str,
+    email: Option<&str>,
+    plan: Option<&str>,
+) -> Result<Option<PathBuf>, CasError> {
+    let mut user_config = CloudConfig::load_user().unwrap_or_default();
+    user_config.endpoint = endpoint.to_string();
+    user_config.token = Some(token.to_string());
+    user_config.email = email.map(String::from);
+    user_config.plan = plan.map(String::from);
+    user_config.save_user()?;
+
+    let Ok(project_path) = CloudConfig::config_path() else {
+        return Ok(None);
+    };
+    if user_level_cloud_json_path().is_some_and(|user| paths_equal(&user, &project_path)) {
+        return Ok(None);
+    }
+    let mut project_config = CloudConfig::load_from(&project_path).unwrap_or_default();
+    project_config.endpoint = endpoint.to_string();
+    project_config.token = Some(token.to_string());
+    project_config.email = email.map(String::from);
+    project_config.plan = plan.map(String::from);
+    match project_config.save_to(&project_path) {
+        Ok(()) => Ok(Some(project_path)),
+        Err(error) => {
+            tracing::debug!(%error, "logged in, but could not cache credentials in the project cloud.json");
+            Ok(None)
+        }
+    }
+}
+
+/// Clear credentials from `~/.cas/cloud.json` and, when inside a project, from
+/// that project's cached copy. Non-credential state (teams, sync timestamps)
+/// is preserved.
+pub fn clear_login_credentials() -> Result<(), CasError> {
+    let mut user_config = CloudConfig::load_user().unwrap_or_default();
+    user_config.logout();
+    user_config.save_user()?;
+
+    if let Ok(project_path) = CloudConfig::config_path()
+        && !user_level_cloud_json_path().is_some_and(|user| paths_equal(&user, &project_path))
+        && project_path.exists()
+        && let Ok(mut project_config) = CloudConfig::load_from(&project_path)
+    {
+        project_config.logout();
+        if let Err(error) = project_config.save_to(&project_path) {
+            tracing::debug!(%error, "could not clear project-level cloud credentials");
+        }
+    }
+    Ok(())
+}
+
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
@@ -944,10 +1019,14 @@ pub fn maybe_adopt_team_scope(cas_root: &Path) -> Result<TeamScopeAdoption, CasE
 impl CloudConfig {
     /// Return the path to the user-level `~/.cas/cloud.json`.
     ///
+    /// Delegates to [`user_level_cloud_json_path`] so reads (`load_user`) and
+    /// writes (`save_user`) always agree, including under the
+    /// `CAS_USER_CLOUD_JSON` test seam.
+    ///
     /// Returns `None` only when `dirs::home_dir()` fails — practically
     /// unreachable on any supported platform (Linux/macOS).
     pub fn user_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".cas").join("cloud.json"))
+        user_level_cloud_json_path()
     }
 
     /// Load the user-level cloud config from `~/.cas/cloud.json`.
@@ -975,10 +1054,81 @@ impl CloudConfig {
         self.save_to(&path)
     }
 
-    /// Load cloud config from .cas/cloud.json
+    /// Load cloud config from `.cas/cloud.json` for the current project,
+    /// inheriting the machine-wide login from `~/.cas/cloud.json`.
+    ///
+    /// Credentials are user-level (cas-046d): `cas login` stores the token in
+    /// `~/.cas/cloud.json`, so a project that has never been logged in to picks
+    /// it up here instead of reporting "not logged in". When the inheritance
+    /// fires inside a real project the credentials are also written through to
+    /// the project file, so the direct-file readers
+    /// ([`load_from_cas_dir`][Self::load_from_cas_dir] — the MCP daemon and
+    /// background syncers) converge without a second `cas login`. That
+    /// write-through is best-effort: a read-only checkout still returns the
+    /// inherited credentials in memory.
     pub fn load() -> Result<Self, CasError> {
         let path = Self::config_path()?;
-        Self::load_from(&path)
+        let mut config = Self::load_from(&path)?;
+        if config.inherit_credentials_from_user_level(&path) {
+            // Cache fill only — never fatal.
+            if let Err(error) = config.save_to(&path) {
+                tracing::debug!(%error, "could not cache user-level credentials into project cloud.json");
+            }
+        }
+        Ok(config)
+    }
+
+    /// The config governing the current context, never failing.
+    ///
+    /// Inside a CAS project this is [`load`][Self::load]; outside one (for
+    /// example `cas login --token` run from `$HOME`) it is the user-level
+    /// `~/.cas/cloud.json` alone. Auth commands use this so they work
+    /// everywhere: credentials do not live in a project.
+    pub fn load_effective() -> Self {
+        match Self::load() {
+            Ok(config) => config,
+            Err(_) => Self::load_user().unwrap_or_default(),
+        }
+    }
+
+    /// Copy the machine-wide login into this (project) config when the project
+    /// has none of its own. Returns whether anything changed.
+    ///
+    /// `self_path` is the file `self` was read from; when it *is* the
+    /// user-level file there is nothing to inherit.
+    fn inherit_credentials_from_user_level(&mut self, self_path: &Path) -> bool {
+        let Some(user_path) = user_level_cloud_json_path() else {
+            return false;
+        };
+        if paths_equal(&user_path, self_path) {
+            return false;
+        }
+        let Ok(user_config) = Self::load_from(&user_path) else {
+            return false;
+        };
+        self.inherit_credentials_from(&user_config)
+    }
+
+    /// Adopt `user`'s credentials when `self` is not logged in. Returns whether
+    /// anything changed. Pure — unit-testable without touching disk.
+    pub fn inherit_credentials_from(&mut self, user: &Self) -> bool {
+        if self.is_logged_in() || !user.is_logged_in() {
+            return false;
+        }
+        self.token = user.token.clone();
+        if self.email.is_none() {
+            self.email = user.email.clone();
+        }
+        if self.plan.is_none() {
+            self.plan = user.plan.clone();
+        }
+        // Only override an endpoint the project never chose for itself.
+        if (self.endpoint.trim().is_empty() || self.endpoint == default_endpoint())
+            && !user.endpoint.trim().is_empty()
+        {
+            self.endpoint = user.endpoint.clone();
+        }
+        true
     }
 
     /// Load cloud config from a specific path
@@ -1226,6 +1376,188 @@ mod tests {
         assert_eq!(loaded.token, Some("test_token".to_string()));
         assert_eq!(loaded.email, Some("test@example.com".to_string()));
         assert!(loaded.is_logged_in());
+    }
+
+    /// Wire up a fake machine: a user-level `~/.cas/cloud.json` (via the
+    /// `CAS_USER_CLOUD_JSON` seam) and a project `.cas/` (via `CAS_ROOT`).
+    /// Returns the guard plus both paths.
+    fn machine_fixture() -> (TestEnvGuard, TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let user_path = temp.path().join("home-cas").join("cloud.json");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        let project_cas = temp.path().join("project-b").join(".cas");
+        std::fs::create_dir_all(&project_cas).unwrap();
+
+        let mut guard = TestEnvGuard::new();
+        guard.set("CAS_USER_CLOUD_JSON", &user_path);
+        guard.set("CAS_ROOT", &project_cas);
+        let project_path = project_cas.join("cloud.json");
+        (guard, temp, user_path, project_path)
+    }
+
+    #[test]
+    fn login_is_machine_wide_so_a_second_project_is_already_logged_in() {
+        // Ben #3 (cas-046d): after `cas login` in one project, a freshly
+        // `cas init`-ed second project reported "not logged in".
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("user-level-token".to_string()),
+            email: Some("ben@example.com".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        assert!(
+            !project_path.exists(),
+            "second project has never been logged in to"
+        );
+
+        let loaded = CloudConfig::load().unwrap();
+
+        assert!(
+            loaded.is_logged_in(),
+            "a machine-wide login must serve every project"
+        );
+        assert_eq!(loaded.token.as_deref(), Some("user-level-token"));
+        assert_eq!(loaded.email.as_deref(), Some("ben@example.com"));
+
+        // Write-through so the direct-file readers (MCP daemon, syncers)
+        // converge without a second login.
+        let cached = CloudConfig::load_from(&project_path).unwrap();
+        assert_eq!(cached.token.as_deref(), Some("user-level-token"));
+    }
+
+    #[test]
+    fn project_credentials_win_over_the_user_level_login() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("user-level-token".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        CloudConfig {
+            token: Some("project-token".to_string()),
+            ..Default::default()
+        }
+        .save_to(&project_path)
+        .unwrap();
+
+        let loaded = CloudConfig::load().unwrap();
+
+        assert_eq!(
+            loaded.token.as_deref(),
+            Some("project-token"),
+            "an explicit project credential must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn inheritance_keeps_an_endpoint_the_project_chose_for_itself() {
+        let mut project = CloudConfig {
+            endpoint: "https://staging.example.com".to_string(),
+            ..Default::default()
+        };
+        let user = CloudConfig {
+            endpoint: "https://petra-stella-cloud.vercel.app".to_string(),
+            token: Some("t".to_string()),
+            ..Default::default()
+        };
+
+        assert!(project.inherit_credentials_from(&user));
+
+        assert_eq!(project.token.as_deref(), Some("t"));
+        assert_eq!(
+            project.endpoint, "https://staging.example.com",
+            "a non-default project endpoint survives credential inheritance"
+        );
+    }
+
+    #[test]
+    fn store_login_credentials_writes_user_level_and_project_cache() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+
+        let cached = store_login_credentials(
+            "https://petra-stella-cloud.vercel.app",
+            "fresh-token",
+            Some("ben@example.com"),
+            Some("pro"),
+        )
+        .unwrap();
+
+        assert_eq!(cached.as_deref(), Some(project_path.as_path()));
+        let user = CloudConfig::load_from(&user_path).unwrap();
+        assert_eq!(
+            user.token.as_deref(),
+            Some("fresh-token"),
+            "the login must land in ~/.cas/cloud.json"
+        );
+        assert_eq!(user.email.as_deref(), Some("ben@example.com"));
+        assert_eq!(user.plan.as_deref(), Some("pro"));
+        let project = CloudConfig::load_from(&project_path).unwrap();
+        assert_eq!(project.token.as_deref(), Some("fresh-token"));
+    }
+
+    #[test]
+    fn store_login_credentials_works_outside_a_project() {
+        // Ben #4 (cas-046d): `cas login --token` from $HOME died with
+        // "CAS not initialized — run cas init".
+        let temp = TempDir::new().unwrap();
+        let user_path = temp.path().join("home-cas").join("cloud.json");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        let outside = temp.path().join("not-a-cas-project");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut guard = TestEnvGuard::new();
+        guard.set("CAS_USER_CLOUD_JSON", &user_path);
+        guard.remove("CAS_ROOT");
+        guard.set_current_dir(&outside);
+
+        let cached = store_login_credentials(
+            "https://petra-stella-cloud.vercel.app",
+            "fresh-token",
+            None,
+            None,
+        )
+        .expect("logging in outside a project must succeed");
+
+        assert!(cached.is_none(), "there is no project cache to write");
+        let user = CloudConfig::load_from(&user_path).unwrap();
+        assert_eq!(user.token.as_deref(), Some("fresh-token"));
+        assert!(CloudConfig::load_effective().is_logged_in());
+    }
+
+    #[test]
+    fn clear_login_credentials_clears_user_level_and_project() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("t".to_string()),
+            team_id: Some("team-123".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        CloudConfig {
+            token: Some("t".to_string()),
+            team_id: Some("team-123".to_string()),
+            ..Default::default()
+        }
+        .save_to(&project_path)
+        .unwrap();
+
+        clear_login_credentials().unwrap();
+
+        let user = CloudConfig::load_from(&user_path).unwrap();
+        assert!(!user.is_logged_in(), "logout is machine-wide");
+        let project = CloudConfig::load_from(&project_path).unwrap();
+        assert!(
+            !project.is_logged_in(),
+            "the project credential cache must not outlive logout"
+        );
+        assert!(
+            !CloudConfig::load().unwrap().is_logged_in(),
+            "nothing re-inherits a cleared credential"
+        );
     }
 
     #[test]

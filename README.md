@@ -282,10 +282,13 @@ Deeper material: [ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md) (crates, stores
 CAS is fully usable offline; the cloud adds sync across machines, semantic search and team sharing.
 
 ```bash
-cas login
-cas cloud status      # what is pending, what is embedded
-cas cloud sync        # push then pull
+cas login                        # browser device flow
+cas login --token <API-TOKEN>    # or a token, from any directory
+cas cloud status                 # what is pending, what is embedded
+cas cloud sync                   # push then pull
 ```
+
+Log in once per machine, not once per project. Credentials live at user level in `~/.cas/cloud.json`, so every project you `cas init` afterwards is already authenticated, `cas login` and `cas whoami` work outside a project too, and `cas logout` signs the machine out. Each project keeps its own `.cas/cloud.json` for project state (team link, sync watermarks) and a cached copy of the credential.
 
 Sync is project-scoped: a push or pull that cannot determine which project it is running in refuses to make the request rather than sending or asking for everything. Personal pushes are incremental: `cas cloud push` consumes the current project's pending `sync_queue` rows, removing successful rows while leaving failures retryable. `--dry-run` previews the next bounded queue batch; `--entries-only` and `--tasks-only` narrow both that plan and the real push. `cas doctor` tells you which bucket a project resolves to; `cas cloud project set` pins it explicitly.
 

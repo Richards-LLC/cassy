@@ -330,3 +330,40 @@ Good — 31 words, same evidence, no intent narration and an actionable headroom
 
 Rewriting four real notes this way: 183 → 129 words, a 29.5% reduction with every SHA, run ID
 and timing retained.
+
+### Pane output vs the durable record
+
+Roughly 90% of a worker's pane prose is never read. The durable record is the task note and the
+close reason — those are what a supervisor reads at review and what survives your session. Pane
+prose that restates the note you just wrote is written for nobody.
+
+- **Answer first**, then one or two bullets. That is the whole shape.
+- **Scannable beats dense.** Bullets, and a small table when you are comparing things, so it lands
+  at a glance. A short but word-dense paragraph fails this requirement as badly as a long one —
+  the goal is maximum information absorbed per second of reading, not minimum words.
+- **Put it in the note, not the pane.** If it matters later, it belongs in `action=notes` or the
+  close reason.
+- **Exceptions that stay complete:** blocker escalations and merge requests. Those are read, acted
+  on, and expensive to get wrong.
+
+### Worked pair (observed, this session)
+
+Bad — a delivery report as a pane wall, restating what the close note already held:
+
+> All lanes green and evidence collected. Per-job stats confirmed emitted by 7 of the 9 compiling
+> ci.yml lanes. Scoped Validation showed 611 hits / 630 misses, 49% on the first cold push, then
+> 32/6, 84% on the second once the branch seeded — the cold-penalty dynamic the spike described,
+> now visible, and the 49% run correctly raised the cold-lane warning annotation. Fast Validation
+> preflight measured 32/4 at 88%, the suite archive build 19/2 at 90% … [continues for 12 more
+> lines, every number already recorded in the close note]
+
+Good — the same turn as a triage line:
+
+> **sccache stats live on 7/9 compiling lanes; PR #478 green.**
+> - Cold→warm proved: Scoped Validation 49% → 84%, cold-lane warning fired as designed.
+> - Needs you: panic-isolation lanes are schedule-only, so their summaries are unverified pre-merge.
+>
+> Full per-lane numbers are in the cas-67a2 close note.
+
+Same decisions available to the reader; the evidence still exists, one hop away, in the surface
+built to hold it.

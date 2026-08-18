@@ -48,6 +48,8 @@ Match controls via [model-selection.md](cas-supervisor/references/model-selectio
 
 **Brevity never trims evidence.** Review findings, rejection reasons, measurements, and merge receipts stay in full; a rejection without its reason costs a whole extra round trip. When you shorten a worker's report before relaying it, keep the causal chain, the hedges, and what was tried and failed — those degrade first at a handoff and their loss is invisible downstream.
 
+**In the pane, shape beats compression.** Answer first, then bullets or a small table so it lands at a glance; a short dense paragraph fails that as badly as a long one. Don't recap the message you just received, restate the board every turn, or close with a summary of what you just said.
+
 ## References
 
 Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), worker-recovery, reference, code-review-queue, or filing-cas-bugs.

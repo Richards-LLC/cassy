@@ -158,7 +158,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Scoped Validation"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Scoped Validation"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Required checks always start: path selection happens in steps, never with
   # job-level `paths` filters, so their exact ruleset contexts keep reporting.
@@ -227,7 +235,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "Fast Validation — preflight"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Fast Validation — preflight"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Compile the workspace test graph once. The archive contains the binaries
   # and nextest metadata needed by the shard jobs below, avoiding three cold
@@ -295,7 +311,15 @@ jobs:
       # the single best predictor of the required critical path.
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "Fast Validation — suite archive build"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Fast Validation — suite archive build"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   fast-validation-suite-shards:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
@@ -426,7 +450,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "Fast Validation — doctests"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Fast Validation — doctests"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # The repository ruleset requires this exact check name. It reports success
   # only after preflight, all exhaustive nextest shards, and doctests pass.
@@ -500,7 +532,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.tree-dedupe.outputs.run-heavy != 'false'
-        run: ./scripts/ci-sccache-summary.sh "Clippy"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Clippy"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
@@ -598,7 +638,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: ./scripts/ci-sccache-summary.sh "macOS Check"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "macOS Check"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # A receipt is trustworthy only after every per-tree PR lane passes. The
   # artifact name is the checked-out Git tree, so a merge commit with identical
@@ -688,7 +736,15 @@ jobs:
 
       - name: Report sccache stats
         if: always() && steps.tree-dedupe.outputs.run-heavy != 'false'
-        run: ./scripts/ci-sccache-summary.sh "Test Compile Guard"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Test Compile Guard"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # EPIC cas-c351 / cas-9e02: run the A2/A3/B3 panic-isolation tests under the
   # release profiles to catch any future profile change that silently
@@ -727,7 +783,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Panic Isolation — release profile"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Panic Isolation — release profile"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   panic-isolation-release-fast:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
@@ -753,7 +817,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Panic Isolation — release-fast profile"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Panic Isolation — release-fast profile"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   # Build-time measurement only. This job executes no tests.
   #

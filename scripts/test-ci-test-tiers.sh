@@ -516,7 +516,57 @@ for job in "${!compiling_lanes[@]}"; do
         "$job publishes its own sccache hit stats"
     require_text "$block" 'if: always()' "$job reports cache stats even when the lane fails"
     require_absent "$block" 'SCCACHE_GHA_ENABLED: "false"' "$job keeps the cache-v2 backend enabled"
+    require_text "$block" 'if [[ -x ./scripts/ci-sccache-summary.sh ]]; then' \
+        "$job survives a checkout that predates the stats script"
 done
+
+# Version-skew guard (cas-3e14, absorbed defect). A `pull_request` run takes the
+# workflow from the newer base but checks out the PR head, so a head that
+# predates scripts/ci-sccache-summary.sh ran a missing file and exited 127.
+# Measured: run 32144587241 on head e3868d2f failed SIX lanes — preflight,
+# doctests, suite archive build, full suite, Fast Validation and macOS Check,
+# four of them required — because an observability step could not find its
+# script. `if: always()` made it worse by guaranteeing the step ran in every
+# lane. Every invocation across both workflows must be existence-guarded, and
+# the guarded and unguarded forms must stay in lockstep so a newly added lane
+# cannot reintroduce the bare call.
+summary_invocations="$(grep -c -F './scripts/ci-sccache-summary.sh "' <<<"$all_actions" || true)"
+summary_guards="$(grep -c -F 'if [[ -x ./scripts/ci-sccache-summary.sh ]]; then' <<<"$all_actions" || true)"
+if [[ "$summary_invocations" == "$summary_guards" && "$summary_invocations" -gt 0 ]]; then
+    printf 'ok   every sccache stats invocation is existence-guarded (%s of them)\n' "$summary_guards"
+    pass=$((pass + 1))
+else
+    printf 'FAIL every sccache stats invocation must be existence-guarded (%s invocations, %s guards)\n' \
+        "$summary_invocations" "$summary_guards"
+    fail=$((fail + 1))
+fi
+require_count "$all_actions" 'scripts/ci-sccache-summary.sh is absent at this checkout' "$summary_guards" \
+    'every missing stats script says so instead of failing the lane'
+
+# The guard body itself must behave: present and executable runs it, absent
+# reports and exits 0. Exercised against the real shell, not just grepped.
+skew_tmp="$(mktemp -d)"
+skew_guard='if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+  ./scripts/ci-sccache-summary.sh "Probe"
+else
+  echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+fi'
+mkdir -p "$skew_tmp/empty" "$skew_tmp/present/scripts"
+printf '#!/usr/bin/env bash\necho "stats for $1"\n' >"$skew_tmp/present/scripts/ci-sccache-summary.sh"
+chmod +x "$skew_tmp/present/scripts/ci-sccache-summary.sh"
+if (cd "$skew_tmp/empty" && bash -c "$skew_guard") >"$skew_tmp/absent.log" 2>&1; then
+    require_text "$(<"$skew_tmp/absent.log")" 'is absent at this checkout' 'a checkout without the stats script reports and passes'
+else
+    printf 'FAIL a checkout without the stats script must not fail the lane\n'
+    fail=$((fail + 1))
+fi
+if (cd "$skew_tmp/present" && bash -c "$skew_guard") >"$skew_tmp/present.log" 2>&1; then
+    require_text "$(<"$skew_tmp/present.log")" 'stats for Probe' 'a checkout with the stats script still reports its lane'
+else
+    printf 'FAIL a checkout with the stats script must still run it\n'
+    fail=$((fail + 1))
+fi
+rm -rf "$skew_tmp"
 
 for job in build build-macos verify; do
     block="$(release_job_block "$job")"

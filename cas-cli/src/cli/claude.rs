@@ -51,11 +51,6 @@ pub struct ClaudeArgs {
     #[command(subcommand)]
     pub command: Option<ClaudeCommand>,
 
-    /// Account profile: `main` maps to ~/.claude; any other name maps to ~/.claude-<name>.
-    ///
-    /// Omit to use whichever account the current environment already selects.
-    pub profile: Option<String>,
-
     /// List detected account profiles with login state and exit.
     #[arg(long = "list-profiles")]
     pub list_profiles: bool,
@@ -64,9 +59,38 @@ pub struct ClaudeArgs {
     #[arg(long = "bare")]
     pub bare: bool,
 
-    /// Remaining arguments: `cas factory` flags, or Claude Code flags with `--bare`.
+    /// `[PROFILE]` followed by `cas factory` flags (or Claude Code flags with `--bare`).
+    ///
+    /// `main` maps to ~/.claude; any other name maps to ~/.claude-<name>. Omit the
+    /// profile to be asked (interactive, >1 account) or to keep whichever account
+    /// the environment already selects.
+    ///
+    /// Deliberately one list rather than a `profile` positional plus a trailing
+    /// list: a dedicated positional makes clap reject a leading factory flag, so
+    /// `cas claude --workers 3` failed with "unexpected argument '--workers'"
+    /// (cas-6dad; the same trap `cas codex` avoided in cas-9cc3).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<OsString>,
+}
+
+impl ClaudeArgs {
+    /// The account profile, if the first argument names one.
+    ///
+    /// A leading token that starts with `-` is a factory/Claude Code flag, not a
+    /// profile.
+    pub(crate) fn profile(&self) -> Option<&str> {
+        let first = self.args.first()?.to_str()?;
+        (!first.starts_with('-')).then_some(first)
+    }
+
+    /// Everything after the optional profile: `cas factory` or Claude Code flags.
+    pub(crate) fn passthrough_args(&self) -> &[OsString] {
+        if self.profile().is_some() {
+            &self.args[1..]
+        } else {
+            &self.args
+        }
+    }
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -315,7 +339,7 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
 
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
 
-    let profile = match args.profile.as_deref() {
+    let profile = match args.profile() {
         // An explicitly named account is the no-prompt fast path.
         Some(profile) => profile.to_string(),
         None => {
@@ -373,7 +397,7 @@ pub fn execute(args: &ClaudeArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
     }
 
     // `apply_profile_env` already exported CLAUDE_CONFIG_DIR for this process.
-    let mut factory_args = parse_factory_args(&args.args);
+    let mut factory_args = parse_factory_args(args.passthrough_args());
     factory_args.supervisor_cli = "claude".to_string();
     factory_args.supervisor_cli_explicit = true;
     super::factory::execute(&factory_args, cli, cas_root)
@@ -406,7 +430,7 @@ fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     // the explicit and the picked case. Only the silent fallback below — no
     // explicit profile and no prompt (non-TTY, or a single account) — still
     // needs its own announcement, which is what it printed before this change.
-    let (profile, already_announced) = match args.profile.as_deref() {
+    let (profile, already_announced) = match args.profile() {
         Some(profile) => (profile.to_string(), true),
         None => match SELECTED_PROFILE.get() {
             Some(picked) => (picked.clone(), true),
@@ -420,7 +444,7 @@ fn execute_bare(args: &ClaudeArgs) -> Result<()> {
         eprintln!("Using Claude account config: {}", profile_dir.display());
     }
 
-    let mut command = build_claude_command(&profile, &profile_dir, &args.args);
+    let mut command = build_claude_command(&profile, &profile_dir, args.passthrough_args());
     exec_claude(&mut command)
 }
 
@@ -514,6 +538,43 @@ mod tests {
 
         assert!(envs.contains(&(OsStr::new("CLAUDE_CONFIG_DIR"), None)));
         assert!(envs.contains(&(OsStr::new("CLAUDE_SECURESTORAGE_CONFIG_DIR"), None)));
+    }
+
+    #[test]
+    fn a_leading_factory_flag_is_not_mistaken_for_a_profile() {
+        let leading = ClaudeArgs {
+            command: None,
+            list_profiles: false,
+            bare: false,
+            args: vec![OsString::from("--workers"), OsString::from("3")],
+        };
+        assert_eq!(leading.profile(), None);
+        assert_eq!(leading.passthrough_args(), leading.args.as_slice());
+
+        let named = ClaudeArgs {
+            command: None,
+            list_profiles: false,
+            bare: false,
+            args: vec![
+                OsString::from("alt"),
+                OsString::from("--workers"),
+                OsString::from("3"),
+            ],
+        };
+        assert_eq!(named.profile(), Some("alt"));
+        assert_eq!(
+            named.passthrough_args(),
+            &[OsString::from("--workers"), OsString::from("3")]
+        );
+
+        let bare = ClaudeArgs {
+            command: None,
+            list_profiles: false,
+            bare: false,
+            args: vec![],
+        };
+        assert_eq!(bare.profile(), None);
+        assert!(bare.passthrough_args().is_empty());
     }
 
     #[test]

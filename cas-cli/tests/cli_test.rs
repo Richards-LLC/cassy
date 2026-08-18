@@ -28,7 +28,9 @@ fn test_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Multi-agent coding factory"));
+        .stdout(predicate::str::contains(
+            "Cassy — a multi-agent coding factory with persistent memory and task coordination",
+        ));
 }
 
 #[test]
@@ -866,7 +868,7 @@ fn test_doctor_fix_initializes_project() {
         .assert()
         .success()
         .stdout(predicate::str::contains("auto-fix"))
-        .stdout(predicate::str::contains("Initialized CAS at"));
+        .stdout(predicate::str::contains("Initialized Cassy at"));
 }
 
 #[test]

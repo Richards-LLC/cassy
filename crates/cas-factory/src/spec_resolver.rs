@@ -77,6 +77,7 @@ struct FactoryDefaultsToml {
     cli: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    config_dir: Option<String>,
 }
 
 /// One `[[factory.workers]]` entry — all fields optional.
@@ -86,6 +87,7 @@ struct FactoryWorkerToml {
     cli: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    config_dir: Option<String>,
 }
 
 /// `[factory.supervisor]` table — all fields optional.
@@ -123,6 +125,7 @@ struct WorkerSpecJson {
     cli: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    config_dir: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +159,9 @@ pub struct ConfigSources {
 
     /// Global `--worker-effort` override — applied to every slot.
     pub effort_flag: Option<Effort>,
+
+    /// Global account-directory override, applied before per-worker JSON.
+    pub config_dir_flag: Option<String>,
 
     /// Raw JSON strings from repeated `--worker-spec` occurrences.
     ///
@@ -265,6 +271,9 @@ pub fn resolve_specs(
         }
         if let Some(effort) = sources.effort_flag {
             spec.effort = Some(effort);
+        }
+        if let Some(ref config_dir) = sources.config_dir_flag {
+            spec.config_dir = Some(config_dir.clone());
         }
     }
 
@@ -616,12 +625,19 @@ fn apply_codex_fallback_with(
         // fallback target — surviving here is exactly how the original
         // incident produced a "wrong provider, wrong file, wrong cause"
         // error (a codex config_dir checked by the Claude preflight).
-        let dropped_account = spec.config_dir.clone().or_else(|| spec.requester_config_dir.clone());
+        let dropped_account = spec
+            .config_dir
+            .clone()
+            .or_else(|| spec.requester_config_dir.clone());
         spec.config_dir = None;
         spec.requester_config_dir = None;
         let account_clause = dropped_account
             .as_deref()
-            .map(|dir| format!(" (account selection {dir} does not apply to claude; using default account)"))
+            .map(|dir| {
+                format!(
+                    " (account selection {dir} does not apply to claude; using default account)"
+                )
+            })
             .unwrap_or_default();
         notices.push(format!(
             "{label}: codex unavailable ({reason}) — falling back to claude{account_clause}"
@@ -712,6 +728,9 @@ fn apply_defaults_to_all(
         if let Some(ref s) = d.effort {
             spec.effort = Some(parse_effort(s)?);
         }
+        if let Some(ref config_dir) = d.config_dir {
+            spec.config_dir = Some(config_dir.clone());
+        }
     }
     Ok(())
 }
@@ -732,6 +751,9 @@ fn apply_worker_toml(
     }
     if let Some(ref s) = wt.effort {
         spec.effort = Some(parse_effort(s)?);
+    }
+    if let Some(ref config_dir) = wt.config_dir {
+        spec.config_dir = Some(config_dir.clone());
     }
     Ok(())
 }
@@ -766,6 +788,9 @@ fn apply_json_spec(spec: &mut WorkerSpec, json: &WorkerSpecJson) -> Result<(), S
     }
     if let Some(ref s) = json.effort {
         spec.effort = Some(parse_effort(s)?);
+    }
+    if let Some(ref config_dir) = json.config_dir {
+        spec.config_dir = Some(config_dir.clone());
     }
     Ok(())
 }
@@ -1287,5 +1312,28 @@ mod codex_fallback_tests {
                 .as_deref(),
             Some("claude-sonnet-4-5")
         );
+    }
+
+    #[test]
+    fn per_worker_json_config_dir_overrides_batch_config_dir() {
+        let specs = resolve_specs(
+            2,
+            ConfigSources {
+                config_dir_flag: Some("/accounts/batch".to_string()),
+                worker_spec_jsons: vec![
+                    r#"{"name":"codex","cli":"codex","config_dir":"/accounts/codex"}"#.to_string(),
+                    r#"{"name":"claude","config_dir":"/accounts/claude"}"#.to_string(),
+                ],
+                ..ConfigSources::default()
+            },
+        )
+        .expect("worker specs resolve");
+        assert_eq!(specs[0].cli, SupervisorCli::Codex);
+        assert_eq!(specs[0].config_dir.as_deref(), Some("/accounts/codex"));
+        assert_eq!(specs[1].config_dir.as_deref(), Some("/accounts/claude"));
+        let roundtrip: Vec<WorkerSpec> =
+            serde_json::from_str(&serde_json::to_string(&specs).expect("worker specs serialize"))
+                .expect("worker specs deserialize");
+        assert_eq!(roundtrip, specs);
     }
 }

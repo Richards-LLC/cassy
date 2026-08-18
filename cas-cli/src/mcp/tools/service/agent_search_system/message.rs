@@ -29,6 +29,8 @@ pub(crate) const INBOX_REDELIVERY_MARKER: &str = "[redelivery]";
 pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> String {
     let origin = if message.source.eq_ignore_ascii_case("supervisor") {
         "supervisor-authored"
+    } else if message.source.eq_ignore_ascii_case("viktor") {
+        "viktor"
     } else if message.source.eq_ignore_ascii_case("director")
         && message
             .summary
@@ -55,6 +57,36 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
         message.created_at.to_rfc3339(),
         delivery,
     )
+}
+
+#[cfg(test)]
+mod viktor_provenance_tests {
+    use super::queued_message_provenance;
+    use cas_store::{NotificationPriority, QueuedPrompt};
+
+    #[test]
+    fn viktor_queue_rows_keep_the_standard_provenance_envelope() {
+        let row = QueuedPrompt {
+            id: 73,
+            source: "viktor".to_string(),
+            target: "worker-1".to_string(),
+            prompt: "reply".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-08-18T20:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            processed_at: None,
+            factory_session: Some("factory-1".to_string()),
+            summary: Some("Viktor reply".to_string()),
+            priority: NotificationPriority::High,
+            acked_at: None,
+            urgent: false,
+        };
+
+        assert_eq!(
+            queued_message_provenance(&row),
+            "CAS provenance: notification_id=73 origin=viktor queued_at=2026-08-18T20:00:00+00:00 delivery=first-delivery"
+        );
+    }
 }
 
 /// cas-99d2 (GH #127): what to do with one row an inbox poll selected.

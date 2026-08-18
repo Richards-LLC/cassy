@@ -3780,6 +3780,9 @@ impl CasService {
             )
         })?;
         let pending_prompts = prompt_queue.pending_count().unwrap_or(0);
+        let live_viktor_watches = cas_store::SqliteViktorWatchStore::open(&self.inner.cas_root)
+            .and_then(|store| store.list_live())
+            .unwrap_or_default();
 
         let worktree_store = open_worktree_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -3833,10 +3836,11 @@ impl CasService {
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nLive Viktor watches: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
+            live_viktor_watches.len(),
             active_worktrees.len(),
             orphan_worktrees.len(),
             orphan_process_groups.len(),
@@ -3850,6 +3854,22 @@ impl CasService {
         ));
         out.push_str(&orphan_processes.render());
         out.push_str(&artifact_report.render());
+
+        if !live_viktor_watches.is_empty() {
+            out.push_str("\nLive Viktor watches:\n");
+            for watch in &live_viktor_watches {
+                out.push_str(&format!(
+                    "  - #{} thread={} run={} requester={} task={} polls={} expires={}\n",
+                    watch.id,
+                    watch.thread_id,
+                    watch.run_id,
+                    watch.requesting_agent_name,
+                    watch.task_id.as_deref().unwrap_or("-"),
+                    watch.poll_count,
+                    watch.expires_at.to_rfc3339(),
+                ));
+            }
+        }
 
         if !stale_agents.is_empty() {
             out.push_str("\nStale agents:\n");

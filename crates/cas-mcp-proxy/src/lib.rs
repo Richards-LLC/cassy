@@ -62,6 +62,24 @@ pub struct ProxyCaller {
     pub active_task_ids: Vec<String>,
 }
 
+/// A successful direct upstream call, exposed to CAS-owned durable side effects.
+///
+/// The observer runs only after the provider accepted the call. Its return
+/// value is intentionally ignored by the transport: turning a local recording
+/// failure into an MCP error would invite callers to retry a run-starting tool
+/// and spend twice. Implementations must emit their own durable diagnostics.
+pub struct ProxyCallEvent<'a> {
+    pub caller: &'a ProxyCaller,
+    pub server: &'a str,
+    pub tool: &'a str,
+    pub arguments: &'a Option<serde_json::Map<String, Value>>,
+    pub result: &'a Value,
+}
+
+pub trait ProxyCallObserver: Send + Sync {
+    fn call_succeeded(&self, event: ProxyCallEvent<'_>);
+}
+
 /// A policy decision requested before an upstream MCP tool call is forwarded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyPolicyDecision {
@@ -312,6 +330,7 @@ pub struct ProxyEngine {
     health: RwLock<HashMap<String, UpstreamHealth>>,
     session_id: String,
     policy: RwLock<Arc<dyn ProxyPolicy>>,
+    observer: RwLock<Option<Arc<dyn ProxyCallObserver>>>,
     policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
 }
 
@@ -349,6 +368,7 @@ impl ProxyEngine {
             health: RwLock::new(health),
             session_id,
             policy: RwLock::new(Arc::new(AllowAllProxyPolicy)),
+            observer: RwLock::new(None),
             policy_audit: Mutex::new(VecDeque::new()),
         };
 
@@ -370,6 +390,11 @@ impl ProxyEngine {
     /// records intact for operator inspection.
     pub async fn set_policy(&self, policy: Arc<dyn ProxyPolicy>) {
         *self.policy.write().await = policy;
+    }
+
+    /// Install the observer for successful upstream calls.
+    pub async fn set_call_observer(&self, observer: Arc<dyn ProxyCallObserver>) {
+        *self.observer.write().await = Some(observer);
     }
 
     /// Return the bounded, redacted authorization audit trail for this proxy
@@ -813,16 +838,35 @@ impl ProxyEngine {
         self.authorize(caller, dispatch_kind, server_name, tool_name, &arguments)
             .await?;
 
-        self.call_upstream(
-            server_name,
-            CallToolRequestParams {
-                name: tool_name.to_string().into(),
-                arguments,
-                meta: None,
-                task: None,
-            },
-        )
-        .await
+        let result = self
+            .call_upstream(
+                server_name,
+                CallToolRequestParams {
+                    name: tool_name.to_string().into(),
+                    arguments: arguments.clone(),
+                    meta: None,
+                    task: None,
+                },
+            )
+            .await?;
+
+        // The receipted external-verification lane owns its own polling and
+        // lifecycle. Observing it here would create a second inbound watch and
+        // duplicate its result into the prompt queue.
+        if dispatch_kind == ProxyDispatchKind::Direct
+            && let Some(observer) = self.observer.read().await.clone()
+        {
+            let serialized = serde_json::to_value(&result).unwrap_or(Value::Null);
+            observer.call_succeeded(ProxyCallEvent {
+                caller,
+                server: server_name,
+                tool: tool_name,
+                arguments: &arguments,
+                result: &serialized,
+            });
+        }
+
+        Ok(result)
     }
 
     async fn authorize(
@@ -1300,7 +1344,10 @@ fn http_transport_config(
     let mut config = StreamableHttpClientTransportConfig::with_uri(Arc::<str>::from(url));
     config.custom_headers = custom_headers;
     if let Some(auth) = auth {
-        config.auth_header = Some(format!("Bearer {}", resolve_credential(auth)?));
+        // RMCP owns the Authorization header and applies the Bearer scheme itself.
+        // Supplying a pre-prefixed value sends `Bearer Bearer <token>`, which a
+        // conforming streamable HTTP server rejects during initialization.
+        config.auth_header = Some(resolve_credential(auth)?);
     }
     Ok(config)
 }
@@ -1918,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_http_headers_and_literal_or_env_auth_are_applied_as_bearer_tokens() {
+    fn imported_http_headers_and_literal_or_env_auth_are_forwarded_as_raw_bearer_tokens() {
         let config = http_transport_config(
             "https://example.invalid/mcp",
             Some("literal-token"),
@@ -1926,7 +1973,7 @@ mod tests {
         )
         .expect("valid HTTP config");
 
-        assert_eq!(config.auth_header.as_deref(), Some("Bearer literal-token"));
+        assert_eq!(config.auth_header.as_deref(), Some("literal-token"));
         assert_eq!(
             config
                 .custom_headers
@@ -1950,10 +1997,9 @@ mod tests {
         .expect("valid env-backed auth");
         unsafe { std::env::remove_var(&env_name) };
 
-        let expected_auth = format!("Bearer {env_secret}");
         assert_eq!(
             env_config.auth_header.as_deref(),
-            Some(expected_auth.as_str())
+            Some(env_secret)
         );
         let health = serde_json::to_string(&ProxyHealthSnapshot {
             session_id: "redaction-test".to_string(),

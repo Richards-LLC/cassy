@@ -100,6 +100,17 @@ Files under `cas-cli/src/builtins/**/references/` are owned by their skill and s
 
 and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as Cassy content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
 
+### Viktor distribution
+
+The managed Viktor surface has three coupled user-facing pieces: its Claude/Codex/Grok builtin
+skill mirrors, `cas viktor` credential-safe provisioning output, and the proxy's configured
+allowlist. Keep the skill body compact and put operational detail in its reference. The mirrors
+must retain identical meaning after their mechanical tool-prefix substitutions; run the builtin
+flavor-drift test. Never add a credential literal to source, fixtures, docs, or artifacts: the
+only supported configuration is the `VIKTOR_API_KEY` environment reference held by `cas serve`.
+For a new CLI or proxy-facing behavior, add a clean-project `cas init`/command assertion and a
+direct registry test so the source cannot exist without reaching all three downstream harnesses.
+
 ## Releasing
 
 ### Version policy

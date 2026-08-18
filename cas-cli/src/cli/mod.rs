@@ -61,6 +61,7 @@ mod statusline;
 mod sync;
 mod update;
 pub mod update_transaction;
+mod viktor;
 
 use std::path::{Path, PathBuf};
 
@@ -89,6 +90,7 @@ pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
 pub use update::UpdateArgs;
+pub use viktor::ViktorArgs;
 
 /// Build version string including git hash and date
 fn build_version() -> String {
@@ -223,6 +225,9 @@ pub enum Commands {
 
     /// Run diagnostics
     Doctor(DoctorArgs),
+
+    /// Show credential-safe provisioning status for the managed Viktor gateway
+    Viktor(ViktorArgs),
 
     /// Manage configuration
     #[command(subcommand)]
@@ -361,6 +366,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         Commands::Init(_)
         | Commands::Open(_)
         | Commands::Doctor(_)
+        | Commands::Viktor(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
         | Commands::Hook(_)
@@ -561,6 +567,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Hub(_) => "hub".to_string(),
         Commands::Serve => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
+        Commands::Viktor(_) => "viktor".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
         Commands::Limits(_) => "limits".to_string(),
@@ -634,6 +641,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Hub(args) => hub::execute(args, cli),
         Commands::Serve => serve_execute(),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
+        Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
         Commands::Config(cmd) => config::execute_subcommand(cmd, cli, require_cas_root(cas_root)?),
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),

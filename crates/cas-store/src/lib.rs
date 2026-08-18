@@ -71,6 +71,7 @@ mod supervisor_queue_store;
 mod task_store;
 pub mod tracing;
 mod verification_store;
+mod viktor_watch_store;
 mod worktree_store;
 
 pub mod code_review;
@@ -183,6 +184,12 @@ pub use verification_store::{
     reopen_terminal_task_atomic, request_changes_for_parked_delivery,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
     timeout_verification_dispatch, update_system_verification,
+};
+
+// Durable Viktor thread watches used by the embedded daemon's inbound bridge.
+pub use viktor_watch_store::{
+    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch,
+    ViktorWatchStatus,
 };
 
 // Worktree store for git worktree tracking

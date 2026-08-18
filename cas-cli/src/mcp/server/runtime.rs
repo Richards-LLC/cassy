@@ -307,12 +307,27 @@ async fn run_server_impl() -> anyhow::Result<()> {
         }
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    let project_proxy_path = cas_root.join("proxy.toml");
+
+    // Refresh the credential-free, user-scoped Viktor default before loading
+    // proxy configuration. An explicit project .cas/proxy.toml is an opt-out:
+    // loading it still inherits user server definitions, so refreshing the
+    // managed default here would otherwise make a project-selected proxy
+    // surface connect to Viktor unexpectedly.
+    #[cfg(feature = "mcp-proxy")]
+    if !project_proxy_path.exists()
+        && let Ok(path) = cmcp_core::config::Scope::User.config_path()
+        && let Err(error) = cmcp_core::config::Config::refresh_viktor_managed_default(&path)
+    {
+        eprintln!("[Cassy] Failed to refresh managed Viktor proxy config: {error}");
+    }
+
     // Load MCP proxy config from .cas/proxy.toml (project) and ~/.config/code-mode-mcp/config.toml (user)
     #[cfg(feature = "mcp-proxy")]
     let proxy = {
-        let proxy_path = cas_root.join("proxy.toml");
-        let cfg = cmcp_core::config::Config::load_merged(if proxy_path.exists() {
-            Some(&proxy_path)
+        let cfg = cmcp_core::config::Config::load_merged(if project_proxy_path.exists() {
+            Some(&project_proxy_path)
         } else {
             None
         });
@@ -326,6 +341,13 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 match cmcp_core::ProxyEngine::from_configs(cfg.servers).await {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
+                        engine
+                            .set_call_observer(std::sync::Arc::new(
+                                crate::mcp::viktor_watch::ViktorWatchRecorder::new(
+                                    cas_root.clone(),
+                                ),
+                            ))
+                            .await;
                         let count = engine.tool_count().await;
                         eprintln!("[Cassy] MCP proxy ready ({count} upstream tools)");
                         if let Err(error) = write_proxy_snapshot_cache_for_config(
@@ -1309,6 +1331,52 @@ mod tests {
         let audit = engine.policy_audit();
         assert_eq!(audit.iter().filter(|entry| entry.allowed).count(), 2);
         assert_eq!(audit.iter().filter(|entry| !entry.allowed).count(), 2);
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test]
+    async fn managed_viktor_conversation_policy_is_exact_and_audits_worker_task_attribution() {
+        use cmcp_core::config::{Config as ProxyConfig, VIKTOR_CONVERSATION_TOOLS, VIKTOR_SERVER};
+
+        let engine = cmcp_core::ProxyEngine::from_configs(Default::default())
+            .await
+            .unwrap();
+        let mut config = ProxyConfig::default();
+        assert!(config.ensure_viktor_managed_default());
+        super::install_proxy_policy(&engine, &config).await;
+        let caller = cmcp_core::ProxyCaller {
+            agent_id: "worker-session".to_string(),
+            role: crate::types::AgentRole::Worker,
+            session_id: "worker-session".to_string(),
+            factory_session: Some("factory-2428".to_string()),
+            active_task_ids: vec!["cas-2428".to_string()],
+        };
+
+        for tool in VIKTOR_CONVERSATION_TOOLS {
+            let error = engine
+                .call_tool(&caller, VIKTOR_SERVER, tool, None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not connected"), "{tool}: {error}");
+            assert!(!error.contains("policy denied"), "{tool}: {error}");
+        }
+        let forbidden = engine
+            .call_tool(&caller, VIKTOR_SERVER, "get_file_download_url", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(forbidden.contains("external tool is not explicitly allowlisted"));
+
+        let audit = engine.policy_audit();
+        assert_eq!(audit.len(), VIKTOR_CONVERSATION_TOOLS.len() + 1);
+        for receipt in audit.iter().take(VIKTOR_CONVERSATION_TOOLS.len()) {
+            assert!(receipt.allowed);
+            assert_eq!(receipt.caller.agent_id, "worker-session");
+            assert_eq!(receipt.caller.active_task_ids, ["cas-2428"]);
+            assert!(receipt.timestamp_ms > 0);
+        }
+        assert!(!audit.last().unwrap().allowed);
     }
 
     fn make_m233_pending(cas_root: &std::path::Path, wrong_ledger_identity: bool) {

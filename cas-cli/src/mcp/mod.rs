@@ -46,6 +46,8 @@ pub(crate) mod daemon;
 mod server;
 pub mod socket;
 pub mod tools;
+#[cfg(feature = "mcp-proxy")]
+pub(crate) mod viktor_watch;
 
 pub use server::CasCore;
 pub use server::run_server;

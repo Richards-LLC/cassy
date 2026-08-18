@@ -2,11 +2,13 @@
 //!
 //! Essential commands only. Use MCP tools for memory, tasks, rules, etc.
 
+mod account_picker;
 mod auth;
 pub(crate) mod bridge;
 mod changelog;
 mod claude;
 mod claude_md;
+mod codex;
 mod codemap_cmd;
 mod history_cmd;
 mod hub;
@@ -70,6 +72,7 @@ pub use auth::AuthCommands;
 pub use bridge::BridgeArgs;
 pub use changelog::ChangelogArgs;
 pub use claude::ClaudeArgs;
+pub use codex::CodexArgs;
 pub use claude_md::ClaudeMdArgs;
 pub use config::ConfigCommands;
 pub use doctor::DoctorArgs;
@@ -158,11 +161,14 @@ pub enum Commands {
     /// see detected accounts, or `--bare` to open plain Claude Code instead.
     Claude(ClaudeArgs),
 
-    /// Launch factory with Codex as the supervisor (shortcut for `cas factory --supervisor-cli=codex`)
+    /// Launch factory with Codex as the supervisor on a chosen account profile
     ///
-    /// All `cas factory` flags pass through. Use `--default` to also persist
-    /// Codex as the default supervisor for future sessions.
-    Codex(FactoryArgs),
+    /// `cas codex alt` runs CAS supervised by Codex, signed in as the account in
+    /// ~/.codex-alt; `main` uses ~/.codex. Spawned codex workers inherit the same
+    /// account through CODEX_HOME. All `cas factory` flags pass through. Use
+    /// `--list-profiles` to see detected accounts, or `--bare` to open plain
+    /// Codex instead.
+    Codex(CodexArgs),
 
     /// Launch factory with Grok as the supervisor (shortcut for `cas factory --supervisor-cli=grok`)
     ///
@@ -415,6 +421,12 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(Commands::Claude(claude_args)) = &cli.command {
         claude::apply_profile_env(claude_args)?;
     }
+    // Same for `cas codex <profile>`: CODEX_HOME must be exported while the
+    // process is single-threaded, so the supervisor pane and every codex worker
+    // inherit the selected ChatGPT account (cas-9cc3).
+    if let Some(Commands::Codex(codex_args)) = &cli.command {
+        codex::apply_profile_env(codex_args)?;
+    }
 
     initialize_telemetry();
 
@@ -584,12 +596,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         // cas-7f2c: provider shortcuts — preset supervisor_cli + explicit flag,
         // then delegate to the same factory::execute path.
         Commands::Claude(args) => claude::execute(args, cli, cas_root),
-        Commands::Codex(args) => {
-            let mut a = args.clone();
-            a.supervisor_cli = "codex".to_string();
-            a.supervisor_cli_explicit = true;
-            factory::execute(&a, cli, cas_root)
-        }
+        Commands::Codex(args) => codex::execute(args, cli, cas_root),
         Commands::Grok(args) => {
             let mut a = args.clone();
             a.supervisor_cli = "grok".to_string();

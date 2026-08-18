@@ -31,7 +31,18 @@ use clap::{Args, FromArgMatches, Subcommand};
 use serde::Deserialize;
 
 use super::Cli;
+use super::account_picker::{
+    LoginState, Profile, ProfileLayout, Selection, login_state_label, report_seeding,
+    scan_profiles_with, seed_profile_dir, should_prompt_for_profile,
+};
 use super::factory::FactoryArgs;
+
+/// `main` → `~/.claude`, any other name → `~/.claude-<name>`.
+const LAYOUT: ProfileLayout = ProfileLayout {
+    main_dir: ".claude",
+    named_prefix: ".claude-",
+    main_name: "main",
+};
 
 /// Arguments for `cas claude [profile] [factory-args...]`.
 #[derive(Args, Clone, Debug)]
@@ -39,11 +50,6 @@ use super::factory::FactoryArgs;
 pub struct ClaudeArgs {
     #[command(subcommand)]
     pub command: Option<ClaudeCommand>,
-
-    /// Account profile: `main` maps to ~/.claude; any other name maps to ~/.claude-<name>.
-    ///
-    /// Omit to use whichever account the current environment already selects.
-    pub profile: Option<String>,
 
     /// List detected account profiles with login state and exit.
     #[arg(long = "list-profiles")]
@@ -53,9 +59,38 @@ pub struct ClaudeArgs {
     #[arg(long = "bare")]
     pub bare: bool,
 
-    /// Remaining arguments: `cas factory` flags, or Claude Code flags with `--bare`.
+    /// `[PROFILE]` followed by `cas factory` flags (or Claude Code flags with `--bare`).
+    ///
+    /// `main` maps to ~/.claude; any other name maps to ~/.claude-<name>. Omit the
+    /// profile to be asked (interactive, >1 account) or to keep whichever account
+    /// the environment already selects.
+    ///
+    /// Deliberately one list rather than a `profile` positional plus a trailing
+    /// list: a dedicated positional makes clap reject a leading factory flag, so
+    /// `cas claude --workers 3` failed with "unexpected argument '--workers'"
+    /// (cas-6dad; the same trap `cas codex` avoided in cas-9cc3).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<OsString>,
+}
+
+impl ClaudeArgs {
+    /// The account profile, if the first argument names one.
+    ///
+    /// A leading token that starts with `-` is a factory/Claude Code flag, not a
+    /// profile.
+    pub(crate) fn profile(&self) -> Option<&str> {
+        let first = self.args.first()?.to_str()?;
+        (!first.starts_with('-')).then_some(first)
+    }
+
+    /// Everything after the optional profile: `cas factory` or Claude Code flags.
+    pub(crate) fn passthrough_args(&self) -> &[OsString] {
+        if self.profile().is_some() {
+            &self.args[1..]
+        } else {
+            &self.args
+        }
+    }
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -71,21 +106,6 @@ pub enum ClaudeCommand {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LoginState {
-    LoggedIn,
-    LoggedOut,
-    Unknown,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct Profile {
-    name: String,
-    directory: PathBuf,
-    login_state: LoginState,
-    active: bool,
-}
-
 #[derive(Deserialize)]
 struct ClaudeAuthStatus {
     #[serde(rename = "loggedIn")]
@@ -94,74 +114,11 @@ struct ClaudeAuthStatus {
 
 /// Resolve a convention-based profile name under `home`.
 pub(crate) fn resolve_profile_dir(home: &Path, profile: &str) -> PathBuf {
-    if profile == "main" {
-        home.join(".claude")
-    } else {
-        home.join(format!(".claude-{profile}"))
-    }
+    LAYOUT.profile_dir(home, profile)
 }
 
 fn scan_profiles(home: &Path, active_dir: Option<&Path>) -> io::Result<Vec<Profile>> {
-    scan_profiles_with(home, active_dir, probe_login_state)
-}
-
-fn scan_profiles_with(
-    home: &Path,
-    active_dir: Option<&Path>,
-    mut login_state_for: impl FnMut(&str, &Path) -> LoginState,
-) -> io::Result<Vec<Profile>> {
-    let mut profiles = vec![profile_for(
-        "main",
-        home.join(".claude"),
-        active_dir,
-        &mut login_state_for,
-    )];
-
-    if let Ok(entries) = std::fs::read_dir(home) {
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(file_name) = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let Some(profile_name) = file_name.strip_prefix(".claude-") else {
-                continue;
-            };
-            if profile_name.is_empty() {
-                continue;
-            }
-            profiles.push(profile_for(
-                profile_name,
-                path,
-                active_dir,
-                &mut login_state_for,
-            ));
-        }
-    }
-
-    profiles[1..].sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(profiles)
-}
-
-fn profile_for(
-    name: &str,
-    directory: PathBuf,
-    active_dir: Option<&Path>,
-    login_state_for: &mut impl FnMut(&str, &Path) -> LoginState,
-) -> Profile {
-    Profile {
-        name: name.to_string(),
-        login_state: login_state_for(name, &directory),
-        active: active_dir.map_or(name == "main", |active| active == directory),
-        directory,
-    }
+    scan_profiles_with(LAYOUT, home, active_dir, probe_login_state)
 }
 
 /// Ask Claude Code itself whether the exact profile credential is usable.
@@ -194,11 +151,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
     );
 
     for profile in profiles {
-        let login = match profile.login_state {
-            LoginState::LoggedIn => "logged in",
-            LoginState::LoggedOut => "not logged in",
-            LoginState::Unknown => "login state unknown",
-        };
+        let login = login_state_label(profile.login_state);
         let active = if profile.active { " (active)" } else { "" };
         output.push_str(&format!(
             "  {} — {} ({login}){active}\n",
@@ -233,40 +186,98 @@ fn configure_profile_command(command: &mut Command, profile: &str, profile_dir: 
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR");
 }
 
-/// Return whether a bare launch should ask the user to select an account.
+/// Prompt for an account. Returns the chosen profile name.
 ///
-/// A profile explicitly named by the caller always wins. We must also leave
-/// pipe/script launches alone: a prompt there would either hang or consume
-/// caller input that belongs to Claude Code.
-fn should_prompt_for_profile(
-    explicit_profile: Option<&str>,
-    profiles: &[Profile],
-    stdin_is_terminal: bool,
-    stdout_is_terminal: bool,
-) -> bool {
-    explicit_profile.is_none()
-        && stdin_is_terminal
-        && stdout_is_terminal
-        && profiles
-            .iter()
-            .filter(|profile| profile.login_state == LoginState::LoggedIn)
-            .count()
-            > 1
+/// The picker itself is shared with `cas codex`; only the login flow that
+/// follows "new login" is Claude-specific.
+fn prompt_for_profile(home: &Path, profiles: &[Profile]) -> Result<String> {
+    match super::account_picker::prompt_for_selection("Claude", LAYOUT, profiles)? {
+        Selection::Existing(name) => Ok(name),
+        Selection::NewLogin(name) => create_and_log_in_new_profile(home, &name),
+    }
 }
 
-/// Prompt for one of the logged-in account profiles.
-fn prompt_for_profile(profiles: &[Profile]) -> Result<String> {
-    let choices = profiles
-        .iter()
-        .filter(|profile| profile.login_state == LoginState::LoggedIn)
-        .map(|profile| profile.name.clone())
-        .collect();
+/// Create the profile, seed shared config, and run the Claude login flow.
+///
+/// The email prompt and its validation now live in the shared picker; this owns
+/// only what is Claude-specific. The login runs as a child process rather than
+/// replacing this one, so a successful login lands the operator straight into
+/// the account they just created instead of making them re-run the command.
+fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
+    let profile = profile.to_string();
+    let profile_dir = resolve_profile_dir(home, &profile);
 
-    inquire::Select::new("Choose Claude account", choices)
-        .with_help_message("This selection applies only to this Claude session")
-        .prompt()
-        .context("Claude account selection cancelled")
+    std::fs::create_dir_all(&profile_dir).with_context(|| {
+        format!(
+            "could not create Claude profile directory {}",
+            profile_dir.display()
+        )
+    })?;
+
+    let seeding = seed_profile_dir(
+        &home.join(".claude"),
+        &profile_dir,
+        &SHARED_PROFILE_ENTRIES,
+        &PRIVATE_PROFILE_ENTRIES,
+    )?;
+    report_seeding(&seeding, "~/.claude");
+
+    eprintln!("Logging in Claude account config: {}", profile_dir.display());
+    let mut command = build_claude_command(
+        &profile,
+        &profile_dir,
+        &[OsString::from("auth"), OsString::from("login")],
+    );
+    let status = command
+        .status()
+        .context("failed to run `claude auth login` for the new account")?;
+    if !status.success() {
+        anyhow::bail!(
+            "`claude auth login` did not complete for {}; the profile directory was created and seeded, so `cas claude login {profile}` can finish it",
+            profile_dir.display()
+        );
+    }
+
+    Ok(profile)
 }
+
+/// Shared configuration surface symlinked into a freshly created profile.
+///
+/// These are the files an account needs to be *equipped* — the same set whose
+/// absence produced the "alt profiles lack hooks/skills" reports (cas-5b96),
+/// plus the team directory that has to live under CLAUDE_CONFIG_DIR (cas-3585).
+const SHARED_PROFILE_ENTRIES: [&str; 8] = [
+    "agents",
+    "skills",
+    "commands",
+    "hooks",
+    "workflows",
+    "output-styles",
+    "settings.json",
+    "CLAUDE.md",
+];
+
+/// Never linked or copied: credentials and per-account identity/history state.
+///
+/// Sharing any of these across profiles would defeat the point of separate
+/// accounts. `.credentials.json` and the securestorage scoping are the account
+/// identity itself; `.claude.json`, history, sessions and projects are that
+/// account's own record. `settings.local.json` is deliberately private too --
+/// the `.local` convention means machine/account-specific overrides.
+const PRIVATE_PROFILE_ENTRIES: [&str; 12] = [
+    ".credentials.json",
+    ".claude.json",
+    "settings.local.json",
+    "history.jsonl",
+    "sessions",
+    "projects",
+    "session-env",
+    "shell-snapshots",
+    "statsig",
+    "telemetry",
+    "stats-cache.json",
+    "backups",
+];
 
 /// Build the command used for a `--bare` profile launch without executing it.
 pub(crate) fn build_claude_command(
@@ -322,22 +333,49 @@ fn set_profile_env(profile: &str, profile_dir: &Path) {
 /// factory supervisor pane and every `spawn_workers` request then inherit the
 /// value through ordinary process environment inheritance.
 pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
-    if args.command.is_some() || args.list_profiles || args.bare {
+    if args.command.is_some() || args.list_profiles {
         return Ok(());
     }
-    let Some(profile) = args.profile.as_deref() else {
-        return Ok(());
-    };
 
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-    let profile_dir = resolve_profile_dir(&home, profile);
-    warn_about_profile_state(profile, &profile_dir);
+
+    let profile = match args.profile() {
+        // An explicitly named account is the no-prompt fast path.
+        Some(profile) => profile.to_string(),
+        None => {
+            let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+            let profiles = scan_profiles(&home, active_dir.as_deref()).with_context(|| {
+                format!("could not inspect Claude profiles under {}", home.display())
+            })?;
+            if should_prompt_for_profile(
+                None,
+                &profiles,
+                io::stdin().is_terminal(),
+                io::stdout().is_terminal(),
+            ) {
+                prompt_for_profile(&home, &profiles)?
+            } else {
+                // Non-interactive, or only one account exists: leave the
+                // ambient environment exactly as the caller set it.
+                return Ok(());
+            }
+        }
+    };
+
+    let profile_dir = resolve_profile_dir(&home, &profile);
+    warn_about_profile_state(&profile, &profile_dir);
     eprintln!("Using Claude account config: {}", profile_dir.display());
 
-    set_profile_env(profile, &profile_dir);
+    set_profile_env(&profile, &profile_dir);
+    // `execute_bare` runs later in the same process; record the choice so the
+    // operator is asked once, not once per launch path.
+    let _ = SELECTED_PROFILE.set(profile);
 
     Ok(())
 }
+
+/// The account chosen during `apply_profile_env`, for later launch paths.
+static SELECTED_PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Run `cas claude`: factory with a Claude supervisor by default, plain Claude
 /// Code under `--bare`, profile listing under `--list-profiles`.
@@ -359,7 +397,7 @@ pub fn execute(args: &ClaudeArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
     }
 
     // `apply_profile_env` already exported CLAUDE_CONFIG_DIR for this process.
-    let mut factory_args = parse_factory_args(&args.args);
+    let mut factory_args = parse_factory_args(args.passthrough_args());
     factory_args.supervisor_cli = "claude".to_string();
     factory_args.supervisor_cli_explicit = true;
     super::factory::execute(&factory_args, cli, cas_root)
@@ -386,25 +424,27 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
 /// Plain Claude Code launch. On Unix this replaces the CAS process with Claude.
 fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-    let profile = match args.profile.as_deref() {
-        Some(profile) => profile.to_string(),
-        None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-            let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-            let profiles = scan_profiles(&home, active_dir.as_deref())?;
-            if should_prompt_for_profile(None, &profiles, true, true) {
-                prompt_for_profile(&profiles)?
-            } else {
-                "main".to_string()
-            }
-        }
-        None => "main".to_string(),
+    // `apply_profile_env` already ran the picker for this process; reuse its
+    // answer rather than asking a second time on the way to the same launch.
+    // `apply_profile_env` already resolved and announced the account for both
+    // the explicit and the picked case. Only the silent fallback below — no
+    // explicit profile and no prompt (non-TTY, or a single account) — still
+    // needs its own announcement, which is what it printed before this change.
+    let (profile, already_announced) = match args.profile() {
+        Some(profile) => (profile.to_string(), true),
+        None => match SELECTED_PROFILE.get() {
+            Some(picked) => (picked.clone(), true),
+            None => ("main".to_string(), false),
+        },
     };
     let profile_dir = resolve_profile_dir(&home, &profile);
 
-    warn_about_profile_state(&profile, &profile_dir);
-    eprintln!("Using Claude account config: {}", profile_dir.display());
+    if !already_announced {
+        warn_about_profile_state(&profile, &profile_dir);
+        eprintln!("Using Claude account config: {}", profile_dir.display());
+    }
 
-    let mut command = build_claude_command(&profile, &profile_dir, &args.args);
+    let mut command = build_claude_command(&profile, &profile_dir, args.passthrough_args());
     exec_claude(&mut command)
 }
 
@@ -455,7 +495,6 @@ fn exec_claude(_command: &mut Command) -> Result<()> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
-    use tempfile::TempDir;
 
     #[test]
     fn resolves_main_and_named_profiles_under_home() {
@@ -464,49 +503,6 @@ mod tests {
         assert_eq!(resolve_profile_dir(home, "main"), home.join(".claude"));
         assert_eq!(resolve_profile_dir(home, "alt"), home.join(".claude-alt"));
         assert_eq!(resolve_profile_dir(home, "work"), home.join(".claude-work"));
-    }
-
-    #[test]
-    fn scans_main_and_named_directories_with_login_and_active_state() {
-        let home = TempDir::new().unwrap();
-        let main = home.path().join(".claude");
-        let alt = home.path().join(".claude-alt");
-        let work = home.path().join(".claude-work");
-        std::fs::create_dir_all(&main).unwrap();
-        std::fs::create_dir_all(&alt).unwrap();
-        std::fs::create_dir_all(&work).unwrap();
-        let profiles = scan_profiles_with(home.path(), Some(alt.as_path()), |name, _| {
-            if name == "alt" {
-                LoginState::LoggedIn
-            } else {
-                LoginState::LoggedOut
-            }
-        })
-        .unwrap();
-
-        assert_eq!(
-            profiles,
-            vec![
-                Profile {
-                    name: "main".to_string(),
-                    directory: main,
-                    login_state: LoginState::LoggedOut,
-                    active: false,
-                },
-                Profile {
-                    name: "alt".to_string(),
-                    directory: alt,
-                    login_state: LoginState::LoggedIn,
-                    active: true,
-                },
-                Profile {
-                    name: "work".to_string(),
-                    directory: work,
-                    login_state: LoginState::LoggedOut,
-                    active: false,
-                },
-            ]
-        );
     }
 
     #[test]
@@ -545,32 +541,40 @@ mod tests {
     }
 
     #[test]
-    fn bare_launch_prompts_only_for_interactive_ambiguous_account_selection() {
-        let profiles = vec![
-            Profile {
-                name: "main".to_string(),
-                directory: PathBuf::from("/tmp/.claude"),
-                login_state: LoginState::LoggedIn,
-                active: false,
-            },
-            Profile {
-                name: "alt".to_string(),
-                directory: PathBuf::from("/tmp/.claude-alt"),
-                login_state: LoginState::LoggedIn,
-                active: false,
-            },
-        ];
+    fn a_leading_factory_flag_is_not_mistaken_for_a_profile() {
+        let leading = ClaudeArgs {
+            command: None,
+            list_profiles: false,
+            bare: false,
+            args: vec![OsString::from("--workers"), OsString::from("3")],
+        };
+        assert_eq!(leading.profile(), None);
+        assert_eq!(leading.passthrough_args(), leading.args.as_slice());
 
-        assert!(should_prompt_for_profile(None, &profiles, true, true));
-        assert!(!should_prompt_for_profile(None, &profiles, false, true));
-        assert!(!should_prompt_for_profile(None, &profiles, true, false));
-        assert!(!should_prompt_for_profile(
-            Some("alt"),
-            &profiles,
-            true,
-            true
-        ));
-        assert!(!should_prompt_for_profile(None, &profiles[..1], true, true));
+        let named = ClaudeArgs {
+            command: None,
+            list_profiles: false,
+            bare: false,
+            args: vec![
+                OsString::from("alt"),
+                OsString::from("--workers"),
+                OsString::from("3"),
+            ],
+        };
+        assert_eq!(named.profile(), Some("alt"));
+        assert_eq!(
+            named.passthrough_args(),
+            &[OsString::from("--workers"), OsString::from("3")]
+        );
+
+        let bare = ClaudeArgs {
+            command: None,
+            list_profiles: false,
+            bare: false,
+            args: vec![],
+        };
+        assert_eq!(bare.profile(), None);
+        assert!(bare.passthrough_args().is_empty());
     }
 
     #[test]

@@ -1,6 +1,31 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
 
+/// Whether this harness has account-directory plumbing at all.
+///
+/// Claude scopes accounts with `CLAUDE_CONFIG_DIR`, Codex with `CODEX_HOME`
+/// (cas-9cc3). Grok has no equivalent yet, so a config_dir aimed at a grok
+/// worker is reported rather than silently dropped.
+fn account_dir_supported(cli: cas_mux::SupervisorCli) -> bool {
+    matches!(
+        cli,
+        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex
+    )
+}
+
+/// The requesting supervisor's own account directory for this harness.
+///
+/// Provider-aware on purpose: applying a Claude supervisor's
+/// `CLAUDE_CONFIG_DIR` to a codex worker would point `CODEX_HOME` at a
+/// `.claude-*` directory, which is worse than no selection at all.
+fn requester_account_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
+    match cli {
+        cas_mux::SupervisorCli::Claude => std::env::var("CLAUDE_CONFIG_DIR").ok(),
+        cas_mux::SupervisorCli::Codex => std::env::var("CODEX_HOME").ok(),
+        _ => None,
+    }
+}
+
 /// Resolve and validate an explicit Claude config directory before its spawn
 /// request reaches the daemon.  A partial profile otherwise starts a PTY that
 /// cannot load CAS' worker contract, then fails sixty seconds later with no
@@ -1231,12 +1256,12 @@ impl CasService {
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                 }
             }
-            let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+            let requester_config_dir = requester_account_dir(spec.cli);
             if (spec.config_dir.is_some() || requester_config_dir.is_some())
-                && spec.cli != cas_mux::SupervisorCli::Claude
+                && !account_dir_supported(spec.cli)
             {
                 let warning = format!(
-                    "config_dir is Claude-only; resolved {} worker will not receive CLAUDE_CONFIG_DIR",
+                    "config_dir has no account plumbing for {}; the resolved worker will not receive an account directory",
                     spec.cli.backend().name()
                 );
                 tracing::warn!(target: "cas::factory", "{warning}");
@@ -1262,7 +1287,17 @@ impl CasService {
         let factory_session = current_factory_session();
         // Capture the requesting supervisor's account now. The daemon may run
         // under a different environment by the time it consumes this queue row.
-        let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        //
+        // Provider-aware since cas-9cc3: the codex backend now applies this
+        // value as CODEX_HOME, so capturing CLAUDE_CONFIG_DIR for a codex
+        // worker would point codex at a `.claude-*` directory.
+        // The serialized spec is authoritative for what will actually spawn; an
+        // unparseable spec falls back to Claude, matching the previous
+        // unconditional CLAUDE_CONFIG_DIR capture.
+        let resolved_cli = serde_json::from_str::<cas_mux::WorkerSpec>(&spec_json_owned)
+            .map(|resolved| resolved.cli)
+            .unwrap_or(cas_mux::SupervisorCli::Claude);
+        let requester_config_dir = requester_account_dir(resolved_cli);
         let request_id = queue
             .enqueue_spawn_with_requester_config_dir(
                 count,

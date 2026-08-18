@@ -1,0 +1,5 @@
+# Operational intelligence sweep — arm only after replacing both absolute paths.
+# The command is read-only outside its configured artifact_root. stdout is one
+# status JSON line; the durable report and receipt live beneath artifact_root.
+# First drain the M1 backlog with mode=backfill, then change it to steady-state.
+17 * * * * cd /ABS/PATH/TO/cas-src && /usr/bin/python3 docs/analysis/scripts/operational_sweep.py run --config /ABS/PATH/TO/cas-src/docs/analysis/operational-sweep-config.json

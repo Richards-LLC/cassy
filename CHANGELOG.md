@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-18
+
+### Added
+- **Viktor conversations now work through a managed, two-way Cassy gateway.** When a project has no `.cas/proxy.toml`, `cas serve` refreshes a credential-reference-only Viktor upstream with an exact, fail-closed allowlist of nine conversation tools; an explicit project proxy configuration opts out. Run-starting calls are registered for daemon-owned follow-up, so Cassy delivers completed replies as inbound `origin=viktor` notifications instead of agents polling. `cas init` and `cas update --sync` install the `cas-viktor` skill for Claude, Codex, and Grok, and `cas viktor` reports credential-safe provisioning status.
+- **Factory spawns can now select each worker's harness and account independently.** `spawn_workers` resolves per-worker `name`, CLI, model, effort, and `config_dir` overrides, validates the matching Claude or Codex account directory, and carries the resolved account into the spawned worker rather than flattening a mixed fleet to one supervisor profile.
+- **Ben's Apple Silicon Mac setup guide is now part of the repository.** The guide covers the supported release-binary install, machine-wide Cloud login, project initialization, Commander service, source-checkout maintenance, recovery, and the current macOS process-restart limitation.
+
 ## [3.0.0] - 2026-08-18
 
 ### Added

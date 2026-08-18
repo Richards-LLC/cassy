@@ -12,12 +12,11 @@ use std::time::Duration;
 mod colors {
     use crossterm::style::Color;
 
-    // Logo colors - bright cyan with glow
-    pub const LOGO: Color = Color::Rgb {
-        r: 0,
-        g: 200,
-        b: 255,
-    };
+    // Semantic 4-bit roles let terminal themes control wordmark contrast.
+    pub const WORDMARK: Color = Color::Cyan;
+    pub const WORDMARK_GLOW: Color = Color::Blue;
+
+    // Existing startup-status glow (the wordmark uses WORDMARK above).
     pub const LOGO_GLOW: Color = Color::Rgb {
         r: 150,
         g: 230,
@@ -97,12 +96,12 @@ mod colors {
 mod minions_colors {
     use crossterm::style::Color;
 
-    // Logo colors - Minion yellow with glow
-    pub const LOGO: Color = Color::Rgb {
-        r: 255,
-        g: 213,
-        b: 0,
-    };
+    // The alternate palette preserves Cassy's identity while respecting the
+    // terminal's standard ANSI-color theme.
+    pub const WORDMARK: Color = Color::Yellow;
+    pub const WORDMARK_GLOW: Color = Color::DarkYellow;
+
+    // Existing startup-status glow (the wordmark uses WORDMARK above).
     pub const LOGO_GLOW: Color = Color::Rgb {
         r: 255,
         g: 235,
@@ -178,54 +177,47 @@ mod minions_colors {
     };
 }
 
-/// ASCII art logo for CAS Factory
+/// Compact six-row Cassy wordmark. Its 49-cell widest row fits an 80-column
+/// terminal and keeps the boot screen within the normal 24-row viewport.
 const LOGO: &str = r#"
-   ██████╗ █████╗ ███████╗    ███████╗ █████╗  ██████╗████████╗ ██████╗ ██████╗ ██╗   ██╗
-  ██╔════╝██╔══██╗██╔════╝    ██╔════╝██╔══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗╚██╗ ██╔╝
-  ██║     ███████║███████╗    █████╗  ███████║██║        ██║   ██║   ██║██████╔╝ ╚████╔╝
-  ██║     ██╔══██║╚════██║    ██╔══╝  ██╔══██║██║        ██║   ██║   ██║██╔══██╗  ╚██╔╝
-  ╚██████╗██║  ██║███████║    ██║     ██║  ██║╚██████╗   ██║   ╚██████╔╝██║  ██║   ██║
-   ╚═════╝╚═╝  ╚═╝╚══════╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝   ╚═╝
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// Smaller logo for narrow terminals (< 100 cols)
+/// Same Cassy wordmark for narrow terminals; the full design is already safe
+/// at 80 columns, so no abbreviated mark is needed.
 const LOGO_SMALL: &str = r#"
-  ╔═══════════════════════════════════════════════════════╗
-  ║   ▄████▄   ▄▄▄        ██████     █████▒▄▄▄   ▄████▄   ║
-  ║  ▒██▀ ▀█  ▒████▄    ▒██    ▒   ▓██   ▒████▄ ▒██▀ ▀█   ║
-  ║  ▒▓█    ▄ ▒██  ▀█▄  ░ ▓██▄     ▒████ ▒██  ▀▒▓█    ▄   ║
-  ║  ▒▓▓▄ ▄██▒░██▄▄▄▄██   ▒   ██▒  ░▓█▒  ░██▄▄▄▒▓▓▄ ▄██▒  ║
-  ║  ▒ ▓███▀ ░ ▓█   ▓██▒▒██████▒▒  ░▒█░   ▓█   ▒ ▓███▀ ░  ║
-  ╚═══════════════════════════════════════════════════════╝
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// Minion ASCII art logo — pill-shaped body, goggles, overalls
+/// The Minions palette still renders the Cassy wordmark; a theme must not
+/// change the product identity at startup.
 const MINION_LOGO: &str = r#"
-           ▄████████████▄
-         ██              ██
-        ██  ▄██████████▄  ██
-        ██ █  ◉      ◉  █ ██
-        ██ █            █ ██
-        ██  ▀██████████▀  ██
-        ██    ╭──────╮    ██
-     ─┤ ██    │ ╰──╯ │    ██ ├─
-        ██    ╰──────╯    ██
-       ▐█ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄ █▌
-       ▐█ █ B A N A N A █ █▌
-       ▐█ █▄▄▄▄▄▄▄▄▄▄▄▄█ █▌
-        ██                ██
-         ██  ██      ██  ██
-          ▀██▀        ▀██▀
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
-/// Smaller minion for narrow/short terminals
+/// Narrow Minions boot uses the same compact Cassy wordmark.
 const MINION_LOGO_SMALL: &str = r#"
-     ▄██████▄
-    ██ (◉◉) ██
-    ██ ╰──╯ ██
-    █▌▐████▌▐█
-    █▌ │  │ ▐█
-     ▀▀    ▀▀
+ ██████╗ █████╗ ███████╗███████╗██╗   ██╗
+██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝
+██║     ███████║███████╗███████╗ ╚████╔╝
+██║     ██╔══██║╚════██║╚════██║  ╚██╔╝
+╚██████╗██║  ██║███████║███████║   ██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝
 "#;
 
 /// Braille spinner frames for smooth animation
@@ -284,8 +276,8 @@ impl BootScreen {
         })
     }
     pub(crate) fn draw_logo(&mut self) -> std::io::Result<u16> {
-        let logo_color = themed!(self, LOGO);
-        let logo_glow = themed!(self, LOGO_GLOW);
+        let logo_color = themed!(self, WORDMARK);
+        let logo_glow = themed!(self, WORDMARK_GLOW);
         let header_color = themed!(self, HEADER);
         let label_color = themed!(self, LABEL);
 
@@ -296,7 +288,7 @@ impl BootScreen {
             )
         } else {
             (
-                "═══  Coding Agent System  ═══",
+                "═══  Cassy Coding Agent System  ═══",
                 format!("Multi-Agent Orchestration  •  v{}", APP_VERSION),
             )
         };
@@ -304,7 +296,7 @@ impl BootScreen {
         let compact_title = if self.minions_theme {
             "Minion Factory Boot"
         } else {
-            "CAS Factory Boot"
+            "Cassy Factory Boot"
         };
 
         let compact_subtitle = if self.minions_theme {
@@ -797,5 +789,19 @@ fn truncate_path(path: &str, max_len: usize) -> String {
         let suffix_len = max_len - 3;
         let suffix: String = path.chars().skip(char_count - suffix_len).collect();
         format!("...{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LOGO, LOGO_SMALL, MINION_LOGO, MINION_LOGO_SMALL};
+
+    #[test]
+    fn cassy_boot_wordmarks_fit_at_80_columns() {
+        for logo in [LOGO, LOGO_SMALL, MINION_LOGO, MINION_LOGO_SMALL] {
+            let rows: Vec<_> = logo.lines().filter(|row| !row.is_empty()).collect();
+            assert_eq!(rows.len(), 6, "the boot splash must remain compact");
+            assert!(rows.iter().all(|row| row.chars().count() <= 80));
+        }
     }
 }

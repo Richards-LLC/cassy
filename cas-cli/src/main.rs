@@ -2,7 +2,6 @@
 //!
 //! A CLI tool for AI agents to build persistent memory across sessions.
 
-use clap::Parser;
 use std::process::ExitCode;
 
 // Use the library crate
@@ -38,7 +37,7 @@ fn main() -> ExitCode {
     duplicate_check::check_and_warn(&parse_args);
 
     // Use try_parse to capture argument errors for tracing
-    let cli = match cli::Cli::try_parse_from(parse_args) {
+    let cli = match cli::try_parse_from_with_wordmark(parse_args) {
         Ok(cli) => cli,
         Err(e) => {
             // Record the argument parsing error

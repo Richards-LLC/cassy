@@ -289,7 +289,7 @@ pub(crate) fn build_codex_command(profile: &str, profile_dir: &Path, args: &[OsS
 }
 
 /// Warn about a profile directory codex will have to bootstrap or log in.
-fn warn_about_profile_state(profile: &str, profile_dir: &Path) {
+fn warn_about_profile_state(profile: &str, profile_dir: &Path, login_state: LoginState) {
     if !profile_dir.is_dir() {
         eprintln!(
             "Note: {} does not exist yet; codex will create it.",
@@ -297,12 +297,53 @@ fn warn_about_profile_state(profile: &str, profile_dir: &Path) {
         );
         return;
     }
-    if probe_login_state(profile, profile_dir) == LoginState::LoggedOut {
+    if login_state == LoginState::LoggedOut {
         eprintln!(
             "Note: {} is not logged in yet; run `cas codex login {profile}`.",
             profile_dir.display()
         );
     }
+}
+
+/// Whether an explicitly named profile needs an interactive login offer.
+///
+/// A named profile is an affirmative account choice, so sending its factory to
+/// a missing or logged-out home is never useful. Unknown deliberately remains
+/// launchable: an unavailable `codex login status` probe must not turn a CLI
+/// outage into an account-selection failure. Pipe/script launches also retain
+/// the old warn-and-proceed behavior so they cannot block on a prompt.
+fn should_offer_login_for_explicit_profile(
+    profile_dir: &Path,
+    login_state: LoginState,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    stdin_is_terminal
+        && stdout_is_terminal
+        && (!profile_dir.is_dir() || login_state == LoginState::LoggedOut)
+}
+
+fn prompt_for_explicit_profile_login(home: &Path, profile: &str, profile_dir: &Path) -> Result<()> {
+    let state = if profile_dir.is_dir() {
+        "is not logged in"
+    } else {
+        "does not exist yet"
+    };
+    if super::interactive::confirm(
+        &format!(
+            "Codex account home {} {state}. Run `codex login` now?",
+            profile_dir.display()
+        ),
+        false,
+    )? {
+        new_login(home, profile)?;
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Launch aborted: Codex account home {} needs login before starting a factory.",
+        profile_dir.display()
+    )
 }
 
 fn set_profile_env(profile: &str, profile_dir: &Path) {
@@ -357,8 +398,21 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
     };
 
     let profile_dir = resolve_profile_dir(&home, &profile);
-    warn_about_profile_state(&profile, &profile_dir);
+    let login_state = probe_login_state(&profile, &profile_dir);
     eprintln!("Using Codex account home: {}", profile_dir.display());
+
+    if args.profile().is_some()
+        && should_offer_login_for_explicit_profile(
+            &profile_dir,
+            login_state,
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+        )
+    {
+        prompt_for_explicit_profile_login(&home, &profile, &profile_dir)?;
+    } else {
+        warn_about_profile_state(&profile, &profile_dir, login_state);
+    }
 
     set_profile_env(&profile, &profile_dir);
     // `execute`/`execute_bare` run later in the same process; record the choice
@@ -435,7 +489,11 @@ fn execute_bare(args: &CodexArgs) -> Result<()> {
     // printed the account line twice for every explicit-profile launch
     // (cas-898d lesson 3), so only speak up for the fallback it left alone.
     if SELECTED_PROFILE.get().is_none() && args.profile().is_none() {
-        warn_about_profile_state(&profile, &profile_dir);
+        warn_about_profile_state(
+            &profile,
+            &profile_dir,
+            probe_login_state(&profile, &profile_dir),
+        );
         eprintln!("Using Codex account home: {}", profile_dir.display());
     }
 
@@ -542,6 +600,39 @@ mod tests {
             probe_login_state("ghost", &home.path().join(".codex-ghost")),
             LoginState::LoggedOut
         );
+    }
+
+    #[test]
+    fn explicit_missing_or_logged_out_profiles_offer_login_only_on_a_terminal() {
+        let home = TempDir::new().unwrap();
+        let missing = home.path().join(".codex-missing");
+        let logged_out = home.path().join(".codex-logged-out");
+        std::fs::create_dir(&logged_out).unwrap();
+
+        assert!(should_offer_login_for_explicit_profile(
+            &missing,
+            LoginState::LoggedOut,
+            true,
+            true,
+        ));
+        assert!(should_offer_login_for_explicit_profile(
+            &logged_out,
+            LoginState::LoggedOut,
+            true,
+            true,
+        ));
+        assert!(!should_offer_login_for_explicit_profile(
+            &logged_out,
+            LoginState::LoggedOut,
+            false,
+            false,
+        ));
+        assert!(!should_offer_login_for_explicit_profile(
+            &logged_out,
+            LoginState::Unknown,
+            true,
+            true,
+        ));
     }
 
     #[test]

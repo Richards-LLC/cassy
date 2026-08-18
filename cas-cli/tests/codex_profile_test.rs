@@ -8,7 +8,9 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::process::{Command as ProcessCommand, Stdio};
 use tempfile::TempDir;
 
 fn cas_cmd(home: &std::path::Path) -> Command {
@@ -66,6 +68,18 @@ exit 0
     let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&codex, permissions).unwrap();
+    home
+}
+
+fn home_with_only_main_profile() -> TempDir {
+    let home = home_with_profiles();
+    for name in [
+        ".codex-alt",
+        ".codex-work",
+        ".codex-support@example.com.lock",
+    ] {
+        std::fs::remove_dir_all(home.path().join(name)).unwrap();
+    }
     home
 }
 
@@ -203,6 +217,43 @@ fn non_tty_launch_does_not_prompt() {
         .stderr(predicate::str::contains(
             "Factory mode requires an interactive terminal",
         ));
+}
+
+/// The first named account must be discoverable from the bare launcher. A PTY
+/// is essential here: ordinary integration-test pipes deliberately preserve
+/// the non-interactive no-prompt contract.
+#[test]
+fn single_profile_bare_launch_offers_continue_and_new_login_rows() {
+    let home = home_with_only_main_profile();
+    let cas = assert_cmd::cargo::cargo_bin!("cas");
+    let path = std::env::join_paths(std::iter::once(home.path().join("bin")).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let command = format!("{} codex --definitely-not-a-flag", cas.display());
+    let mut child = ProcessCommand::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".xdg"))
+        .env("PATH", path)
+        .env_remove("CAS_ROOT")
+        .env_remove("CODEX_HOME")
+        .env("CAS_SKIP_FACTORY_TOOLING", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let transcript = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "the invalid factory flag must end the selected launch: {transcript}"
+    );
+    assert!(transcript.contains("Choose Codex account"), "{transcript}");
+    assert!(transcript.contains("+ Log in a new account"), "{transcript}");
+    assert!(transcript.contains("unexpected argument"), "{transcript}");
 }
 
 /// `cas codex login <profile>` creates the profile home, seeds the shared

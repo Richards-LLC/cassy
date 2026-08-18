@@ -70,7 +70,15 @@ jobs:
       # its hit rate. Observability only — this step can never fail a release.
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Verify Release Inputs"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Verify Release Inputs"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   build:
     name: Build Linux x86_64
@@ -153,7 +161,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Build Linux x86_64"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Build Linux x86_64"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   build-macos:
     name: Build macOS ARM64
@@ -220,7 +236,15 @@ jobs:
 
       - name: Report sccache stats
         if: always()
-        run: ./scripts/ci-sccache-summary.sh "Build macOS ARM64"
+        run: |
+          # Version skew (cas-3e14): the workflow can come from a newer main
+          # while the checkout is an older head that predates this script.
+          # Observability must never fail a lane that compiled and tested fine.
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Build macOS ARM64"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
 
   release:
     name: Create Release

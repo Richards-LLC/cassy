@@ -90,6 +90,115 @@ require_text "$scoped" 'github.base_ref != github.event.repository.default_branc
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
 require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one test binary'
 
+# Merge-latency contract for the scoped lane (cas-3e14). This lane is not a
+# required check, but it reports last on a factory PR, so a merge that waits for
+# every check waits for it. Measured on PR #479: 8m28s of Rust work on a
+# docs-only diff, finishing 9s before the merge and 8m after the required lanes
+# were green. Both mitigations below must stay, and both must stay fail-closed.
+require_text "$scoped" 'id: classify-diff' 'scoped lane classifies before expensive work'
+require_text "$scoped" './.github/actions/classify-required-diff' 'scoped lane uses the shared classifier'
+require_text "$scoped" 'fetch-depth: 0' 'scoped lane computes a real merge base'
+require_text "$scoped" 'github.event.pull_request.head.sha || github.sha' 'scoped lane classifies the PR head rather than its synthetic merge commit'
+require_text "$scoped" 'github.event.pull_request.base.sha || github.event.before' 'scoped lane compares against its own event base'
+require_text "$scoped" "steps.classify-diff.outputs.rust-unaffected != 'true'" 'scoped lane gates Rust work only after a safe classification'
+require_text "$scoped" 'id: pr-dedupe' 'scoped lane checks for a PR event on the same head SHA'
+require_text "$scoped" 'scripts/check-ci-pr-event-coverage.sh' 'scoped lane uses the shared fail-closed PR coverage guard'
+require_text "$scoped" "steps.pr-dedupe.outputs.covered != 'true'" 'scoped lane gates expensive work on the dedupe verdict'
+require_text "$scoped" 'scoped-validation-${{ github.event.pull_request.head.sha || github.sha }}' 'scoped lane groups duplicate runs by head SHA'
+require_text "$scoped" 'cancel-in-progress: false' 'scoped lane queues duplicate runs instead of cancelling validation'
+require_text "$scoped" 'pull-requests: read' 'scoped lane reads PR metadata without write access'
+
+# The dedupe may only ever silence the PUSH copy. If the pull-request event
+# could also stand down, a head SHA could reach a merge with no validation at
+# all — the exact hole the fail-closed design exists to prevent.
+dedupe_step="$(awk '
+    /^      - id: pr-dedupe$/ { inside = 1 }
+    inside && /^      - id: classify-diff$/ { exit }
+    inside { print }
+' <<<"$scoped")"
+require_text "$dedupe_step" "if: github.event_name == 'push'" 'only the push copy may dedupe; the PR event always validates'
+
+# Every expensive step must carry BOTH gates. A step gated on only one of them
+# would run Rust work in a case the other already ruled out — or worse, skip on
+# an empty output from a step that never ran.
+for expensive in \
+    './.github/actions/setup-rust-linux' \
+    'taiki-e/install-action@nextest' \
+    'cargo check -p cas --lib --tests' \
+    'scripts/run-scoped-tests.sh -p cas --lib'; do
+    step_block="$(awk -v needle="$expensive" '
+        /^      - / {
+            if (block != "" && index(block, needle)) { printf "%s", block; found = 1; exit }
+            block = ""
+        }
+        { block = block $0 "\n" }
+        END { if (!found && index(block, needle)) printf "%s", block }
+    ' <<<"$scoped")"
+    require_text "$step_block" "steps.pr-dedupe.outputs.covered != 'true'" "scoped lane step is dedupe-gated: $expensive"
+    require_text "$step_block" "steps.classify-diff.outputs.rust-unaffected != 'true'" "scoped lane step is classification-gated: $expensive"
+done
+
+# Removing the factory push trigger in the name of dedupe would leave the
+# supervisor's `git merge --no-ff` integration path — which never opens a pull
+# request — with no validation whatsoever.
+require_text "$scoped" "github.event_name == 'push'" 'scoped lane still validates factory branch pushes'
+
+# Exercise the real coverage guard. Only an open pull request whose head is
+# exactly this commit may silence the lane; every other answer runs it.
+coverage_guard="$repo_root/scripts/check-ci-pr-event-coverage.sh"
+if [[ -x "$coverage_guard" ]]; then
+    coverage_tmp="$(mktemp -d)"
+    mkdir -p "$coverage_tmp/bin"
+    cat >"$coverage_tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
+case "${FAKE_GH_MODE:?}" in
+  hit) printf '%s\n' '479' ;;
+  miss) printf '\n' ;;
+  garbage) printf '%s\n' 'not-a-number' ;;
+  error) exit 1 ;;
+  *) exit 2 ;;
+esac
+EOF
+    chmod +x "$coverage_tmp/bin/gh"
+
+    run_coverage() {
+        local mode="$1" event="${2:-push}"
+        local output="$coverage_tmp/$mode.$event.output"
+        : >"$output"
+        GITHUB_OUTPUT="$output" GITHUB_EVENT_NAME="$event" GITHUB_SHA=deadbeefcafe \
+            GITHUB_REPOSITORY=example/repo FAKE_GH_MODE="$mode" \
+            FAKE_GH_LOG="$coverage_tmp/gh.log" \
+            PATH="$coverage_tmp/bin:$PATH" "$coverage_guard" >/dev/null
+        cat "$output"
+    }
+
+    : >"$coverage_tmp/gh.log"
+    hit_coverage="$(run_coverage hit)"
+    require_text "$hit_coverage" 'covered=true' 'an open PR on this exact head SHA dedupes the push copy'
+    require_text "$hit_coverage" 'pr-number=479' 'dedupe records which pull request covers the commit'
+    require_text "$(<"$coverage_tmp/gh.log")" 'commits/deadbeefcafe/pulls' 'coverage lookup asks about the exact head commit'
+    require_text "$(<"$coverage_tmp/gh.log")" 'select(.head.sha == "deadbeefcafe")' 'coverage lookup accepts only a PR whose head is this commit'
+    require_text "$(<"$coverage_tmp/gh.log")" 'select(.state == "open")' 'coverage lookup ignores closed pull requests'
+
+    for mode in miss garbage error; do
+        require_absent "$(run_coverage "$mode")" 'covered=true' "$mode pull-request evidence fails closed to running the lane"
+    done
+    require_absent "$(run_coverage hit pull_request)" 'covered=true' 'a pull request event never dedupes itself'
+
+    no_repo_output="$coverage_tmp/no-repo.output"
+    : >"$no_repo_output"
+    GITHUB_OUTPUT="$no_repo_output" GITHUB_EVENT_NAME=push GITHUB_SHA=deadbeefcafe \
+        GITHUB_REPOSITORY="" FAKE_GH_MODE=hit FAKE_GH_LOG="$coverage_tmp/gh.log" \
+        PATH="$coverage_tmp/bin:$PATH" "$coverage_guard" >/dev/null
+    require_absent "$(<"$no_repo_output")" 'covered=true' 'a missing repository slug fails closed to running the lane'
+
+    rm -rf "$coverage_tmp"
+else
+    printf 'FAIL PR event coverage guard is executable\n'
+    fail=$((fail + 1))
+fi
+
 required_jobs=(
     fast-validation-preflight
     fast-validation-suite-build
@@ -407,7 +516,57 @@ for job in "${!compiling_lanes[@]}"; do
         "$job publishes its own sccache hit stats"
     require_text "$block" 'if: always()' "$job reports cache stats even when the lane fails"
     require_absent "$block" 'SCCACHE_GHA_ENABLED: "false"' "$job keeps the cache-v2 backend enabled"
+    require_text "$block" 'if [[ -x ./scripts/ci-sccache-summary.sh ]]; then' \
+        "$job survives a checkout that predates the stats script"
 done
+
+# Version-skew guard (cas-3e14, absorbed defect). A `pull_request` run takes the
+# workflow from the newer base but checks out the PR head, so a head that
+# predates scripts/ci-sccache-summary.sh ran a missing file and exited 127.
+# Measured: run 32144587241 on head e3868d2f failed SIX lanes — preflight,
+# doctests, suite archive build, full suite, Fast Validation and macOS Check,
+# four of them required — because an observability step could not find its
+# script. `if: always()` made it worse by guaranteeing the step ran in every
+# lane. Every invocation across both workflows must be existence-guarded, and
+# the guarded and unguarded forms must stay in lockstep so a newly added lane
+# cannot reintroduce the bare call.
+summary_invocations="$(grep -c -F './scripts/ci-sccache-summary.sh "' <<<"$all_actions" || true)"
+summary_guards="$(grep -c -F 'if [[ -x ./scripts/ci-sccache-summary.sh ]]; then' <<<"$all_actions" || true)"
+if [[ "$summary_invocations" == "$summary_guards" && "$summary_invocations" -gt 0 ]]; then
+    printf 'ok   every sccache stats invocation is existence-guarded (%s of them)\n' "$summary_guards"
+    pass=$((pass + 1))
+else
+    printf 'FAIL every sccache stats invocation must be existence-guarded (%s invocations, %s guards)\n' \
+        "$summary_invocations" "$summary_guards"
+    fail=$((fail + 1))
+fi
+require_count "$all_actions" 'scripts/ci-sccache-summary.sh is absent at this checkout' "$summary_guards" \
+    'every missing stats script says so instead of failing the lane'
+
+# The guard body itself must behave: present and executable runs it, absent
+# reports and exits 0. Exercised against the real shell, not just grepped.
+skew_tmp="$(mktemp -d)"
+skew_guard='if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+  ./scripts/ci-sccache-summary.sh "Probe"
+else
+  echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+fi'
+mkdir -p "$skew_tmp/empty" "$skew_tmp/present/scripts"
+printf '#!/usr/bin/env bash\necho "stats for $1"\n' >"$skew_tmp/present/scripts/ci-sccache-summary.sh"
+chmod +x "$skew_tmp/present/scripts/ci-sccache-summary.sh"
+if (cd "$skew_tmp/empty" && bash -c "$skew_guard") >"$skew_tmp/absent.log" 2>&1; then
+    require_text "$(<"$skew_tmp/absent.log")" 'is absent at this checkout' 'a checkout without the stats script reports and passes'
+else
+    printf 'FAIL a checkout without the stats script must not fail the lane\n'
+    fail=$((fail + 1))
+fi
+if (cd "$skew_tmp/present" && bash -c "$skew_guard") >"$skew_tmp/present.log" 2>&1; then
+    require_text "$(<"$skew_tmp/present.log")" 'stats for Probe' 'a checkout with the stats script still reports its lane'
+else
+    printf 'FAIL a checkout with the stats script must still run it\n'
+    fail=$((fail + 1))
+fi
+rm -rf "$skew_tmp"
 
 for job in build build-macos verify; do
     block="$(release_job_block "$job")"

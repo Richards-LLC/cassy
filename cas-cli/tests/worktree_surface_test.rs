@@ -243,6 +243,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         model: None,
         effort: None,
         config_dir: None,
+        workers: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,

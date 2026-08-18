@@ -52,3 +52,7 @@ node_modules/
 # Codex/agent rollout session logs — debugging artifacts, not source
 docs/requests/**/*.codex-rollout*.jsonl
 docs/requests/artifacts/
+
+# Python bytecode — regenerated on every run of the docs/analysis scripts
+__pycache__/
+*.pyc

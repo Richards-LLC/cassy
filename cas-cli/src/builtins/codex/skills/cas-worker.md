@@ -52,20 +52,18 @@ Null means use judgment; other values are invalid.
 
 ## Rules of Engagement
 
-Your scope is locked at assignment:
-
 - **Cross-team routing.** Report CAS defects to `Richards-LLC/cassy`; file Richards-LLC team requests on its issue board, not its checkout. Save a memory receipt (URL, ask, date); `docs/requests` is legacy-only.
 
 - **Never self-dispatch.** Start only a task assigned by `action=mine` or named explicitly by the supervisor. `ready`/`available` are backlog *visibility*, never authorization to `start` a task yourself. Idle means wait.
 - **One task at a time.** Complete the current task before taking another.
 - **Scope is frozen.** Build exactly the spec; note related improvements without implementing them.
 - **Honor non-goals and layer boundaries.** Modify only assigned files/modules.
-- **Match existing patterns.** Follow established conventions; don't introduce new ones without asking.
+- **Match existing patterns.** Don't introduce new conventions without asking.
 - **Stow/install only from the main checkout, never a worktree.** Persistent symlinks otherwise break when the worktree is cleaned.
 - **No config surprises.** Don't hardcode values that should be configurable. Don't add config that wasn't requested.
 - **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another host path.
-  - Bad (observed): after a `/dev/null` denial, retry it or switch to an arbitrary host path.
-  - Good: stop, classify the output as source, durable proof, or ephemeral, then use its sanctioned location.
+  - Bad (observed): retrying `/dev/null`, or switching to an arbitrary host path.
+  - Good: classify the output first, then use its sanctioned location.
 - **Document important choices.** Use `mcp__cs__task action=notes note_type=decision` for non-obvious decisions.
 - **Keep durable discoveries deliberately.** Relays are attributed, not auto-saved; use `mcp__cs__memory action=remember` for cross-session facts.
 - **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
@@ -74,7 +72,7 @@ Your scope is locked at assignment:
 
 ## cas-src surface checklist — required before close
 
-In the pre-close task note, every applicable entry must paste its proving file, command, or test; every `not applicable` entry must state why. This is a requirement, not a suggestion. Bare assertions such as “synced all mirrors” or “migration covered” are non-compliant.
+In the pre-close task note, every applicable entry must paste its proving file, command, or test; every `not applicable` entry must state why. This is a requirement, not a suggestion. Bare assertions are non-compliant.
 
 **Evidence pair (observed):** Bad: `Builtin skill/agent — synced all mirrors.` Good: `Builtin skill/agent — changed <three mirror paths>; proof: builtin flavor-drift test, 9/9 passed.`
 

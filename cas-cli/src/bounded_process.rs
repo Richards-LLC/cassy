@@ -161,28 +161,91 @@ impl Drop for Capture {
 mod tests {
     use super::*;
 
+    /// A deadline long enough that runner load cannot decide the outcome.
+    ///
+    /// Tests that assert *what* a bounded command returns must not also race
+    /// the clock: on a loaded CI runner a one-second budget is a coin toss, not
+    /// a correctness statement. Only the tests that assert timeout behaviour
+    /// itself keep a short deadline, and there the load pushes them toward the
+    /// expected result rather than away from it.
+    const GENEROUS: Duration = Duration::from_secs(30);
+
+    /// Echo a token through the platform shell, with no toolchain dependency.
+    #[cfg(unix)]
+    fn echo_command() -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo bounded-process-ok"]);
+        command
+    }
+
+    #[cfg(not(unix))]
+    fn echo_command() -> Command {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "echo bounded-process-ok"]);
+        command
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_reaps_descendants_without_waiting_for_inherited_output() {
         let started = Instant::now();
         let result = run_command(
-            Command::new("sh").args(["-c", "(sleep 10)& wait"]),
+            Command::new("sh").args(["-c", "(sleep 30)& wait"]),
             Deadline::after(Duration::from_millis(75)),
             Duration::from_millis(75),
         );
         assert!(matches!(result, Err(BoundedCommandError::TimedOut)));
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // The point is that we did not wait for the orphaned child, so the
+        // bound only has to sit clearly below its sleep. Five seconds proves
+        // that while leaving ~66x the deadline as headroom for a loaded runner;
+        // the previous one-second bound was the same tight-margin shape that
+        // made this file flaky (cas-2b7e, commit 2c6a4bc6).
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned after {:?}, which no longer proves the inherited sleep was skipped",
+            started.elapsed()
+        );
     }
 
     #[test]
     fn captures_success_output() {
-        let output = run_command(
-            Command::new("rustc").arg("--version"),
-            Deadline::after(Duration::from_secs(1)),
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        // Deliberately not `rustc --version`: an external toolchain command
+        // under a one-second deadline lost the race on a loaded ubuntu-latest
+        // runner (CI 32140529939). Nothing here is about the toolchain, so the
+        // child is now a cheap deterministic echo with a generous budget.
+        let output = run_command(&mut echo_command(), Deadline::after(GENEROUS), GENEROUS).unwrap();
+
         assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("rustc"));
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("bounded-process-ok"),
+            "stdout was {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn captures_failure_status_and_stderr_without_racing_the_clock() {
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "echo bounded-process-bad >&2; exit 3"]);
+            command
+        };
+        #[cfg(not(unix))]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "echo bounded-process-bad 1>&2 & exit 3"]);
+            command
+        };
+
+        let output = run_command(&mut command, Deadline::after(GENEROUS), GENEROUS).unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(output.status.code(), Some(3));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("bounded-process-bad"),
+            "stderr was {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

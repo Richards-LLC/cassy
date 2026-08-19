@@ -6505,9 +6505,12 @@ pub(crate) fn run_factory_branch_merge_gate(
 }
 
 /// cas-e74c: count commits on `commit_ish` that are not on `parent_branch`
-/// AND fall inside this task's work cycle (committer date at or after
+/// AND either fall inside this task's work cycle (committer date at or after
 /// `window.not_before`, with the same clock-skew allowance the commit
-/// receipt uses).
+/// receipt uses) OR are explicitly known to belong to the task. The latter
+/// includes durable task identity evidence and the receipt supplied by this
+/// close, because a restart after commit moves the lease boundary forward but
+/// must never turn the already-known delivery into somebody else's residue.
 ///
 /// Returns `None` — "unknowable" — when the merge-base or the rev-list
 /// cannot be computed, so the caller falls back to the whole-branch count
@@ -6517,6 +6520,7 @@ pub(crate) fn count_task_attributable_unmerged_commits(
     commit_ish: &str,
     parent_branch: &str,
     window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
 ) -> Option<u32> {
     use std::process::Command;
 
@@ -6541,17 +6545,14 @@ pub(crate) fn count_task_attributable_unmerged_commits(
 
     // Git parses `@<epoch>` as an absolute timestamp, so no locale- or
     // timezone-dependent formatting is involved.
-    let since = format!(
-        "@{}",
-        window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
-    );
     // cas-fdc9 (GH #66): exclude the remote-tracking target too. Measuring
     // this task's commits against a stale local ref alone counts work that
-    // already landed on `origin/<parent>` as stranded.
-    let since_arg = format!("--since={since}");
+    // already landed on `origin/<parent>` as stranded. Do not give rev-list
+    // `--since`: a known task receipt may predate a restart's new lease and
+    // must still be visible for attribution below.
     let range = format!("{merge_base}..{commit_ish}");
     let origin_parent = format!("origin/{parent_branch}");
-    let mut args = vec!["rev-list", "--count", since_arg.as_str(), range.as_str()];
+    let mut args = vec!["rev-list", "--timestamp", range.as_str()];
     if git_ref_exists(repo_path, &origin_parent) {
         args.push("--not");
         args.push(origin_parent.as_str());
@@ -6564,10 +6565,25 @@ pub(crate) fn count_task_attributable_unmerged_commits(
     if !count_out.status.success() {
         return None;
     }
+    let known_commits = window
+        .identity
+        .known_commits
+        .iter()
+        .map(String::as_str)
+        .chain(receipt)
+        .collect::<std::collections::HashSet<_>>();
+    let cutoff = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
     String::from_utf8_lossy(&count_out.stdout)
-        .trim()
-        .parse()
-        .ok()
+        .lines()
+        .map(|line| {
+            let (timestamp, sha) = line.split_once(' ')?;
+            let timestamp = timestamp.parse::<i64>().ok()?;
+            Some((timestamp, sha))
+        })
+        .try_fold(0u32, |count, entry| {
+            let (timestamp, sha) = entry?;
+            Some(count + u32::from(timestamp >= cutoff || known_commits.contains(sha)))
+        })
 }
 
 pub(crate) fn run_factory_branch_merge_gate_with_attribution(
@@ -6800,7 +6816,13 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // Unknowable Git state falls back to the whole-branch count (fail
     // closed), and commits this task actually made still reject below.
     let attributable = attribution.window.and_then(|window| {
-        count_task_attributable_unmerged_commits(repo_path, commit_ish, parent_branch, window)
+        count_task_attributable_unmerged_commits(
+            repo_path,
+            commit_ish,
+            parent_branch,
+            window,
+            attribution.receipt,
+        )
     });
     if attributable == Some(0) {
         return MergeStateGateOutcome::ProceedWithNote(format!(
@@ -13122,7 +13144,10 @@ fn reverse_delivery_path_applies_to_tree(
 /// Checks whether every added zero-context hunk from a delivery still occurs
 /// verbatim in the target file. Reverse-applying a normal-context patch is a
 /// stronger proof, but it spuriously fails when sibling lanes edit nearby
-/// context while leaving the delivery's own lines intact.
+/// context while leaving the delivery's own lines intact. Generated shared
+/// files can also reorder otherwise byte-identical delivery blocks while
+/// producing a strict superset, so after the contiguous-hunk proof fails we
+/// accept a multiset containment proof for every non-blank added line.
 fn delivery_added_hunks_survive_on_tree(
     repo_path: &std::path::Path,
     delivery_parent: &str,
@@ -13181,11 +13206,38 @@ fn delivery_added_hunks_survive_on_tree(
     }
     let target = String::from_utf8_lossy(&target.stdout);
     let target_lines = target.lines().collect::<Vec<_>>();
-    Ok(hunks.iter().all(|hunk| {
+    if hunks.iter().all(|hunk| {
         target_lines
             .windows(hunk.len())
             .any(|candidate| candidate == hunk.as_slice())
-    }))
+    }) {
+        return Ok(true);
+    }
+
+    // GH #495: a DB-first schema regeneration may insert another lane's
+    // generated block between blocks from this delivery. The result is a
+    // strict superset even though the original multi-block hunk is no longer
+    // contiguous. Count duplicate lines so repeated field declarations still
+    // need to be present as many times as the delivery added them.
+    let mut target_line_counts = std::collections::HashMap::<&str, u32>::new();
+    for line in target_lines {
+        *target_line_counts.entry(line).or_default() += 1;
+    }
+    for line in hunks
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|line| !line.trim().is_empty())
+    {
+        let Some(count) = target_line_counts.get_mut(line) else {
+            return Ok(false);
+        };
+        if *count == 0 {
+            return Ok(false);
+        }
+        *count -= 1;
+    }
+    Ok(true)
 }
 
 fn delivery_path_effect_survives_on_tree(
@@ -17761,13 +17813,57 @@ mod merge_state_gate_tests {
         }
     }
 
+    /// GH #473: a worker can be restarted after committing but before close.
+    /// The new lease timestamp is then after the real delivery commit, so a
+    /// timestamp-only attribution window must not mistake that commit for
+    /// somebody else's lane residue and accept an unmerged close.
+    #[test]
+    fn restarted_task_with_known_unmerged_delivery_receipt_still_requires_merge_gh_473() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivery.rs", "// delivered but unmerged\n", "2026-08-17T21:00:00Z");
+        let receipt = head_sha(p);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let mut window = window_at(1_800_000_000, "restart claim after delivery commit");
+        window.identity.known_commits.push(receipt.clone());
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains(&receipt), "{message}");
+            }
+            other => panic!(
+                "an unmerged known delivery must not become zero-attributable after restart, got {other:?}"
+            ),
+        }
+    }
+
     #[test]
     fn attributable_count_is_none_when_git_state_is_unknowable() {
         let dir = tempfile::tempdir().unwrap();
         let window = window_at(1_700_000_000, "test");
         assert!(
-            count_task_attributable_unmerged_commits(dir.path(), "factory/x", "main", &window)
-                .is_none(),
+            count_task_attributable_unmerged_commits(
+                dir.path(),
+                "factory/x",
+                "main",
+                &window,
+                None,
+            )
+            .is_none(),
             "non-git dir must be Unknown (fall back to whole-branch count), not Some(0)"
         );
     }
@@ -18419,6 +18515,76 @@ mod merge_state_gate_tests {
             !report.contains("All child factory branches are merged"),
             "{report}"
         );
+    }
+
+    /// GH #495: generated shared-schema lanes can resolve a real conflict by
+    /// regenerating a strict superset at the integration tip. The delivery's
+    /// blocks remain byte-for-byte present, but another generated block may
+    /// split the original zero-context hunk. That is evolved delivery, not a
+    /// conflict resolution that dropped the worker's content.
+    #[test]
+    fn superset_conflict_resolution_preserves_delivery_content_gh_495() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(
+            p.join("schema.prisma"),
+            "generator client {\n  provider = \"prisma-client-js\"\n}\n",
+        )
+        .unwrap();
+        git(p, &["add", "schema.prisma"]);
+        git(p, &["commit", "-q", "-m", "chore: seed schema"]);
+        git(p, &["branch", "-f", "main", "HEAD"]);
+        let base = rev_parse_local(p, "main");
+
+        std::fs::write(
+            p.join("schema.prisma"),
+            "generator client {\n  provider = \"prisma-client-js\"\n}\n\nmodel DeliveryOne {\n  id Int @id\n}\n\nmodel DeliveryTwo {\n  id Int @id\n}\n",
+        )
+        .unwrap();
+        git(p, &["add", "schema.prisma"]);
+        git(p, &["commit", "-q", "-m", "feat: add delivery models"]);
+        let delivery = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "-b", "factory/other", &base]);
+        std::fs::write(
+            p.join("schema.prisma"),
+            "generator client {\n  provider = \"prisma-client-js\"\n}\n\nmodel OtherLane {\n  id Int @id\n}\n",
+        )
+        .unwrap();
+        git(p, &["add", "schema.prisma"]);
+        git(p, &["commit", "-q", "-m", "feat: add other model"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+        let conflict = git_command(p, &["merge", "--no-ff", "factory/other"])
+            .status()
+            .expect("start conflicting schema merge");
+        assert!(!conflict.success(), "fixture must produce a real merge conflict");
+        std::fs::write(
+            p.join("schema.prisma"),
+            "generator client {\n  provider = \"prisma-client-js\"\n}\n\nmodel DeliveryOne {\n  id Int @id\n}\n\nmodel RegeneratedSuperset {\n  id Int @id\n}\n\nmodel DeliveryTwo {\n  id Int @id\n}\n\nmodel OtherLane {\n  id Int @id\n}\n",
+        )
+        .unwrap();
+        git(p, &["add", "schema.prisma"]);
+        git(p, &["commit", "-q", "-m", "merge: regenerate schema superset"]);
+
+        assert!(git_commit_is_ancestor(p, &delivery, "main"));
+        assert_eq!(
+            delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["schema.prisma".to_string()]
+            },
+            "the generated superset retains both delivery models"
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery);
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &req, "main", p),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// cas-b278 review amendment: reverse-apply failure after an ordinary

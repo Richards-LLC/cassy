@@ -57,6 +57,43 @@ permissions:
   actions: read
 
 jobs:
+  # GitHub Actions cannot fall back after it has assigned an offline
+  # self-hosted runner: the job would simply remain queued. Select the runner
+  # before assignment instead. The repository variable is deliberately
+  # opt-in; its absent/disabled state is the fail-safe hosted path used before
+  # maintenance or whenever the runner's health is not established.
+  #
+  # This job never checks out the merge-queue tree and only selects a label.
+  # Therefore fork/pull-request code cannot use the persistent runner. The
+  # actual archive job repeats the merge_group-only guard before it compiles.
+  fast-validation-runner-route:
+    name: Fast Validation — merge-queue runner route
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'pull_request'
+      && github.base_ref == github.event.repository.default_branch)
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.route.outputs.runner }}
+      mode: ${{ steps.route.outputs.mode }}
+    steps:
+      - id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+        run: |
+          if [[ "$EVENT_NAME" == merge_group && "$SELF_HOSTED_ENABLED" == enabled ]]; then
+            echo 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' >> "$GITHUB_OUTPUT"
+            echo 'mode=self-hosted' >> "$GITHUB_OUTPUT"
+          else
+            echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'mode=hosted' >> "$GITHUB_OUTPUT"
+          fi
+
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
   # do not spend an additional runner on this redundant subset there.
@@ -267,14 +304,20 @@ jobs:
   fast-validation-suite-build:
     name: Fast Validation — suite archive build
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
-    runs-on: ubuntu-latest
+      || startsWith(github.ref, 'refs/tags/'))))
+      && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
+      || (github.event_name == 'merge_group'
+      && github.repository == 'Richards-LLC/cassy'
+      && github.event.repository.fork == false
+      && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
+    needs: fast-validation-runner-route
+    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -287,18 +330,61 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      - name: Verify merge-queue self-hosted trust boundary
+        if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        env:
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = merge_group
+          test "$GITHUB_REPOSITORY" = Richards-LLC/cassy
+          test "$SELF_HOSTED_ENABLED" = enabled
+          case "$GITHUB_REF" in
+            refs/heads/gh-readonly-queue/*) ;;
+            *) echo "self-hosted route received a non-queue ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
         run: echo "Rust suite archive build skipped for ${{ steps.classify-diff.outputs.class }} diff."
 
-      - if: steps.classify-diff.outputs.rust-unaffected != 'true'
+      - if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted'
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-suite-archive
 
+      - name: Set up the isolated merge-queue runner
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig on the isolated merge-queue runner
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        run: ./scripts/bootstrap-zig.sh
+
       - name: Install nextest
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
+
+      - name: Verify private self-hosted sccache
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        run: |
+          set -euo pipefail
+          test "${SCCACHE_SERVER_PORT:?}" = 4227
+          case "${SCCACHE_DIR:?}" in
+            /var/lib/cassy-actions/*) ;;
+            *) echo "SCCACHE_DIR is not isolated from the runner cache" >&2; exit 1 ;;
+          esac
+          sccache rustc -vV
+          sccache --show-stats
+          echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
 
       # Debug info is stripped from the archived test binaries (cas-59d3).
       # Every shard downloads this whole artifact, so its size is multiplied by

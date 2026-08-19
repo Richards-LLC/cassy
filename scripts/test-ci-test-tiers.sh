@@ -99,10 +99,10 @@ require_text "$ruleset_text" '"max_entries_to_build": 1' 'merge queue avoids bat
 require_text "$ruleset_text" '"max_entries_to_merge": 1' 'merge queue merges one proven PR at a time'
 require_text "$ruleset_text" '"min_entries_to_merge_wait_minutes": 0' 'merge queue adds no group-fill wait'
 
-# Self-hosted pilot security/availability contract (cas-f5638). This repo is
-# public, so fork/untrusted PR code must be unable to request the persistent
-# runner. Required checks remain hosted: the local box is advisory and an
-# outage cannot strand merge eligibility.
+# Self-hosted pilot security contract (cas-f5638). This repo is public, so
+# fork/untrusted PR code must be unable to request the persistent runner. The
+# old push-only pilot remains advisory; the merge-queue route below is the only
+# required-path use of the box.
 require_text "$self_hosted_text" 'push:' 'self-hosted pilot accepts canonical repository pushes'
 require_text "$self_hosted_text" '- "factory/**"' 'self-hosted pilot accepts trusted factory branches'
 require_text "$self_hosted_text" '- "epic/**"' 'self-hosted pilot accepts trusted epic branches'
@@ -133,8 +133,30 @@ require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a 
 
 suite_build="$(job_block fast-validation-suite-build)"
 suite_shards="$(job_block fast-validation-suite-shards)"
-require_text "$suite_build" 'runs-on: ubuntu-latest' 'required archive build retains automatic hosted availability'
-require_text "$suite_shards" 'runs-on: ubuntu-latest' 'required suite shards retain automatic hosted availability'
+route="$(job_block fast-validation-runner-route)"
+require_text "$route" "github.event_name == 'merge_group'" 'runner route only offers the box to merge-queue trees'
+require_text "$route" 'vars.CASSY_MERGE_QUEUE_SELF_HOSTED' 'runner route requires explicit self-hosted opt-in'
+require_text "$route" '"$SELF_HOSTED_ENABLED" == enabled' 'runner route defaults to hosted unless the box is declared ready'
+require_text "$route" 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' 'merge-queue route selects the isolated runner label set'
+require_text "$route" 'runner=["ubuntu-latest"]' 'disabled or non-queue traffic routes to hosted runners'
+require_text "$route" 'mode=self-hosted' 'runner route exposes selected self-hosted mode'
+require_text "$route" 'mode=hosted' 'runner route exposes selected hosted fallback mode'
+require_absent "$route" 'actions/checkout' 'runner route does not execute merge-queue source before label selection'
+
+require_text "$suite_build" 'needs: fast-validation-runner-route' 'required archive build waits for explicit runner routing'
+require_text "$suite_build" 'fromJSON(needs.fast-validation-runner-route.outputs.runner)' 'archive build receives the fail-safe selected runner labels'
+require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode != 'self-hosted'" 'archive rejects an untrusted self-hosted route before assignment'
+require_text "$suite_build" "github.event_name == 'merge_group'" 'self-hosted archive is restricted to merge-queue events'
+require_text "$suite_build" "github.repository == 'Richards-LLC/cassy'" 'self-hosted archive pins the canonical repository'
+require_text "$suite_build" "vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'" 'self-hosted archive repeats explicit readiness opt-in'
+require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 'hosted'" 'hosted setup remains selected for PR and fallback validation'
+require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" 'self-hosted setup is limited to selected merge-queue validation'
+require_text "$suite_build" 'Verify merge-queue self-hosted trust boundary' 'self-hosted archive verifies queue-only trust at execution'
+require_text "$suite_build" 'refs/heads/gh-readonly-queue/*' 'self-hosted archive rejects non-queue refs'
+require_text "$suite_build" 'Verify private self-hosted sccache' 'merge-queue archive verifies its dedicated local cache service'
+require_text "$suite_build" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'required self-hosted archive pins the private cache port'
+require_text "$suite_build" 'SCCACHE_GHA_ENABLED=false' 'required self-hosted archive never depends on hosted cache credentials'
+require_text "$suite_shards" 'runs-on: ubuntu-latest' 'required suite shards retain hosted parallel execution and availability'
 
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'

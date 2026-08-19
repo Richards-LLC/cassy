@@ -359,6 +359,14 @@ async fn run_server_impl() -> anyhow::Result<()> {
                         {
                             eprintln!("[Cassy] Failed to publish MCP proxy state: {error}");
                         }
+                        if let Err(error) =
+                            crate::mcp::viktor_watch::alert_unpollable_watches(&cas_root, &engine)
+                                .await
+                        {
+                            eprintln!(
+                                "[Cassy] Failed to surface unpollable Viktor watches: {error}"
+                            );
+                        }
                         Some(std::sync::Arc::new(engine))
                     }
                     Err(e) => {

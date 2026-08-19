@@ -17,6 +17,12 @@ The managed policy admits exactly these conversation tools:
 If `.cas/proxy.toml` exists, it opts out of the managed default. It must explicitly configure
 the required Viktor server and routes; the managed user configuration never widens a project.
 
+If `server:viktor` discovery reports that the upstream is absent, do not treat that as an empty
+tool catalog or retry a run-starting call. Run `cas viktor` for the credential-safe connection
+state and durable pending run IDs. On daemon restart, Cassy alerts a live session supervisor when
+such watches cannot be polled; restore `VIKTOR_API_KEY` to `cas serve` and let the existing watch
+resume rather than starting a replacement run.
+
 ## Conversation flow
 
 Use `mcp_search` with `server:viktor` before relying on a tool, then call an advertised,

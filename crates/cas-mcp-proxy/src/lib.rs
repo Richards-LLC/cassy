@@ -547,6 +547,31 @@ impl ProxyEngine {
         // Parse optional server: prefix
         let (server_filter, keywords) = parse_search_query(query);
 
+        // A configured upstream that failed to connect used to look exactly
+        // like an unknown server: `server:viktor` simply returned `[]`. That
+        // hides credential loss after a daemon restart and strands any
+        // durable work that relies on the upstream. Keep ordinary no-match
+        // searches empty, but make an explicitly selected, configured and
+        // disconnected server a visible gateway failure.
+        if let Some(filter) = server_filter.as_deref() {
+            let filter = filter.to_ascii_lowercase();
+            let unavailable = configs.keys().find(|name| {
+                public_servers
+                    .get(*name)
+                    .is_some_and(|public| public.to_ascii_lowercase() == filter)
+                    && !servers.contains_key(*name)
+            });
+            if let Some(name) = unavailable {
+                let public = public_servers
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| public_upstream_id(name));
+                anyhow::bail!(
+                    "MCP upstream '{public}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying"
+                );
+            }
+        }
+
         let mut results: Vec<SearchResult> = Vec::new();
 
         for (server_name, connected) in servers.iter() {
@@ -678,6 +703,13 @@ impl ProxyEngine {
     pub async fn tool_count(&self) -> usize {
         let servers = self.servers.read().await;
         servers.values().map(|s| s.tools.len()).sum()
+    }
+
+    /// Whether a configured upstream has an active connection in this proxy
+    /// session. Callers use this only for explicit operator-facing recovery
+    /// paths; normal dispatch still goes through the policy and routing gates.
+    pub async fn upstream_connected(&self, server: &str) -> bool {
+        self.servers.read().await.contains_key(server)
     }
 
     /// Return catalog entries grouped by server name.
@@ -976,7 +1008,7 @@ impl ProxyEngine {
                 .collect();
             available.sort();
             format!(
-                "server '{}' not connected. Available: {}",
+                "MCP upstream '{}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying. Available: {}",
                 requested_public,
                 if available.is_empty() {
                     "(none)".to_string()
@@ -1730,6 +1762,46 @@ mod tests {
         assert!(!audit[0].allowed);
         assert_eq!(audit[0].server, "viktor-shadow");
         assert_eq!(audit[0].tool, "ask_viktor");
+    }
+
+    #[tokio::test]
+    async fn disconnected_configured_viktor_is_loud_in_search_and_execute() {
+        let config = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some("env:CAS_TEST_MISSING_VIKTOR_KEY_8563".to_string()),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine = ProxyEngine::from_configs(HashMap::from([("viktor".to_string(), config)]))
+            .await
+            .unwrap();
+        engine
+            .set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
+                ExternalToolRoute::new("viktor", "ask_viktor"),
+            ])))
+            .await;
+
+        let search = engine.search("server:viktor", None).await.unwrap_err();
+        assert!(
+            search.to_string().contains("upstream 'viktor' is absent"),
+            "configured but disconnected discovery must not read as an empty catalog: {search}"
+        );
+        let execute = match engine
+            .execute(
+                &registered_worker_caller(),
+                r#"{"server":"viktor","tool":"ask_viktor","args":{}}"#,
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("disconnected Viktor execution must fail loudly"),
+            Err(error) => error,
+        };
+        assert!(
+            execute.to_string().contains("upstream 'viktor' is absent"),
+            "configured but disconnected execution must identify the absent upstream: {execute}"
+        );
+        assert!(!engine.upstream_connected("viktor").await);
     }
 
     fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {

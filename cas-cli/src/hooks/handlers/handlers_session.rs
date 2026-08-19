@@ -204,6 +204,11 @@ pub fn handle_session_start(
         assembler.append_protected(warning);
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    if let Some(warning) = crate::mcp::viktor_watch::session_start_warning(cas_root) {
+        assembler.prepend_degradable(warning.clone(), warning);
+    }
+
     // Planning is a shared write surface: two live supervisors can otherwise
     // decompose the same epic before either sees the other's task set. Put
     // this at the protected top of supervisor context so it survives the

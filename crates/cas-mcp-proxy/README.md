@@ -113,6 +113,10 @@ configuration and is never copied into tool arguments or model context.
 - **Server filter**: `server:github issue` filters to the `github` server first
 - **Empty query**: returns all tools
 
+An explicit `server:<name>` query for a configured upstream that is disconnected returns an
+`upstream ... is absent` error instead of an empty catalog. Inspect `proxy_health` and repair the
+credential or connection before retrying a run-starting call.
+
 ## Execute
 
 `ProxyEngine::execute(caller, code, max_length)` dispatches tool calls. The

@@ -4842,6 +4842,89 @@ enabled = false
     );
 }
 
+/// cas-a699: an unrelated urgent halt must not strand a worker after its own
+/// supervisor-review queue entry has received an approved, current-cycle
+/// verdict. `task start` intentionally refuses PendingSupervisorReview, so
+/// re-close is the only legitimate lifecycle exit from this completed state.
+#[tokio::test]
+async fn test_a699_halted_approved_pending_supervisor_review_recloses() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("enable verification");
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req(
+            "Approved supervisor-review task with an unrelated urgent halt",
+        )))
+        .await
+        .expect("create task");
+    let id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("start task");
+
+    // Model the durable queue projection after the worker's first close. The
+    // exact supervisor verdict below resolves the same current review cycle.
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let mut task = task_store.get(&id).expect("task exists");
+    task.status = TaskStatus::PendingSupervisorReview;
+    task.pending_verification = true;
+    task_store.update(&task).expect("park for supervisor review");
+    add_exact_supervisor_fixture_verdict(
+        &cas_dir,
+        Verification::approved(
+            "ver-a699-approved-review".to_string(),
+            id.clone(),
+            "supervisor approved the current review cycle".to_string(),
+        ),
+        None,
+    );
+
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let mut agent = agent_store
+        .list(None)
+        .expect("list agents")
+        .into_iter()
+        .find(|agent| agent.name == "test-agent")
+        .expect("test agent exists");
+    agent
+        .metadata
+        .insert("halt_task_work".to_string(), "1".to_string());
+    agent_store.update(&agent).expect("arm unrelated urgent halt");
+
+    let response = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                stranded_branch_override: None,
+                id: id.clone(),
+                reason: Some("approved review re-close".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("approved review re-close must be a legitimate halt exit"),
+    );
+    assert!(
+        response.contains("Closed task:"),
+        "approved review re-close must complete, not only skip WORK HALTED: {response}"
+    );
+    assert_eq!(
+        task_store.get(&id).expect("closed task exists").status,
+        TaskStatus::Closed
+    );
+}
+
 /// cas-0447 (GH #187) pinning regression for the cas-3894 behavior already on
 /// main: with halt armed while the caller still owns an InProgress task, an
 /// already-merged commit receipt closes successfully without a task-start

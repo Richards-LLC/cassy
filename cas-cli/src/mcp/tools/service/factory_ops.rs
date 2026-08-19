@@ -609,34 +609,6 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
     Ok(Some(values.len()))
 }
 
-/// `[factory] strict_cli` lookup for the cas-7199 / cas-a487 Codex-fallback
-/// check applied in `factory_spawn_workers`. Deliberately NOT inside
-/// `build_spawn_spec_json_with_project_config` above: that function is pure
-/// cascade resolution + serialization, exercised directly by unit tests
-/// (e.g. `spawn_spec_omitted_cli_without_config_uses_stock_codex_defaults`)
-/// that assert the stock/default `cli` value itself and run under an
-/// isolated fake `HOME` — folding a REAL `codex_available()` probe in
-/// there would make those tests depend on whether the isolated `HOME`
-/// happens to contain a `.codex/auth.json` (it never does), silently
-/// changing their resolved `cli` out from under them and making the whole
-/// suite depend on the test machine's actual Codex install/login state.
-/// The availability check belongs at the actual "about to queue this for
-/// spawn" checkpoint instead — see `factory_spawn_workers` below, which
-/// mirrors exactly where `cli/factory/mod.rs` applies the same fallback:
-/// AFTER cascade resolution, not inside it.
-fn strict_cli_from_project_config(project_config: Option<&std::path::Path>) -> bool {
-    project_config
-        .and_then(|p| p.parent())
-        .map(|cas_root| {
-            use crate::config::Config;
-            Config::load(cas_root)
-                .unwrap_or_default()
-                .factory()
-                .strict_cli
-        })
-        .unwrap_or(false)
-}
-
 fn spawn_specs_summary(specs: &[cas_mux::WorkerSpec], worker_names: &[String]) -> String {
     specs
         .iter()
@@ -898,6 +870,43 @@ fn format_undelivered_relay_section(
          (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
     );
     out
+}
+
+/// Select launch records that can be stopped before their PTY has registered
+/// an Agent row. `id` accepts either the eventual worker name or the durable
+/// spawn-request id included in the launch receipt.
+fn select_launched_shutdown_targets(
+    launched_workers: &[cas_store::SpawnLifecycle],
+    requested_id: Option<&str>,
+    requested_names: &[String],
+    count: Option<i32>,
+) -> Vec<cas_store::SpawnLifecycle> {
+    if let Some(id) = requested_id {
+        launched_workers
+            .iter()
+            .filter(|spawn| spawn.worker_name.as_deref() == Some(id) || spawn.id.to_string() == id)
+            .cloned()
+            .collect()
+    } else if !requested_names.is_empty() {
+        launched_workers
+            .iter()
+            .filter(|spawn| {
+                spawn
+                    .worker_name
+                    .as_deref()
+                    .is_some_and(|name| requested_names.iter().any(|requested| requested == name))
+            })
+            .cloned()
+            .collect()
+    } else if count.unwrap_or(0) == 0 {
+        launched_workers.to_vec()
+    } else {
+        launched_workers
+            .iter()
+            .take(count.unwrap_or_default() as usize)
+            .cloned()
+            .collect()
+    }
 }
 
 fn format_spawn_lifecycle_section(
@@ -1699,35 +1708,12 @@ impl CasService {
                 .collect()
         };
 
-        let selected_launched: Vec<_> = if let Some(id) = requested_id {
-            // `id` accepts either the familiar worker id/name or the spawn
-            // request id printed in the launch receipt.
-            launched_workers
-                .iter()
-                .filter(|spawn| {
-                    spawn.worker_name.as_deref() == Some(id) || spawn.id.to_string() == id
-                })
-                .cloned()
-                .collect()
-        } else if !requested_names.is_empty() {
-            launched_workers
-                .iter()
-                .filter(|spawn| {
-                    spawn.worker_name.as_deref().is_some_and(|name| {
-                        requested_names.iter().any(|requested| requested == name)
-                    })
-                })
-                .cloned()
-                .collect()
-        } else if req.count.unwrap_or(0) == 0 {
-            launched_workers.clone()
-        } else {
-            launched_workers
-                .iter()
-                .take(req.count.unwrap_or_default() as usize)
-                .cloned()
-                .collect()
-        };
+        let selected_launched = select_launched_shutdown_targets(
+            &launched_workers,
+            requested_id,
+            &requested_names,
+            req.count,
+        );
         let selected_launched_names: Vec<String> = selected_launched
             .iter()
             .filter_map(|spawn| spawn.worker_name.clone())
@@ -7979,6 +7965,24 @@ mod spawn_lifecycle_tests {
         format_spawn_lifecycle_section(rows, chrono::Utc::now())
     }
 
+    #[test]
+    fn launched_pty_can_be_shutdown_by_name_or_spawn_request_id_before_registration() {
+        let launched = vec![row(
+            491,
+            Some("kind-dragon-90"),
+            SpawnLifecycleState::Launched,
+            2,
+            None,
+        )];
+
+        let by_name =
+            select_launched_shutdown_targets(&launched, Some("kind-dragon-90"), &[], None);
+        let by_request_id = select_launched_shutdown_targets(&launched, Some("491"), &[], None);
+
+        assert_eq!(by_name[0].worker_name.as_deref(), Some("kind-dragon-90"));
+        assert_eq!(by_request_id[0].id, 491);
+    }
+
     fn lost_relay(task_summary: &str) -> cas_store::UndeliveredLifecycleRelay {
         cas_store::UndeliveredLifecycleRelay {
             prompt_id: 7783,
@@ -9054,38 +9058,6 @@ effort = "high"
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
         assert!(warning.contains("frontier-tier"), "{warning}");
-    }
-
-    // cas-7199 / cas-a487: `strict_cli_from_project_config` tests.
-
-    #[test]
-    fn strict_cli_from_project_config_true_when_set() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join("config.toml"),
-            "[factory]\nstrict_cli = true\n",
-        )
-        .unwrap();
-        assert!(strict_cli_from_project_config(Some(
-            &tmp.path().join("config.toml")
-        )));
-    }
-
-    #[test]
-    fn strict_cli_from_project_config_false_by_default() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("config.toml"), "[factory]\n").unwrap();
-        assert!(!strict_cli_from_project_config(Some(
-            &tmp.path().join("config.toml")
-        )));
-    }
-
-    #[test]
-    fn strict_cli_from_project_config_false_when_missing_or_none() {
-        assert!(!strict_cli_from_project_config(None));
-        assert!(!strict_cli_from_project_config(Some(
-            &std::path::PathBuf::from("/tmp/cas-7199-definitely-missing/config.toml")
-        )));
     }
 
     /// Run the real unavailable-Codex probe in a dedicated process. PATH is

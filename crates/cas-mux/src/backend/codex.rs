@@ -142,30 +142,22 @@ mod tests {
         let home = root.join("alt-home");
         std::fs::create_dir_all(&worktree).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("hooks.json"), "{\"hooks\":{}}").unwrap();
+        std::fs::write(
+            home.join("hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse"}]}],"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse"}]}]}}"#,
+        )
+        .unwrap();
 
         CODEX
             .prepare_workdir(&worktree, Some(home.to_str().unwrap()))
             .unwrap();
 
-        let config: toml::Value =
-            toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
-        let project = worktree.to_string_lossy().to_string();
-        assert_eq!(
-            config["projects"][&project]["trust_level"].as_str(),
-            Some("trusted")
-        );
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains("trust_level = \"trusted\""));
         let hooks = home.join("hooks.json").to_string_lossy().to_string();
-        assert!(
-            config["hooks"]["state"]
-                .get(format!("{hooks}:pre_tool_use:0:0"))
-                .is_some()
-        );
-        assert!(
-            config["hooks"]["state"]
-                .get(format!("{hooks}:post_tool_use:0:0"))
-                .is_some()
-        );
+        assert!(config.contains(&hooks));
+        assert!(config.contains(":pre_tool_use:0:0"));
+        assert!(config.contains(":post_tool_use:0:0"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

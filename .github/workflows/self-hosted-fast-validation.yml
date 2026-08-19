@@ -45,7 +45,10 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_BUILD_JOBS: "12"
-      RUSTC_WRAPPER: sccache
+      # First timing receipt is intentionally uncached. The service owns a
+      # private sccache for follow-up tuning, but cache plumbing must never be a
+      # prerequisite for proving the 32-core runner or for this advisory lane.
+      RUSTC_WRAPPER: ""
       SCCACHE_GHA_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
@@ -88,13 +91,10 @@ jobs:
       - name: Install Zig
         run: ./scripts/bootstrap-zig.sh
 
-      - name: Reset timing and cache counters
+      - name: Reset timing receipt
         run: |
           : > "$RUNNER_TEMP/self-hosted-fast-validation.timings"
-          # The systemd service owns the server so Runner.Worker's step cleanup
-          # cannot reap it between this step and Cargo.
-          sccache --show-stats >/dev/null
-          sccache --zero-stats || true
+          echo 'rustc_wrapper=disabled' >> "$RUNNER_TEMP/self-hosted-fast-validation.timings"
 
       - name: Build full suite archive
         env:
@@ -134,7 +134,6 @@ jobs:
             echo
             echo '```text'
             cat "$RUNNER_TEMP/self-hosted-fast-validation.timings" 2>/dev/null || true
-            sccache --show-stats 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -48,6 +48,8 @@ GitHub listener, outside Runner.Worker's per-step process tracking; starting it
 inside one workflow step causes the runner to reap it before Cargo's next step.
 The launch wrapper then uses GitHub's `bin/runsvc.sh`, which translates systemd
 termination into the listener signal that closes the remote session cleanly.
+The pilot workflow explicitly clears `RUSTC_WRAPPER` for its first measured
+receipt. The private cache is a later optimization, never a lane prerequisite.
 
 ## Provision and audit
 

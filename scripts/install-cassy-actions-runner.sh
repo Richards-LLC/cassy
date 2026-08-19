@@ -35,6 +35,7 @@ install -d -o "$runner_user" -g "$runner_user" -m 0750 \
     "$runner_root/.cargo/bin" "$runner_root/.rustup"
 
 tmp_dir="$(mktemp -d)"
+chmod 0755 "$tmp_dir"
 trap 'rm -rf "$tmp_dir"' EXIT
 curl --fail --location --proto '=https' --tlsv1.2 "$runner_url" -o "$tmp_dir/$runner_archive"
 printf '%s  %s\n' "$runner_sha256" "$tmp_dir/$runner_archive" | sha256sum --check --strict
@@ -71,4 +72,3 @@ install -o root -g root -m 0644 "$unit_source" /etc/systemd/system/cassy-actions
 systemctl daemon-reload
 systemctl enable --now cassy-actions-runner.service
 systemctl --no-pager --full status cassy-actions-runner.service
-

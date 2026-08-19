@@ -375,6 +375,9 @@ jobs:
         if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
           && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        # cas-065a: cache isolation stays observable, but its TCP failure must
+        # not block the merge queue while the server defect is investigated.
+        continue-on-error: true
         run: |
           set -euo pipefail
           test "${SCCACHE_SERVER_PORT:?}" = 4227
@@ -384,7 +387,13 @@ jobs:
           esac
           sccache rustc -vV
           sccache --show-stats
-          echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
+
+      - name: Disable sccache for the self-hosted suite archive
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        # cas-065a: the cache is an optimization, not a merge-queue prerequisite.
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
       # Debug info is stripped from the archived test binaries (cas-59d3).
       # Every shard downloads this whole artifact, so its size is multiplied by

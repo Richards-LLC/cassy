@@ -86,6 +86,8 @@ In the pre-close task note, every applicable entry must paste its proving file, 
 
 ## Communication
 
+- Facts, not narration; answer first. Use steps/bullets/table to scan. Keep SHA/ID, `file:line`, exits, failures, uncertainty/reasons; blockers/merges stay complete. See [discipline.md](cas-worker/references/discipline.md).
+
 ```
 cas__coordination action=message target=supervisor \
   summary="<brief preview>" message="<full body>"

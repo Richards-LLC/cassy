@@ -792,8 +792,10 @@ fn prefer_fresher_base_ref(
 
 /// Resolve the immutable commit a worker will be checked out from, preserving
 /// the logical parent branch used for merge-back. A declared WorkTarget is
-/// always fetched and checked out from its `origin/<branch>` tip, so a stale
-/// local branch cannot make a regression task start before the regression.
+/// fetched before selection: it uses `origin/<branch>` when that is the
+/// fresher tip, but retains a local-only tip when an epic-base refresh could
+/// not be published. That keeps the checkout consistent with the refresh
+/// notice instead of silently reverting to a stale remote-tracking ref.
 fn checkout_ref_for_spawn_base(
     repo_root: &std::path::Path,
     parent_branch: &str,
@@ -803,11 +805,24 @@ fn checkout_ref_for_spawn_base(
     let mut checkout_ref = parent_branch.to_string();
     if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
         let remote = format!("origin/{parent_branch}");
-        if ref_exists(repo_root, &remote)
-            && let Some(remote_sha) = full_sha(repo_root, &remote)
-        {
-            base_ref = Some(remote_sha);
-            checkout_ref = remote;
+        if let (Some(local_sha), Some(remote_sha)) = (
+            full_sha(repo_root, parent_branch),
+            full_sha(repo_root, &remote),
+        ) {
+            // `prefer_fresher_base_ref` selected the remote only when it is
+            // strictly ahead of local. Otherwise local is equal, ahead, or
+            // divergent. Pin the equal case to the fetched object, but retain
+            // the local object in the other two cases: an unpublished
+            // fast-forward leaves local ahead while origin is necessarily
+            // stale (GH #450).
+            if local_sha == remote_sha
+                || base_ref.as_deref() == Some(remote_sha.as_str())
+            {
+                base_ref = Some(remote_sha);
+                checkout_ref = remote;
+            } else {
+                base_ref = Some(local_sha);
+            }
         }
     }
     (base_ref, freshness_notice, checkout_ref)
@@ -3793,7 +3808,7 @@ mod spawn_base_tests {
     }
 
     #[test]
-    fn epic_base_refresh_push_rejection_keeps_local_tip_and_cuts_worker_from_it() {
+    fn work_target_spawn_uses_unpublished_refreshed_epic_tip_after_push_rejection_cas_5504() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = TempDir::new().unwrap();
@@ -3859,6 +3874,26 @@ mod spawn_base_tests {
             "a rejected publication must leave only the remote ref stale"
         );
 
+        let source = SpawnBaseSource::WorkTarget {
+            task_id: "cas-5504".into(),
+            owner: WorkTargetOwner::Task,
+        };
+        let (base_ref, freshness_notice, checkout_ref) =
+            checkout_ref_for_spawn_base(&repo, "epic/behind", &source);
+        let base_ref = base_ref.expect("WorkTarget spawn must pin its checkout commit");
+        assert_eq!(
+            base_ref, parent_tip,
+            "the fresh unpublished local tip must win"
+        );
+        assert_eq!(
+            checkout_ref, "epic/behind",
+            "origin/epic/behind is stale"
+        );
+        assert!(
+            freshness_notice.is_none(),
+            "the preceding unpublished-refresh notice is the applicable disclosure: {freshness_notice:?}"
+        );
+
         let worker_path = repo.join(".cas/worktrees/push-rejected-refreshed-worker");
         WorkerSpawnPrep {
             worker_name: "push-rejected-refreshed-worker".to_string(),
@@ -3866,7 +3901,7 @@ mod spawn_base_tests {
                 worktree_path: worker_path.clone(),
                 branch_name: "factory/push-rejected-refreshed-worker".to_string(),
                 parent_branch: "epic/behind".to_string(),
-                base_ref: None,
+                base_ref: Some(base_ref),
                 repo_root: repo.clone(),
                 cas_dir: repo.join(".cas"),
             }),

@@ -1110,9 +1110,20 @@ async fn test_spawn_workers_requires_epic() {
     );
 }
 
+#[test]
+fn test_spawn_workers_enqueues_with_epic() {
+    run_isolated_codex_test(
+        "test_spawn_workers_enqueues_with_epic_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_spawn_workers_enqueues_with_epic() {
-    let env = FactoryTestEnv::new();
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_enqueues_with_epic_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_enqueues_with_epic_in_isolated_child",
+    );
     env.create_epic("Test Epic");
 
     let mut req = factory_req("spawn_workers");
@@ -1174,9 +1185,20 @@ async fn test_spawn_workers_isolate_flag_in_isolated_child() {
 /// follow-on task must be spawnable without inventing a ceremonial
 /// single-child epic. The epic gate exists to stop *unscoped* spawning; a
 /// concrete open task_id already states the work.
+#[test]
+fn test_spawn_workers_with_task_id_succeeds_after_epic_closed() {
+    run_isolated_codex_test(
+        "test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed() {
-    let env = FactoryTestEnv::new();
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_child",
+    );
     let task_store = env.task_store();
 
     // The exact reported sequence: an epic existed, was completed, and closed.
@@ -1223,6 +1245,7 @@ async fn test_spawn_workers_with_task_id_succeeds_with_no_epic_at_all() {
     let mut req = factory_req("spawn_workers");
     req.worker_names = Some("swift-fox".to_string());
     req.task_id = Some(task_id.clone());
+    req.cli = Some("claude".to_string());
 
     let result = env.service.factory(Parameters(req)).await;
     assert!(
@@ -1309,14 +1332,25 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
 /// cas-549c review follow-up: the SAME statuses must still be accepted when
 /// an epic is open — the tightening only ever withholds the epic bypass, it
 /// must not change pre-assignment rules for an epic-backed factory.
+#[test]
+fn test_undispatchable_task_id_still_allowed_when_an_epic_is_open() {
+    run_isolated_codex_test(
+        "test_undispatchable_task_id_still_allowed_when_an_epic_is_open_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_undispatchable_task_id_still_allowed_when_an_epic_is_open() {
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_undispatchable_task_id_still_allowed_when_an_epic_is_open_in_isolated_child() {
     for (status, assignee) in [
         (TaskStatus::AwaitingMerge, None),
         (TaskStatus::Open, Some("alpha")),
         (TaskStatus::InProgress, Some("alpha")),
     ] {
-        let env = FactoryTestEnv::new();
+        let env = factory_env_in_isolated_codex_child(
+            "test_undispatchable_task_id_still_allowed_when_an_epic_is_open_in_isolated_child",
+        );
         env.create_epic("Live Epic");
         let task_store = env.task_store();
         let id = task_store.generate_id().expect("generate_id");
@@ -1352,6 +1386,7 @@ async fn test_task_id_authorizes_only_one_epic_free_spawn() {
     let mut first = factory_req("spawn_workers");
     first.count = Some(1);
     first.task_id = Some(task_id.clone());
+    first.cli = Some("claude".to_string());
     env.service
         .factory(Parameters(first))
         .await
@@ -1464,6 +1499,7 @@ async fn test_spawn_workers_task_id_enqueues_for_single_worker() {
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
     req.task_id = Some(task_id.clone());
+    req.cli = Some("claude".to_string());
 
     let result = env.service.factory(Parameters(req)).await;
     assert!(
@@ -1497,6 +1533,7 @@ async fn test_spawn_workers_task_id_accepts_stale_assignee_for_reset_preassign()
 
     let mut req = factory_req("spawn_workers");
     req.task_id = Some(task_id.clone());
+    req.cli = Some("claude".to_string());
     let text = get_text(
         &env.service
             .factory(Parameters(req))
@@ -1551,6 +1588,7 @@ async fn test_spawn_workers_task_id_enqueues_for_single_named_worker() {
     let mut req = factory_req("spawn_workers");
     req.worker_names = Some("swift-fox".to_string());
     req.task_id = Some(task_id.clone());
+    req.cli = Some("claude".to_string());
 
     let result = env.service.factory(Parameters(req)).await;
     assert!(
@@ -1739,21 +1777,21 @@ async fn test_spawn_workers_codex_available_enqueues_codex_spec_in_isolated_chil
 }
 
 #[test]
-fn test_spawn_workers_codex_unavailable_falls_back_to_claude() {
+fn test_spawn_workers_codex_unavailable_fails_loudly() {
     run_isolated_codex_test(
-        "test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_child",
+        "test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child",
         IsolatedCodexState::Unavailable,
     );
 }
 
 #[tokio::test]
 #[ignore = "subprocess helper for deterministic unavailable-Codex probe"]
-async fn test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_child() {
+async fn test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child() {
     // The child removes BOTH independent availability signals: PATH has no
     // codex executable and temp HOME has no auth marker. This deliberately
     // exercises the real public probe + fallback composition.
     let env = factory_env_in_isolated_codex_child(
-        "test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_child",
+        "test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child",
     );
     env.create_epic("Test Epic");
 
@@ -1773,25 +1811,18 @@ async fn test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_c
     req.count = Some(1);
     req.cli = Some("codex".to_string());
 
-    let result = env
+    let error = env
         .service
         .factory(Parameters(req))
         .await
-        .expect("non-strict unavailable Codex should fall back");
-    let text = get_text(&result);
+        .expect_err("unavailable Codex must refuse rather than substitute Claude");
     assert!(
-        text.contains("codex unavailable") && text.contains("falling back to claude"),
-        "caller must see the fallback reason: {text}"
+        error.message.contains("codex is unavailable")
+            && error.message.contains("refusing to silently fall back"),
+        "caller must see the loud refusal: {}",
+        error.message
     );
-
-    let entries = env.spawn_queue().peek(10).expect("peek");
-    assert_eq!(entries.len(), 1, "should have one queue entry");
-    let spec_json = entries[0]
-        .worker_spec
-        .as_deref()
-        .expect("fallback spawn must queue a concrete worker spec");
-    let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
-    assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }
 
 #[tokio::test]
@@ -4632,6 +4663,7 @@ async fn test_spawn_then_shutdown_sequence() {
     // Spawn
     let mut req = factory_req("spawn_workers");
     req.count = Some(2);
+    req.cli = Some("claude".to_string());
     let result = env.service.factory(Parameters(req)).await;
     assert!(result.is_ok());
 

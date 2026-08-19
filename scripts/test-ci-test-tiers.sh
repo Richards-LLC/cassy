@@ -9,6 +9,9 @@ setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
 fallback="$repo_root/scripts/sccache-unavailable.sh"
 ruleset="$repo_root/docs/branch-protection/main-ruleset.json"
 makefile="$repo_root/cas-cli/Makefile"
+verified="$repo_root/scripts/run-verified-tests.sh"
+real_store_guard="$repo_root/scripts/check-real-store-untouched.sh"
+migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
 
 pass=0
 fail=0
@@ -99,7 +102,7 @@ require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branch
 require_text "$scoped" "github.event_name == 'pull_request'" 'pull requests use scoped tier'
 require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier skips protected-default PRs'
 require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
-require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one test binary'
+require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one guarded test binary'
 
 # Merge-latency contract for the scoped lane (cas-3e14). This lane is not a
 # required check, but it reports last on a factory PR, so a merge that waits for
@@ -335,11 +338,20 @@ require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait f
 require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
 require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'
 require_text "$suite_shards" 'test -x target/debug/cas' 'shards verify the restored CLI runner remains executable'
-require_text "$suite_shards" 'cargo nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
+require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
 require_text "$suite" 'needs: fast-validation-suite-shards' 'required full-suite context fans in every shard'
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
-require_text "$(<"$makefile")" '$(CARGO) nextest run --workspace --no-fail-fast' 'local make test matches CI workspace nextest scope'
-require_text "$docs" 'cargo test -p cas --doc' 'doctest coverage remains in Fast Validation'
+require_text "$(<"$makefile")" '../scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast' 'local make test verifies CI workspace nextest scope'
+require_text "$docs" 'scripts/run-verified-tests.sh test -p cas --doc' 'doctest coverage remains in Fast Validation with an execution receipt'
+require_text "$(<"$real_store_guard")" 'run-verified-tests.sh' 'real-store guard requires an executed-test receipt'
+require_text "$(<"$migration_guard")" 'run-verified-tests.sh nextest run -p cas --test component_output_test' 'release migration snapshots require an executed-test receipt'
+if [[ -x "$verified" ]]; then
+    printf 'ok   verified-test receipt wrapper is executable\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL verified-test receipt wrapper is executable\n'
+    fail=$((fail + 1))
+fi
 require_text "$fan_in" 'fast-validation-preflight' 'required Fast Validation waits for preflight'
 require_text "$fan_in" 'fast-validation-suite' 'required Fast Validation waits for the full suite'
 require_text "$fan_in" 'fast-validation-docs' 'required Fast Validation waits for doctests'

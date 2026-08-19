@@ -109,7 +109,8 @@ echo
 echo "Running: ${CARGO} ${CARGO_CMD} $*"
 echo "CAS_TEST_PROTECTED_DBS=${CAS_TEST_PROTECTED_DBS}"
 echo
-(cd "${REPO_ROOT}" && "${CARGO}" ${CARGO_CMD} "$@")
+read -r -a cargo_cmd_args <<<"${CARGO_CMD}"
+(cd "${REPO_ROOT}" && CARGO="${CARGO}" "${REPO_ROOT}/scripts/run-verified-tests.sh" "${cargo_cmd_args[@]}" "$@")
 test_status=$?
 
 echo

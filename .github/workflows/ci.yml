@@ -408,7 +408,7 @@ jobs:
       # their own required lane because nextest cannot run them.
       - name: Test full suite shard ${{ matrix.shard }}/3
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: cargo nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3
+        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and
@@ -483,7 +483,7 @@ jobs:
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo test -p cas --doc
+        run: scripts/run-verified-tests.sh test -p cas --doc
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'

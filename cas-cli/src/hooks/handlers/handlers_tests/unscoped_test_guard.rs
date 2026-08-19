@@ -25,16 +25,18 @@ fn deny_reason(out: &HookOutput) -> Option<String> {
 }
 
 #[test]
-fn worker_unscoped_cargo_test_and_nextest_are_denied_with_scoped_recipe() {
+fn worker_direct_cargo_test_and_nextest_are_denied_with_receipt_recipe() {
     for command in [
         "cargo test",
         "cargo test -p cas --no-fail-fast",
+        "cargo test -p cas --test cli_test",
         "RUSTC_WRAPPER=sccache cargo nextest run -p cas",
+        "cargo nextest run -p cas --lib hooks::",
         "cargo check -p cas && cargo test store::tests",
     ] {
         let out = handle_pre_tool_use(&input(command, "worker"), None).expect("handler ok");
         let reason = deny_reason(&out).unwrap_or_else(|| panic!("expected deny for {command:?}"));
-        assert!(reason.contains("UNSCOPED WORKER TEST RUN"), "{reason}");
+        assert!(reason.contains("UNVERIFIED WORKER TEST RUN"), "{reason}");
         assert!(reason.contains("scripts/run-scoped-tests.sh"), "{reason}");
         assert!(
             reason.contains("cargo check -p cas --lib --tests"),
@@ -45,13 +47,12 @@ fn worker_unscoped_cargo_test_and_nextest_are_denied_with_scoped_recipe() {
 }
 
 #[test]
-fn worker_target_scopes_and_non_test_commands_are_not_denied() {
+fn worker_receipted_test_commands_and_non_test_commands_are_not_denied() {
     for command in [
-        "cargo nextest run -p cas --lib hooks::",
-        "cargo test -p cas --test cli_test",
-        "cargo test -p cas --doc",
-        "cargo check -p cas --lib --tests",
         "scripts/run-scoped-tests.sh -p cas --lib hooks::",
+        "scripts/run-verified-tests.sh test -p cas --doc",
+        "cargo test -p cas --test cli_test --no-run",
+        "cargo check -p cas --lib --tests",
         "echo 'cargo test'",
     ] {
         let out = handle_pre_tool_use(&input(command, "worker"), None).expect("handler ok");

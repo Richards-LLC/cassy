@@ -57,7 +57,8 @@ Generate a short-lived organization registration token, then run from a trusted
 checkout:
 
 ```bash
-RUNNER_TOKEN=... sudo --preserve-env=RUNNER_TOKEN scripts/install-cassy-actions-runner.sh
+RUNNER_TOKEN=... SCCACHE_SOURCE="$(command -v sccache)" \
+  sudo --preserve-env=RUNNER_TOKEN,SCCACHE_SOURCE scripts/install-cassy-actions-runner.sh
 ```
 
 Verify the runner reports `online` before enabling the job:

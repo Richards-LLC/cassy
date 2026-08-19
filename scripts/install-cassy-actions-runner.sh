@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install the pinned GitHub runner and register it in the pre-created,
 # selected-repository/selected-workflow group. Run from a trusted checkout:
-#   sudo --preserve-env=RUNNER_TOKEN scripts/install-cassy-actions-runner.sh
+#   SCCACHE_SOURCE="$(command -v sccache)" \
+#     sudo --preserve-env=RUNNER_TOKEN,SCCACHE_SOURCE scripts/install-cassy-actions-runner.sh
 set -euo pipefail
 
 runner_user=cassy-actions
@@ -60,11 +61,12 @@ sudo -u "$runner_user" env HOME="$runner_root" CARGO_HOME="$runner_root/.cargo" 
 sudo -u "$runner_user" env HOME="$runner_root" CARGO_HOME="$runner_root/.cargo" \
     RUSTUP_HOME="$runner_root/.rustup" \
     "$runner_root/.cargo/bin/rustup" default stable
-if command -v sccache >/dev/null 2>&1; then
+sccache_source="${SCCACHE_SOURCE:-$(command -v sccache 2>/dev/null || true)}"
+if [[ -n "$sccache_source" && -x "$sccache_source" ]]; then
     install -o "$runner_user" -g "$runner_user" -m 0755 \
-        "$(command -v sccache)" "$runner_root/.cargo/bin/sccache"
+        "$sccache_source" "$runner_root/.cargo/bin/sccache"
 else
-    echo "sccache is required on the provisioning host" >&2
+    echo "sccache is required; set SCCACHE_SOURCE to its absolute executable path" >&2
     exit 1
 fi
 

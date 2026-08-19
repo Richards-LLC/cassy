@@ -121,17 +121,10 @@ pub fn resolve_canonical_id(cas_root: &Path) -> Option<String> {
 /// [`resolve_canonical_id`] plus the step that produced the value.
 pub fn resolve_canonical_id_with_source(cas_root: &Path) -> Option<(String, CanonicalIdSource)> {
     if let Some(id) = canonical_id_from_config_toml(cas_root) {
-        // Reconcile the legacy folder-name value used by older clients with
-        // the current remote-derived identity. This is deliberately narrow:
-        // an intentional server-assigned pin such as `team-alpha` remains a
-        // pin unless it is exactly this repository's final remote segment.
-        if let Some(remote) = derive_canonical_id_from_git_remote(cas_root)
-            .and_then(|remote| normalize_project_canonical_id(&remote))
-        {
-            if legacy_slug_matches_remote(&id, &remote) {
-                return Some((remote, CanonicalIdSource::ConfigToml));
-            }
-        }
+        // A config pin is authoritative. Registration reconciles an unpinned
+        // remote-derived id with the server and writes the server-resolved
+        // bucket here; rewriting that pin afterwards disconnects the client
+        // from legacy bare-slug buckets because team pull matches verbatim.
         return Some((id, CanonicalIdSource::ConfigToml));
     }
     if let Some(id) = derive_canonical_id_from_git_remote(cas_root)
@@ -178,13 +171,6 @@ pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
         .or_else(|| normalize_git_remote_url(&trimmed.to_ascii_lowercase()))
         .unwrap_or_else(|| trimmed.to_string());
     Some(normalized.trim_matches('/').to_ascii_lowercase())
-}
-
-fn legacy_slug_matches_remote(legacy: &str, remote: &str) -> bool {
-    let Some(last_segment) = remote.rsplit('/').next() else {
-        return false;
-    };
-    legacy == last_segment && !legacy.contains('/')
 }
 
 /// Write `[project] canonical_id = "<value>"` to `<cas_root>/config.toml`,

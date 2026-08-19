@@ -51,21 +51,36 @@ pub enum RegistrationOutcome {
     AlreadyRegistered { project_uuid: String },
     /// The project was missing and the server accepted + confirmed it.
     Registered { project_uuid: String },
+    /// The registration push resolved to an existing project under a different
+    /// canonical id. The caller must persist this id before the same sync run
+    /// performs its regular team push and pull.
+    AdoptedExisting {
+        project_uuid: String,
+        canonical_id: String,
+    },
 }
 
 impl RegistrationOutcome {
     /// Server-side UUID of the team project.
     pub fn project_uuid(&self) -> &str {
         match self {
-            Self::AlreadyRegistered { project_uuid } | Self::Registered { project_uuid } => {
-                project_uuid
-            }
+            Self::AlreadyRegistered { project_uuid }
+            | Self::Registered { project_uuid }
+            | Self::AdoptedExisting { project_uuid, .. } => project_uuid,
         }
     }
 
     /// `true` when this run created the registration (worth telling the user).
     pub fn newly_registered(&self) -> bool {
         matches!(self, Self::Registered { .. })
+    }
+
+    /// The server-resolved id that must be pinned for future sync operations.
+    pub fn adopted_canonical_id(&self) -> Option<&str> {
+        match self {
+            Self::AdoptedExisting { canonical_id, .. } => Some(canonical_id),
+            _ => None,
+        }
     }
 }
 
@@ -83,7 +98,11 @@ pub struct RegistrationFailure {
 
 impl fmt::Display for RegistrationFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}\n  Failing interaction: {}", self.reason, self.interaction)
+        write!(
+            f,
+            "{}\n  Failing interaction: {}",
+            self.reason, self.interaction
+        )
     }
 }
 
@@ -116,12 +135,7 @@ pub struct TeamRegistration<'a> {
 
 impl<'a> TeamRegistration<'a> {
     /// Build a registration for `canonical_id` against `team_id`.
-    pub fn new(
-        endpoint: &'a str,
-        token: &'a str,
-        team_id: &'a str,
-        canonical_id: &'a str,
-    ) -> Self {
+    pub fn new(endpoint: &'a str, token: &'a str, team_id: &'a str, canonical_id: &'a str) -> Self {
         Self {
             endpoint,
             token,
@@ -159,24 +173,41 @@ impl<'a> TeamRegistration<'a> {
     /// Returns `Ok` only when the *server* lists the project — a 2xx on the
     /// registration write is not treated as proof on its own.
     pub fn ensure(&self) -> Result<RegistrationOutcome, RegistrationFailure> {
-        if let Some(project_uuid) = self.lookup()? {
+        if let Some(project_uuid) = self.lookup(self.canonical_id)? {
             return Ok(RegistrationOutcome::AlreadyRegistered { project_uuid });
         }
 
-        let register_status = self.register()?;
+        let (register_status, resolved_id) = self.register()?;
+        let expected_id = resolved_id.as_deref().unwrap_or(self.canonical_id);
 
-        match self.lookup()? {
-            Some(project_uuid) => Ok(RegistrationOutcome::Registered { project_uuid }),
+        match self.lookup(expected_id)? {
+            Some(project_uuid) if expected_id == self.canonical_id => {
+                Ok(RegistrationOutcome::Registered { project_uuid })
+            }
+            Some(project_uuid) => Ok(RegistrationOutcome::AdoptedExisting {
+                project_uuid,
+                canonical_id: expected_id.to_string(),
+            }),
             None => Err(RegistrationFailure {
-                reason: format!(
-                    "Project '{}' is still not registered with team {} on {} after the \
-                     registration request succeeded. The server accepted the write but does \
-                     not list the project, so team memories and team pushes for this project \
-                     cannot work. This is a server-side defect — report the interaction below.",
-                    self.canonical_id, self.team_id, self.endpoint
-                ),
+                reason: if expected_id == self.canonical_id {
+                    format!(
+                        "Project '{}' is still not registered with team {} on {} after the \
+                         registration request succeeded. The server accepted the write but does \
+                         not list the project, so team memories and team pushes for this project \
+                         cannot work. This is a server-side defect — report the interaction below.",
+                        self.canonical_id, self.team_id, self.endpoint
+                    )
+                } else {
+                    format!(
+                        "The server resolved project '{}' to '{}' during registration, but \
+                         team {} on {} did not list the resolved project afterward. The client \
+                         will not adopt '{}' until that verification succeeds.",
+                        self.canonical_id, expected_id, self.team_id, self.endpoint, expected_id,
+                    )
+                },
                 interaction: format!(
-                    "POST {} (body: {{\"entries\":[],\"project_canonical_id\":\"{}\"{}}}) -> {}; \
+                    "POST {} (body: {{\"entries\":[],\"project_canonical_id\":\"{}\"{}}}) -> {} \
+                     (resolved canonical_id: {}); \
                      GET {} -> 200 but no project with canonical_id \"{}\"",
                     self.push_url(),
                     self.canonical_id,
@@ -185,16 +216,17 @@ impl<'a> TeamRegistration<'a> {
                         None => String::new(),
                     },
                     register_status,
+                    resolved_id.as_deref().unwrap_or("<absent>"),
                     self.projects_url(),
-                    self.canonical_id,
+                    expected_id,
                 ),
             }),
         }
     }
 
     /// `GET /api/teams/{teamId}/projects` → the project UUID when the team
-    /// already knows this canonical id.
-    fn lookup(&self) -> Result<Option<String>, RegistrationFailure> {
+    /// already knows `canonical_id`.
+    fn lookup(&self, canonical_id: &str) -> Result<Option<String>, RegistrationFailure> {
         let url = self.projects_url();
         let response = ureq::get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
@@ -260,13 +292,14 @@ impl<'a> TeamRegistration<'a> {
         Ok(parsed
             .projects
             .into_iter()
-            .find(|p| p.canonical_id == self.canonical_id)
+            .find(|p| p.canonical_id == canonical_id)
             .map(|p| p.id))
     }
 
     /// `POST /api/teams/{teamId}/sync/push` with no rows — the server's
-    /// project-registration path. Returns the accepted status code.
-    fn register(&self) -> Result<u16, RegistrationFailure> {
+    /// project-registration path. Returns its status plus the canonical id the
+    /// server resolved the push into, if provided in the response body.
+    fn register(&self) -> Result<(u16, Option<String>), RegistrationFailure> {
         let url = self.push_url();
 
         let mut payload = serde_json::Map::new();
@@ -303,7 +336,18 @@ impl<'a> TeamRegistration<'a> {
             Ok(resp) => {
                 let status = resp.status();
                 if (200..300).contains(&status) {
-                    return Ok(status);
+                    let body = resp.into_string().unwrap_or_default();
+                    let resolved_id = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("canonical_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::trim)
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_owned)
+                        });
+                    return Ok((status, resolved_id));
                 }
                 let body = resp.into_string().unwrap_or_default();
                 Err(self.register_failure(&url, status, &body))
@@ -392,5 +436,14 @@ mod tests {
         };
         assert_eq!(fresh.project_uuid(), "p-2");
         assert!(fresh.newly_registered());
+        assert_eq!(fresh.adopted_canonical_id(), None);
+
+        let adopted = RegistrationOutcome::AdoptedExisting {
+            project_uuid: "p-3".to_string(),
+            canonical_id: "legacy-slug".to_string(),
+        };
+        assert_eq!(adopted.project_uuid(), "p-3");
+        assert!(!adopted.newly_registered());
+        assert_eq!(adopted.adopted_canonical_id(), Some("legacy-slug"));
     }
 }

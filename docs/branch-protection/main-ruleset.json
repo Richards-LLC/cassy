@@ -1,5 +1,5 @@
 {
-  "name": "main: require test suite and macOS validation",
+  "name": "main: required validation and merge queue",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
@@ -16,10 +16,21 @@
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          { "context": "Fast Validation — full suite" },
-          { "context": "Fast Validation — doctests" },
+          { "context": "Fast Validation" },
           { "context": "macOS Check" }
         ]
+      }
+    },
+    {
+      "type": "merge_queue",
+      "parameters": {
+        "check_response_timeout_minutes": 15,
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 1,
+        "max_entries_to_merge": 1,
+        "merge_method": "MERGE",
+        "min_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 0
       }
     },
     { "type": "deletion" },

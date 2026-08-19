@@ -146,6 +146,7 @@ if [[ -x "$watchdog_script" ]]; then
     require_text "$watchdog_text" "CASSY_MERGE_GROUP_HANG_SECONDS: '1200'" 'watchdog pins a 20-minute 2x-p95 threshold'
     require_text "$watchdog_script_text" 'event=merge_group&status=in_progress' 'watchdog inspects in-progress merge-group runs'
     require_text "$watchdog_script_text" 'event=merge_group&status=queued' 'watchdog also reclaims queued pre-claim starvation'
+    require_text "$watchdog_script_text" "printf '%s\\n%s\\n'" 'watchdog combines in-progress and queued API responses'
     require_text "$watchdog_script_text" '.run_started_at // .created_at' 'watchdog measures queued starvation from queue creation'
     require_text "$watchdog_script_text" 'actions/runs/$run_id/cancel' 'watchdog cancels stale runs by id'
     require_text "$watchdog_script_text" 'age_seconds > hang_seconds' 'watchdog does not cancel at or below threshold'

@@ -67,6 +67,7 @@ release_job_block() {
 }
 
 ci_text="$(<"$ci")"
+ruleset_text="$(<"$ruleset")"
 mapfile -t required_contexts < <(
     grep -oE '"context": "[^"]+"' "$ruleset" | sed -E 's/"context": "(.*)"/\1/'
 )
@@ -81,7 +82,16 @@ fi
 require_text "$ci_text" '- "factory/**"' 'factory pushes trigger CI'
 require_text "$ci_text" '- "epic/**"' 'epic pushes trigger CI'
 require_text "$ci_text" '- "v*"' 'release tags trigger CI'
+require_text "$ci_text" 'merge_group:' 'CI accepts merge-queue merged-tree events'
 require_text "$ci_text" 'make -C cas-cli test-ci-tiers' 'Fast Validation invokes release publication guard scripts'
+require_count "$ruleset_text" '"context": "Fast Validation — full suite"' 1 'ruleset requires the Fast Validation fan-in once'
+require_count "$ruleset_text" '"context": "macOS Check"' 1 'ruleset requires macOS validation once'
+require_absent "$ruleset_text" '"context": "Fast Validation — doctests"' 'ruleset does not duplicate Fast Validation doctest coverage'
+require_text "$ruleset_text" '"type": "merge_queue"' 'ruleset requires the GitHub merge queue'
+require_text "$ruleset_text" '"grouping_strategy": "ALLGREEN"' 'merge queue validates every entry in its group'
+require_text "$ruleset_text" '"max_entries_to_build": 1' 'merge queue avoids batching extra PRs into the latency path'
+require_text "$ruleset_text" '"max_entries_to_merge": 1' 'merge queue merges one proven PR at a time'
+require_text "$ruleset_text" '"min_entries_to_merge_wait_minutes": 0' 'merge queue adds no group-fill wait'
 
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'
@@ -335,6 +345,12 @@ require_text "$fan_in" 'fast-validation-docs' 'required Fast Validation waits fo
 require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required Fast Validation rejects a failed preflight'
 require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed full suite'
 require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation rejects failed doctests'
+
+# Merge queue validates GitHub's synthetic merged tree, not the PR head. Both
+# required contexts and every Fast Validation dependency must report there.
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check; do
+    require_text "$(job_block "$job")" "github.event_name == 'merge_group'" "$job runs on merge-queue merged trees"
+done
 
 # Main PRs validate the reusable compile surfaces while the release-profile
 # panic probes and cold benchmark remain schedule/manual workloads.

@@ -22,11 +22,16 @@ mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
 use cas::cli::cloud::{CloudSyncArgs, ensure_team_project_registration, execute_sync};
-use cas::cloud::{CloudConfig, SyncQueue, TeamInfo, get_project_canonical_id};
+use cas::cloud::{
+    CloudConfig, EntityType, SyncOperation, SyncQueue, TeamInfo, canonical_id_from_config_toml,
+    get_project_canonical_id, set_canonical_id_in_config_toml,
+};
 use cas::store::{
     open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
     open_rule_store, open_skill_store, open_spec_store, open_store, open_task_store,
 };
+use flate2::read::GzDecoder;
+use std::io::Read;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -141,6 +146,15 @@ fn team_push_ok_body() -> serde_json::Value {
     })
 }
 
+fn decode_gzip_json(body: &[u8]) -> serde_json::Value {
+    let mut decoder = GzDecoder::new(body);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .expect("team request must be gzip-compressed JSON");
+    serde_json::from_slice(&decoded).expect("team request must decode as JSON")
+}
+
 /// THE regression test for the reported defect: the server accepts everything
 /// but never lists the project. Before the fix this was a green, exit-0 sync;
 /// now `execute_sync` fails with a non-zero exit and names the real reason.
@@ -218,7 +232,9 @@ async fn sync_fails_loud_when_server_never_registers_the_project() {
     let queue = SyncQueue::open(&cas_root).unwrap();
     assert_eq!(
         queue
-            .get_metadata(&format!("team_project_registered_{TEST_TEAM}_{expected_id}"))
+            .get_metadata(&format!(
+                "team_project_registered_{TEST_TEAM}_{expected_id}"
+            ))
             .unwrap(),
         None,
         "a failed registration must never be recorded as confirmed"
@@ -276,10 +292,264 @@ async fn registration_creates_the_project_when_the_team_does_not_know_it() {
     let queue = SyncQueue::open(&cas_root).unwrap();
     assert!(
         queue
-            .get_metadata(&format!("team_project_registered_{TEST_TEAM}_{expected_id}"))
+            .get_metadata(&format!(
+                "team_project_registered_{TEST_TEAM}_{expected_id}"
+            ))
             .unwrap()
             .is_some(),
         "a confirmed registration must be cached so steady-state syncs stay cheap"
+    );
+}
+
+/// A server can resolve the registration push to an existing legacy-slug
+/// bucket by its git remote. The client must verify and adopt *that* id, not
+/// retry its sent remote-shaped id and call the server broken.
+#[tokio::test]
+async fn registration_adopts_the_server_resolved_existing_bucket() {
+    let server = MockServer::start().await;
+    let sent_id = "github.com/richards-llc/gabber-studio";
+    let resolved_id = "gabber-studio";
+
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_project_list_body()))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "canonical_id": resolved_id,
+            "synced": { "entries": 0, "tasks": 0, "rules": 0, "skills": 0 },
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(project_list_body(resolved_id)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let outcome = tokio::task::spawn_blocking(move || {
+        cas::cloud::TeamRegistration::new(&endpoint, "test-token", TEST_TEAM, sent_id).ensure()
+    })
+    .await
+    .unwrap()
+    .expect("the resolved existing bucket must be treated as a successful registration");
+
+    assert_eq!(outcome.project_uuid(), "project-uuid-1");
+    assert!(
+        !outcome.newly_registered(),
+        "mapping to an existing server bucket must not be reported as creating a new one"
+    );
+    assert!(
+        format!("{outcome:?}").contains("AdoptedExisting"),
+        "the outcome must preserve that the server resolved a different canonical id: {outcome:?}"
+    );
+}
+
+/// A divergent server response is an identity-resolution result, not evidence
+/// of a server-side defect. If its listed bucket disappears between the push
+/// and the verification GET, name the resolved id honestly for recovery.
+#[tokio::test]
+async fn divergent_registration_failure_names_resolved_id_without_blame() {
+    let server = MockServer::start().await;
+    let sent_id = "github.com/richards-llc/gabber-studio";
+    let resolved_id = "gabber-studio";
+
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_project_list_body()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "canonical_id": resolved_id,
+            "synced": { "entries": 0, "tasks": 0, "rules": 0, "skills": 0 },
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let failure = tokio::task::spawn_blocking(move || {
+        cas::cloud::TeamRegistration::new(&endpoint, "test-token", TEST_TEAM, sent_id)
+            .ensure()
+            .expect_err("missing resolved bucket must fail registration")
+    })
+    .await
+    .unwrap();
+    let message = failure.to_string();
+
+    assert!(
+        message.contains(resolved_id),
+        "failure must name the resolved id: {message}"
+    );
+    assert!(
+        !message.contains("server-side defect"),
+        "a divergent response is not proof of a server-side defect: {message}"
+    );
+}
+
+/// End-to-end regression coverage for the live outage shape: an explicit
+/// remote-form pin, a pre-contract bare-slug bucket, and a queued team row.
+/// The same sync run must re-home its cache/config before team push and pull.
+#[tokio::test]
+async fn sync_adopts_resolved_id_before_its_team_push_and_pull() {
+    let server = MockServer::start().await;
+    let sent_id = "github.com/richards-llc/gabber-studio";
+    let resolved_id = "gabber-studio";
+
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_project_list_body()))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(projects_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(project_list_body(resolved_id)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(team_push_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "canonical_id": resolved_id,
+            "synced": { "entries": 1, "tasks": 0, "rules": 0, "skills": 0,
+                "sessions": 0, "verifications": 0, "events": 0, "prompts": 0,
+                "file_changes": 0, "commit_links": 0, "agents": 0, "worktrees": 0 },
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [], "specs": [],
+            "events": [], "prompts": [], "file_changes": [], "commit_links": [],
+            "knowledge_pages": [], "pulled_at": "2026-08-18T00:00:00Z",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "pulled_at": "2026-08-18T00:00:00Z", "team_id": TEST_TEAM, "status": "ok",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = make_cas_root();
+    let cas_root = tmp.path().to_path_buf();
+    init_all_stores_at(&cas_root);
+    set_canonical_id_in_config_toml(&cas_root, sent_id).unwrap();
+    let config = make_cloud_config(server.uri());
+    config.save_to_cas_dir(&cas_root).unwrap();
+    let queue = SyncQueue::open(&cas_root).unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            "legacy-id-proof-entry",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"legacy-id-proof-entry","scope":"project","content":"proof"}"#),
+            TEST_TEAM,
+        )
+        .unwrap();
+
+    let _env = ScopedEnv::set(&[
+        ("CAS_ROOT", &cas_root.to_string_lossy()),
+        (
+            "CAS_USER_CLOUD_JSON",
+            "/nonexistent/cas-test-isolation/cloud.json",
+        ),
+    ]);
+    assert_eq!(
+        project_id(),
+        sent_id,
+        "prime the process cache with the sent id"
+    );
+
+    let args = CloudSyncArgs {
+        dry_run: false,
+        rehome: false,
+        full: false,
+    };
+    let cli = make_cli_json();
+    let cas_root_owned = cas_root.clone();
+    tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
+        .await
+        .unwrap()
+        .expect("the same sync run must finish against the resolved bucket");
+
+    assert_eq!(
+        canonical_id_from_config_toml(&cas_root).as_deref(),
+        Some(resolved_id),
+        "registration must persist the server-resolved canonical id"
+    );
+    assert_eq!(
+        get_project_canonical_id().as_deref(),
+        Some(resolved_id),
+        "registration must invalidate the stale process cache before team sync"
+    );
+    assert!(
+        queue
+            .get_metadata(&format!(
+                "team_project_registered_{TEST_TEAM}_{resolved_id}"
+            ))
+            .unwrap()
+            .is_some(),
+        "registration cache must be keyed by the adopted id"
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    let team_push_ids: Vec<_> = requests
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "POST" && request.url.path() == team_push_path()
+        })
+        .map(|request| {
+            decode_gzip_json(&request.body)["project_canonical_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        team_push_ids,
+        vec![sent_id, resolved_id],
+        "registration sends the original id once; the queued team push in the same run must use the adopted id"
+    );
+    let team_pull = requests
+        .iter()
+        .find(|request| {
+            request.method.as_str() == "GET"
+                && request.url.path() == format!("/api/teams/{TEST_TEAM}/sync/pull")
+        })
+        .expect("sync must perform the team pull");
+    assert_eq!(
+        team_pull
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "project_id")
+            .map(|(_, value)| value.into_owned())
+            .as_deref(),
+        Some(resolved_id),
+        "same-run team pull must use the adopted id"
     );
 }
 
@@ -522,7 +792,9 @@ async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
         "sync must persist the adopted team scope"
     );
     assert_eq!(
-        saved.active_team_id_with_user_config(Some(&user_cfg)).as_deref(),
+        saved
+            .active_team_id_with_user_config(Some(&user_cfg))
+            .as_deref(),
         Some(TEST_TEAM),
         "the adopted scope must resolve to the user's team"
     );
@@ -533,7 +805,9 @@ async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
     let queue = SyncQueue::open(&cas_root).unwrap();
     assert!(
         queue
-            .get_metadata(&format!("team_project_registered_{TEST_TEAM}_{expected_id}"))
+            .get_metadata(&format!(
+                "team_project_registered_{TEST_TEAM}_{expected_id}"
+            ))
             .unwrap()
             .is_some(),
         "the adopted team must end the sync with a confirmed registration"

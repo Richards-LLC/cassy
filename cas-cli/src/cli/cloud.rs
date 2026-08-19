@@ -2663,20 +2663,30 @@ pub fn ensure_team_project_registration(
         .ok()
         .and_then(|root| crate::cloud::normalized_git_remote_for_push(&root));
 
-    let registration = crate::cloud::TeamRegistration::new(
-        &cloud_config.endpoint,
-        token,
-        &team_id,
-        &canonical_id,
-    )
-    .with_git_remote(git_remote.as_deref());
+    let registration =
+        crate::cloud::TeamRegistration::new(&cloud_config.endpoint, token, &team_id, &canonical_id)
+            .with_git_remote(git_remote.as_deref());
 
     match registration.ensure() {
         Ok(outcome) => {
+            let effective_id = match outcome.adopted_canonical_id() {
+                Some(adopted) => {
+                    crate::cloud::set_canonical_id_in_config_toml(cas_root, adopted)?;
+                    crate::cloud::invalidate_cached_project_id();
+                    tracing::info!(
+                        sent_canonical_id = %canonical_id,
+                        adopted_canonical_id = %adopted,
+                        "adopted server-resolved canonical project id during registration"
+                    );
+                    adopted.to_string()
+                }
+                None => canonical_id.clone(),
+            };
             if let Some(q) = queue.as_ref() {
-                let _ = q.set_metadata(&cache_key, &chrono::Utc::now().to_rfc3339());
+                let effective_cache_key = team_registration_metadata_key(&team_id, &effective_id);
+                let _ = q.set_metadata(&effective_cache_key, &chrono::Utc::now().to_rfc3339());
             }
-            report_team_registration(cli, &team_id, &canonical_id, &outcome)?;
+            report_team_registration(cli, &team_id, &effective_id, &outcome)?;
             Ok(())
         }
         Err(failure) => {
@@ -2723,6 +2733,7 @@ fn report_team_registration(
                     "canonical_id": canonical_id,
                     "registered": true,
                     "newly_registered": outcome.newly_registered(),
+                    "adopted_canonical_id": outcome.adopted_canonical_id(),
                     "project_uuid": outcome.project_uuid(),
                 }
             })
@@ -2740,6 +2751,16 @@ fn report_team_registration(
         fmt.write_colored("  \u{2713} ", success_color)?;
         fmt.write_raw(&format!(
             "Registered project {canonical_id} with team {team_id}"
+        ))?;
+        fmt.newline()?;
+    } else if outcome.adopted_canonical_id().is_some() {
+        let theme = ActiveTheme::default();
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, theme);
+        let success_color = fmt.theme().palette.status_success;
+        fmt.write_colored("  ✓ ", success_color)?;
+        fmt.write_raw(&format!(
+            "Adopted team project id {canonical_id} (server-resolved existing bucket)"
         ))?;
         fmt.newline()?;
     }

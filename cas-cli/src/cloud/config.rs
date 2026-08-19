@@ -121,17 +121,10 @@ pub fn resolve_canonical_id(cas_root: &Path) -> Option<String> {
 /// [`resolve_canonical_id`] plus the step that produced the value.
 pub fn resolve_canonical_id_with_source(cas_root: &Path) -> Option<(String, CanonicalIdSource)> {
     if let Some(id) = canonical_id_from_config_toml(cas_root) {
-        // Reconcile the legacy folder-name value used by older clients with
-        // the current remote-derived identity. This is deliberately narrow:
-        // an intentional server-assigned pin such as `team-alpha` remains a
-        // pin unless it is exactly this repository's final remote segment.
-        if let Some(remote) = derive_canonical_id_from_git_remote(cas_root)
-            .and_then(|remote| normalize_project_canonical_id(&remote))
-        {
-            if legacy_slug_matches_remote(&id, &remote) {
-                return Some((remote, CanonicalIdSource::ConfigToml));
-            }
-        }
+        // A config pin is authoritative. Registration reconciles an unpinned
+        // remote-derived id with the server and writes the server-resolved
+        // bucket here; rewriting that pin afterwards disconnects the client
+        // from legacy bare-slug buckets because team pull matches verbatim.
         return Some((id, CanonicalIdSource::ConfigToml));
     }
     if let Some(id) = derive_canonical_id_from_git_remote(cas_root)
@@ -178,13 +171,6 @@ pub fn normalize_project_canonical_id(value: &str) -> Option<String> {
         .or_else(|| normalize_git_remote_url(&trimmed.to_ascii_lowercase()))
         .unwrap_or_else(|| trimmed.to_string());
     Some(normalized.trim_matches('/').to_ascii_lowercase())
-}
-
-fn legacy_slug_matches_remote(legacy: &str, remote: &str) -> bool {
-    let Some(last_segment) = remote.rsplit('/').next() else {
-        return false;
-    };
-    legacy == last_segment && !legacy.contains('/')
 }
 
 /// Write `[project] canonical_id = "<value>"` to `<cas_root>/config.toml`,
@@ -340,7 +326,8 @@ pub fn normalize_git_remote_url(url: &str) -> Option<String> {
 ///  - the local remote equals the returned `git_remote` (case-insensitive —
 ///    the server lowercases per its `normalizeGitRemote` rule, while our
 ///    [`normalize_git_remote_url`] preserves the original case),
-///  - the returned id differs from the current pin (otherwise it is a no-op).
+///  - no explicit config pin exists. A pin is authoritative, whether set by
+///    `cas cloud project set` or by verified registration-time adoption.
 ///
 /// The git-remote equality gate is the safety property: it prevents a shared
 /// machine whose `origin` differs from the returned project from being silently
@@ -360,14 +347,10 @@ pub fn should_adopt_canonical_id(
     if !local.eq_ignore_ascii_case(resp_remote) {
         return None;
     }
-    let canonical = normalize_project_canonical_id(canonical)?;
-    if current_pin
-        .and_then(normalize_project_canonical_id)
-        .is_some_and(|pin| pin == canonical)
-    {
-        return None; // already pinned correctly — no-op
+    if current_pin.is_some() {
+        return None;
     }
-    Some(canonical)
+    normalize_project_canonical_id(canonical)
 }
 
 /// Derive the canonical project ID from a `.cas` directory path.
@@ -1817,10 +1800,7 @@ mod tests {
         let _guard = TestEnvGuard::new();
         let mut project = logged_in_project();
         let user = user_with_teams(
-            &[
-                ("team-a", "alpha", "Alpha"),
-                ("team-b", "beta", "Beta"),
-            ],
+            &[("team-a", "alpha", "Alpha"), ("team-b", "beta", "Beta")],
             Some("team-b"),
         );
 
@@ -2742,7 +2722,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_folder_slug_reconciles_to_this_repositories_remote_identity() {
+    fn explicit_pin_wins_even_when_it_equals_the_repo_name() {
         let temp = TempDir::new().unwrap();
         let cas_dir = git_project_with_remote(
             temp.path(),
@@ -2753,8 +2733,8 @@ mod tests {
 
         assert_eq!(
             resolve_canonical_id(&cas_dir).as_deref(),
-            Some("github.com/richards-llc/gabber-studio"),
-            "the old bare folder slug and both remote spellings must share one identity",
+            Some("gabber-studio"),
+            "an explicit pin is the source of truth, even when it equals the repo name",
         );
     }
 
@@ -3026,18 +3006,34 @@ mod tests {
     }
 
     #[test]
-    fn adopt_is_case_insensitive_on_remote() {
-        // Our normalize preserves case (Richards-LLC); the server lowercases.
-        // Equality must still hold so mixed-case orgs adopt correctly.
+    fn adopt_is_case_insensitive_on_remote_when_unpinned() {
+        // The server lowercases git remotes; a fresh clone of a mixed-case
+        // organization must still adopt its server-resolved bucket.
+        assert_eq!(
+            should_adopt_canonical_id(
+                Some("github.com/Richards-LLC/ozer-health"),
+                Some("github.com/richards-llc/ozer-health"),
+                Some("ozer"),
+                None,
+            )
+            .as_deref(),
+            Some("ozer"),
+        );
+    }
+
+    #[test]
+    fn explicit_pin_blocks_adoption_even_when_remote_matches() {
+        // `[project] canonical_id` is authoritative. The later team-push
+        // path must not undo a server-resolved legacy bucket pin by re-homing
+        // it to the remote-form identity.
         assert_eq!(
             should_adopt_canonical_id(
                 Some("github.com/Richards-LLC/ozer-health"),
                 Some("github.com/richards-llc/ozer-health"),
                 Some("ozer"),
                 Some("github.com/Richards-LLC/ozer-health"),
-            )
-            .as_deref(),
-            Some("ozer"),
+            ),
+            None,
         );
     }
 

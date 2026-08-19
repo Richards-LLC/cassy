@@ -85,7 +85,12 @@ termination into the listener signal that closes the remote session cleanly.
 `SCCACHE_IDLE_TIMEOUT=0` is committed in the unit: the server must not
 self-terminate after ten minutes of queue inactivity. The incident-only debug
 drop-in is not a provisioned dependency; inspect the journal or reproduce with
-the committed unit instead.
+the committed unit instead. The unit also sets `CARGO_CACHE_RUSTC_INFO=0`.
+Cargo's otherwise persistent `CARGO_TARGET_DIR/.rustc_info.json` had retained
+a failed `sccache rustc -vV` response and replayed it in later jobs without a
+new request reaching the healthy server. Disabling only that version-probe
+cache retains the shared target artifacts while making each job re-check the
+live compiler/cache path.
 The pilot workflow explicitly clears `RUSTC_WRAPPER` for its first measured
 receipt. The private cache is a later optimization, never a lane prerequisite.
 It also points `TMPDIR` at GitHub Runner's disk-backed temporary directory;

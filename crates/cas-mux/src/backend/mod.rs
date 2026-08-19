@@ -62,7 +62,7 @@ pub trait Backend: Sync {
     fn build_supervisor_config(&self, launch: SupervisorLaunchConfig<'_>) -> PtyConfig;
 
     /// Complete any backend-specific launch precondition before spawning.
-    fn prepare_workdir(&self, _cwd: &Path) -> Result<()> {
+    fn prepare_workdir(&self, _cwd: &Path, _config_dir: Option<&str>) -> Result<()> {
         Ok(())
     }
 

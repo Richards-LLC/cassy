@@ -609,34 +609,6 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
     Ok(Some(values.len()))
 }
 
-/// `[factory] strict_cli` lookup for the cas-7199 / cas-a487 Codex-fallback
-/// check applied in `factory_spawn_workers`. Deliberately NOT inside
-/// `build_spawn_spec_json_with_project_config` above: that function is pure
-/// cascade resolution + serialization, exercised directly by unit tests
-/// (e.g. `spawn_spec_omitted_cli_without_config_uses_stock_codex_defaults`)
-/// that assert the stock/default `cli` value itself and run under an
-/// isolated fake `HOME` — folding a REAL `codex_available()` probe in
-/// there would make those tests depend on whether the isolated `HOME`
-/// happens to contain a `.codex/auth.json` (it never does), silently
-/// changing their resolved `cli` out from under them and making the whole
-/// suite depend on the test machine's actual Codex install/login state.
-/// The availability check belongs at the actual "about to queue this for
-/// spawn" checkpoint instead — see `factory_spawn_workers` below, which
-/// mirrors exactly where `cli/factory/mod.rs` applies the same fallback:
-/// AFTER cascade resolution, not inside it.
-fn strict_cli_from_project_config(project_config: Option<&std::path::Path>) -> bool {
-    project_config
-        .and_then(|p| p.parent())
-        .map(|cas_root| {
-            use crate::config::Config;
-            Config::load(cas_root)
-                .unwrap_or_default()
-                .factory()
-                .strict_cli
-        })
-        .unwrap_or(false)
-}
-
 fn spawn_specs_summary(specs: &[cas_mux::WorkerSpec], worker_names: &[String]) -> String {
     specs
         .iter()
@@ -898,6 +870,43 @@ fn format_undelivered_relay_section(
          (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
     );
     out
+}
+
+/// Select launch records that can be stopped before their PTY has registered
+/// an Agent row. `id` accepts either the eventual worker name or the durable
+/// spawn-request id included in the launch receipt.
+fn select_launched_shutdown_targets(
+    launched_workers: &[cas_store::SpawnLifecycle],
+    requested_id: Option<&str>,
+    requested_names: &[String],
+    count: Option<i32>,
+) -> Vec<cas_store::SpawnLifecycle> {
+    if let Some(id) = requested_id {
+        launched_workers
+            .iter()
+            .filter(|spawn| spawn.worker_name.as_deref() == Some(id) || spawn.id.to_string() == id)
+            .cloned()
+            .collect()
+    } else if !requested_names.is_empty() {
+        launched_workers
+            .iter()
+            .filter(|spawn| {
+                spawn
+                    .worker_name
+                    .as_deref()
+                    .is_some_and(|name| requested_names.iter().any(|requested| requested == name))
+            })
+            .cloned()
+            .collect()
+    } else if count.unwrap_or(0) == 0 {
+        launched_workers.to_vec()
+    } else {
+        launched_workers
+            .iter()
+            .take(count.unwrap_or_default() as usize)
+            .cloned()
+            .collect()
+    }
 }
 
 fn format_spawn_lifecycle_section(
@@ -1419,8 +1428,10 @@ impl CasService {
             }
         }
 
-        let strict_cli =
-            strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
+        // A caller who requested Codex must either receive Codex or an
+        // actionable refusal. Rewriting the provider/tier to Claude here is
+        // a cost and capability change the supervisor did not approve.
+        let strict_cli = true;
         let notices = cas_factory::apply_codex_fallback(
             &mut specs,
             strict_cli,
@@ -1581,6 +1592,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
+        use cas_store::SpawnLifecycleState;
         use cas_types::{AgentRole, AgentStatus};
 
         let requested_names: Vec<String> = req
@@ -1616,6 +1628,31 @@ impl CasService {
         })?;
         let owned = supervisor_owned_workers();
         let factory_session = current_factory_session();
+        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open spawn queue: {e}"),
+            )
+        })?;
+        // A launched PTY has a durable lifecycle row before it has an Agent
+        // row. Keep that control-plane identity available to shutdown instead
+        // of making a wedged pre-registration process untargetable.
+        let launched_workers = factory_session
+            .as_deref()
+            .map(|session| queue.recent_spawn_lifecycle(session, 200))
+            .transpose()
+            .map_err(|e| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to list launched workers: {e}"),
+                )
+            })?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|spawn| {
+                spawn.state == SpawnLifecycleState::Launched && spawn.worker_name.is_some()
+            })
+            .collect::<Vec<_>>();
         let all_agents = agent_store.list(None).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1671,8 +1708,20 @@ impl CasService {
                 .collect()
         };
 
+        let selected_launched = select_launched_shutdown_targets(
+            &launched_workers,
+            requested_id,
+            &requested_names,
+            req.count,
+        );
+        let selected_launched_names: Vec<String> = selected_launched
+            .iter()
+            .filter_map(|spawn| spawn.worker_name.clone())
+            .filter(|name| !selected.iter().any(|worker| worker.name == *name))
+            .collect();
+
         let missing: Vec<String> = if let Some(id) = requested_id {
-            if selected.is_empty() {
+            if selected.is_empty() && selected_launched.is_empty() {
                 vec![id.to_string()]
             } else {
                 Vec::new()
@@ -1684,14 +1733,23 @@ impl CasService {
                     !selected
                         .iter()
                         .any(|worker| worker.name.as_str() == name.as_str())
+                        && !selected_launched_names
+                            .iter()
+                            .any(|launched| launched == *name)
                 })
                 .cloned()
                 .collect()
         };
-        if !missing.is_empty() || selected.is_empty() {
+        if !missing.is_empty() || (selected.is_empty() && selected_launched_names.is_empty()) {
             let known = known_workers
                 .iter()
                 .map(|worker| format!("{} ({})", worker.name, worker.id))
+                .chain(selected_launched.iter().filter_map(|spawn| {
+                    spawn
+                        .worker_name
+                        .as_ref()
+                        .map(|name| format!("{name} (launched; spawn request {})", spawn.id))
+                }))
                 .collect::<Vec<_>>();
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -1746,16 +1804,14 @@ impl CasService {
             ));
         }
 
-        let worker_names: Vec<String> = selected.iter().map(|worker| worker.name.clone()).collect();
+        let worker_names: Vec<String> = selected
+            .iter()
+            .map(|worker| worker.name.clone())
+            .chain(selected_launched_names.iter().cloned())
+            .collect();
 
         // Validation passed: queue only the exact resolved names. `count=None`
         // is intentional — the daemon must not re-expand this decision.
-        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open spawn queue: {e}"),
-            )
-        })?;
 
         let request_id = queue
             .enqueue_shutdown(None, &worker_names, force, factory_session.as_deref())
@@ -2477,6 +2533,14 @@ impl CasService {
                             .then(|| transcript_path_fast(clone_path.as_deref(), session_uuid))
                             .flatten()
                     });
+                // A Codex MCP server can keep the registry heartbeat fresh
+                // after the interactive harness has terminally rejected every
+                // turn for exhausted account credits. Prefer the harness's
+                // own terminal record over that process-only heartbeat.
+                let usage_limited = codex_rollout_reports_usage_limit(
+                    transcript_path_for_worker.as_deref(),
+                    worker_cli,
+                );
                 // cas-4fb9 / cas-71d9: checkpoint/heartbeat freshness cannot
                 // answer whether the harness actually started a turn. Render
                 // the harness's own artifact-backed turn observation
@@ -2802,7 +2866,11 @@ impl CasService {
                     "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
-                    liveness_label,
+                    if usage_limited {
+                        " [UNAVAILABLE: Codex usage limit]"
+                    } else {
+                        liveness_label
+                    },
                     held_label,
                     clone_info,
                     git_info,
@@ -6797,6 +6865,43 @@ pub(crate) fn default_codex_sessions_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Whether a resolved Codex rollout records the terminal account-limit failure
+/// that leaves its MCP child heartbeating while no harness turn can proceed.
+///
+/// This intentionally requires the exact user-facing terminal error and the
+/// machine-readable exhausted-credit state in the same bounded tail. A generic
+/// error, an old rate-limit record, or an unresolved rollout is not enough to
+/// declare a live worker unavailable.
+fn codex_rollout_reports_usage_limit(
+    rollout: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+) -> bool {
+    if cli != cas_mux::SupervisorCli::Codex {
+        return false;
+    }
+    let Some(rollout) = rollout else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(rollout) else {
+        return false;
+    };
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let start = metadata.len().saturating_sub(TAIL_BYTES);
+    let Ok(mut file) = std::fs::File::open(rollout) else {
+        return false;
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut tail = String::new();
+    if file.read_to_string(&mut tail).is_err() {
+        return false;
+    }
+    tail.contains("You've hit your usage limit")
+        && (tail.contains("\"has_credits\":false") || tail.contains("\"has_credits\": false"))
+}
+
 fn synthesized_codex_transcript_path(clone_path: &str, session_id: &str) -> String {
     format!(
         "~/.codex/sessions/<YYYY/MM/DD>/rollout-*-*.jsonl (cwd={clone_path}; cas_session={session_id})"
@@ -7860,6 +7965,24 @@ mod spawn_lifecycle_tests {
         format_spawn_lifecycle_section(rows, chrono::Utc::now())
     }
 
+    #[test]
+    fn launched_pty_can_be_shutdown_by_name_or_spawn_request_id_before_registration() {
+        let launched = vec![row(
+            491,
+            Some("kind-dragon-90"),
+            SpawnLifecycleState::Launched,
+            2,
+            None,
+        )];
+
+        let by_name =
+            select_launched_shutdown_targets(&launched, Some("kind-dragon-90"), &[], None);
+        let by_request_id = select_launched_shutdown_targets(&launched, Some("491"), &[], None);
+
+        assert_eq!(by_name[0].worker_name.as_deref(), Some("kind-dragon-90"));
+        assert_eq!(by_request_id[0].id, 491);
+    }
+
     fn lost_relay(task_summary: &str) -> cas_store::UndeliveredLifecycleRelay {
         cas_store::UndeliveredLifecycleRelay {
             prompt_id: 7783,
@@ -8277,6 +8400,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("auth.json"), "{}").unwrap();
         preflight_codex_config_dir(temp.path().to_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_limit_rollout_overrides_a_healthy_heartbeat_claim() {
+        let rollout = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rollout.path(),
+            r#"{"type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+        )
+        .unwrap();
+        assert!(codex_rollout_reports_usage_limit(
+            Some(rollout.path()),
+            cas_mux::SupervisorCli::Codex
+        ));
+        assert!(!codex_rollout_reports_usage_limit(
+            Some(rollout.path()),
+            cas_mux::SupervisorCli::Claude
+        ));
     }
 
     /// cas-4a5e: a typo'd/missing codex config_dir must fail with a message
@@ -8917,38 +9058,6 @@ effort = "high"
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
         assert!(warning.contains("frontier-tier"), "{warning}");
-    }
-
-    // cas-7199 / cas-a487: `strict_cli_from_project_config` tests.
-
-    #[test]
-    fn strict_cli_from_project_config_true_when_set() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join("config.toml"),
-            "[factory]\nstrict_cli = true\n",
-        )
-        .unwrap();
-        assert!(strict_cli_from_project_config(Some(
-            &tmp.path().join("config.toml")
-        )));
-    }
-
-    #[test]
-    fn strict_cli_from_project_config_false_by_default() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("config.toml"), "[factory]\n").unwrap();
-        assert!(!strict_cli_from_project_config(Some(
-            &tmp.path().join("config.toml")
-        )));
-    }
-
-    #[test]
-    fn strict_cli_from_project_config_false_when_missing_or_none() {
-        assert!(!strict_cli_from_project_config(None));
-        assert!(!strict_cli_from_project_config(Some(
-            &std::path::PathBuf::from("/tmp/cas-7199-definitely-missing/config.toml")
-        )));
     }
 
     /// Run the real unavailable-Codex probe in a dedicated process. PATH is

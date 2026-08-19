@@ -503,10 +503,11 @@ jobs:
 
       # count:1/3 through count:3/3 are disjoint and exhaustive. Keep
       # --no-fail-fast so failures never mask later binaries; doctests stay in
-      # their own required lane because nextest cannot run them.
+      # their own required lane because nextest cannot run them. Remap the
+      # self-hosted producer workspace to this hosted checkout (cas-c4a5).
       - name: Test full suite shard ${{ matrix.shard }}/3
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3
+        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and

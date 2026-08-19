@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-08-19
+
+### Added
+- **Factory workers now surface Viktor-originated questions to a live supervisor.** Incoming conversations are persisted and deduplicated, and remain visible for the next supervisor when no live session is available.
+- **Cassy can use an alternate worker account without losing its isolated project context.** Each worker now resolves its own project history and hooks instead of inheriting another checkout's state.
+
+### Changed
+- **Merge-queue validation now uses the trusted self-hosted route where appropriate, while the required validation set stays intentionally small and explicit.**
+- **Worker guidance is more concise and scannable, with evidence-first progress updates and clearer handoff expectations.**
+
+### Fixed
+- **Factory spawning and delivery are more reliable.** Workers retain refreshed local epic bases when publication is unavailable, reject unsafe branch-reference state, and handle Codex account, liveness, and terminal-limit conditions more accurately.
+- **Task completion and test evidence are stricter and clearer.** Cassy prevents misleading green test receipts, preserves merge and review gates, and repairs the urgent-stop review path.
+- **Viktor restart and archive handling now fail visibly and recover safely, reducing silent loss of pending replies and queued work.**
+
 ## [3.1.0] - 2026-08-18
 
 ### Added

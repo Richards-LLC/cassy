@@ -74,6 +74,7 @@ fi
 (
     cd "$runner_dir"
     sudo -u "$runner_user" env HOME="$runner_root" \
+        PATH="$runner_root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         ./config.sh --unattended --replace \
         --url https://github.com/Richards-LLC \
         --token "$RUNNER_TOKEN" \

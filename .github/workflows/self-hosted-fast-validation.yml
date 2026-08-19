@@ -27,8 +27,12 @@ jobs:
     # This expression is evaluated by GitHub before runner assignment. It is a
     # second control behind the push-only trigger and selected-workflow runner
     # group: only canonical same-repository branch pushes can reach the box.
+    # The explicit opt-in prevents a missing/offline runner from creating a red
+    # or permanently queued advisory run. Operators enable it only after the
+    # listener is verified online and disable it before maintenance.
     if: >-
-      github.repository == 'Richards-LLC/cassy'
+      vars.CASSY_SELF_HOSTED_PILOT == 'enabled'
+      && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
@@ -134,4 +138,3 @@ jobs:
           path: ${{ runner.temp }}/self-hosted-fast-validation.timings
           if-no-files-found: warn
           retention-days: 7
-

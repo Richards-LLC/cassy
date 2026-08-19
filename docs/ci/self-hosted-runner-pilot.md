@@ -19,7 +19,10 @@ independent restrictions:
    `Richards-LLC/cassy` and only this workflow at an explicit canonical branch
    ref. The pilot ref is replaced by `refs/heads/main` after landing.
 3. The job repeats the canonical repository, non-fork, push-event, and trusted
-   ref conditions in a server-evaluated job `if` before runner assignment.
+   ref conditions in a server-evaluated job `if` before runner assignment. The
+   same guard requires repository variable `CASSY_SELF_HOSTED_PILOT=enabled`;
+   absent or disabled is a clean skip, so registration or maintenance cannot
+   create a red/queued advisory run.
 
 Fork pull requests continue to run only the existing GitHub-hosted required
 checks. Approval of a fork workflow does not grant it the selected runner
@@ -57,6 +60,21 @@ checkout:
 RUNNER_TOKEN=... sudo --preserve-env=RUNNER_TOKEN scripts/install-cassy-actions-runner.sh
 ```
 
+Verify the runner reports `online` before enabling the job:
+
+```bash
+gh api orgs/Richards-LLC/actions/runners
+gh variable set CASSY_SELF_HOSTED_PILOT --repo Richards-LLC/cassy --body enabled
+```
+
+Before planned maintenance or an offline-fallback drill, disable assignment
+first, then stop the listener:
+
+```bash
+gh variable set CASSY_SELF_HOSTED_PILOT --repo Richards-LLC/cassy --body disabled
+sudo systemctl stop cassy-actions-runner.service
+```
+
 Audit without exposing tokens:
 
 ```bash
@@ -71,4 +89,3 @@ To demonstrate hosted fallback, stop the service, push a Rust-touched commit on
 a same-repository factory branch with an open PR, and record that all required
 hosted contexts finish while only the advisory pilot remains queued. Restart
 the service after capturing the receipt.
-

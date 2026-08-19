@@ -110,6 +110,7 @@ for forbidden_event in pull_request: pull_request_target: workflow_run: issue_co
     require_absent "$self_hosted_text" "$forbidden_event" "self-hosted pilot rejects event before runner assignment: $forbidden_event"
 done
 require_text "$self_hosted_text" "github.repository == 'Richards-LLC/cassy'" 'self-hosted job pins the canonical repository'
+require_text "$self_hosted_text" "vars.CASSY_SELF_HOSTED_PILOT == 'enabled'" 'self-hosted job skips cleanly until an online listener is explicitly enabled'
 require_text "$self_hosted_text" 'github.event.repository.fork == false' 'self-hosted job rejects fork repositories'
 require_text "$self_hosted_text" "github.event_name == 'push'" 'self-hosted job repeats the push-only trust gate'
 require_text "$self_hosted_text" "startsWith(github.ref, 'refs/heads/factory/')" 'self-hosted job pins trusted factory refs'

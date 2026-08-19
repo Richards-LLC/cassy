@@ -985,6 +985,32 @@ fn test_create_epic_branch_honors_configured_epic_base_branch() {
     );
 }
 
+#[test]
+fn test_create_epic_branch_rejects_corrupt_base_without_writing_ref_cas_42a4() {
+    let (_temp, repo_path) = create_test_repo();
+    write_epic_base_branch_config(&repo_path, "epic/corrupt-base");
+
+    let corrupt_ref = repo_path.join(".git/refs/heads/epic/corrupt-base");
+    std::fs::create_dir_all(corrupt_ref.parent().unwrap()).unwrap();
+    std::fs::write(&corrupt_ref, "epic/corrupt-base\n").unwrap();
+
+    let manager = WorktreeManager::new(&repo_path, WorktreeConfig::default()).unwrap();
+    let error = manager
+        .create_epic_branch("Must Not Exist")
+        .expect_err("a corrupt configured base must abort epic branch creation");
+
+    assert!(
+        error.to_string().contains("does not resolve to a commit"),
+        "failure must identify the unresolvable start point: {error}"
+    );
+    assert!(
+        !repo_path
+            .join(".git/refs/heads/epic/must-not-exist")
+            .exists(),
+        "failed epic creation must not write a loose ref"
+    );
+}
+
 // --- cas-006c: merge/removal dirty-check classification --------------------
 
 /// AC1: a worktree whose only dirty entry is the Cassy-generated

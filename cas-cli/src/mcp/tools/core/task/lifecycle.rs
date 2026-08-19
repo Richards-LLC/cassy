@@ -592,7 +592,7 @@ impl CasCore {
                         resolved.sha.clone()
                     };
                     let sha_preview = &base_sha[..base_sha.len().min(8)];
-                    match git_ops.create_branch_from(&branch_name, &base_ref) {
+                    match git_ops.create_branch_from(&branch_name, &base_sha) {
                         Ok(created) => {
                             // Update epic with branch info (no worktree)
                             let task_store = self.open_task_store()?;

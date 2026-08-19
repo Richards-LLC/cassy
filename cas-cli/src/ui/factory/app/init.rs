@@ -96,7 +96,7 @@ impl FactoryApp {
                 }
             }
             let resolved = git_ops.resolve_fresh_base(&trunk)?;
-            if git_ops.create_branch_from(&branch_name, &resolved.branch_ref)? {
+            if git_ops.create_branch_from(&branch_name, &resolved.sha)? {
                 tracing::info!(
                     "Created epic branch {} from base '{}' (sha={}, behind={})",
                     branch_name,

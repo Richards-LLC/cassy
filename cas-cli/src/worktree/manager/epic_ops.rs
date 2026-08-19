@@ -56,7 +56,7 @@ impl WorktreeManager {
 
         let newly_created = match self
             .git
-            .create_branch_from(&branch_name, &base_choice.base_ref)
+            .create_branch_from(&branch_name, &base_sha)
         {
             Ok(true) => {
                 tracing::info!(

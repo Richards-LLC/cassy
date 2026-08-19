@@ -45,10 +45,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_BUILD_JOBS: "12"
-      # nextest archive extraction otherwise defaults to the service's
-      # PrivateTmp tmpfs. Keep all large temporary files on the runner's
-      # isolated, disk-backed work volume.
-      TMPDIR: ${{ runner.temp }}
       # First timing receipt is intentionally uncached. The service owns a
       # private sccache for follow-up tuning, but cache plumbing must never be a
       # prerequisite for proving the 32-core runner or for this advisory lane.
@@ -103,6 +99,8 @@ jobs:
       - name: Build full suite archive
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
+          # nextest otherwise defaults to the service's PrivateTmp tmpfs.
+          TMPDIR: ${{ runner.temp }}
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_STRIP: debuginfo

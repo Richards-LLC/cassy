@@ -1817,10 +1817,7 @@ mod tests {
         let _guard = TestEnvGuard::new();
         let mut project = logged_in_project();
         let user = user_with_teams(
-            &[
-                ("team-a", "alpha", "Alpha"),
-                ("team-b", "beta", "Beta"),
-            ],
+            &[("team-a", "alpha", "Alpha"), ("team-b", "beta", "Beta")],
             Some("team-b"),
         );
 
@@ -2742,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_folder_slug_reconciles_to_this_repositories_remote_identity() {
+    fn explicit_pin_wins_even_when_it_equals_the_repo_name() {
         let temp = TempDir::new().unwrap();
         let cas_dir = git_project_with_remote(
             temp.path(),
@@ -2753,8 +2750,8 @@ mod tests {
 
         assert_eq!(
             resolve_canonical_id(&cas_dir).as_deref(),
-            Some("github.com/richards-llc/gabber-studio"),
-            "the old bare folder slug and both remote spellings must share one identity",
+            Some("gabber-studio"),
+            "an explicit pin is the source of truth, even when it equals the repo name",
         );
     }
 

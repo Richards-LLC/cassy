@@ -397,7 +397,8 @@ require_absent "$ci_text" 'CARGO_PROFILE_DEV_STRIP: symbols' 'archive keeps symb
 for job in fast-validation-preflight fast-validation-docs clippy test-compile-guard; do
     require_absent "$(job_block "$job")" 'CARGO_PROFILE_DEV_DEBUG' "$job keeps normal debug info: $job"
 done
-require_text "$suite_build" 'tar -czf fast-validation-suite-runner.tar.gz target/debug/cas' 'suite packages the executable CLI runner with its mode bits'
+require_text "$suite_build" 'CARGO_TARGET_DIR:-target}/debug' 'suite packaging reads the configured Cargo target directory'
+require_text "$suite_build" "--transform='s,^cas$,target/debug/cas,'" 'suite packaging preserves the hosted runner archive layout'
 require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait for the shared test archive'
 require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
 require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'

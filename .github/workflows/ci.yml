@@ -423,7 +423,10 @@ jobs:
       # upload-artifact intentionally does not preserve executable mode bits.
       - name: Package CLI runner
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: tar -czf fast-validation-suite-runner.tar.gz target/debug/cas
+        run: |
+          tar -C "${CARGO_TARGET_DIR:-target}/debug" \
+            --transform='s,^cas$,target/debug/cas,' \
+            -czf fast-validation-suite-runner.tar.gz cas
 
       - name: Upload full suite archive and CLI runner
         if: steps.classify-diff.outputs.rust-unaffected != 'true'

@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::mcp::tools::service::factory_ops::{
-    resolve_worker_transcript_path, worker_cli_from_agent, worker_scope_paths,
+    resolve_worker_transcript_path_for_account, worker_cli_from_agent, worker_scope_paths,
 };
 
 /// Window in which a Claude transcript mtime counts as "recent" — used to
@@ -817,7 +817,12 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
     // resolver as worker_status so the human and director stall surfaces
     // cannot disagree about which transcript is evidence.
     let cli = worker_cli_from_agent(&agent);
-    let transcript_path = resolve_worker_transcript_path(clone_path.as_deref(), &session_id, cli);
+    let transcript_path = resolve_worker_transcript_path_for_account(
+        clone_path.as_deref(),
+        &session_id,
+        cli,
+        agent.metadata.get("worker_account_dir").map(String::as_str),
+    );
     Ok(ResolvedWorker {
         name: worker_name.to_string(),
         pid,

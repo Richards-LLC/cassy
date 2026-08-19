@@ -8,6 +8,29 @@ use crate::daemon::observation::process_observations;
 use crate::daemon::{DaemonConfig, DaemonRunResult};
 use crate::error::CasError;
 
+/// A stale heartbeat is not enough to kill a factory worker.  Codex has no
+/// lifecycle hooks, so a worker may remain busy while its heartbeat path is
+/// unavailable; a process that identifies itself by argv or `CAS_AGENT_NAME`
+/// is independent liveness evidence and wins over the stale timestamp.
+///
+/// Non-worker agents retain the historical heartbeat-only cleanup policy.
+pub(crate) fn heartbeat_stale_agent_should_be_reaped(
+    agent: &crate::types::Agent,
+    find_live_worker_pid: impl FnOnce(&str) -> Option<u32>,
+) -> bool {
+    agent.role != crate::types::AgentRole::Worker || find_live_worker_pid(&agent.name).is_none()
+}
+
+fn heartbeat_stale_agent_has_live_process(agent: &crate::types::Agent) -> bool {
+    !heartbeat_stale_agent_should_be_reaped(agent, |worker_name| {
+        crate::cli::factory::wedged::find_worker_pid(
+            &crate::cli::factory::wedged::RealProcessTable,
+            worker_name,
+        )
+        .filter(|pid| crate::mcp::daemon::pid_alive(*pid))
+    })
+}
+
 /// Run a single maintenance cycle.
 pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasError> {
     use crate::store::{open_agent_store, open_event_store, open_recording_store, open_store};
@@ -85,6 +108,14 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         // Grace period is 90s (not 60s) to accommodate the known first-MCP-call timeout.
         if let Ok(failed_startup_agents) = agent_store.list_failed_startup(90) {
             for agent in &failed_startup_agents {
+                if heartbeat_stale_agent_has_live_process(agent) {
+                    tracing::warn!(
+                        worker = %agent.name,
+                        agent_id = %agent.id,
+                        "heartbeat stale but live factory worker process found; skipping reap"
+                    );
+                    continue;
+                }
                 let agent_id = agent.id.clone();
 
                 // Re-check: a heartbeat may have arrived between list_failed_startup
@@ -116,6 +147,14 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
 
         if let Ok(stale_agents) = agent_store.list_stale(600) {
             for agent in &stale_agents {
+                if heartbeat_stale_agent_has_live_process(agent) {
+                    tracing::warn!(
+                        worker = %agent.name,
+                        agent_id = %agent.id,
+                        "heartbeat stale but live factory worker process found; skipping reap"
+                    );
+                    continue;
+                }
                 let held_tasks = agent_store.list_agent_leases(&agent.id).unwrap_or_default();
                 let held_ids: Vec<String> = held_tasks.iter().map(|l| l.task_id.clone()).collect();
                 let agent_id = agent.id.clone();
@@ -339,4 +378,96 @@ fn cleanup_orphaned_worktrees(config: &DaemonConfig) -> Result<usize, CasError> 
 /// Run daemon once (for testing or one-shot mode).
 pub fn run_once(config: &DaemonConfig) -> Result<DaemonRunResult, CasError> {
     run_maintenance(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_named_codex_worker_with_live_process_is_not_reaped() {
+        let mut worker = crate::types::Agent::new(
+            "codex-kind-owl-71-session".to_string(),
+            "kind-owl-71".to_string(),
+        );
+        worker.role = crate::types::AgentRole::Worker;
+        worker
+            .metadata
+            .insert("worker_cli".to_string(), "codex".to_string());
+        worker.metadata.insert(
+            "worker_account_dir".to_string(),
+            "/home/operator/.codex-support@example.test".to_string(),
+        );
+
+        assert!(
+            !heartbeat_stale_agent_should_be_reaped(&worker, |name| {
+                (name == "kind-owl-71").then_some(4242)
+            }),
+            "a stale heartbeat alone must not park a named-account Codex worker while its argv/env-identifiable process is live"
+        );
+    }
+
+    #[test]
+    fn stale_worker_without_live_process_is_reaped() {
+        let mut worker = crate::types::Agent::new("dead-worker".to_string(), "dead-owl".to_string());
+        worker.role = crate::types::AgentRole::Worker;
+        assert!(heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+    }
+
+    /// Incident-shaped cas-66fd regression: a Codex worker on a named account
+    /// can go 10+ minutes without a heartbeat because Codex has no hooks, but
+    /// its live process still carries `CAS_AGENT_NAME`. Maintenance must not
+    /// revoke its lease or park its task on heartbeat staleness alone.
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_keeps_named_account_codex_worker_with_live_env_identity() {
+        use crate::store::{init_cas_dir, open_agent_store};
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("temp CAS root");
+        let cas_root = init_cas_dir(temp.path()).expect("initialize CAS root");
+        let worker_name = format!("cas-66fd-live-{}", std::process::id());
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .env("CAS_AGENT_NAME", &worker_name)
+            .spawn()
+            .expect("spawn identifiable worker process");
+
+        let store = open_agent_store(&cas_root).expect("open agent store");
+        let mut worker = crate::types::Agent::new(
+            "cas-66fd-live-session".to_string(),
+            worker_name.clone(),
+        );
+        worker.role = crate::types::AgentRole::Worker;
+        worker.last_heartbeat = Utc::now() - chrono::Duration::seconds(601);
+        worker.metadata.insert("worker_cli".to_string(), "codex".to_string());
+        worker.metadata.insert(
+            "worker_account_dir".to_string(),
+            "/home/operator/.codex-support@example.test".to_string(),
+        );
+        store.register(&worker).expect("register stale worker");
+
+        let result = run_maintenance(&DaemonConfig {
+            cas_root: cas_root.clone(),
+            process_observations: false,
+            consolidate_memories: false,
+            auto_prune: false,
+            apply_decay: false,
+            update_entity_summaries: false,
+            index_code: false,
+            index_bm25: false,
+            agent_purge_age_hours: 0,
+            ..DaemonConfig::default()
+        })
+        .expect("maintenance succeeds");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(result.agents_cleaned, 0);
+        assert_eq!(
+            store.get(&worker.id).expect("read worker after maintenance").status,
+            crate::types::AgentStatus::Active,
+            "a live env-identified Codex worker must not be reaped solely for heartbeat age"
+        );
+    }
 }

@@ -2517,10 +2517,11 @@ impl CasService {
                 // stat fast path.
                 let transcript_resolution_for_worker =
                     worker_status_uses_scanned_transcript(worker_cli).then(|| {
-                        worker_status_cached_transcript_resolution(
+                        worker_status_cached_transcript_resolution_for_account(
                             clone_path.as_deref(),
                             session_uuid,
                             worker_cli,
+                            agent.metadata.get("worker_account_dir").map(String::as_str),
                         )
                     });
                 let transcript_path_for_worker = transcript_resolution_for_worker
@@ -3036,7 +3037,12 @@ impl CasService {
                 let cli = worker_cli_from_agent(agent);
                 let clone_path = agent.metadata.get("clone_path").map(String::as_str);
                 let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-                let transcript_path = worker_status_transcript_path(clone_path, session_id, cli)?;
+                let transcript_path = worker_status_transcript_path_for_account(
+                    clone_path,
+                    session_id,
+                    cli,
+                    agent.metadata.get("worker_account_dir").map(String::as_str),
+                )?;
                 let event_activity = last_worker_activity_secs(&activity_events, &agent.id);
                 let effective_activity = last_worker_activity_secs_with_transcript(
                     &activity_events,
@@ -5197,7 +5203,12 @@ pub(crate) fn worker_transcript_path_for_agent(
     };
     let cli = worker_cli_from_agent(agent);
     let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-    worker_status_transcript_path(clone_path.to_str(), session_id, cli)
+    worker_status_transcript_path_for_account(
+        clone_path.to_str(),
+        session_id,
+        cli,
+        agent.metadata.get("worker_account_dir").map(String::as_str),
+    )
 }
 
 fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String, String> {
@@ -6712,6 +6723,42 @@ fn default_transcript_roots(cli: cas_mux::SupervisorCli) -> Vec<std::path::PathB
     }
 }
 
+/// Return the rollout root for the account a Codex worker was actually
+/// launched under.  `worker_account_dir` is durable spawn metadata, whereas
+/// this process's `CODEX_HOME` belongs to whichever supervisor/daemon happens
+/// to be answering an operator query.  Those are often different accounts.
+fn codex_sessions_dir_for_worker_account(account_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    let account_dir = account_dir?.trim();
+    if account_dir.is_empty() {
+        return None;
+    }
+    let expanded = account_dir.strip_prefix('~').map_or_else(
+        || std::path::PathBuf::from(account_dir),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| home.join(suffix.trim_start_matches('/')))
+                .unwrap_or_else(|| std::path::PathBuf::from(account_dir))
+        },
+    );
+    Some(expanded.join("sessions"))
+}
+
+/// Harness transcript roots for one registered worker.  Codex is special:
+/// each worker may have been spawned under a named `CODEX_HOME`, and querying
+/// from a supervisor must not silently substitute the supervisor's account.
+fn transcript_roots_for_worker(
+    cli: cas_mux::SupervisorCli,
+    account_dir: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    if cli == cas_mux::SupervisorCli::Codex {
+        return codex_sessions_dir_for_worker_account(account_dir)
+            .or_else(default_codex_sessions_dir)
+            .into_iter()
+            .collect();
+    }
+    default_transcript_roots(cli)
+}
+
 /// [`resolve_transcript`] over a set of roots rather than a single one.
 ///
 /// Only Claude actually searches more than one (cas-9e81); Codex and Grok keep
@@ -7176,13 +7223,25 @@ pub(crate) fn resolve_worker_transcript_path(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> Option<std::path::PathBuf> {
+    resolve_worker_transcript_path_for_account(clone_path, session_id, cli, None)
+}
+
+/// Account-aware form of [`resolve_worker_transcript_path`].  Callers that
+/// have the agent row (is-wedged, debug, and worker_status) must use this so a
+/// named Codex account resolves its own rollout tree.
+pub(crate) fn resolve_worker_transcript_path_for_account(
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+    account_dir: Option<&str>,
+) -> Option<std::path::PathBuf> {
     // cas-9e81: search every root this harness could have written under, not
     // just the default one. On a two-account factory the single-root lookup
     // returned None for every pane on the non-default `CLAUDE_CONFIG_DIR`, and
     // the daemon's wake gate treats an unresolvable transcript as evidence of
     // an in-flight tool call — a permanent, silent refusal to wake.
     transcript_path_from_resolution(resolve_transcript_in_roots(
-        &default_transcript_roots(cli),
+        &transcript_roots_for_worker(cli, account_dir),
         clone_path,
         session_id,
         cli,
@@ -7202,9 +7261,23 @@ fn worker_status_transcript_path(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> Option<std::path::PathBuf> {
+    worker_status_transcript_path_for_account(clone_path, session_id, cli, None)
+}
+
+fn worker_status_transcript_path_for_account(
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+    account_dir: Option<&str>,
+) -> Option<std::path::PathBuf> {
     match cli {
         cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok => {
-            let cached = worker_status_cached_transcript_resolution(clone_path, session_id, cli);
+            let cached = worker_status_cached_transcript_resolution_for_account(
+                clone_path,
+                session_id,
+                cli,
+                account_dir,
+            );
             worker_status_path_from_resolution(cached.resolution, cli)
         }
         cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
@@ -7240,15 +7313,16 @@ fn hard_dead_worker_transcript_block(
     )
 }
 
-fn worker_status_cached_transcript_resolution(
+fn worker_status_cached_transcript_resolution_for_account(
     clone_path: Option<&str>,
     session_id: &str,
     cli: cas_mux::SupervisorCli,
+    account_dir: Option<&str>,
 ) -> WorkerStatusTranscriptResolution {
     // cas-9e81: same multi-root search as `resolve_worker_transcript_path`, so
     // `worker_status` and the daemon's wake gate cannot disagree about whether
     // a worker has a readable transcript.
-    let roots = default_transcript_roots(cli);
+    let roots = transcript_roots_for_worker(cli, account_dir);
     WorkerStatusTranscriptResolution {
         resolution: worker_status_cached_transcript_resolution_in_roots(
             &roots, clone_path, session_id, cli,
@@ -10886,6 +10960,49 @@ effort = "high"
             }
         }
         assert_eq!(got, Some(sessions.join(rel)));
+    }
+
+    /// cas-66fd: the supervisor normally runs under its own (often default)
+    /// CODEX_HOME.  A worker's persisted spawn account must win, otherwise
+    /// worker_status, is-wedged, and debug all report its live rollout as
+    /// unresolved despite a fresh named-account transcript on disk.
+    #[test]
+    fn codex_worker_account_dir_resolves_its_own_rollout_not_supervisor_home() {
+        let clone = "/tmp/cas-66fd-named-account-worker";
+        let rel = "2026/08/18/rollout-2026-08-18T17-22-01-live.jsonl";
+        let (account_home, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
+        let account_dir = account_home.path().to_str().expect("utf-8 account home");
+
+        let resolved = resolve_worker_transcript_path_for_account(
+            Some(clone),
+            "codex-kind-owl-71-session",
+            cas_mux::SupervisorCli::Codex,
+            Some(account_dir),
+        );
+        assert_eq!(resolved, Some(sessions.join(rel)));
+
+        let status_path = worker_status_transcript_path_for_account(
+            Some(clone),
+            "codex-kind-owl-71-session",
+            cas_mux::SupervisorCli::Codex,
+            Some(account_dir),
+        );
+        assert_eq!(status_path, Some(sessions.join(rel)));
+
+        let mut agent = cas_types::Agent::new(
+            "codex-kind-owl-71-session".to_string(),
+            "kind-owl-71".to_string(),
+        );
+        agent.metadata.insert("worker_cli".to_string(), "codex".to_string());
+        agent.metadata.insert("clone_path".to_string(), clone.to_string());
+        agent
+            .metadata
+            .insert("worker_account_dir".to_string(), account_dir.to_string());
+        assert_eq!(
+            worker_transcript_path_for_agent(account_home.path(), &agent),
+            Some(sessions.join(rel)),
+            "the registered worker's spawn-time CODEX_HOME must reach all agent-aware callers"
+        );
     }
 
     #[test]

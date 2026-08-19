@@ -326,7 +326,8 @@ pub fn normalize_git_remote_url(url: &str) -> Option<String> {
 ///  - the local remote equals the returned `git_remote` (case-insensitive —
 ///    the server lowercases per its `normalizeGitRemote` rule, while our
 ///    [`normalize_git_remote_url`] preserves the original case),
-///  - the returned id differs from the current pin (otherwise it is a no-op).
+///  - no explicit config pin exists. A pin is authoritative, whether set by
+///    `cas cloud project set` or by verified registration-time adoption.
 ///
 /// The git-remote equality gate is the safety property: it prevents a shared
 /// machine whose `origin` differs from the returned project from being silently
@@ -346,14 +347,10 @@ pub fn should_adopt_canonical_id(
     if !local.eq_ignore_ascii_case(resp_remote) {
         return None;
     }
-    let canonical = normalize_project_canonical_id(canonical)?;
-    if current_pin
-        .and_then(normalize_project_canonical_id)
-        .is_some_and(|pin| pin == canonical)
-    {
-        return None; // already pinned correctly — no-op
+    if current_pin.is_some() {
+        return None;
     }
-    Some(canonical)
+    normalize_project_canonical_id(canonical)
 }
 
 /// Derive the canonical project ID from a `.cas` directory path.
@@ -3009,18 +3006,18 @@ mod tests {
     }
 
     #[test]
-    fn adopt_is_case_insensitive_on_remote() {
-        // Our normalize preserves case (Richards-LLC); the server lowercases.
-        // Equality must still hold so mixed-case orgs adopt correctly.
+    fn explicit_pin_blocks_adoption_even_when_remote_matches() {
+        // `[project] canonical_id` is authoritative. The later team-push
+        // path must not undo a server-resolved legacy bucket pin by re-homing
+        // it to the remote-form identity.
         assert_eq!(
             should_adopt_canonical_id(
                 Some("github.com/Richards-LLC/ozer-health"),
                 Some("github.com/richards-llc/ozer-health"),
                 Some("ozer"),
                 Some("github.com/Richards-LLC/ozer-health"),
-            )
-            .as_deref(),
-            Some("ozer"),
+            ),
+            None,
         );
     }
 

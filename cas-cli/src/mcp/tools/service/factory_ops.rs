@@ -1749,7 +1749,7 @@ impl CasService {
                         .any(|worker| worker.name.as_str() == name.as_str())
                         && !selected_launched_names
                             .iter()
-                            .any(|launched| launched == name)
+                            .any(|launched| launched == *name)
                 })
                 .cloned()
                 .collect()
@@ -2547,6 +2547,14 @@ impl CasService {
                             .then(|| transcript_path_fast(clone_path.as_deref(), session_uuid))
                             .flatten()
                     });
+                // A Codex MCP server can keep the registry heartbeat fresh
+                // after the interactive harness has terminally rejected every
+                // turn for exhausted account credits. Prefer the harness's
+                // own terminal record over that process-only heartbeat.
+                let usage_limited = codex_rollout_reports_usage_limit(
+                    transcript_path_for_worker.as_deref(),
+                    worker_cli,
+                );
                 // cas-4fb9 / cas-71d9: checkpoint/heartbeat freshness cannot
                 // answer whether the harness actually started a turn. Render
                 // the harness's own artifact-backed turn observation
@@ -2872,7 +2880,11 @@ impl CasService {
                     "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
-                    liveness_label,
+                    if usage_limited {
+                        " [UNAVAILABLE: Codex usage limit]"
+                    } else {
+                        liveness_label
+                    },
                     held_label,
                     clone_info,
                     git_info,
@@ -6867,6 +6879,43 @@ pub(crate) fn default_codex_sessions_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Whether a resolved Codex rollout records the terminal account-limit failure
+/// that leaves its MCP child heartbeating while no harness turn can proceed.
+///
+/// This intentionally requires the exact user-facing terminal error and the
+/// machine-readable exhausted-credit state in the same bounded tail. A generic
+/// error, an old rate-limit record, or an unresolved rollout is not enough to
+/// declare a live worker unavailable.
+fn codex_rollout_reports_usage_limit(
+    rollout: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+) -> bool {
+    if cli != cas_mux::SupervisorCli::Codex {
+        return false;
+    }
+    let Some(rollout) = rollout else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(rollout) else {
+        return false;
+    };
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let start = metadata.len().saturating_sub(TAIL_BYTES);
+    let Ok(mut file) = std::fs::File::open(rollout) else {
+        return false;
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut tail = String::new();
+    if file.read_to_string(&mut tail).is_err() {
+        return false;
+    }
+    tail.contains("You've hit your usage limit")
+        && (tail.contains("\"has_credits\":false") || tail.contains("\"has_credits\": false"))
+}
+
 fn synthesized_codex_transcript_path(clone_path: &str, session_id: &str) -> String {
     format!(
         "~/.codex/sessions/<YYYY/MM/DD>/rollout-*-*.jsonl (cwd={clone_path}; cas_session={session_id})"
@@ -8347,6 +8396,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("auth.json"), "{}").unwrap();
         preflight_codex_config_dir(temp.path().to_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_limit_rollout_overrides_a_healthy_heartbeat_claim() {
+        let rollout = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rollout.path(),
+            r#"{"type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+        )
+        .unwrap();
+        assert!(codex_rollout_reports_usage_limit(
+            Some(rollout.path()),
+            cas_mux::SupervisorCli::Codex
+        ));
+        assert!(!codex_rollout_reports_usage_limit(
+            Some(rollout.path()),
+            cas_mux::SupervisorCli::Claude
+        ));
     }
 
     /// cas-4a5e: a typo'd/missing codex config_dir must fail with a message

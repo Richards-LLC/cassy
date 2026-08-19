@@ -20,13 +20,15 @@ if [[ ! "$now_epoch" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 
-runs="$(gh api "repos/$repository/actions/runs?event=merge_group&status=in_progress&per_page=100")"
-while IFS=$'\t' read -r run_id started_at head_branch; do
+in_progress_runs="$(gh api "repos/$repository/actions/runs?event=merge_group&status=in_progress&per_page=100")"
+queued_runs="$(gh api "repos/$repository/actions/runs?event=merge_group&status=queued&per_page=100")"
+runs="$(jq -s '{workflow_runs: map(.workflow_runs[]) }' <<<"$in_progress_runs" <<<"$queued_runs")"
+while IFS=$'\t' read -r run_id started_at head_branch status; do
     [[ -n "$run_id" && "$started_at" != null ]] || continue
     started_epoch="$(date -u -d "$started_at" +%s)"
     age_seconds=$((now_epoch - started_epoch))
     (( age_seconds > hang_seconds )) || continue
-    printf 'cancelling stale merge_group run=%s age_seconds=%s threshold_seconds=%s ref=%s\n' \\
-        "$run_id" "$age_seconds" "$hang_seconds" "$head_branch"
+    printf 'cancelling stale merge_group run=%s status=%s age_seconds=%s threshold_seconds=%s ref=%s\n' \
+        "$run_id" "$status" "$age_seconds" "$hang_seconds" "$head_branch"
     gh api --method POST "repos/$repository/actions/runs/$run_id/cancel" >/dev/null
-done < <(jq -r '.workflow_runs[] | [.id, (.run_started_at // .created_at), .head_branch] | @tsv' <<<"$runs")
+done < <(jq -r '.workflow_runs[] | [.id, (.run_started_at // .created_at), .head_branch, .status] | @tsv' <<<"$runs")

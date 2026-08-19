@@ -1,12 +1,15 @@
 # Self-hosted Fast Validation pilot
 
-This pilot is an advisory duplicate of the required hosted Fast Validation
-archive producer. It measures the archive build on the 32-core `soundwave`
-host without making merge eligibility depend on that host. The first real
-measurement kept the three exhaustive partitions in the same local job for
+The push-triggered pilot is an advisory duplicate of the required hosted Fast
+Validation archive producer. Separately, the CI workflow may route the required
+archive producer for a `merge_group` tree to the same 32-core `soundwave` host.
+The route is explicit and fail-safe: unless repository variable
+`CASSY_MERGE_QUEUE_SELF_HOSTED` is exactly `enabled`, the required archive runs
+on GitHub-hosted Ubuntu. Pull-request work always remains hosted. The first
+real measurement kept the three exhaustive partitions in the same local job for
 evaluation; shard 1 stalled in three subprocess-spawning integration tests for
-more than seven minutes, so the pilot deliberately leaves every shard on
-GitHub-hosted runners.
+more than seven minutes, so required shards deliberately remain parallel on
+GitHub-hosted runners even when their archive producer uses the box.
 
 The uncached archive build in self-hosted run
 [32255590235](https://github.com/Richards-LLC/cassy/actions/runs/32255590235)
@@ -37,15 +40,29 @@ independent restrictions:
    create a red/queued advisory run.
 
 Fork pull requests continue to run only the existing GitHub-hosted required
-checks. Approval of a fork workflow does not grant it the selected runner
-group. Do not weaken any of the three restrictions independently.
+checks. The CI route selects the box only when `github.event_name` is
+`merge_group` and the explicit control variable is enabled; the route job does
+not check out source, and the archive job repeats the selected-mode guard.
+Approval of a fork workflow does not grant it the selected runner group. Do not
+weaken any of the three restrictions independently.
 
 ## Availability and isolation
 
-The pilot job is not present in `docs/branch-protection/main-ruleset.json`. Every
-required context, including `Fast Validation — suite archive build` and its
-shards, remains on `ubuntu-latest`. Stopping the local service can queue or
-cancel only the advisory pilot; the required hosted checks continue normally.
+The pilot job is not present in `docs/branch-protection/main-ruleset.json`. The
+ruleset still requires only the `Fast Validation` rollup and `macOS Check`.
+For ordinary PRs, and whenever the self-hosted control variable is absent or
+disabled, every Fast Validation component runs hosted. A merge-queue archive
+may use the trusted box only after the runner is confirmed online; its shards
+remain hosted and parallel.
+
+GitHub cannot reassign a job after it has been scheduled on an offline
+self-hosted label. The safe maintenance/offline-fallback sequence is therefore
+to disable the route first, verify a queue entry selected `ubuntu-latest`, and
+only then stop the listener. An unexpected host failure after an operator has
+explicitly enabled the route is a GitHub scheduler limitation, not a condition
+the workflow can repair after assignment; treat the variable as a readiness
+lease and disable it before any maintenance. This preserves a concrete hosted
+fallback instead of wedging planned queue work.
 
 The listener runs as the non-login `cassy-actions` system account under
 `cassy-actions-runner.service`. Its checkout, Cargo target directory, Rust
@@ -91,11 +108,18 @@ gh api orgs/Richards-LLC/actions/runners
 gh variable set CASSY_SELF_HOSTED_PILOT --repo Richards-LLC/cassy --body enabled
 ```
 
-Before planned maintenance or an offline-fallback drill, disable assignment
-first, then stop the listener:
+Enable required merge-queue archive routing only after that online check:
+
+```bash
+gh variable set CASSY_MERGE_QUEUE_SELF_HOSTED --repo Richards-LLC/cassy --body enabled
+```
+
+Before planned maintenance or an offline-fallback drill, disable required
+merge-queue routing and advisory assignment first, then stop the listener:
 
 ```bash
 gh variable set CASSY_SELF_HOSTED_PILOT --repo Richards-LLC/cassy --body disabled
+gh variable set CASSY_MERGE_QUEUE_SELF_HOSTED --repo Richards-LLC/cassy --body disabled
 sudo systemctl stop cassy-actions-runner.service
 ```
 

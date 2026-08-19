@@ -26,6 +26,11 @@ Environment=CARGO_HOME=/var/lib/cassy-actions/.cargo
 Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup
 Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target
 Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache
+# sccache otherwise discovers the operator's machine-global server on its
+# default port and crosses Unix-user/cache boundaries. A dedicated port keeps
+# runner traffic and statistics inside this service account.
+Environment=SCCACHE_SERVER_PORT=4227
+Environment=SCCACHE_CACHE_SIZE=50G
 Environment=CARGO_BUILD_JOBS=12
 Environment=RUSTC_WRAPPER=sccache
 Environment=PATH=/var/lib/cassy-actions/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -50,4 +55,3 @@ ReadWritePaths=/var/lib/cassy-actions
 
 [Install]
 WantedBy=multi-user.target
-

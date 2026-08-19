@@ -41,7 +41,9 @@ toolchain, and sccache live under `/var/lib/cassy-actions`, never under `.cas`
 or the factory worktrees. The unit has no privileges or Docker access, applies
 systemd filesystem/device/kernel hardening, uses `nice=10` and best-effort
 `ionice=7`, and caps Cargo at 12 jobs. One listener and one workflow concurrency
-group enforce host job concurrency 1.
+group enforce host job concurrency 1. The runner uses dedicated sccache port
+4227; the default port belongs to the operator's cache server and must not be
+shared across Unix users.
 
 ## Provision and audit
 

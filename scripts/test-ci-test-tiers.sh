@@ -120,6 +120,8 @@ require_text "$self_hosted_text" 'permissions:' 'self-hosted workflow declares e
 require_text "$self_hosted_text" 'contents: read' 'self-hosted workflow token is read-only'
 require_text "$self_hosted_text" 'CARGO_BUILD_JOBS: "12"' 'self-hosted compile leaves CPU capacity for the worker fleet'
 require_text "$self_hosted_text" 'CARGO_TARGET_DIR is not isolated from factory worktrees' 'self-hosted job fails if host isolation is lost'
+require_text "$self_hosted_text" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'self-hosted job pins its isolated sccache server'
+require_text "$self_hosted_text" 'SCCACHE_DIR is not isolated from the operator cache' 'self-hosted job rejects the operator sccache directory'
 require_text "$self_hosted_text" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'self-hosted pilot measures the same suite archive'
 require_text "$self_hosted_text" '--partition "count:${shard}/3"' 'self-hosted pilot evaluates every suite shard'
 require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a required status check'

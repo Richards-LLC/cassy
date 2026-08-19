@@ -1,9 +1,12 @@
 # Self-hosted Fast Validation pilot
 
 This pilot is an advisory duplicate of the required hosted Fast Validation
-suite. It measures the archive build and all three exhaustive nextest
-partitions on the 32-core `soundwave` host without making merge eligibility
-depend on that host.
+archive producer. It measures the archive build on the 32-core `soundwave`
+host without making merge eligibility depend on that host. The first real
+measurement kept the three exhaustive partitions in the same local job for
+evaluation; shard 1 stalled in three subprocess-spawning integration tests for
+more than seven minutes, so the pilot deliberately leaves every shard on
+GitHub-hosted runners.
 
 ## Trust boundary
 
@@ -50,6 +53,9 @@ The launch wrapper then uses GitHub's `bin/runsvc.sh`, which translates systemd
 termination into the listener signal that closes the remote session cleanly.
 The pilot workflow explicitly clears `RUSTC_WRAPPER` for its first measured
 receipt. The private cache is a later optimization, never a lane prerequisite.
+It also points `TMPDIR` at GitHub Runner's disk-backed temporary directory;
+nextest's default archive extraction used the unit's private tmpfs-backed
+`/tmp` and consumed about 2.5 GB during the shard evaluation.
 
 ## Provision and audit
 
@@ -96,5 +102,6 @@ systemctl show cassy-actions-runner.service \
 
 To demonstrate hosted fallback, stop the service, push a Rust-touched commit on
 a same-repository factory branch with an open PR, and record that all required
-hosted contexts finish while only the advisory pilot remains queued. Restart
-the service after capturing the receipt.
+hosted contexts finish while the disabled advisory pilot skips cleanly. Restart
+the service only after capturing the receipt and explicitly re-enabling the
+opt-in.

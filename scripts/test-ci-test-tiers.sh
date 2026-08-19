@@ -126,7 +126,9 @@ require_text "$self_hosted_text" 'SCCACHE_DIR is not isolated from the operator 
 require_absent "$self_hosted_text" 'sccache --start-server' 'workflow steps cannot start a cache server that Runner.Worker will reap'
 require_absent "$self_hosted_text" 'sccache --zero-stats' 'pilot workflow does not depend on a cache server for its first receipt'
 require_text "$self_hosted_text" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'self-hosted pilot measures the same suite archive'
-require_text "$self_hosted_text" '--partition "count:${shard}/3"' 'self-hosted pilot evaluates every suite shard'
+require_text "$self_hosted_text" 'TMPDIR: ${{ runner.temp }}' 'self-hosted pilot keeps large temporary files off tmpfs'
+require_absent "$self_hosted_text" 'cargo nextest run' 'self-hosted pilot leaves suite execution on hosted runners'
+require_absent "$self_hosted_text" '--partition' 'self-hosted pilot does not duplicate hosted shard execution'
 require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a required status check'
 
 suite_build="$(job_block fast-validation-suite-build)"

@@ -699,6 +699,18 @@ impl PtyConfig {
             ("IS_DEMO".to_string(), "true".to_string()),
         ];
 
+        // Claude uses this path to associate file-history snapshots and project
+        // skills with a session. A factory worker must name its own worktree,
+        // not inherit the supervisor/main checkout's project directory: the
+        // latter lets Claude restore a foreign session snapshot over a tracked
+        // skill in the worker checkout (GH #507).
+        if role == "worker" {
+            env.push((
+                "CLAUDE_PROJECT_DIR".to_string(),
+                cwd.to_string_lossy().to_string(),
+            ));
+        }
+
         // Set CAS_ROOT env var if provided (enables workers in clones to use main's .cas)
         if let Some(root) = cas_root {
             env.push(("CAS_ROOT".to_string(), root.to_string_lossy().to_string()));
@@ -2100,6 +2112,105 @@ mod tests {
         );
         // No CAS_ROOT when not provided
         assert!(!config.env.iter().any(|(k, _)| k == "CAS_ROOT"));
+        assert!(
+            config
+                .env
+                .iter()
+                .any(|(k, v)| k == "CLAUDE_PROJECT_DIR" && v == "/tmp"),
+            "a worker must explicitly scope Claude file-history and skill loading to its clone"
+        );
+    }
+
+    #[test]
+    fn factory_worker_skill_load_keeps_tracked_worktree_porcelain_clean_cas_fb41() {
+        use std::process::Command;
+
+        let _e = ScopedEnv::new();
+        let sandbox = std::env::temp_dir().join(format!("cas-fb41-{}", uuid::Uuid::new_v4()));
+        let main = sandbox.join("main");
+        let worker = sandbox.join("worker");
+        std::fs::create_dir_all(main.join(".claude/skills/cas-history-probe"))
+            .expect("create tracked skill fixture");
+        std::fs::write(main.join(".claude/skills/cas-history-probe/SKILL.md"), "tracked skill\n")
+            .expect("write tracked skill fixture");
+
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Cassy Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Cassy Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["add", ".claude/skills/cas-history-probe/SKILL.md"]);
+        git(&main, &["commit", "-qm", "add tracked project skill"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "factory/history-probe",
+                worker.to_str().expect("UTF-8 worker path"),
+            ],
+        );
+
+        let config = PtyConfig::claude(
+            "history-probe",
+            "worker",
+            worker.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // Simulate a worker startup loading the tracked project skill while a
+        // main-checkout value is present in its inherited environment. The
+        // launch config must replace it with the worker worktree before the
+        // harness can select file-history for the skill.
+        let load = Command::new("sh")
+            .args([
+                "-c",
+                "test \"$CLAUDE_PROJECT_DIR\" = \"$PWD\" && cat \"$CLAUDE_PROJECT_DIR/.claude/skills/cas-history-probe/SKILL.md\" >/dev/null",
+            ])
+            .current_dir(&worker)
+            .env("CLAUDE_PROJECT_DIR", &main)
+            .envs(config.env.iter().map(|(key, value)| (key, value)))
+            .output()
+            .expect("start worker skill loader probe");
+        assert!(
+            load.status.success(),
+            "worker skill loading must use its own project directory: {}",
+            String::from_utf8_lossy(&load.stderr)
+        );
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&worker)
+            .output()
+            .expect("inspect worker porcelain");
+        assert!(status.status.success(), "git status must succeed");
+        assert!(
+            status.stdout.is_empty(),
+            "skill loading must leave the isolated worker worktree clean, got: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+
+        std::fs::remove_dir_all(&sandbox).expect("remove test sandbox");
     }
 
     #[tokio::test]

@@ -3006,6 +3006,22 @@ mod tests {
     }
 
     #[test]
+    fn adopt_is_case_insensitive_on_remote_when_unpinned() {
+        // The server lowercases git remotes; a fresh clone of a mixed-case
+        // organization must still adopt its server-resolved bucket.
+        assert_eq!(
+            should_adopt_canonical_id(
+                Some("github.com/Richards-LLC/ozer-health"),
+                Some("github.com/richards-llc/ozer-health"),
+                Some("ozer"),
+                None,
+            )
+            .as_deref(),
+            Some("ozer"),
+        );
+    }
+
+    #[test]
     fn explicit_pin_blocks_adoption_even_when_remote_matches() {
         // `[project] canonical_id` is authoritative. The later team-push
         // path must not undo a server-resolved legacy bucket pin by re-homing

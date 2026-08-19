@@ -8,6 +8,15 @@ evaluation; shard 1 stalled in three subprocess-spawning integration tests for
 more than seven minutes, so the pilot deliberately leaves every shard on
 GitHub-hosted runners.
 
+The uncached archive build in self-hosted run
+[32255590235](https://github.com/Richards-LLC/cassy/actions/runs/32255590235)
+took 207.41 seconds. The hosted steady-state baseline in run
+[32146014087](https://github.com/Richards-LLC/cassy/actions/runs/32146014087)
+was 338 seconds, so the 32-core box saved 130.59 seconds (38.6%) but did
+not reach the pilot's two-minute target. This is an honest partial result;
+the private sccache service remains outside the workflow and is not a hidden
+prerequisite for the measurement.
+
 ## Trust boundary
 
 `Richards-LLC/cassy` is public. GitHub warns that persistent self-hosted runners

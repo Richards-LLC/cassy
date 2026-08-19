@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-19
+
+### Fixed
+- **Cloud sync no longer deadlocks on projects whose team bucket predates the git-remote identity contract.** Team registration now adopts the server-resolved canonical project id from the registration response, verifies it, and pins it so the same sync run pushes and pulls against the real bucket. Previously every sync aborted with a misleading "server-side defect" error (gabber-studio was down for two days; any legacy-slug project on a fresh checkout was affected).
+- **`cas cloud project set` is authoritative again.** An explicit `[project] canonical_id` pin is no longer silently rewritten to the remote-derived form, and the later team-push adoption path never overrides an existing pin.
+- **Registration failure messages now name the server-resolved canonical id** instead of wrongly blaming the server when identity resolution diverges.
+
 ## [3.2.0] - 2026-08-19
 
 ### Added

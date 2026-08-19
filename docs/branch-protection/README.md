@@ -10,7 +10,7 @@ The two required contexts are deliberately minimal, but neither removes coverage
 
 | Required context | Unique protection | Steady-state wall | Verdict |
 | --- | --- | --- | --- |
-| `Fast Validation — full suite` | Its fan-in rejects a failed preflight, every exhaustive nextest shard, **and doctests**. | Dominated by the suite archive build/shards; target is under five minutes after the self-hosted archive path. | Required. |
+| `Fast Validation` | Its rollup rejects a failed preflight, the full-suite fan-in (and every exhaustive nextest shard), **and doctests**. | Dominated by the suite archive build/shards; target is under five minutes after the self-hosted archive path. | Required. |
 | `macOS Check` | Darwin/Xcode/SDK compile surface that Linux does not exercise. | Measured about 4.2–4.3 minutes. | Required; no equivalent scoped macOS proof exists yet. |
 
 `Fast Validation — doctests` is intentionally not a separate required context: the required
@@ -62,7 +62,7 @@ Live API application remains operator-visible and must be receipted.
 
 | Job (`name:`) | Triggers | Required? |
 | --- | --- | --- |
-| `Fast Validation` | `pull_request`, `merge_group`, push to `main`, schedule, dispatch | **Yes** |
+| `Fast Validation` | `pull_request`, `merge_group`, push to `main`, schedule, dispatch | **Yes — the rollup, not the lower full-suite fan-in** |
 | `macOS Check` | `pull_request`, `merge_group`, push to `main`, schedule, dispatch | **Yes** — see below |
 | `Release-Profile & Build Guard (compile-only, no test suite)` | `if:` limits it to `schedule` or `refs/heads/main` | **No — must not be required** |
 

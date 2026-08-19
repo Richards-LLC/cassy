@@ -84,8 +84,9 @@ require_text "$ci_text" '- "epic/**"' 'epic pushes trigger CI'
 require_text "$ci_text" '- "v*"' 'release tags trigger CI'
 require_text "$ci_text" 'merge_group:' 'CI accepts merge-queue merged-tree events'
 require_text "$ci_text" 'make -C cas-cli test-ci-tiers' 'Fast Validation invokes release publication guard scripts'
-require_count "$ruleset_text" '"context": "Fast Validation — full suite"' 1 'ruleset requires the Fast Validation fan-in once'
+require_count "$ruleset_text" '"context": "Fast Validation"' 1 'ruleset requires the complete Fast Validation rollup once'
 require_count "$ruleset_text" '"context": "macOS Check"' 1 'ruleset requires macOS validation once'
+require_absent "$ruleset_text" '"context": "Fast Validation — full suite"' 'ruleset does not mistake the lower suite fan-in for complete validation'
 require_absent "$ruleset_text" '"context": "Fast Validation — doctests"' 'ruleset does not duplicate Fast Validation doctest coverage'
 require_text "$ruleset_text" '"type": "merge_queue"' 'ruleset requires the GitHub merge queue'
 require_text "$ruleset_text" '"grouping_strategy": "ALLGREEN"' 'merge queue validates every entry in its group'
@@ -345,6 +346,22 @@ require_text "$fan_in" 'fast-validation-docs' 'required Fast Validation waits fo
 require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required Fast Validation rejects a failed preflight'
 require_text "$fan_in" 'test "$SUITE" = success' 'required Fast Validation rejects a failed full suite'
 require_text "$fan_in" 'test "$DOCS" = success' 'required Fast Validation rejects failed doctests'
+
+# Required-context closure (cas-5496): the ruleset must select the top-level
+# Fast Validation rollup, never its lower suite-only fan-in. This is the
+# coverage proof that a failed OR cancelled preflight, shard, or doctest blocks
+# a merge: always() ensures the fan-in gate still runs after a dependency fails,
+# and each need result must be success.
+require_text "$ruleset_text" '"context": "Fast Validation"' 'required context selects the complete validation rollup'
+require_text "$fan_in" 'always()' 'required validation rollup still runs after a failed dependency'
+require_text "$fan_in" 'fast-validation-preflight' 'required validation closure includes preflight'
+require_text "$fan_in" 'fast-validation-suite' 'required validation closure includes suite fan-in'
+require_text "$fan_in" 'fast-validation-docs' 'required validation closure includes doctests'
+require_text "$fan_in" 'test "$PREFLIGHT" = success' 'required validation rejects failed or cancelled preflight'
+require_text "$fan_in" 'test "$SUITE" = success' 'required validation rejects failed or cancelled suite fan-in'
+require_text "$fan_in" 'test "$DOCS" = success' 'required validation rejects failed or cancelled doctests'
+require_text "$suite" 'always()' 'suite fan-in still runs after a failed shard'
+require_text "$suite" 'test "$SHARDS" = success' 'suite fan-in rejects failed or cancelled shards'
 
 # Merge queue validates GitHub's synthetic merged tree, not the PR head. Both
 # required contexts and every Fast Validation dependency must report there.

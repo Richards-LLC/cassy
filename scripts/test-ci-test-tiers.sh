@@ -15,6 +15,7 @@ real_store_guard="$repo_root/scripts/check-real-store-untouched.sh"
 migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
 watchdog="$repo_root/.github/workflows/merge-queue-watchdog.yml"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
+runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
 
 pass=0
 fail=0
@@ -137,6 +138,10 @@ pilot_doc="$(<"$repo_root/docs/ci/self-hosted-runner-pilot.md")"
 require_text "$pilot_doc" 'restricted_to_workflows=false' 'runner-group policy permits synthetic merge-queue refs'
 require_text "$pilot_doc" 'refs/heads/gh-readonly-queue/...' 'pilot documents queue-ref mismatch'
 require_text "$pilot_doc" 'selected-workflow wildcards are rejected' 'pilot records GitHub wildcard limitation'
+require_text "$pilot_doc" 'CARGO_CACHE_RUSTC_INFO=0' 'pilot documents Cargo rustc-info cache containment'
+
+runner_unit_text="$(<"$runner_unit")"
+require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
 
 if [[ -x "$watchdog_script" ]]; then
     watchdog_text="$(<"$watchdog")"

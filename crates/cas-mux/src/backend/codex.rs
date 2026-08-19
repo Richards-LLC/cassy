@@ -77,15 +77,37 @@ impl Backend for Codex {
         config
     }
 
-    fn prepare_workdir(&self, cwd: &Path) -> Result<()> {
-        match cas_pty::ensure_project_trusted(cwd)? {
-            cas_pty::CodexTrustOutcome::Added(_) | cas_pty::CodexTrustOutcome::AlreadyPresent => {
-                Ok(())
+    fn prepare_workdir(&self, cwd: &Path, config_dir: Option<&str>) -> Result<()> {
+        // A per-worker CODEX_HOME is only installed in the child environment
+        // below. Trust must therefore target that explicit home here, before
+        // the CLI starts; consulting the daemon's own home leaves alternate
+        // accounts at Codex's interactive hooks-review prompt.
+        let trust = match config_dir.filter(|dir| !dir.trim().is_empty()) {
+            Some(home) => {
+                let config = Path::new(home).join("config.toml");
+                match cas_pty::ensure_project_trusted_in(&config, cwd)? {
+                    cas_pty::CodexTrustOutcome::Added(_)
+                    | cas_pty::CodexTrustOutcome::AlreadyPresent => {
+                        cas_pty::ensure_cas_hooks_trusted_in(
+                            &config,
+                            &Path::new(home).join("hooks.json"),
+                        )?;
+                        Ok(())
+                    }
+                    cas_pty::CodexTrustOutcome::Skipped(reason) => Err(Error::pty(format!(
+                        "refusing to launch Codex before its project trust is verified: {reason}"
+                    ))),
+                }
             }
-            cas_pty::CodexTrustOutcome::Skipped(reason) => Err(Error::pty(format!(
-                "refusing to launch Codex before its project trust is verified: {reason}"
-            ))),
-        }
+            None => match cas_pty::ensure_project_trusted(cwd)? {
+                cas_pty::CodexTrustOutcome::Added(_)
+                | cas_pty::CodexTrustOutcome::AlreadyPresent => Ok(()),
+                cas_pty::CodexTrustOutcome::Skipped(reason) => Err(Error::pty(format!(
+                    "refusing to launch Codex before its project trust is verified: {reason}"
+                ))),
+            },
+        };
+        trust
     }
 
     fn push_factory_session(&self, config: &mut PtyConfig, session: &str) {
@@ -99,5 +121,51 @@ impl Backend for Codex {
 
     fn turn_cancel_bytes(&self) -> &'static [u8] {
         &[0x1b]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Backend, CODEX};
+
+    #[test]
+    fn alternate_codex_home_trusts_project_and_home_hook_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "cas-mux-alt-codex-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let worktree = root.join("worktree");
+        let home = root.join("alt-home");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("hooks.json"), "{\"hooks\":{}}").unwrap();
+
+        CODEX
+            .prepare_workdir(&worktree, Some(home.to_str().unwrap()))
+            .unwrap();
+
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
+        let project = worktree.to_string_lossy().to_string();
+        assert_eq!(
+            config["projects"][&project]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        let hooks = home.join("hooks.json").to_string_lossy().to_string();
+        assert!(
+            config["hooks"]["state"]
+                .get(format!("{hooks}:pre_tool_use:0:0"))
+                .is_some()
+        );
+        assert!(
+            config["hooks"]["state"]
+                .get(format!("{hooks}:post_tool_use:0:0"))
+                .is_some()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

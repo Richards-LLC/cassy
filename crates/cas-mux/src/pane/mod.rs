@@ -362,7 +362,7 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
     ) -> Result<Self> {
-        cli.backend().prepare_workdir(&cwd)?;
+        cli.backend().prepare_workdir(&cwd, config_dir)?;
         let mut config = Self::build_worker_config(
             name,
             cwd,
@@ -429,7 +429,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
-        cli.backend().prepare_workdir(&cwd)?;
+        cli.backend().prepare_workdir(&cwd, None)?;
         let mut config = Self::build_supervisor_config(
             name,
             cwd,

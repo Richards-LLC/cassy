@@ -1419,8 +1419,10 @@ impl CasService {
             }
         }
 
-        let strict_cli =
-            strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
+        // A caller who requested Codex must either receive Codex or an
+        // actionable refusal. Rewriting the provider/tier to Claude here is
+        // a cost and capability change the supervisor did not approve.
+        let strict_cli = true;
         let notices = cas_factory::apply_codex_fallback(
             &mut specs,
             strict_cli,
@@ -1581,6 +1583,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
+        use cas_store::SpawnLifecycleState;
         use cas_types::{AgentRole, AgentStatus};
 
         let requested_names: Vec<String> = req
@@ -1616,6 +1619,31 @@ impl CasService {
         })?;
         let owned = supervisor_owned_workers();
         let factory_session = current_factory_session();
+        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open spawn queue: {e}"),
+            )
+        })?;
+        // A launched PTY has a durable lifecycle row before it has an Agent
+        // row. Keep that control-plane identity available to shutdown instead
+        // of making a wedged pre-registration process untargetable.
+        let launched_workers = factory_session
+            .as_deref()
+            .map(|session| queue.recent_spawn_lifecycle(session, 200))
+            .transpose()
+            .map_err(|e| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to list launched workers: {e}"),
+                )
+            })?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|spawn| {
+                spawn.state == SpawnLifecycleState::Launched && spawn.worker_name.is_some()
+            })
+            .collect::<Vec<_>>();
         let all_agents = agent_store.list(None).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1671,8 +1699,43 @@ impl CasService {
                 .collect()
         };
 
+        let selected_launched: Vec<_> = if let Some(id) = requested_id {
+            // `id` accepts either the familiar worker id/name or the spawn
+            // request id printed in the launch receipt.
+            launched_workers
+                .iter()
+                .filter(|spawn| {
+                    spawn.worker_name.as_deref() == Some(id) || spawn.id.to_string() == id
+                })
+                .cloned()
+                .collect()
+        } else if !requested_names.is_empty() {
+            launched_workers
+                .iter()
+                .filter(|spawn| {
+                    spawn.worker_name.as_deref().is_some_and(|name| {
+                        requested_names.iter().any(|requested| requested == name)
+                    })
+                })
+                .cloned()
+                .collect()
+        } else if req.count.unwrap_or(0) == 0 {
+            launched_workers.clone()
+        } else {
+            launched_workers
+                .iter()
+                .take(req.count.unwrap_or_default() as usize)
+                .cloned()
+                .collect()
+        };
+        let selected_launched_names: Vec<String> = selected_launched
+            .iter()
+            .filter_map(|spawn| spawn.worker_name.clone())
+            .filter(|name| !selected.iter().any(|worker| worker.name == *name))
+            .collect();
+
         let missing: Vec<String> = if let Some(id) = requested_id {
-            if selected.is_empty() {
+            if selected.is_empty() && selected_launched.is_empty() {
                 vec![id.to_string()]
             } else {
                 Vec::new()
@@ -1684,14 +1747,23 @@ impl CasService {
                     !selected
                         .iter()
                         .any(|worker| worker.name.as_str() == name.as_str())
+                        && !selected_launched_names
+                            .iter()
+                            .any(|launched| launched == name)
                 })
                 .cloned()
                 .collect()
         };
-        if !missing.is_empty() || selected.is_empty() {
+        if !missing.is_empty() || (selected.is_empty() && selected_launched_names.is_empty()) {
             let known = known_workers
                 .iter()
                 .map(|worker| format!("{} ({})", worker.name, worker.id))
+                .chain(selected_launched.iter().filter_map(|spawn| {
+                    spawn
+                        .worker_name
+                        .as_ref()
+                        .map(|name| format!("{name} (launched; spawn request {})", spawn.id))
+                }))
                 .collect::<Vec<_>>();
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -1746,16 +1818,14 @@ impl CasService {
             ));
         }
 
-        let worker_names: Vec<String> = selected.iter().map(|worker| worker.name.clone()).collect();
+        let worker_names: Vec<String> = selected
+            .iter()
+            .map(|worker| worker.name.clone())
+            .chain(selected_launched_names.iter().cloned())
+            .collect();
 
         // Validation passed: queue only the exact resolved names. `count=None`
         // is intentional — the daemon must not re-expand this decision.
-        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open spawn queue: {e}"),
-            )
-        })?;
 
         let request_id = queue
             .enqueue_shutdown(None, &worker_names, force, factory_session.as_deref())

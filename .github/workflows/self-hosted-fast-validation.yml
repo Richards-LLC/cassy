@@ -1,0 +1,137 @@
+name: Self-hosted Fast Validation pilot
+
+# SECURITY BOUNDARY (cas-f5638): this advisory pilot is deliberately separate
+# from CI's required pull_request workflow. A public fork cannot emit a push in
+# Richards-LLC/cassy, and the runner group independently limits this runner to
+# this repository plus this exact workflow. Do not add pull_request,
+# pull_request_target, workflow_run, issue_comment, or repository_dispatch here.
+on:
+  push:
+    branches:
+      - main
+      - "epic/**"
+      - "factory/**"
+
+permissions:
+  contents: read
+
+# One persistent listener serves this label. Cancel superseded branch heads so
+# stale builds never occupy the box after a newer commit is available.
+concurrency:
+  group: self-hosted-fast-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trusted-suite-pilot:
+    name: Self-hosted pilot — archive and suite shards (advisory)
+    # This expression is evaluated by GitHub before runner assignment. It is a
+    # second control behind the push-only trigger and selected-workflow runner
+    # group: only canonical same-repository branch pushes can reach the box.
+    if: >-
+      github.repository == 'Richards-LLC/cassy'
+      && github.event.repository.fork == false
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/epic/')
+      || startsWith(github.ref, 'refs/heads/factory/'))
+    runs-on:
+      group: cassy-public-trusted
+      labels: cas-ci-32core
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "12"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          # The persistent target and sccache directories live outside the
+          # checkout. Cleaning the source tree remains safe and deterministic.
+          clean: true
+
+      - name: Verify isolated runner contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Richards-LLC/cassy
+          test "$GITHUB_EVENT_NAME" = push
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/heads/epic/*|refs/heads/factory/*) ;;
+            *) echo "ref is outside the trusted same-repository branch set: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+          case "${CARGO_TARGET_DIR:?}" in
+            /var/lib/cassy-actions/*) ;;
+            *) echo "CARGO_TARGET_DIR is not isolated from factory worktrees" >&2; exit 1 ;;
+          esac
+          test "$(id -u)" -ne 0
+          test "$(nproc)" -ge 16
+          command -v cargo rustup sccache mold gcc >/dev/null
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Reset timing and cache counters
+        run: |
+          : > "$RUNNER_TEMP/self-hosted-fast-validation.timings"
+          sccache --zero-stats || true
+
+      - name: Build full suite archive
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_DEV_STRIP: debuginfo
+          CARGO_PROFILE_TEST_STRIP: debuginfo
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'archive_wall_seconds=%e' \
+            -o "$RUNNER_TEMP/archive.time" \
+            cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
+          cat "$RUNNER_TEMP/archive.time" | tee -a "$RUNNER_TEMP/self-hosted-fast-validation.timings"
+
+      # The listener intentionally accepts one job at a time. Running the three
+      # exhaustive partitions in this job evaluates shard cost without adding
+      # runner concurrency or paying artifact upload/download time.
+      - name: Test all three suite shards
+        run: |
+          set -euo pipefail
+          for shard in 1 2 3; do
+            /usr/bin/time -f "shard_${shard}_wall_seconds=%e" \
+              -o "$RUNNER_TEMP/shard-${shard}.time" \
+              cargo nextest run \
+                --archive-file fast-validation-suite.tar.zst \
+                --no-fail-fast \
+                --partition "count:${shard}/3"
+            cat "$RUNNER_TEMP/shard-${shard}.time" | tee -a "$RUNNER_TEMP/self-hosted-fast-validation.timings"
+          done
+
+      - name: Publish pilot timing summary
+        if: always()
+        run: |
+          {
+            echo '## Self-hosted Fast Validation pilot'
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/self-hosted-fast-validation.timings" 2>/dev/null || true
+            sccache --show-stats 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload timing receipt only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-hosted-fast-validation-timings-${{ github.sha }}
+          path: ${{ runner.temp }}/self-hosted-fast-validation.timings
+          if-no-files-found: warn
+          retention-days: 7
+

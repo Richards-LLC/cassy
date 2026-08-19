@@ -31,8 +31,11 @@ if ! id "$runner_user" >/dev/null 2>&1; then
     useradd --system --create-home --home-dir "$runner_root" --shell /usr/sbin/nologin "$runner_user"
 fi
 install -d -o "$runner_user" -g "$runner_user" -m 0750 \
-    "$runner_dir" "$runner_root/cache/cargo-target" "$runner_root/cache/sccache" \
+    "$runner_dir" "$runner_root/cache" "$runner_root/cache/cargo-target" \
+    "$runner_root/cache/sccache" "$runner_root/.cargo" \
     "$runner_root/.cargo/bin" "$runner_root/.rustup"
+chown -R "$runner_user:$runner_user" \
+    "$runner_root/cache" "$runner_root/.cargo" "$runner_root/.rustup"
 
 tmp_dir="$(mktemp -d)"
 chmod 0755 "$tmp_dir"
@@ -51,6 +54,12 @@ if [[ ! -x "$runner_root/.cargo/bin/rustup" ]]; then
         RUSTUP_HOME="$runner_root/.rustup" \
         "$tmp_dir/rustup-init.sh" -y --profile minimal --default-toolchain stable --no-modify-path
 fi
+sudo -u "$runner_user" env HOME="$runner_root" CARGO_HOME="$runner_root/.cargo" \
+    RUSTUP_HOME="$runner_root/.rustup" \
+    "$runner_root/.cargo/bin/rustup" toolchain install stable --profile minimal
+sudo -u "$runner_user" env HOME="$runner_root" CARGO_HOME="$runner_root/.cargo" \
+    RUSTUP_HOME="$runner_root/.rustup" \
+    "$runner_root/.cargo/bin/rustup" default stable
 if command -v sccache >/dev/null 2>&1; then
     install -o "$runner_user" -g "$runner_user" -m 0755 \
         "$(command -v sccache)" "$runner_root/.cargo/bin/sccache"

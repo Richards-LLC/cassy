@@ -28,6 +28,113 @@ pub(crate) struct ViktorWatchRecorder {
     cas_root: PathBuf,
 }
 
+/// Surface a restart that left the managed Viktor upstream disconnected before
+/// a pending watch silently retries forever. The queue receipt is keyed by the
+/// exact durable watch set, so another daemon restart cannot spam a supervisor
+/// while a newly-recorded run still produces a fresh alert.
+pub(crate) async fn alert_unpollable_watches(
+    cas_root: &Path,
+    proxy: &cmcp_core::ProxyEngine,
+) -> Result<usize, String> {
+    if proxy.upstream_connected("viktor").await {
+        return Ok(0);
+    }
+    let store = SqliteViktorWatchStore::open(cas_root).map_err(|error| error.to_string())?;
+    let watches = store.list_live().map_err(|error| error.to_string())?;
+    if watches.is_empty() {
+        return Ok(0);
+    }
+
+    let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
+    let live_agents = agents.list(None).map_err(|error| error.to_string())?;
+    let mut delivered = 0;
+    for supervisor in live_agents.into_iter().filter(|agent| {
+        matches!(agent.role, AgentRole::Supervisor | AgentRole::Director)
+            && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+    }) {
+        let run_ids: Vec<&str> = watches
+            .iter()
+            .filter(|watch| {
+                watch.factory_session.is_none()
+                    || watch.factory_session == supervisor.factory_session
+            })
+            .map(|watch| watch.run_id.as_str())
+            .collect();
+        if run_ids.is_empty() {
+            continue;
+        }
+        let run_ids_text = run_ids.join(", ");
+        let prompt = format!(
+            "<viktor-upstream-absent runs=\"{}\">\nViktor upstream is absent after daemon startup. {} watched run(s) cannot be polled until VIKTOR_API_KEY is available to cas serve and the daemon reconnects. Run IDs: {}.\n</viktor-upstream-absent>",
+            run_ids_text,
+            run_ids.len(),
+            run_ids_text,
+        );
+        let queue = SqlitePromptQueueStore::open(cas_root).map_err(|error| error.to_string())?;
+        queue.init().map_err(|error| error.to_string())?;
+        let receipt = format!(
+            "viktor-upstream-absent:{}:{}",
+            supervisor.id,
+            run_ids.join(",")
+        );
+        queue
+            .enqueue_idempotent(
+                "viktor",
+                &supervisor.name,
+                &prompt,
+                supervisor.factory_session.as_deref(),
+                Some(&format!(
+                    "Viktor upstream absent — {} watched run(s) unpollable",
+                    run_ids.len()
+                )),
+                Some(cas_store::NotificationPriority::High),
+                &receipt,
+            )
+            .map_err(|error| error.to_string())?;
+        delivered += 1;
+    }
+    Ok(delivered)
+}
+
+/// A bounded session-start warning derived from the same durable records that
+/// drive daemon polling. This remains visible even when no supervisor was live
+/// at daemon startup to receive the queue notification.
+pub(crate) fn session_start_warning(cas_root: &Path) -> Option<String> {
+    let health = crate::mcp::read_proxy_health_cache(cas_root).ok()?;
+    let snapshot: cmcp_core::ProxyHealthSnapshot = serde_json::from_slice(&health).ok()?;
+    let absent = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name.eq_ignore_ascii_case("viktor"))
+        .filter(|server| server.state != cmcp_core::UpstreamState::Healthy)?;
+    let watches = SqliteViktorWatchStore::open(cas_root)
+        .ok()
+        .and_then(|store| store.list_live().ok())
+        .unwrap_or_default();
+    let run_ids = watches
+        .iter()
+        .take(8)
+        .map(|watch| watch.run_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let watch_detail = if watches.is_empty() {
+        "No watched runs are pending.".to_string()
+    } else {
+        format!(
+            "{} watched run(s) are unpollable: {}{}.",
+            watches.len(),
+            run_ids,
+            if watches.len() > 8 { ", …" } else { "" }
+        )
+    };
+    Some(format!(
+        "⚠ Viktor upstream absent ({:?}; {}). {} Restore VIKTOR_API_KEY to the cas serve process, then restart or wait for proxy reconnect; run `cas viktor` for durable watch status.",
+        absent.state,
+        absent.last_error_code.as_deref().unwrap_or("unknown"),
+        watch_detail
+    ))
+}
+
 impl ViktorWatchRecorder {
     pub(crate) fn new(cas_root: PathBuf) -> Self {
         Self { cas_root }
@@ -501,4 +608,71 @@ mod tests {
         engine.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn restart_with_absent_viktor_notifies_supervisor_with_durable_run_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut supervisor = Agent::new_with_role(
+            "supervisor-session".to_string(),
+            "supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("factory-1".to_string());
+        agents.register(&supervisor).unwrap();
+
+        // This record stands in for the previous daemon's successful
+        // run-starting call. It must survive the replacement daemon even when
+        // that daemon has no credential with which to reconnect Viktor.
+        let watch_store = SqliteViktorWatchStore::open(temp.path()).unwrap();
+        watch_store
+            .record(
+                "thread-before-restart",
+                "run-before-restart",
+                "worker-session",
+                "worker-1",
+                "worker",
+                Some("factory-1"),
+                Some("cas-fixture"),
+                None,
+                cas_store::DEFAULT_VIKTOR_WATCH_TTL_SECS,
+            )
+            .unwrap();
+
+        let replacement = cmcp_core::ProxyEngine::from_configs(HashMap::from([(
+            "viktor".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                auth: Some("env:CAS_TEST_MISSING_VIKTOR_KEY_8563".to_string()),
+                headers: HashMap::new(),
+                oauth: false,
+            },
+        )]))
+        .await
+        .unwrap();
+        assert!(!replacement.upstream_connected("viktor").await);
+
+        assert_eq!(
+            alert_unpollable_watches(temp.path(), &replacement)
+                .await
+                .unwrap(),
+            1
+        );
+        // The receipt is restart-idempotent: the same durable run does not
+        // create a second high-priority alert every time the daemon starts.
+        assert_eq!(
+            alert_unpollable_watches(temp.path(), &replacement)
+                .await
+                .unwrap(),
+            1
+        );
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let messages = queue.poll_for_target("supervisor", 10).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].prompt.contains("Viktor upstream is absent"));
+        assert!(messages[0].prompt.contains("run-before-restart"));
+        assert_eq!(watch_store.list_live().unwrap().len(), 1);
+
+        replacement.shutdown().await;
+    }
 }

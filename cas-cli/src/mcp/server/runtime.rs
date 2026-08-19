@@ -359,6 +359,14 @@ async fn run_server_impl() -> anyhow::Result<()> {
                         {
                             eprintln!("[Cassy] Failed to publish MCP proxy state: {error}");
                         }
+                        if let Err(error) =
+                            crate::mcp::viktor_watch::alert_unpollable_watches(&cas_root, &engine)
+                                .await
+                        {
+                            eprintln!(
+                                "[Cassy] Failed to surface unpollable Viktor watches: {error}"
+                            );
+                        }
                         Some(std::sync::Arc::new(engine))
                     }
                     Err(e) => {
@@ -1318,14 +1326,14 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(ordinary.contains("server 'github' not connected"));
+        assert!(ordinary.contains("MCP upstream 'github' is absent: it is configured but not connected"));
         assert!(!ordinary.contains("proxy policy denied"));
         let delegated = engine
             .call_external_production_verification_tool(&caller, "viktor", "ask_viktor", None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(delegated.contains("server 'viktor' not connected"));
+        assert!(delegated.contains("MCP upstream 'viktor' is absent: it is configured but not connected"));
         assert!(!delegated.contains("proxy policy denied"));
 
         let audit = engine.policy_audit();

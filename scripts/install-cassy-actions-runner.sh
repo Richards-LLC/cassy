@@ -14,6 +14,7 @@ runner_url="https://github.com/actions/runner/releases/download/v${runner_versio
 runner_sha256=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
 runner_group=cassy-public-trusted
 unit_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ops/systemd/cassy-actions-runner.service"
+wrapper_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ops/systemd/run-cassy-actions-runner.sh"
 
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "run as root (sudo --preserve-env=RUNNER_TOKEN $0)" >&2
@@ -23,8 +24,8 @@ if [[ -z "${RUNNER_TOKEN:-}" ]]; then
     echo "RUNNER_TOKEN must contain a short-lived Richards-LLC organization runner registration token" >&2
     exit 1
 fi
-if [[ ! -f "$unit_source" ]]; then
-    echo "systemd unit not found: $unit_source" >&2
+if [[ ! -f "$unit_source" || ! -f "$wrapper_source" ]]; then
+    echo "systemd service files not found: $unit_source / $wrapper_source" >&2
     exit 1
 fi
 
@@ -79,6 +80,8 @@ sudo -u "$runner_user" env HOME="$runner_root" \
     --labels cas-ci-32core,trusted-branches \
     --work _work
 
+install -o "$runner_user" -g "$runner_user" -m 0755 \
+    "$wrapper_source" "$runner_root/run-service.sh"
 install -o root -g root -m 0644 "$unit_source" /etc/systemd/system/cassy-actions-runner.service
 systemctl daemon-reload
 systemctl enable --now cassy-actions-runner.service

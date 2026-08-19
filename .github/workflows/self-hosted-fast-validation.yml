@@ -91,7 +91,9 @@ jobs:
       - name: Reset timing and cache counters
         run: |
           : > "$RUNNER_TEMP/self-hosted-fast-validation.timings"
-          sccache --start-server
+          # The systemd service owns the server so Runner.Worker's step cleanup
+          # cannot reap it between this step and Cargo.
+          sccache --show-stats >/dev/null
           sccache --zero-stats || true
 
       - name: Build full suite archive

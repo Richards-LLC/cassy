@@ -122,6 +122,8 @@ require_text "$self_hosted_text" 'CARGO_BUILD_JOBS: "12"' 'self-hosted compile l
 require_text "$self_hosted_text" 'CARGO_TARGET_DIR is not isolated from factory worktrees' 'self-hosted job fails if host isolation is lost'
 require_text "$self_hosted_text" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'self-hosted job pins its isolated sccache server'
 require_text "$self_hosted_text" 'SCCACHE_DIR is not isolated from the operator cache' 'self-hosted job rejects the operator sccache directory'
+require_text "$self_hosted_text" 'systemd service owns the server' 'self-hosted job does not spawn a step-scoped cache server'
+require_absent "$self_hosted_text" 'sccache --start-server' 'workflow steps cannot start a cache server that Runner.Worker will reap'
 require_text "$self_hosted_text" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'self-hosted pilot measures the same suite archive'
 require_text "$self_hosted_text" '--partition "count:${shard}/3"' 'self-hosted pilot evaluates every suite shard'
 require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a required status check'

@@ -43,7 +43,9 @@ systemd filesystem/device/kernel hardening, uses `nice=10` and best-effort
 `ionice=7`, and caps Cargo at 12 jobs. One listener and one workflow concurrency
 group enforce host job concurrency 1. The runner uses dedicated sccache port
 4227; the default port belongs to the operator's cache server and must not be
-shared across Unix users.
+shared across Unix users. The systemd launch wrapper starts sccache before the
+GitHub listener, outside Runner.Worker's per-step process tracking; starting it
+inside one workflow step causes the runner to reap it before Cargo's next step.
 
 ## Provision and audit
 

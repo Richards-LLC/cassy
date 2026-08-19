@@ -29,6 +29,7 @@ pub use indexing::{
     index_code_files, reconcile_code_tree, run_code_index_cycle, run_embedding_cycle,
     run_indexing_cycle,
 };
+pub(crate) use maintenance::heartbeat_stale_agent_should_be_reaped;
 pub use maintenance::{run_maintenance, run_once};
 pub use queue::{
     MaintenanceTask, TaskQueue, TaskType, global_queue, queue_embedding_task,

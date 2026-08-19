@@ -1237,6 +1237,20 @@ impl EmbeddedDaemon {
             // This is only for crash detection - normal cleanup via SessionEnd hook
             if let Ok(stale_agents) = agent_store.list_stale(600) {
                 for agent in stale_agents {
+                    if !crate::daemon::heartbeat_stale_agent_should_be_reaped(&agent, |name| {
+                        crate::cli::factory::wedged::find_worker_pid(
+                            &crate::cli::factory::wedged::RealProcessTable,
+                            name,
+                        )
+                        .filter(|pid| pid_alive(*pid))
+                    }) {
+                        tracing::warn!(
+                            worker = %agent.name,
+                            agent_id = %agent.id,
+                            "heartbeat stale but live factory worker process found; skipping reap"
+                        );
+                        continue;
+                    }
                     let held: Vec<String> = agent_store
                         .list_agent_leases(&agent.id)
                         .unwrap_or_default()

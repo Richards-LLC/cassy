@@ -67,6 +67,89 @@ fn test_current_branch() {
     assert!(branch == "main" || branch == "master");
 }
 
+#[test]
+fn create_branch_from_resolves_start_point_and_verifies_exact_ref_cas_42a4() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+    let expected = git.resolve_commit("HEAD").unwrap();
+
+    assert!(git.create_branch_from("epic/verified", "HEAD").unwrap());
+    assert_eq!(
+        git.resolve_commit("refs/heads/epic/verified").as_deref(),
+        Some(expected.as_str())
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo_path.join(".git/refs/heads/epic/verified"))
+            .unwrap()
+            .trim(),
+        expected,
+        "the loose ref must contain the resolved object ID, never the start-point name"
+    );
+}
+
+#[test]
+fn create_branch_from_rejects_unresolvable_start_without_writing_ref_cas_42a4() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+
+    // Reproduce the observed corruption shape: a loose branch ref contains
+    // its own branch name instead of an object ID.
+    let corrupt_ref = repo_path.join(".git/refs/heads/epic/corrupt-base");
+    std::fs::create_dir_all(corrupt_ref.parent().unwrap()).unwrap();
+    std::fs::write(&corrupt_ref, "epic/corrupt-base\n").unwrap();
+
+    let error = git
+        .create_branch_from("epic/must-not-exist", "epic/corrupt-base")
+        .expect_err("a corrupt start point must fail before branch creation");
+
+    assert!(
+        error.to_string().contains("does not resolve to a commit"),
+        "failure must identify the invalid start point: {error}"
+    );
+    assert!(
+        !repo_path
+            .join(".git/refs/heads/epic/must-not-exist")
+            .exists(),
+        "failure must not leave a loose branch ref"
+    );
+    assert!(
+        git.resolve_commit("refs/heads/epic/must-not-exist")
+            .is_none(),
+        "failure must not create any resolvable branch ref"
+    );
+}
+
+#[test]
+fn create_worktree_rejects_unresolvable_start_without_writing_ref_cas_42a4() {
+    let (temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+    let worktree_path = temp.path().join("must-not-exist");
+
+    let corrupt_ref = repo_path.join(".git/refs/heads/epic/corrupt-worktree-base");
+    std::fs::create_dir_all(corrupt_ref.parent().unwrap()).unwrap();
+    std::fs::write(&corrupt_ref, "epic/corrupt-worktree-base\n").unwrap();
+
+    let error = git
+        .create_worktree(
+            &worktree_path,
+            "factory/must-not-exist",
+            Some("epic/corrupt-worktree-base"),
+        )
+        .expect_err("a corrupt worktree start point must fail before ref creation");
+
+    assert!(
+        error.to_string().contains("does not resolve to a commit"),
+        "failure must identify the invalid worktree start point: {error}"
+    );
+    assert!(!worktree_path.exists(), "failure must not create a worktree");
+    assert!(
+        !repo_path
+            .join(".git/refs/heads/factory/must-not-exist")
+            .exists(),
+        "failure must not create the worktree branch ref"
+    );
+}
+
 /// cas-9415: `git merge` commits to implicit HEAD. If another supervisor
 /// parks the shared checkout on a foreign branch after the target was
 /// resolved, the merge helper must refuse before changing any ref or file.

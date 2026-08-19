@@ -186,8 +186,9 @@ impl GitOperations {
     /// Create a branch from a specific base ref if it doesn't exist.
     ///
     /// Unlike `create_branch_if_not_exists`, this uses an explicit start point
-    /// rather than the current HEAD. Pass the configured trunk (e.g. "main") so
-    /// epic and worker branches are always anchored to the correct base.
+    /// rather than the current HEAD. The start point is resolved to a commit ID
+    /// before any ref is written, and the new local branch is read back through
+    /// its fully-qualified ref before success is reported.
     ///
     /// Returns true if the branch was created, false if it already existed.
     pub fn create_branch_from(&self, branch: &str, base: &str) -> Result<bool> {
@@ -195,8 +196,14 @@ impl GitOperations {
             return Ok(false);
         }
 
+        let base_sha = self.resolve_commit(base).ok_or_else(|| {
+            GitError::CommandFailed(format!(
+                "Refusing to create branch '{branch}': start point '{base}' does not resolve to a commit"
+            ))
+        })?;
+
         let output = Command::new("git")
-            .args(["branch", branch, base])
+            .args(["branch", branch, &base_sha])
             .current_dir(&self.repo_root)
             .output()?;
 
@@ -204,6 +211,18 @@ impl GitOperations {
             return Err(GitError::CommandFailed(
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
+        }
+
+        let branch_ref = format!("refs/heads/{branch}");
+        let written_sha = self.resolve_commit(&branch_ref).ok_or_else(|| {
+            GitError::CommandFailed(format!(
+                "Created branch '{branch}', but its ref '{branch_ref}' does not resolve to a commit"
+            ))
+        })?;
+        if written_sha != base_sha {
+            return Err(GitError::CommandFailed(format!(
+                "Created branch '{branch}', but post-verification found {written_sha} instead of expected {base_sha}"
+            )));
         }
 
         Ok(true)

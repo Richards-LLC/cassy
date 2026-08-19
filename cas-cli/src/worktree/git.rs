@@ -688,15 +688,15 @@ impl GitOperations {
             return Err(GitError::BranchExists(branch.to_string()));
         }
 
-        // Validate base branch is a valid ref (catches empty repos with no commits)
-        if let Some(base) = base_branch {
-            if !self.branch_exists(base)? {
-                return Err(GitError::CommandFailed(format!(
-                    "Base branch '{base}' is not a valid reference. Does the repository have any commits? \
-                     Try making an initial commit first."
-                )));
-            }
-        }
+        // Resolve before `git worktree add -b` writes refs/heads/<branch>.
+        // This is the worktree-creation sibling of `create_branch_from`: an
+        // unresolved or corrupt name must never reach a ref-writing command.
+        let start_point = base_branch.unwrap_or("HEAD");
+        let start_sha = self.resolve_commit(start_point).ok_or_else(|| {
+            GitError::CommandFailed(format!(
+                "Refusing to create worktree branch '{branch}': start point '{start_point}' does not resolve to a commit"
+            ))
+        })?;
 
         // Build command
         let mut args = vec!["worktree", "add"];
@@ -704,11 +704,7 @@ impl GitOperations {
         let path_str = path.to_str().ok_or_else(|| {
             GitError::CommandFailed(format!("Path contains invalid UTF-8: {}", path.display()))
         })?;
-        if let Some(base) = base_branch {
-            args.extend(["-b", branch, path_str, base]);
-        } else {
-            args.extend(["-b", branch, path_str]);
-        }
+        args.extend(["-b", branch, path_str, &start_sha]);
 
         let output = Command::new("git")
             .args(&args)
@@ -719,6 +715,18 @@ impl GitOperations {
             return Err(GitError::CommandFailed(
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
+        }
+
+        let branch_ref = format!("refs/heads/{branch}");
+        let written_sha = self.resolve_commit(&branch_ref).ok_or_else(|| {
+            GitError::CommandFailed(format!(
+                "Created worktree branch '{branch}', but its ref '{branch_ref}' does not resolve to a commit"
+            ))
+        })?;
+        if written_sha != start_sha {
+            return Err(GitError::CommandFailed(format!(
+                "Created worktree branch '{branch}', but post-verification found {written_sha} instead of expected {start_sha}"
+            )));
         }
 
         // Initialize submodules in the new worktree

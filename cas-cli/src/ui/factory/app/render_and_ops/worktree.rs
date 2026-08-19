@@ -47,7 +47,7 @@ impl FactoryApp {
             (resolved.sha.clone(), resolved.behind_count)
         };
 
-        if git_ops.create_branch_from(&branch_name, &base_choice.base_ref)? {
+        if git_ops.create_branch_from(&branch_name, &base_sha)? {
             tracing::info!(
                 "Created epic branch {} from base '{}' (sha={}, behind={})",
                 branch_name,

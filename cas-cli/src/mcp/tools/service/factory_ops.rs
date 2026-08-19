@@ -8394,11 +8394,16 @@ mod tests {
         }
     }
 
-    /// cas-4a5e: a codex config_dir whose `auth.json` is present must pass.
+    /// GH #491: Codex's `CODEX_HOME` has `auth.json`, not Claude's
+    /// `settings.json` / `.credentials.json` profile files. Keep this at the
+    /// preflight boundary so a valid alternate Codex account cannot regress
+    /// into the old Claude-shaped validation failure.
     #[test]
-    fn codex_config_dir_preflight_passes_when_auth_json_present() {
+    fn codex_config_dir_preflight_accepts_codex_home_without_claude_profile_files() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("auth.json"), "{}").unwrap();
+        assert!(!temp.path().join("settings.json").exists());
+        assert!(!temp.path().join(".credentials.json").exists());
         preflight_codex_config_dir(temp.path().to_str().unwrap()).unwrap();
     }
 

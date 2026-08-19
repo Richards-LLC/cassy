@@ -217,7 +217,7 @@ tool = "list_issues"
         }),
     );
     let admitted_message = admitted["error"]["message"].as_str().unwrap();
-    assert!(admitted_message.contains("server 'github' not connected"));
+    assert!(admitted_message.contains("MCP upstream 'github' is absent: it is configured but not connected"));
     assert!(!admitted_message.contains("proxy policy denied"));
 }
 

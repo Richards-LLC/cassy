@@ -71,14 +71,17 @@ else
     exit 1
 fi
 
-sudo -u "$runner_user" env HOME="$runner_root" \
-    "$runner_dir/config.sh" --unattended --replace \
-    --url https://github.com/Richards-LLC \
-    --token "$RUNNER_TOKEN" \
-    --name soundwave-cas-ci \
-    --runnergroup "$runner_group" \
-    --labels cas-ci-32core,trusted-branches \
-    --work _work
+(
+    cd "$runner_dir"
+    sudo -u "$runner_user" env HOME="$runner_root" \
+        ./config.sh --unattended --replace \
+        --url https://github.com/Richards-LLC \
+        --token "$RUNNER_TOKEN" \
+        --name soundwave-cas-ci \
+        --runnergroup "$runner_group" \
+        --labels cas-ci-32core,trusted-branches \
+        --work _work
+)
 
 install -o "$runner_user" -g "$runner_user" -m 0755 \
     "$wrapper_source" "$runner_root/run-service.sh"

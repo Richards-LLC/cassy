@@ -6,5 +6,7 @@ set -euo pipefail
 
 sccache --start-server
 sccache --show-stats >/dev/null
-exec /var/lib/cassy-actions/runner/run.sh
-
+# GitHub's service wrapper translates systemd SIGTERM to Runner.Listener
+# SIGINT, allowing the remote session to close cleanly. The interactive run.sh
+# loop can leave a stale session that rejects the restarted listener.
+exec /var/lib/cassy-actions/runner/bin/runsvc.sh

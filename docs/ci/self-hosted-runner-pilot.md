@@ -46,6 +46,8 @@ group enforce host job concurrency 1. The runner uses dedicated sccache port
 shared across Unix users. The systemd launch wrapper starts sccache before the
 GitHub listener, outside Runner.Worker's per-step process tracking; starting it
 inside one workflow step causes the runner to reap it before Cargo's next step.
+The launch wrapper then uses GitHub's `bin/runsvc.sh`, which translates systemd
+termination into the listener signal that closes the remote session cleanly.
 
 ## Provision and audit
 

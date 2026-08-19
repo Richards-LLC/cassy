@@ -31,17 +31,17 @@ CARGO ?= cargo
 
 # Run all tests
 test:
-	$(CARGO) nextest run --workspace --no-fail-fast
-	$(CARGO) test -p cas --doc
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh test -p cas --doc
 
 # Run full test matrix
 test-full:
-	$(CARGO) nextest run -p cas --all-features --no-fail-fast
-	$(CARGO) test -p cas --all-features --doc
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --all-features --no-fail-fast
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh test -p cas --all-features --doc
 
 # Run tests with output
 test-verbose:
-	$(CARGO) nextest run -p cas --no-capture
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --no-capture
 
 # Reproduce the clean-CI environment shape locally (cas-43ce / GH #136).
 #
@@ -72,11 +72,11 @@ test-clean-env:
 		echo "No CAS_* variables set — already in the clean-CI shape."; \
 	fi; \
 	unset_args=$$(echo "$$stripped" | sed 's/^/-u /'); \
-	env $$unset_args $(CARGO) nextest run -p cas $(CLEAN_ENV_ARGS)
+	env $$unset_args CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas $(CLEAN_ENV_ARGS)
 
 # Run specific test module
 test-%:
-	$(CARGO) nextest run -p cas $* --no-capture
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas $* --no-capture
 
 # Generate coverage report (requires cargo-tarpaulin)
 # Install: cargo install cargo-tarpaulin
@@ -157,12 +157,12 @@ release-fast:
 test-release-panic: test-release-panic-release test-release-panic-release-fast
 
 test-release-panic-release:
-	$(CARGO) nextest run -p cas --release --lib panic_regression
-	$(CARGO) nextest run -p cas --release --test search_utf8_regression_test
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --release --lib panic_regression
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --release --test search_utf8_regression_test
 
 test-release-panic-release-fast:
-	$(CARGO) nextest run -p cas --cargo-profile release-fast --lib panic_regression
-	$(CARGO) nextest run -p cas --cargo-profile release-fast --test search_utf8_regression_test
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --cargo-profile release-fast --lib panic_regression
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --cargo-profile release-fast --test search_utf8_regression_test
 
 # Prove a test run writes nothing into a real CAS store (cas-78c8 / GH #156).
 #
@@ -200,6 +200,7 @@ test-scoped:
 # Prove the GH #173 guard itself still fails every silent-success shape.
 test-scoped-selftest:
 	../scripts/test-run-scoped-tests.sh
+	../scripts/test-run-verified-tests.sh
 
 # Prove factory pushes stay scoped while epic/main/tag gates retain the full
 # matrix, including macOS, and reject the retired sccache cache protocol.
@@ -211,6 +212,7 @@ test-scoped-selftest:
 # migration-snapshot suite went stale for five days (cas-66ee). Keep this list
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
+	cd .. && ./scripts/test-run-verified-tests.sh
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
@@ -245,23 +247,23 @@ install-tools:
 
 # Run tests with nextest (faster parallel execution)
 test-nextest:
-	$(CARGO) nextest run -p cas --all-features
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --all-features
 
 # Watch for changes and run tests
 watch:
-	$(CARGO) watch -x "nextest run -p cas"
+	$(CARGO) watch -s '../scripts/run-verified-tests.sh nextest run -p cas'
 
 # Integration tests only
 integration:
-	$(CARGO) test -p cas --all-features --test "*" -- --test-threads=1
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh test -p cas --all-features --test "*" -- --test-threads=1
 
 # Unit tests only (lib tests)
 unit:
-	$(CARGO) nextest run -p cas --lib
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --lib
 
 # Run library tests without the optional MCP proxy
 dev-test:
-	$(CARGO) nextest run -p cas --lib --no-default-features
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --lib --no-default-features
 
 # Generate cargo timing report
 timings:

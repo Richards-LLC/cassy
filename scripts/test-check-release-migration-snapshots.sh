@@ -15,7 +15,8 @@ cargo_stub="$tmpdir/cargo"
 git init -q "$repo"
 git -C "$repo" config user.email release-guard@example.test
 git -C "$repo" config user.name release-guard-test
-mkdir -p "$repo/cas-cli/src/migration/migrations"
+mkdir -p "$repo/cas-cli/src/migration/migrations" "$repo/scripts"
+cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
 printf '// baseline\n' >"$repo/cas-cli/src/migration/migrations/mod.rs"
 git -C "$repo" add .
 git -C "$repo" commit -qm 'baseline migration registry'
@@ -24,6 +25,7 @@ git -C "$repo" tag v0.0.1
 cat >"$cargo_stub" <<EOF
 #!/usr/bin/env bash
 printf '%s\\n' "\$*" >>"$cargo_log"
+printf '%s\\n' '     Summary [   0.001s] 1 test run: 1 passed, 0 skipped'
 exit "\${CARGO_EXIT:-0}"
 EOF
 chmod +x "$cargo_stub"
@@ -85,7 +87,8 @@ no_tag_repo="$tmpdir/no-tag-repo"
 git init -q "$no_tag_repo"
 git -C "$no_tag_repo" config user.email release-guard@example.test
 git -C "$no_tag_repo" config user.name release-guard-test
-mkdir -p "$no_tag_repo/cas-cli/src/migration/migrations"
+mkdir -p "$no_tag_repo/cas-cli/src/migration/migrations" "$no_tag_repo/scripts"
+cp "$script_dir/run-verified-tests.sh" "$no_tag_repo/scripts/run-verified-tests.sh"
 printf '// first release\n' >"$no_tag_repo/cas-cli/src/migration/migrations/mod.rs"
 git -C "$no_tag_repo" add .
 git -C "$no_tag_repo" commit -qm 'first migration registry'

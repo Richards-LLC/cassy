@@ -22,5 +22,5 @@ else
   echo "release guard: $migration_registry changed since $previous_tag; running migration snapshots"
 fi
 
-echo "+ cargo nextest run -p cas --test component_output_test"
-"$cargo_bin" nextest run -p cas --test component_output_test
+echo "+ scripts/run-verified-tests.sh nextest run -p cas --test component_output_test"
+CARGO="$cargo_bin" "$repo_root/scripts/run-verified-tests.sh" nextest run -p cas --test component_output_test

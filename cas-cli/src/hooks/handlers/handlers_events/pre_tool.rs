@@ -30,8 +30,8 @@ pub fn handle_pre_tool_use(
     // In a workspace that is not fmt-clean, either shape spills unrelated
     // changes. A full test invocation similarly links dozens of binaries.
     // Workers use non-mutating/scoped format commands, iterate with cargo check,
-    // and run a test target (`--lib`, `--test`, etc.); the supervisor integration
-    // merge and release gate own full-suite runs.
+    // and run a test target through the receipt wrapper; the supervisor
+    // integration merge and release gate own full-suite runs.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -53,14 +53,14 @@ pub fn handle_pre_tool_use(
                  A workspace normalization requires separate operator approval and must not be run from a worker.",
             ));
         }
-        if command.is_some_and(worker_command_runs_unscoped_tests) {
+        if command.is_some_and(worker_command_runs_unguarded_tests) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "🚫 UNSCOPED WORKER TEST RUN: a full suite links dozens of test binaries in this worktree.\n\n\
-                 Iterate with `cargo check -p cas --lib --tests`, then run the affected target through the guarded nextest recipe:\n  \
+                "🚫 UNVERIFIED WORKER TEST RUN: Cargo can exit 0 when a filter selected zero tests, so direct Cargo test output is not a verification receipt.\n\n\
+                 Iterate with `cargo check -p cas --lib --tests`, then run the affected target through the guarded recipe:\n  \
                  `scripts/run-scoped-tests.sh -p cas --lib <module>`\n  \
                  `scripts/run-scoped-tests.sh -p cas --test <name>`\n\n\
-                 Full-suite runs are reserved for the supervisor integration merge and the release gate.",
+                 The wrapper requires a nonzero passed count. Full-suite runs are reserved for the supervisor integration merge and the release gate.",
             ));
         }
     }
@@ -908,16 +908,13 @@ pub fn handle_pre_tool_use(
     Ok(HookOutput::empty())
 }
 
-/// Detect a worker shell command that launches an entire Cargo test matrix.
-///
-/// Package selection alone (`-p cas`) is not a test-target scope: this repo's
-/// one package still owns dozens of integration binaries. A target selector is
-/// required. Runtime name filters do not count either because Cargo links all
-/// test targets before applying them.
-fn worker_command_runs_unscoped_tests(command: &str) -> bool {
+/// Detect a worker shell command that executes Cargo tests without the
+/// zero-executed receipt wrapper.  A target scope controls cost but does not
+/// prove the filter matched anything, because Cargo exits zero for zero tests.
+fn worker_command_runs_unguarded_tests(command: &str) -> bool {
     super::attribution::split_shell_statements(command)
         .iter()
-        .any(|words| test_invocation_without_target_scope(words))
+        .any(|words| direct_test_invocation_without_receipt(words))
 }
 
 /// Detect formatter invocations that can mutate files outside a worker's scope.
@@ -976,7 +973,7 @@ fn formatter_invocation_can_spill(words: &[String]) -> bool {
     !skips_children
 }
 
-fn test_invocation_without_target_scope(words: &[String]) -> bool {
+fn direct_test_invocation_without_receipt(words: &[String]) -> bool {
     let Some(cargo_index) = words
         .iter()
         .position(|word| word == "cargo" || word.ends_with("/cargo"))
@@ -991,23 +988,9 @@ fn test_invocation_without_target_scope(words: &[String]) -> bool {
         return false;
     }
 
-    !cargo_args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--lib"
-                | "--test"
-                | "--bin"
-                | "--bins"
-                | "--example"
-                | "--examples"
-                | "--bench"
-                | "--benches"
-                | "--doc"
-        ) || arg.starts_with("--test=")
-            || arg.starts_with("--bin=")
-            || arg.starts_with("--example=")
-            || arg.starts_with("--bench=")
-    })
+    // `--no-run` intentionally compiles test targets without claiming tests
+    // passed. It is not a test-execution receipt and remains available.
+    !cargo_args.iter().any(|arg| arg == "--no-run")
 }
 
 // ── Worker commit guard helpers (cas-bea2, LAYER 1) ───────────────────────

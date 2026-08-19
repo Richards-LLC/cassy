@@ -22,6 +22,8 @@ struct ViktorReport {
     upstream_status: String,
     watched_runs_pending: usize,
     pending_run_ids: Vec<String>,
+    inbound_questions_pending: usize,
+    pending_inbound_message_ids: Vec<String>,
 }
 
 /// Print the configuration contract without reading or displaying the API key.
@@ -41,6 +43,10 @@ pub fn execute(_args: &ViktorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow
     let watches = cas_root
         .and_then(|root| cas_store::SqliteViktorWatchStore::open(root).ok())
         .and_then(|store| store.list_live().ok())
+        .unwrap_or_default();
+    let inbound = cas_root
+        .and_then(|root| cas_store::SqliteViktorInboundStore::open(root).ok())
+        .and_then(|store| store.list_pending(32).ok())
         .unwrap_or_default();
     #[cfg(feature = "mcp-proxy")]
     let upstream_status = cas_root
@@ -75,10 +81,15 @@ pub fn execute(_args: &ViktorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow
         project_config,
         project_policy: "an existing .cas/proxy.toml opts out of the managed Viktor default; explicitly configure the sanctioned Viktor server and routes before direct calls",
         startup_action: "run cas serve without a project proxy config; startup refreshes the credential-reference-only managed Viktor upstream",
-        reply_delivery: "run-starting calls are durably watched by CAS; replies arrive as inbound notifications (origin=viktor), and a disconnected upstream surfaces pending run IDs instead of silently dropping them",
+        reply_delivery: "run-starting calls are durably watched by CAS; replies and Viktor-originated questions arrive as inbound notifications (origin=viktor), and disconnected/no-live states remain durable instead of being dropped",
         upstream_status,
         watched_runs_pending: watches.len(),
         pending_run_ids: watches.into_iter().map(|watch| watch.run_id).collect(),
+        inbound_questions_pending: inbound.len(),
+        pending_inbound_message_ids: inbound
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect(),
     };
 
     if cli.json {
@@ -111,6 +122,15 @@ pub fn execute(_args: &ViktorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow
                 String::new()
             } else {
                 format!(" ({})", report.pending_run_ids.join(", "))
+            }
+        );
+        println!(
+            "  inbound questions pending: {}{}",
+            report.inbound_questions_pending,
+            if report.pending_inbound_message_ids.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", report.pending_inbound_message_ids.join(", "))
             }
         );
         println!("  replies: {}", report.reply_delivery);

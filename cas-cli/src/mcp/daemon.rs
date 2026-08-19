@@ -787,6 +787,12 @@ impl EmbeddedDaemon {
                         ).await {
                             tracing::warn!(error = %error, "Viktor inbound watch tick failed");
                         }
+                        if let Err(error) = crate::mcp::viktor_watch::discover_originated_messages(
+                            &self.config.cas_root,
+                            &proxy,
+                        ).await {
+                            tracing::warn!(error = %error, "Viktor originated-thread discovery tick failed");
+                        }
                     }
                 }
 

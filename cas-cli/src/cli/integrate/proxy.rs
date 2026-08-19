@@ -194,6 +194,26 @@ impl ProxyClient {
             })
         })
     }
+
+    /// Shut down a lazily-created proxy engine before this client is dropped.
+    ///
+    /// Call this from a synchronous context when a client may otherwise be
+    /// dropped while a Tokio runtime is active. It is safe to call more than
+    /// once; later calls have no engine left to stop. Like [`Drop`], this
+    /// method must not run from inside an active Tokio runtime.
+    pub fn shutdown(&self) {
+        // Recover from a poisoned Mutex so a prior failed call cannot leave
+        // an upstream MCP child alive until process exit.
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((rt, engine)) = guard.take() {
+            rt.block_on(async move {
+                engine.shutdown().await;
+            });
+        }
+    }
 }
 
 impl Drop for ProxyClient {
@@ -206,16 +226,7 @@ impl Drop for ProxyClient {
         //
         // Drop MUST NOT be invoked from inside an active tokio runtime
         // (see module doc).
-        let mut guard = match self.state.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        if let Some((rt, engine)) = guard.take() {
-            rt.block_on(async move {
-                engine.shutdown().await;
-            });
-            // rt drops here, joining its blocking pool.
-        }
+        self.shutdown();
     }
 }
 
@@ -306,6 +317,14 @@ mod tests {
         assert_eq!(client.server_name(), "vercel");
         // Drop with no engine constructed must not panic.
         drop(client);
+    }
+
+    #[test]
+    fn explicit_shutdown_is_idempotent_before_lazy_engine_initialization() {
+        let client = ProxyClient::new("vercel");
+        client.shutdown();
+        client.shutdown();
+        assert!(!client.engine_constructed());
     }
 
     #[test]

@@ -22,7 +22,7 @@ fi
 
 in_progress_runs="$(gh api "repos/$repository/actions/runs?event=merge_group&status=in_progress&per_page=100")"
 queued_runs="$(gh api "repos/$repository/actions/runs?event=merge_group&status=queued&per_page=100")"
-runs="$(jq -s '{workflow_runs: map(.workflow_runs[]) }' <<<"$in_progress_runs" <<<"$queued_runs")"
+runs="$(printf '%s\n%s\n' "$in_progress_runs" "$queued_runs" | jq -s '{workflow_runs: map(.workflow_runs[]) }')"
 while IFS=$'\t' read -r run_id started_at head_branch status; do
     [[ -n "$run_id" && "$started_at" != null ]] || continue
     started_epoch="$(date -u -d "$started_at" +%s)"

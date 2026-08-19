@@ -20,6 +20,14 @@ Every forwarded call is attributed by the proxy policy audit to the registered
 CAS caller, active task leases, and dispatch timestamp; request arguments and
 upstream output are not retained in that receipt.
 
+The embedded daemon also discovers Viktor-originated threads that have no
+CAS-created watch row. Discovery reuses the 30-second watcher cadence, is
+bounded to one 32-thread `list_threads` scan plus at most four `list_messages`
+calls and four seconds per tick, and deduplicates durably by provider message ID. A question
+is queued with `origin=viktor` to one live factory supervisor; if none exists,
+the durable message is surfaced exactly once at the next supervisor
+SessionStart. Replies use the existing `send_message` tool on that thread.
+
 An existing `.cas/proxy.toml` intentionally replaces the user allowlist and
 delegation policy rather than widening it. Projects that have one must add the
 same exact routes there to opt into direct Viktor conversations. This preserves

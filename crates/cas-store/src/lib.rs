@@ -71,6 +71,7 @@ mod supervisor_queue_store;
 mod task_store;
 pub mod tracing;
 mod verification_store;
+mod viktor_inbound_store;
 mod viktor_watch_store;
 mod worktree_store;
 
@@ -187,9 +188,9 @@ pub use verification_store::{
 };
 
 // Durable Viktor thread watches used by the embedded daemon's inbound bridge.
+pub use viktor_inbound_store::{SqliteViktorInboundStore, ViktorInboundMessage};
 pub use viktor_watch_store::{
-    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch,
-    ViktorWatchStatus,
+    DEFAULT_VIKTOR_WATCH_TTL_SECS, SqliteViktorWatchStore, ViktorThreadWatch, ViktorWatchStatus,
 };
 
 // Worktree store for git worktree tracking

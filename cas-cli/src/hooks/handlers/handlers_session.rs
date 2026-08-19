@@ -205,6 +205,16 @@ pub fn handle_session_start(
     }
 
     #[cfg(feature = "mcp-proxy")]
+    if is_supervisor
+        && let Some(inbound) = crate::mcp::viktor_watch::surface_inbound_at_session_start(
+            cas_root,
+            std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+        )
+    {
+        assembler.prepend_protected(inbound);
+    }
+
+    #[cfg(feature = "mcp-proxy")]
     if let Some(warning) = crate::mcp::viktor_watch::session_start_warning(cas_root) {
         assembler.prepend_degradable(warning.clone(), warning);
     }
@@ -620,6 +630,43 @@ mod large_artifact_staging_tests {
         assert!(
             !context.contains("CONCURRENT SUPERVISORS ACTIVE"),
             "a lone supervisor must not receive a false concurrent-supervisor warning: {context}"
+        );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn supervisor_session_start_surfaces_viktor_inbound_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbound = cas_store::SqliteViktorInboundStore::open(tmp.path()).unwrap();
+        assert!(
+            inbound
+                .record(
+                    "thread-provider-question",
+                    "message-provider-question",
+                    "Can Cassy answer from SessionStart?",
+                )
+                .unwrap()
+        );
+        inbound
+            .mark_delivery_error(
+                "message-provider-question",
+                "no live factory supervisor was registered at discovery time",
+            )
+            .unwrap();
+
+        let mut env = staging_env("supervisor");
+        env.set("CAS_AGENT_NAME", "next-supervisor");
+        env.set("CAS_FACTORY_SESSION", "factory-viktor-inbound");
+        let input = session_input(tmp.path().to_str().unwrap());
+        let first = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(first.contains("Viktor-originated message arrived"));
+        assert!(first.contains("thread-provider-question"));
+        assert!(first.contains("Can Cassy answer from SessionStart?"));
+
+        let second = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(
+            !second.contains("thread-provider-question"),
+            "the durable inbound question must be receipted after one SessionStart"
         );
     }
 

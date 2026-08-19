@@ -4,16 +4,24 @@
 use std::path::{Path, PathBuf};
 
 use cas_store::{
-    EnqueueIdempotentResult, PromptQueueStore, SqlitePromptQueueStore, SqliteViktorWatchStore,
-    ViktorThreadWatch,
+    EnqueueIdempotentResult, PromptQueueStore, SqlitePromptQueueStore, SqliteViktorInboundStore,
+    SqliteViktorWatchStore, ViktorInboundMessage, ViktorThreadWatch,
 };
-use cas_types::{AgentRole, AgentStatus};
+use cas_types::{Agent, AgentRole, AgentStatus};
 use serde_json::{Map, Value};
 
 pub(crate) const VIKTOR_WATCH_POLL_INTERVAL_SECS: i64 = 30;
 pub(crate) const VIKTOR_WATCH_MAX_PER_TICK: usize = 16;
 pub(crate) const VIKTOR_WATCH_MAX_CALLS_PER_TICK: usize = VIKTOR_WATCH_MAX_PER_TICK * 2;
 pub(crate) const VIKTOR_WATCH_TICK_BUDGET_SECS: u64 = 20;
+pub(crate) const VIKTOR_INBOUND_DISCOVERY_SCAN_THREADS: usize = 32;
+pub(crate) const VIKTOR_INBOUND_DISCOVERY_MAX_THREADS: usize = 4;
+pub(crate) const VIKTOR_INBOUND_DISCOVERY_MAX_CALLS: usize =
+    VIKTOR_INBOUND_DISCOVERY_MAX_THREADS + 1;
+pub(crate) const VIKTOR_INBOUND_DISCOVERY_BUDGET_SECS: u64 = 4;
+const VIKTOR_INBOUND_MESSAGES_PER_THREAD: usize = 8;
+const VIKTOR_INBOUND_SESSION_START_LIMIT: usize = 1;
+const VIKTOR_INBOUND_SESSION_START_BODY_CHARS: usize = 2_000;
 
 const START_TOOLS: &[&str] = &["ask_viktor", "create_thread", "send_message"];
 const TERMINAL_RUN_STATES: &[&str] = &[
@@ -99,6 +107,37 @@ pub(crate) async fn alert_unpollable_watches(
 /// A bounded session-start warning derived from the same durable records that
 /// drive daemon polling. This remains visible even when no supervisor was live
 /// at daemon startup to receive the queue notification.
+pub(crate) fn surface_inbound_at_session_start(
+    cas_root: &Path,
+    factory_session: Option<&str>,
+) -> Option<String> {
+    let store = SqliteViktorInboundStore::open(cas_root).ok()?;
+    let messages = store
+        .surface_pending(factory_session, VIKTOR_INBOUND_SESSION_START_LIMIT)
+        .ok()?;
+    if messages.is_empty() {
+        return None;
+    }
+    let mut rendered = String::from(
+        "⚠ Viktor-originated message arrived while no live Cassy supervisor could receive it. It is surfaced once here; answer on its existing thread through Viktor `send_message`.",
+    );
+    for message in messages {
+        let body = message
+            .body
+            .chars()
+            .take(VIKTOR_INBOUND_SESSION_START_BODY_CHARS)
+            .collect::<String>();
+        let truncated = (message.body.chars().count() > VIKTOR_INBOUND_SESSION_START_BODY_CHARS)
+            .then_some("\n[message truncated to the SessionStart safety bound]")
+            .unwrap_or_default();
+        rendered.push_str(&format!(
+            "\n\n<viktor-inbound thread_id=\"{}\" message_id=\"{}\">\n{}{}\n</viktor-inbound>",
+            message.thread_id, message.message_id, body, truncated
+        ));
+    }
+    Some(rendered)
+}
+
 pub(crate) fn session_start_warning(cas_root: &Path) -> Option<String> {
     let health = crate::mcp::read_proxy_health_cache(cas_root).ok()?;
     let snapshot: cmcp_core::ProxyHealthSnapshot = serde_json::from_slice(&health).ok()?;
@@ -133,6 +172,205 @@ pub(crate) fn session_start_warning(cas_root: &Path) -> Option<String> {
         absent.last_error_code.as_deref().unwrap_or("unknown"),
         watch_detail
     ))
+}
+
+/// Discover provider-originated threads on the same cadence as run watches.
+/// One tick costs at most one `list_threads` plus four `list_messages` calls,
+/// and the whole discovery pass is cancelled after four seconds.
+pub(crate) async fn discover_originated_messages(
+    cas_root: &Path,
+    proxy: &cmcp_core::ProxyEngine,
+) -> Result<usize, String> {
+    if !proxy.upstream_connected("viktor").await {
+        return Ok(0);
+    }
+    tracing::debug!(
+        max_threads = VIKTOR_INBOUND_DISCOVERY_MAX_THREADS,
+        scan_threads = VIKTOR_INBOUND_DISCOVERY_SCAN_THREADS,
+        max_calls = VIKTOR_INBOUND_DISCOVERY_MAX_CALLS,
+        budget_secs = VIKTOR_INBOUND_DISCOVERY_BUDGET_SECS,
+        "Viktor originated-thread discovery tick"
+    );
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(VIKTOR_INBOUND_DISCOVERY_BUDGET_SECS);
+    let caller = discovery_caller();
+    let list_args = Map::from_iter([(
+        "limit".to_string(),
+        Value::from(VIKTOR_INBOUND_DISCOVERY_SCAN_THREADS as u64),
+    )]);
+    let threads = tokio::time::timeout_at(
+        deadline,
+        proxy.call_tool(&caller, "viktor", "list_threads", Some(list_args)),
+    )
+    .await
+    .map_err(|_| "Viktor inbound discovery exhausted its 4s wall-clock budget".to_string())?
+    .map_err(|error| bounded_error(&error.to_string()))?;
+
+    let watch_store = SqliteViktorWatchStore::open(cas_root).map_err(|error| error.to_string())?;
+    let inbound_store =
+        SqliteViktorInboundStore::open(cas_root).map_err(|error| error.to_string())?;
+    let mut thread_ids = provider_items(&threads, "threads")
+        .into_iter()
+        .filter_map(|thread| item_id(&thread, "thread_id"))
+        .collect::<Vec<_>>();
+    thread_ids.dedup();
+    thread_ids.truncate(VIKTOR_INBOUND_DISCOVERY_SCAN_THREADS);
+    let mut candidates = Vec::new();
+    for thread_id in thread_ids {
+        if watch_store
+            .contains_thread(&thread_id)
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
+        let known = inbound_store
+            .contains_thread(&thread_id)
+            .map_err(|error| error.to_string())?;
+        candidates.push((known, thread_id));
+    }
+    // Drain newly observed threads before refreshing known inbound threads so
+    // a busy unresolved conversation cannot permanently starve the next one.
+    candidates.sort_by_key(|(known, _)| *known);
+
+    for (_, thread_id) in candidates
+        .into_iter()
+        .take(VIKTOR_INBOUND_DISCOVERY_MAX_THREADS)
+    {
+        let args = Map::from_iter([
+            ("thread_id".to_string(), Value::String(thread_id.clone())),
+            (
+                "limit".to_string(),
+                Value::from(VIKTOR_INBOUND_MESSAGES_PER_THREAD as u64),
+            ),
+        ]);
+        let messages = tokio::time::timeout_at(
+            deadline,
+            proxy.call_tool(&caller, "viktor", "list_messages", Some(args)),
+        )
+        .await
+        .map_err(|_| "Viktor inbound discovery exhausted its 4s wall-clock budget".to_string())?
+        .map_err(|error| bounded_error(&error.to_string()))?;
+        for message in provider_items(&messages, "messages") {
+            let Some(message_id) = item_id(&message, "message_id") else {
+                tracing::error!(thread_id, "Viktor inbound message had no stable message id");
+                continue;
+            };
+            let body = render_message_body(&message);
+            if body.trim().is_empty() {
+                tracing::error!(
+                    thread_id,
+                    message_id,
+                    "Viktor inbound message had no content"
+                );
+                continue;
+            }
+            inbound_store
+                .record(&thread_id, &message_id, &body)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    deliver_pending_inbound(cas_root, &inbound_store)
+}
+
+fn discovery_caller() -> cmcp_core::ProxyCaller {
+    cmcp_core::ProxyCaller {
+        agent_id: "cas-daemon-viktor-inbound".to_string(),
+        role: AgentRole::Supervisor,
+        session_id: "cas-daemon-viktor-inbound".to_string(),
+        factory_session: None,
+        active_task_ids: Vec::new(),
+    }
+}
+
+fn live_supervisor(cas_root: &Path) -> Option<Agent> {
+    let store = crate::store::open_agent_store(cas_root).ok()?;
+    store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|agent| {
+            matches!(agent.role, AgentRole::Supervisor | AgentRole::Director)
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                && agent.factory_session.is_some()
+        })
+        .max_by_key(|agent| agent.last_heartbeat)
+}
+
+fn deliver_pending_inbound(
+    cas_root: &Path,
+    store: &SqliteViktorInboundStore,
+) -> Result<usize, String> {
+    let pending = store
+        .list_pending(VIKTOR_INBOUND_DISCOVERY_MAX_THREADS * VIKTOR_INBOUND_MESSAGES_PER_THREAD)
+        .map_err(|error| error.to_string())?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let Some(supervisor) = live_supervisor(cas_root) else {
+        for message in pending {
+            store
+                .mark_delivery_error(
+                    &message.message_id,
+                    "no live factory supervisor was registered at discovery time",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(0);
+    };
+    let queue = SqlitePromptQueueStore::open(cas_root).map_err(|error| error.to_string())?;
+    queue.init().map_err(|error| error.to_string())?;
+    let mut delivered = 0;
+    for message in pending {
+        let prompt = render_originated_message(&message);
+        let enqueued = queue
+            .enqueue_idempotent(
+                "viktor",
+                &supervisor.name,
+                &prompt,
+                supervisor.factory_session.as_deref(),
+                Some(&format!("Viktor question on {}", message.thread_id)),
+                Some(cas_store::NotificationPriority::High),
+                &format!("viktor-inbound:{}", message.message_id),
+            )
+            .map_err(|error| error.to_string())?;
+        let notification_id = match enqueued {
+            EnqueueIdempotentResult::Created(id) => {
+                delivered += 1;
+                id
+            }
+            EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        store
+            .mark_delivered(
+                &message.message_id,
+                supervisor.factory_session.as_deref(),
+                Some(notification_id),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let _ = cas_factory::notify_daemon(cas_root);
+    Ok(delivered)
+}
+
+fn render_originated_message(message: &ViktorInboundMessage) -> String {
+    format!(
+        "<viktor-inbound thread_id=\"{}\" message_id=\"{}\">\n{}\n\nReply on this thread through the existing Viktor `send_message` tool with `thread_id=\"{}\"`; do not start a replacement thread.\n</viktor-inbound>",
+        message.thread_id, message.message_id, message.body, message.thread_id
+    )
+}
+
+fn render_message_body(value: &Value) -> String {
+    for key in ["content", "text", "message", "markdown"] {
+        if let Some(text) = value
+            .as_object()
+            .and_then(|object| object.get(key))
+            .and_then(Value::as_str)
+        {
+            return text.chars().take(16_000).collect();
+        }
+    }
+    render_provider_payload(value)
 }
 
 impl ViktorWatchRecorder {
@@ -401,6 +639,63 @@ fn render_provider_payload(value: &Value) -> String {
     rendered.chars().take(16_000).collect()
 }
 
+fn provider_items(value: &Value, collection_key: &str) -> Vec<Value> {
+    let decoded = decode_provider_payload(value);
+    match decoded {
+        Value::Array(items) => items,
+        Value::Object(mut object) => object
+            .remove(collection_key)
+            .and_then(|items| items.as_array().cloned())
+            .or_else(|| {
+                object
+                    .values()
+                    .find_map(|child| find_array_by_key(child, collection_key))
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn decode_provider_payload(value: &Value) -> Value {
+    if let Value::Object(object) = value
+        && let Some(Value::Array(content)) = object.get("content")
+        && let Some(text) = content.iter().find_map(|item| {
+            item.as_object()
+                .and_then(|item| item.get("text"))
+                .and_then(Value::as_str)
+        })
+        && let Ok(decoded) = serde_json::from_str(text)
+    {
+        return decoded;
+    }
+    value.clone()
+}
+
+fn find_array_by_key(value: &Value, key: &str) -> Option<Vec<Value>> {
+    match value {
+        Value::Object(object) => object
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| {
+                object
+                    .values()
+                    .find_map(|child| find_array_by_key(child, key))
+            }),
+        Value::Array(items) => items.iter().find_map(|child| find_array_by_key(child, key)),
+        _ => None,
+    }
+}
+
+fn item_id(value: &Value, flat_key: &str) -> Option<String> {
+    value
+        .as_object()
+        .and_then(|object| object.get(flat_key).or_else(|| object.get("id")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| find_string_by_key(value, flat_key))
+}
+
 fn collect_content_text(value: &Value, texts: &mut Vec<String>) {
     match value {
         Value::Object(object) => {
@@ -507,6 +802,10 @@ mod tests {
         assert!(!TERMINAL_RUN_STATES.contains(&"running"));
         assert_eq!(VIKTOR_WATCH_MAX_CALLS_PER_TICK, 32);
         assert_eq!(VIKTOR_WATCH_TICK_BUDGET_SECS, 20);
+        assert_eq!(VIKTOR_INBOUND_DISCOVERY_SCAN_THREADS, 32);
+        assert_eq!(VIKTOR_INBOUND_DISCOVERY_MAX_THREADS, 4);
+        assert_eq!(VIKTOR_INBOUND_DISCOVERY_MAX_CALLS, 5);
+        assert_eq!(VIKTOR_INBOUND_DISCOVERY_BUDGET_SECS, 4);
     }
 
     #[tokio::test]
@@ -605,6 +904,208 @@ mod tests {
         );
         assert!(fallback[0].prompt.contains("run-fixture-2"));
 
+        engine.shutdown().await;
+    }
+
+    async fn inbound_fixture_engine(cas_root: &Path) -> cmcp_core::ProxyEngine {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mock_mcp_viktor_inbound_server.py");
+        let config = cmcp_core::config::ServerConfig::Stdio {
+            command: "python3".to_string(),
+            args: vec![fixture.display().to_string()],
+            env: HashMap::new(),
+        };
+        let engine =
+            cmcp_core::ProxyEngine::from_configs(HashMap::from([("viktor".to_string(), config)]))
+                .await
+                .unwrap();
+        engine
+            .set_call_observer(std::sync::Arc::new(ViktorWatchRecorder::new(
+                cas_root.to_path_buf(),
+            )))
+            .await;
+        engine
+    }
+
+    #[tokio::test]
+    async fn provider_originated_thread_reaches_live_supervisor_once_and_can_reply() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut other_supervisor = Agent::new_with_role(
+            "other-supervisor-session".to_string(),
+            "other-supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        other_supervisor.factory_session = Some("factory-other".to_string());
+        agents.register(&other_supervisor).unwrap();
+        let mut supervisor = Agent::new_with_role(
+            "supervisor-session".to_string(),
+            "live-supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("factory-inbound".to_string());
+        supervisor.last_heartbeat = other_supervisor.last_heartbeat + chrono::Duration::seconds(1);
+        agents.register(&supervisor).unwrap();
+
+        // The second fixture thread was opened by CAS earlier. Discovery must
+        // leave that existing watch path alone, including after its run ends.
+        let watch_store = SqliteViktorWatchStore::open(temp.path()).unwrap();
+        let prior_watch = watch_store
+            .record(
+                "thread-cas-opened",
+                "run-cas-opened",
+                &supervisor.id,
+                &supervisor.name,
+                "supervisor",
+                supervisor.factory_session.as_deref(),
+                None,
+                None,
+                cas_store::DEFAULT_VIKTOR_WATCH_TTL_SECS,
+            )
+            .unwrap();
+        watch_store.mark_delivered(prior_watch, 404).unwrap();
+
+        let engine = inbound_fixture_engine(temp.path()).await;
+        assert_eq!(
+            discover_originated_messages(temp.path(), &engine)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            discover_originated_messages(temp.path(), &engine)
+                .await
+                .unwrap(),
+            0,
+            "the same provider message id must not enqueue twice"
+        );
+
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let messages = queue
+            .poll_for_target_with_session(
+                &supervisor.name,
+                supervisor.factory_session.as_deref(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].source, "viktor");
+        assert_eq!(
+            messages[0].factory_session.as_deref(),
+            Some("factory-inbound")
+        );
+        assert!(messages[0].prompt.contains("thread-viktor-originated"));
+        assert!(messages[0].prompt.contains("message-viktor-question"));
+        assert!(
+            messages[0]
+                .prompt
+                .contains("Can Cassy answer this question on-thread?")
+        );
+        assert!(messages[0].prompt.contains("send_message"));
+        assert!(!messages[0].prompt.contains("thread-cas-opened"));
+        assert!(
+            queue
+                .poll_for_target_with_session(
+                    &other_supervisor.name,
+                    other_supervisor.factory_session.as_deref(),
+                    10,
+                )
+                .unwrap()
+                .is_empty(),
+            "an originated question must route to one supervisor session, not broadcast"
+        );
+
+        // No new write surface is needed: the existing send_message route is
+        // still observed and arms the ordinary watched-run reply path.
+        let caller = cmcp_core::ProxyCaller {
+            agent_id: supervisor.id.clone(),
+            role: AgentRole::Supervisor,
+            session_id: supervisor.id.clone(),
+            factory_session: supervisor.factory_session.clone(),
+            active_task_ids: vec![],
+        };
+        engine
+            .call_tool(
+                &caller,
+                "viktor",
+                "send_message",
+                Some(Map::from_iter([
+                    (
+                        "thread_id".to_string(),
+                        Value::String("thread-viktor-originated".to_string()),
+                    ),
+                    (
+                        "message".to_string(),
+                        Value::String("Cassy's on-thread answer".to_string()),
+                    ),
+                ])),
+            )
+            .await
+            .unwrap();
+        assert!(
+            SqliteViktorWatchStore::open(temp.path())
+                .unwrap()
+                .list_live()
+                .unwrap()
+                .iter()
+                .any(|watch| watch.run_id == "run-cassy-reply")
+        );
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_live_supervisor_is_durable_and_surfaces_once_at_session_start() {
+        let temp = tempfile::tempdir().unwrap();
+        SqliteViktorWatchStore::open(temp.path())
+            .unwrap()
+            .record(
+                "thread-cas-opened",
+                "run-cas-opened",
+                "ended-agent",
+                "ended-agent",
+                "standard",
+                None,
+                None,
+                None,
+                cas_store::DEFAULT_VIKTOR_WATCH_TTL_SECS,
+            )
+            .unwrap();
+        let engine = inbound_fixture_engine(temp.path()).await;
+        assert_eq!(
+            discover_originated_messages(temp.path(), &engine)
+                .await
+                .unwrap(),
+            0,
+            "discovery cannot claim live delivery when no supervisor exists"
+        );
+        let pending = SqliteViktorInboundStore::open(temp.path())
+            .unwrap()
+            .list_pending(8)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].last_error.as_deref(),
+            Some("no live factory supervisor was registered at discovery time")
+        );
+
+        let warning = surface_inbound_at_session_start(temp.path(), Some("factory-next"))
+            .expect("the next supervisor SessionStart must surface the durable question");
+        assert!(warning.contains("while no live Cassy supervisor could receive"));
+        assert!(warning.contains("thread-viktor-originated"));
+        assert!(warning.contains("Can Cassy answer this question on-thread?"));
+        assert!(warning.contains("send_message"));
+        assert!(
+            surface_inbound_at_session_start(temp.path(), Some("factory-next")).is_none(),
+            "SessionStart surfacing must be exactly once"
+        );
+        assert!(
+            SqliteViktorInboundStore::open(temp.path())
+                .unwrap()
+                .list_pending(8)
+                .unwrap()
+                .is_empty()
+        );
         engine.shutdown().await;
     }
 

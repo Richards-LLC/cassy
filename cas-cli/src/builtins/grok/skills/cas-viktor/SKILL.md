@@ -23,6 +23,10 @@ inbound notification with `origin=viktor`. Do not poll `get_run` or `get_run_res
 Treat starts as spend-bearing: use a bounded question, never auto-retry an uncertain start, and
 reconcile an existing thread/run before continuing.
 
+Viktor may also originate a thread and question Cassy. That arrives through the same inbound
+notification channel with `origin=viktor`; answer on the supplied thread with the existing
+`send_message` tool instead of creating a replacement thread.
+
 ## Boundary
 
 The proxy has a fail-closed allowlist and holds the credential reference. Never handle,

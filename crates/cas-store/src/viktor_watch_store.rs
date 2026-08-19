@@ -215,6 +215,19 @@ impl SqliteViktorWatchStore {
             .map_err(Into::into)
     }
 
+    /// Any CAS-created watch, including a terminal one, proves that the thread
+    /// originated on the existing outbound path and must not be rediscovered
+    /// as a provider-initiated thread.
+    pub fn contains_thread(&self, thread_id: &str) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM viktor_thread_watches WHERE thread_id = ?1)",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn record_poll(
         &self,
         id: i64,

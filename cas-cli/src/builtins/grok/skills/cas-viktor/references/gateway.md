@@ -33,6 +33,13 @@ notification with `origin=viktor`. The requesting agent must not poll; it receiv
 normally on a later turn. If the requester is gone, CAS routes the notification to the live
 session supervisor.
 
+Viktor-originated threads require no prior CAS watch. The daemon checks Viktor's newest threads
+on the same 30-second cadence, skips every thread with any local watch row, and spends at most one
+32-thread `list_threads` scan plus four `list_messages` calls and four seconds per tick. Each provider message ID
+is durable and idempotent. It is routed with `origin=viktor` to one live, factory-session-filtered
+supervisor; when none is live, the question is retained and surfaced exactly once at the next
+supervisor SessionStart. Reply with `send_message` on the supplied thread ID.
+
 ## Cost and security
 
 Viktor starts can cost money or outlive a client timeout. Do not automatically retry a start;

@@ -184,6 +184,11 @@ impl SessionContextAssembler {
         self.push(false, text, None);
     }
 
+    /// Prepend a safety segment that must survive verbatim.
+    pub(crate) fn prepend_protected(&mut self, text: String) {
+        self.push(true, text, None);
+    }
+
     /// Append a segment that degrades to `compact` when over budget.
     pub(crate) fn append_degradable(&mut self, full: String, compact: String) {
         self.push(false, full, Some(compact));

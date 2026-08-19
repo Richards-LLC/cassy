@@ -4,6 +4,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ci="$repo_root/.github/workflows/ci.yml"
+self_hosted="$repo_root/.github/workflows/self-hosted-fast-validation.yml"
 release="$repo_root/.github/workflows/release.yml"
 setup="$repo_root/.github/actions/setup-rust-linux/action.yml"
 fallback="$repo_root/scripts/sccache-unavailable.sh"
@@ -71,6 +72,7 @@ release_job_block() {
 
 ci_text="$(<"$ci")"
 ruleset_text="$(<"$ruleset")"
+self_hosted_text="$(<"$self_hosted")"
 mapfile -t required_contexts < <(
     grep -oE '"context": "[^"]+"' "$ruleset" | sed -E 's/"context": "(.*)"/\1/'
 )
@@ -96,6 +98,43 @@ require_text "$ruleset_text" '"grouping_strategy": "ALLGREEN"' 'merge queue vali
 require_text "$ruleset_text" '"max_entries_to_build": 1' 'merge queue avoids batching extra PRs into the latency path'
 require_text "$ruleset_text" '"max_entries_to_merge": 1' 'merge queue merges one proven PR at a time'
 require_text "$ruleset_text" '"min_entries_to_merge_wait_minutes": 0' 'merge queue adds no group-fill wait'
+
+# Self-hosted pilot security/availability contract (cas-f5638). This repo is
+# public, so fork/untrusted PR code must be unable to request the persistent
+# runner. Required checks remain hosted: the local box is advisory and an
+# outage cannot strand merge eligibility.
+require_text "$self_hosted_text" 'push:' 'self-hosted pilot accepts canonical repository pushes'
+require_text "$self_hosted_text" '- "factory/**"' 'self-hosted pilot accepts trusted factory branches'
+require_text "$self_hosted_text" '- "epic/**"' 'self-hosted pilot accepts trusted epic branches'
+for forbidden_event in pull_request: pull_request_target: workflow_run: issue_comment: repository_dispatch: workflow_dispatch:; do
+    require_absent "$self_hosted_text" "$forbidden_event" "self-hosted pilot rejects event before runner assignment: $forbidden_event"
+done
+require_text "$self_hosted_text" "github.repository == 'Richards-LLC/cassy'" 'self-hosted job pins the canonical repository'
+require_text "$self_hosted_text" "vars.CASSY_SELF_HOSTED_PILOT == 'enabled'" 'self-hosted job skips cleanly until an online listener is explicitly enabled'
+require_text "$self_hosted_text" 'github.event.repository.fork == false' 'self-hosted job rejects fork repositories'
+require_text "$self_hosted_text" "github.event_name == 'push'" 'self-hosted job repeats the push-only trust gate'
+require_text "$self_hosted_text" "startsWith(github.ref, 'refs/heads/factory/')" 'self-hosted job pins trusted factory refs'
+require_text "$self_hosted_text" 'group: cassy-public-trusted' 'self-hosted job uses the restricted runner group'
+require_text "$self_hosted_text" 'labels: cas-ci-32core' 'self-hosted job uses its unique runner label'
+require_text "$self_hosted_text" 'permissions:' 'self-hosted workflow declares explicit token permissions'
+require_text "$self_hosted_text" 'contents: read' 'self-hosted workflow token is read-only'
+require_text "$self_hosted_text" 'CARGO_BUILD_JOBS: "12"' 'self-hosted compile leaves CPU capacity for the worker fleet'
+require_text "$self_hosted_text" 'RUSTC_WRAPPER: ""' 'pilot archive timing is not coupled to sccache availability'
+require_text "$self_hosted_text" 'CARGO_TARGET_DIR is not isolated from factory worktrees' 'self-hosted job fails if host isolation is lost'
+require_text "$self_hosted_text" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'self-hosted job pins its isolated sccache server'
+require_text "$self_hosted_text" 'SCCACHE_DIR is not isolated from the operator cache' 'self-hosted job rejects the operator sccache directory'
+require_absent "$self_hosted_text" 'sccache --start-server' 'workflow steps cannot start a cache server that Runner.Worker will reap'
+require_absent "$self_hosted_text" 'sccache --zero-stats' 'pilot workflow does not depend on a cache server for its first receipt'
+require_text "$self_hosted_text" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'self-hosted pilot measures the same suite archive'
+require_text "$self_hosted_text" 'TMPDIR: ${{ runner.temp }}' 'self-hosted pilot keeps large temporary files off tmpfs'
+require_absent "$self_hosted_text" 'cargo nextest run' 'self-hosted pilot leaves suite execution on hosted runners'
+require_absent "$self_hosted_text" '--partition' 'self-hosted pilot does not duplicate hosted shard execution'
+require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a required status check'
+
+suite_build="$(job_block fast-validation-suite-build)"
+suite_shards="$(job_block fast-validation-suite-shards)"
+require_text "$suite_build" 'runs-on: ubuntu-latest' 'required archive build retains automatic hosted availability'
+require_text "$suite_shards" 'runs-on: ubuntu-latest' 'required suite shards retain automatic hosted availability'
 
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'

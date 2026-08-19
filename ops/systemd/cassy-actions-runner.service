@@ -1,0 +1,57 @@
+[Unit]
+Description=Cassy trusted-branch GitHub Actions runner
+Documentation=https://github.com/Richards-LLC/cassy/blob/main/docs/ci/self-hosted-runner-pilot.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cassy-actions
+Group=cassy-actions
+WorkingDirectory=/var/lib/cassy-actions/runner
+ExecStart=/usr/bin/ionice -c 2 -n 7 /var/lib/cassy-actions/run-service.sh
+Restart=always
+RestartSec=10s
+TimeoutStopSec=2min
+KillMode=mixed
+
+# Keep the pilot below the five-worker fleet's scheduling priority and prevent
+# one archive compile from treating all 32 logical CPUs as exclusively its own.
+Nice=10
+CPUWeight=25
+IOWeight=25
+TasksMax=512
+Environment=HOME=/var/lib/cassy-actions
+Environment=CARGO_HOME=/var/lib/cassy-actions/.cargo
+Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup
+Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target
+Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache
+# sccache otherwise discovers the operator's machine-global server on its
+# default port and crosses Unix-user/cache boundaries. A dedicated port keeps
+# runner traffic and statistics inside this service account.
+Environment=SCCACHE_SERVER_PORT=4227
+Environment=SCCACHE_CACHE_SIZE=50G
+Environment=CARGO_BUILD_JOBS=12
+Environment=RUSTC_WRAPPER=sccache
+Environment=PATH=/var/lib/cassy-actions/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# The listener needs network access and one writable state root. It does not
+# need root, Docker, factory worktrees, home directories, devices, or kernel
+# mutation privileges.
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/cassy-actions
+
+[Install]
+WantedBy=multi-user.target

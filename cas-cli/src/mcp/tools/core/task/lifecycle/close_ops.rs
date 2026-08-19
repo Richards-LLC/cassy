@@ -1892,6 +1892,30 @@ impl CasCore {
             }
         }
 
+        // cas-e74c: resolve the work-cycle identity before the urgent-halt
+        // gate as well as the later delivery/review gates. cas-a699 needs the
+        // same current-cycle boundary before it can safely recognize the one
+        // completed PendingSupervisorReview exit below.
+        let task_commit_identity = task_commit_identity(
+            &task,
+            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+                .ok()
+                .flatten()
+                .map(|(receipt, _)| receipt.commit_sha),
+        );
+        let commit_receipt_window = {
+            let lease_history = self
+                .open_agent_store()
+                .ok()
+                .and_then(|store| store.get_lease_history(&req.id, None).ok())
+                .unwrap_or_default();
+            Some(resolve_task_commit_receipt_window(
+                task.created_at,
+                &lease_history,
+                task_commit_identity.clone(),
+            ))
+        };
+
         // cas-b269/cas-85fd: urgent stop sets halt_task_work; block close
         // until the worker answers that exchange (or starts a new task).
         //
@@ -1915,6 +1939,16 @@ impl CasCore {
                         task.status,
                         task.assignee.as_deref(),
                         Some(agent.name.as_str()),
+                    ) || super::stale_close_guard::halt_exempt_for_owned_approved_supervisor_review(
+                        task.status,
+                        task.assignee.as_deref(),
+                        Some(agent.name.as_str()),
+                        self.current_cycle_approved_verification(
+                            &req.id,
+                            required_verification_type(task.task_type),
+                            commit_receipt_window.as_ref(),
+                        )
+                        .is_some(),
                     );
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
@@ -2252,36 +2286,6 @@ impl CasCore {
                 return Ok(Self::tool_error(message));
             }
             Err(_) => "main".to_string(),
-        };
-        // cas-5626: a worker-supplied receipt is attributable only to the
-        // current task work cycle. The latest claim/transfer survives the
-        // AwaitingMerge park path, while a reopened task gets a newer claim.
-        // Fall back to task creation when lease history is unavailable.
-        // cas-e74c: resolved unconditionally (it used to be computed only
-        // when a receipt was supplied). The merge-state guard now needs the
-        // same work-cycle window to tell this task's commits apart from a
-        // reused lane's prior-task residue, receipt or no receipt.
-        // cas-9596: attribution evidence for commits this task produced in ANY
-        // cycle, under any assignee — the parked factory anchor, the durable
-        // worker delivery receipt, and the task id itself.
-        let task_commit_identity = task_commit_identity(
-            &task,
-            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
-                .ok()
-                .flatten()
-                .map(|(receipt, _)| receipt.commit_sha),
-        );
-        let commit_receipt_window = {
-            let lease_history = self
-                .open_agent_store()
-                .ok()
-                .and_then(|store| store.get_lease_history(&req.id, None).ok())
-                .unwrap_or_default();
-            Some(resolve_task_commit_receipt_window(
-                task.created_at,
-                &lease_history,
-                task_commit_identity.clone(),
-            ))
         };
         // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
         // repository this close is bound to. The cross-repo delivery in the

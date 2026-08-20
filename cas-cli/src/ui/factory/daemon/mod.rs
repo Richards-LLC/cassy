@@ -233,6 +233,12 @@ pub struct FactoryDaemon {
     notify_rx: Option<cas_factory::DaemonNotifier>,
     /// Workers that have been shut down or crashed — their queued messages are dropped.
     dead_workers: std::collections::HashSet<String>,
+    /// Workers whose harness has reported a terminal unavailable state in the
+    /// current session. One supervisor relay per episode; removal permits a
+    /// later recovered-and-exhausted worker to surface again.
+    reported_unavailable_workers: std::collections::HashSet<String>,
+    /// Last bounded rollout scan for terminal harness availability evidence.
+    last_usage_limit_scan: Option<Instant>,
     /// In-flight spawns cancelled by a shutdown that targeted that specific
     /// generation. Entries are consumed when the matching spawn task finishes.
     cancelled_spawns: std::collections::HashSet<String>,

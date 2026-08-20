@@ -58,6 +58,11 @@ const SEMANTIC_INJECTION_FLOOR: f64 = 0.47;
 const UBIQUITOUS_TERM_MIN_DOCUMENTS: usize = 3;
 const UBIQUITOUS_TERM_DOCUMENT_FREQUENCY: f64 = 0.80;
 
+/// Decision traces are evidence for diagnosing an ambient-recall turn, not a
+/// second retrieval corpus. Keep one record bounded even when a retriever has
+/// a large local candidate window.
+const RECALL_DECISION_CANDIDATE_CAP: usize = 24;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RecallRole {
@@ -333,6 +338,221 @@ impl RecallQuery {
             focus_terms,
             authored_evidence,
         })
+    }
+}
+
+/// Durable, queryable account of one ambient-recall decision.  This is kept
+/// beside the disposable session ledger so an operator can distinguish a hook
+/// that was never eligible from retrieval, precision, and prompt-budget
+/// decisions after the session is over.
+#[derive(Debug, Serialize)]
+struct RecallDecisionTrace {
+    recorded_at: DateTime<Utc>,
+    session_id: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    silence_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversational: Option<bool>,
+    #[serde(default)]
+    terms: Vec<RecallTriggerTerm>,
+    #[serde(default)]
+    candidates: Vec<RecallDecisionCandidate>,
+    #[serde(default)]
+    injected: Vec<String>,
+    rejected_scope: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RecallTriggerTerm {
+    term: String,
+    source: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct RecallDecisionCandidate {
+    evidence_id: String,
+    relevance: f64,
+    lexical_score: f64,
+    semantic_score: Option<f64>,
+    structural_score: f64,
+    role_score: f64,
+    lexical_eligible: bool,
+    lexical_weak: bool,
+    binding: bool,
+    considered_as: &'static str,
+}
+
+fn decision_trigger_terms(query: &RecallQuery) -> Vec<RecallTriggerTerm> {
+    let mut terms = Vec::new();
+    for line in query.canonical.lines() {
+        let (source, value) = if let Some(value) = line.strip_prefix("request=") {
+            ("prompt", value)
+        } else if let Some(value) = line.strip_prefix("task_title=") {
+            ("task_title", value)
+        } else if let Some(value) = line.strip_prefix("labels=") {
+            ("task_labels", value)
+        } else if let Some(value) = line.strip_prefix("files=") {
+            ("file_path", value)
+        } else if let Some(value) = line.strip_prefix("symbols=") {
+            ("symbol", value)
+        } else if let Some(value) = line.strip_prefix("decisions=") {
+            ("recent_decision", value)
+        } else if let Some(value) = line.strip_prefix("focus_title=") {
+            ("focus_epic_title", value)
+        } else if let Some(value) = line.strip_prefix("focus_labels=") {
+            ("focus_epic_labels", value)
+        } else {
+            continue;
+        };
+        for raw in value
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+        {
+            let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+            if is_content_bearing_term(&term) || term.chars().any(|ch| ch.is_ascii_digit()) {
+                if !terms
+                    .iter()
+                    .any(|existing: &RecallTriggerTerm| existing.term == term)
+                {
+                    terms.push(RecallTriggerTerm { term, source });
+                }
+                if terms.len() == 10 {
+                    return terms;
+                }
+            }
+        }
+    }
+    terms
+}
+
+fn decision_candidate_state(
+    query: &RecallQuery,
+    candidate: &EvidenceCandidate,
+    injected: &HashSet<&str>,
+) -> &'static str {
+    if injected.contains(candidate.evidence_id.as_str()) {
+        "injected"
+    } else if query.conversational && is_weak_lexical_only(candidate) {
+        "precision_gate"
+    } else if !candidate.binding
+        && !candidate.lexical_eligible
+        && !candidate
+            .semantic_score
+            .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR)
+    {
+        "below_threshold"
+    } else {
+        "not_selected"
+    }
+}
+
+fn silent_decision_reason(
+    query: &RecallQuery,
+    candidates: &RecallCandidates,
+    ledger: &RecallLedger,
+) -> &'static str {
+    let unseen: Vec<&EvidenceCandidate> = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| !ledger.has_seen(candidate) && !ledger.has_authored(candidate))
+        .collect();
+    if unseen.is_empty() {
+        return "below_threshold";
+    }
+    if query.conversational
+        && unseen
+            .iter()
+            .all(|candidate| is_weak_lexical_only(candidate))
+    {
+        return "precision_gate";
+    }
+    if unseen.iter().all(|candidate| {
+        !candidate.binding
+            && !candidate.lexical_eligible
+            && !candidate
+                .semantic_score
+                .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR)
+    }) {
+        return "below_threshold";
+    }
+    "budget"
+}
+
+/// Write a standalone JSON trace so completed sessions stay inspectable
+/// without a live MCP process. The trace deliberately contains IDs, bounded
+/// scores, and redacted query terms, never recalled bodies or raw tool input.
+fn record_recall_decision(
+    cas_root: &Path,
+    session_id: &str,
+    query: Option<&RecallQuery>,
+    candidates: Option<&RecallCandidates>,
+    injected: &[EvidenceCandidate],
+    silence_reason: Option<&'static str>,
+) {
+    let injected_ids: Vec<String> = injected
+        .iter()
+        .map(|candidate| candidate.evidence_id.clone())
+        .collect();
+    let injected_set: HashSet<&str> = injected_ids.iter().map(String::as_str).collect();
+    let trace_candidates = candidates
+        .map(|candidates| {
+            candidates
+                .candidates
+                .iter()
+                .take(RECALL_DECISION_CANDIDATE_CAP)
+                .map(|candidate| RecallDecisionCandidate {
+                    evidence_id: candidate.evidence_id.clone(),
+                    relevance: candidate.relevance,
+                    lexical_score: candidate.lexical_score,
+                    semantic_score: candidate.semantic_score,
+                    structural_score: candidate.structural_score,
+                    role_score: candidate.role_score,
+                    lexical_eligible: candidate.lexical_eligible,
+                    lexical_weak: candidate.lexical_weak,
+                    binding: candidate.binding,
+                    considered_as: query.map_or("not_invoked", |query| {
+                        decision_candidate_state(query, candidate, &injected_set)
+                    }),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let trace = RecallDecisionTrace {
+        recorded_at: Utc::now(),
+        session_id: clean_scalar(session_id, 160),
+        outcome: if injected_ids.is_empty() {
+            "silent"
+        } else {
+            "injected"
+        },
+        silence_reason,
+        query_hash: query.map(|query| stable_hash(&query.canonical)),
+        conversational: query.map(|query| query.conversational),
+        terms: query.map(decision_trigger_terms).unwrap_or_default(),
+        candidates: trace_candidates,
+        injected: injected_ids,
+        rejected_scope: candidates.map_or(0, |candidates| candidates.rejected_scope),
+    };
+    let Ok(bytes) = serde_json::to_vec(&trace) else {
+        return;
+    };
+    let directory = cas_root.join("cache/ambient-recall/decisions");
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let stamp = trace.recorded_at.timestamp_nanos_opt().unwrap_or_default();
+    let file_name = format!(
+        "{}-{}-{}.json",
+        &stable_hash(session_id)[..16],
+        stamp,
+        &stable_hash(&format!("{}:{:?}", session_id, trace.silence_reason))[..8]
+    );
+    let path = directory.join(file_name);
+    let temporary = path.with_extension("tmp");
+    if fs::write(&temporary, bytes).is_ok() {
+        let _ = fs::rename(temporary, path);
     }
 }
 
@@ -1400,10 +1620,18 @@ fn build_ambient_recall_context_with_factory_identity(
     factory_session: Option<&str>,
 ) -> Option<RecallPacket> {
     if crate::internal_llm::is_internal_invocation() {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            None,
+            None,
+            &[],
+            Some("no_invocation"),
+        );
         eprintln!("cas: ambient recall skipped (internal model identity)");
         return None;
     }
-    let role = input
+    let Some(role) = input
         .agent_role
         .as_deref()
         .and_then(RecallRole::parse)
@@ -1412,8 +1640,27 @@ fn build_ambient_recall_context_with_factory_identity(
                 .ok()
                 .as_deref()
                 .and_then(RecallRole::parse)
-        })?;
+        })
+    else {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            None,
+            None,
+            &[],
+            Some("no_invocation"),
+        );
+        return None;
+    };
     if !session_start && !meaningful_transition(prompt.unwrap_or_default()) {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            None,
+            None,
+            &[],
+            Some("no_invocation"),
+        );
         return None;
     }
     let identity = RecallIdentity {
@@ -1432,6 +1679,14 @@ fn build_ambient_recall_context_with_factory_identity(
         internal_llm: false,
     };
     if !identity.is_eligible() {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            None,
+            None,
+            &[],
+            Some("no_invocation"),
+        );
         eprintln!("cas: ambient recall skipped (incomplete outer factory identity)");
         return None;
     }
@@ -1444,15 +1699,45 @@ fn build_ambient_recall_context_with_factory_identity(
     );
     // Query construction and its caps are complete before the retriever is
     // opened. A malformed/oversized prompt therefore cannot expand DB work.
-    let query = RecallQuery::build(&identity, &request)?;
-    let retriever = SqliteRecallRetriever::existing(cas_root)?;
+    let Some(query) = RecallQuery::build(&identity, &request) else {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            None,
+            None,
+            &[],
+            Some("no_invocation"),
+        );
+        return None;
+    };
+    let Some(retriever) = SqliteRecallRetriever::existing(cas_root) else {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            Some(&query),
+            None,
+            &[],
+            Some("below_threshold"),
+        );
+        return None;
+    };
     let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).unwrap_or_default();
     let semantic = SemanticRecallRetriever::existing(cas_root, &config);
     let mut retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
     if let Some(semantic) = semantic.as_ref() {
         retrievers.push(semantic);
     }
-    let mut candidates = retrieve_candidates(&identity, &request, &retrievers)?;
+    let Some(mut candidates) = retrieve_candidates(&identity, &request, &retrievers) else {
+        record_recall_decision(
+            cas_root,
+            &input.session_id,
+            Some(&query),
+            None,
+            &[],
+            Some("below_threshold"),
+        );
+        return None;
+    };
     apply_outcome_feedback(cas_root, &mut candidates.candidates);
     let ledger_file = ledger_path(cas_root, &identity.session_id);
     let mut ledger = RecallLedger::load(&ledger_file);
@@ -1464,6 +1749,14 @@ fn build_ambient_recall_context_with_factory_identity(
     let rendered = render_packet(&identity, &query, &candidates, &mut ledger);
     match rendered {
         Some((packet, injected)) => {
+            record_recall_decision(
+                cas_root,
+                &input.session_id,
+                Some(&query),
+                Some(&candidates),
+                &injected,
+                None,
+            );
             let query_id =
                 record_ambient_query(cas_root, &identity, &query, &injected, session_start);
             ledger.record(packet.query_hash.clone(), query_id, &injected);
@@ -1475,6 +1768,15 @@ fn build_ambient_recall_context_with_factory_identity(
             Some(packet)
         }
         None => {
+            let silence_reason = silent_decision_reason(&query, &candidates, &ledger);
+            record_recall_decision(
+                cas_root,
+                &input.session_id,
+                Some(&query),
+                Some(&candidates),
+                &[],
+                Some(silence_reason),
+            );
             ledger.save(&ledger_file);
             None
         }
@@ -3302,6 +3604,58 @@ mod tests {
                 .full
                 .contains("[recall disclosure: injected=1 omitted=3")
         );
+    }
+
+    /// Characterization for GH #553: a conversational turn whose sole useful
+    /// lexical signal is weak currently produces no packet. The observability
+    /// delivery must leave a durable explanation instead of making this shape
+    /// indistinguishable from an absent hook invocation.
+    #[test]
+    fn gh_553_silent_conversational_turn_leaves_a_decision_trace() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        crate::store::open_store_local(&cas_root)
+            .unwrap()
+            .add(&Entry {
+                id: "gh-553-weak-memory".into(),
+                title: Some("Memory operational note".into()),
+                content: "system".into(),
+                ..Entry::default()
+            })
+            .unwrap();
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "gh-553-silent".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+
+        assert!(
+            build_ambient_recall_context(
+                &input,
+                &cas_root,
+                Some("How is the system performing?"),
+                false,
+            )
+            .is_none()
+        );
+
+        let trace_dir = cas_root.join("cache/ambient-recall/decisions");
+        let trace = fs::read_dir(&trace_dir)
+            .expect("every silent recall turn must leave a queryable decision trace")
+            .filter_map(Result::ok)
+            .map(|entry| fs::read_to_string(entry.path()).unwrap())
+            .collect::<String>();
+        assert!(trace.contains("precision_gate"), "{trace}");
+        assert!(trace.contains("gh-553-weak-memory"), "{trace}");
+        assert!(trace.contains("\"source\":\"prompt\""), "{trace}");
+        assert!(trace.contains("\"lexical_score\":"), "{trace}");
     }
 
     #[test]

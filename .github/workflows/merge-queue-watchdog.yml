@@ -1,0 +1,24 @@
+name: Merge queue watchdog
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-stale-merge-group-runs:
+    name: Cancel stale merge-queue runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cancel runs exceeding twice the suite-build p95
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Successful suite builds measured 288–576s; 20m exceeds 2x p95.
+          CASSY_MERGE_GROUP_HANG_SECONDS: '1200'
+        run: ./scripts/cancel-stale-merge-group-runs.sh

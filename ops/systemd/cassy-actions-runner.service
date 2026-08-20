@@ -31,6 +31,13 @@ Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache
 # runner traffic and statistics inside this service account.
 Environment=SCCACHE_SERVER_PORT=4227
 Environment=SCCACHE_CACHE_SIZE=50G
+# Keep the private server alive across idle merge-queue periods.
+Environment=SCCACHE_IDLE_TIMEOUT=0
+# Cargo otherwise persists a failed sccache rustc probe in
+# CARGO_TARGET_DIR/.rustc_info.json and replays it in later jobs without
+# contacting the now-healthy server. The saved target artifacts remain shared;
+# this only repeats Cargo's inexpensive rustc version probe per invocation.
+Environment=CARGO_CACHE_RUSTC_INFO=0
 Environment=CARGO_BUILD_JOBS=12
 Environment=RUSTC_WRAPPER=sccache
 Environment=PATH=/var/lib/cassy-actions/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

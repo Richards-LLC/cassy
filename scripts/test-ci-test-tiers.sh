@@ -13,6 +13,9 @@ makefile="$repo_root/cas-cli/Makefile"
 verified="$repo_root/scripts/run-verified-tests.sh"
 real_store_guard="$repo_root/scripts/check-real-store-untouched.sh"
 migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
+watchdog="$repo_root/.github/workflows/merge-queue-watchdog.yml"
+watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
+runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
 
 pass=0
 fail=0
@@ -130,6 +133,32 @@ require_text "$self_hosted_text" 'TMPDIR: ${{ runner.temp }}' 'self-hosted pilot
 require_absent "$self_hosted_text" 'cargo nextest run' 'self-hosted pilot leaves suite execution on hosted runners'
 require_absent "$self_hosted_text" '--partition' 'self-hosted pilot does not duplicate hosted shard execution'
 require_absent "$(<"$ruleset")" 'Self-hosted pilot' 'self-hosted pilot is not a required status check'
+
+pilot_doc="$(<"$repo_root/docs/ci/self-hosted-runner-pilot.md")"
+require_text "$pilot_doc" 'restricted_to_workflows=false' 'runner-group policy permits synthetic merge-queue refs'
+require_text "$pilot_doc" 'refs/heads/gh-readonly-queue/...' 'pilot documents queue-ref mismatch'
+require_text "$pilot_doc" 'selected-workflow wildcards are rejected' 'pilot records GitHub wildcard limitation'
+require_text "$pilot_doc" 'CARGO_CACHE_RUSTC_INFO=0' 'pilot documents Cargo rustc-info cache containment'
+
+runner_unit_text="$(<"$runner_unit")"
+require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
+
+if [[ -x "$watchdog_script" ]]; then
+    watchdog_text="$(<"$watchdog")"
+    watchdog_script_text="$(<"$watchdog_script")"
+    require_text "$watchdog_text" "cron: '*/5 * * * *'" 'merge-queue watchdog runs at GitHub’s five-minute floor'
+    require_text "$watchdog_text" 'actions: write' 'merge-queue watchdog may cancel an orphaned run'
+    require_text "$watchdog_text" "CASSY_MERGE_GROUP_HANG_SECONDS: '1200'" 'watchdog pins a 20-minute 2x-p95 threshold'
+    require_text "$watchdog_script_text" 'event=merge_group&status=in_progress' 'watchdog inspects in-progress merge-group runs'
+    require_text "$watchdog_script_text" 'event=merge_group&status=queued' 'watchdog also reclaims queued pre-claim starvation'
+    require_text "$watchdog_script_text" "printf '%s\\n%s\\n'" 'watchdog combines in-progress and queued API responses'
+    require_text "$watchdog_script_text" '.run_started_at // .created_at' 'watchdog measures queued starvation from queue creation'
+    require_text "$watchdog_script_text" 'actions/runs/$run_id/cancel' 'watchdog cancels stale runs by id'
+    require_text "$watchdog_script_text" 'age_seconds > hang_seconds' 'watchdog does not cancel at or below threshold'
+else
+    printf 'FAIL merge-queue watchdog script is executable\n'
+    fail=$((fail + 1))
+fi
 
 suite_build="$(job_block fast-validation-suite-build)"
 suite_shards="$(job_block fast-validation-suite-shards)"

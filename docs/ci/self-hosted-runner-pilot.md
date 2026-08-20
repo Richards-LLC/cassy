@@ -31,8 +31,11 @@ independent restrictions:
    repository `push` trigger for `main`, `epic/**`, and `factory/**`. It has no
    pull-request, pull-request-target, workflow-run, comment, or dispatch event.
 2. The `cassy-public-trusted` organization runner group selects only repository
-   `Richards-LLC/cassy` and only this workflow at an explicit canonical branch
-   ref. The pilot ref is replaced by `refs/heads/main` after landing.
+   `Richards-LLC/cassy`; it deliberately has `restricted_to_workflows=false`.
+   GitHub matches that policy against the synthetic
+   `refs/heads/gh-readonly-queue/...` ref for `merge_group`, not `main`, and
+   selected-workflow wildcards are rejected. A `ci.yml@refs/heads/main`
+   restriction therefore makes a self-hosted queue job unclaimable.
 3. The job repeats the canonical repository, non-fork, push-event, and trusted
    ref conditions in a server-evaluated job `if` before runner assignment. The
    same guard requires repository variable `CASSY_SELF_HOSTED_PILOT=enabled`;
@@ -43,8 +46,10 @@ Fork pull requests continue to run only the existing GitHub-hosted required
 checks. The CI route selects the box only when `github.event_name` is
 `merge_group` and the explicit control variable is enabled; the route job does
 not check out source, and the archive job repeats the selected-mode guard.
-Approval of a fork workflow does not grant it the selected runner group. Do not
-weaken any of the three restrictions independently.
+Approval of a fork workflow does not grant it the selected runner group. The
+queue route's no-checkout selector, `merge_group`-only archive guard, canonical
+repository check, non-fork check, queue-ref check, and explicit readiness
+variable are all required; do not weaken them independently.
 
 ## Availability and isolation
 
@@ -77,6 +82,15 @@ GitHub listener, outside Runner.Worker's per-step process tracking; starting it
 inside one workflow step causes the runner to reap it before Cargo's next step.
 The launch wrapper then uses GitHub's `bin/runsvc.sh`, which translates systemd
 termination into the listener signal that closes the remote session cleanly.
+`SCCACHE_IDLE_TIMEOUT=0` is committed in the unit: the server must not
+self-terminate after ten minutes of queue inactivity. The incident-only debug
+drop-in is not a provisioned dependency; inspect the journal or reproduce with
+the committed unit instead. The unit also sets `CARGO_CACHE_RUSTC_INFO=0`.
+Cargo's otherwise persistent `CARGO_TARGET_DIR/.rustc_info.json` had retained
+a failed `sccache rustc -vV` response and replayed it in later jobs without a
+new request reaching the healthy server. Disabling only that version-probe
+cache retains the shared target artifacts while making each job re-check the
+live compiler/cache path.
 The pilot workflow explicitly clears `RUSTC_WRAPPER` for its first measured
 receipt. The private cache is a later optimization, never a lane prerequisite.
 It also points `TMPDIR` at GitHub Runner's disk-backed temporary directory;
@@ -86,11 +100,18 @@ nextest's default archive extraction used the unit's private tmpfs-backed
 ## Provision and audit
 
 Create `cassy-public-trusted` before registration with selected repository
-`Richards-LLC/cassy`, `allows_public_repositories=true`,
-`restricted_to_workflows=true`, and exactly one selected workflow:
+`Richards-LLC/cassy`, `allows_public_repositories=true`, and
+`restricted_to_workflows=false`. This is intentional: GitHub cannot match a
+selected workflow pinned to `main` against merge-queue refs and rejects a
+queue-ref wildcard. The checked-in CI route is the compensating boundary.
 
-```text
-Richards-LLC/cassy/.github/workflows/self-hosted-fast-validation.yml@refs/heads/main
+After updating an existing group, read it back before enabling the route:
+
+```bash
+gh api --method PATCH orgs/Richards-LLC/actions/runner-groups/GROUP_ID \\
+  -f restricted_to_workflows=false
+gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID \\
+  --jq '{restricted_to_workflows, selected_workflows}'
 ```
 
 Generate a short-lived organization registration token, then run from a trusted

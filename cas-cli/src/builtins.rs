@@ -497,6 +497,9 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-domain-modeling/SKILL.md",
         content: include_str!("builtins/skills/cas-domain-modeling/SKILL.md"),
     },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/skills/cas-codebase-design/DEEPENING.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
 ];
 
 /// Built-in Workflow scripts shipped to `.claude/workflows/` on `cas update --sync`.
@@ -884,6 +887,9 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-domain-modeling/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-domain-modeling/SKILL.md"),
     },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/codex/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DEEPENING.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1314,6 +1320,9 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-domain-modeling/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-domain-modeling/SKILL.md"),
     },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/grok/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DEEPENING.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
 ];
 
 /// A factory-critical capability that every harness must resolve from its own

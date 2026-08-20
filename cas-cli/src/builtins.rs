@@ -480,6 +480,23 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/fallow/references/patterns.md",
         content: include_str!("builtins/skills/fallow/references/patterns.md"),
     },
+    // cas-writing-for-agents: adapted from mattpocock/skills (MIT, © 2026 Matt Pocock).
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL.md",
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/SKILL.md",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-domain-modeling/SKILL.md",
+        content: include_str!("builtins/skills/cas-domain-modeling/SKILL.md"),
+    },
 ];
 
 /// Built-in Workflow scripts shipped to `.claude/workflows/` on `cas update --sync`.
@@ -849,6 +866,23 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/fallow/references/patterns.md",
         content: include_str!("builtins/codex/skills/fallow/references/patterns.md"),
+    },
+    // cas-writing-for-agents: Codex mirror of the MIT Matt Pocock import above.
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-domain-modeling/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-domain-modeling/SKILL.md"),
     },
 ];
 
@@ -1262,6 +1296,23 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cli-routing/references/routing.md",
         content: include_str!("builtins/grok/skills/cli-routing/references/routing.md"),
+    },
+    // cas-writing-for-agents: Grok mirror of the MIT Matt Pocock import above.
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-domain-modeling/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-domain-modeling/SKILL.md"),
     },
 ];
 

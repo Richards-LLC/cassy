@@ -84,9 +84,11 @@ fn test_vt_parser() {
         .spawn("printf", &["\\033[1mBold\\033[0m Normal"])
         .unwrap();
 
-    // Wait and read
-    std::thread::sleep(Duration::from_millis(100));
-    let output = runner.read_available().unwrap();
+    // Wait for the complete expected output instead of assuming the PTY reader
+    // has received it after a fixed delay.
+    let output = runner
+        .wait_for_text_timeout("Normal", Duration::from_secs(5))
+        .expect("printf output should reach the PTY buffer");
 
     // Parse through VT parser
     let mut parser = VtParser::new(80, 24);

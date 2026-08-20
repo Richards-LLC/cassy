@@ -20,8 +20,11 @@ name: CI
 # Warm lanes measured 90-92% hits while pre-cache-v2 lanes measured 0-6%; that
 # difference is worth minutes per run and used to be invisible. The stats step
 # is observability only — it always exits 0 and can never redden a lane.
-# `build-benchmark` is the one deliberately uncached compiling job: it measures
-# a cold compiler, so it gets neither the backend nor a stats step (see below).
+# `build-benchmark` is the cold-build deliberately uncached compiling job: it
+# measures a cold compiler, so it gets neither the backend nor a stats step.
+# The self-hosted suite archive is the separate, merge-queue-gated exception:
+# cas-065a clears its wrapper after the fail-open cache probe so an outage
+# cannot block the lane.
 # scripts/test-ci-test-tiers.sh pins all of this.
 
 on:
@@ -320,7 +323,7 @@ jobs:
     needs: fast-validation-runner-route
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     outputs:
-      producer_mode: ${{ needs.fast-validation-runner-route.outputs.mode }}
+      producer-mode: ${{ needs.fast-validation-runner-route.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -510,7 +513,7 @@ jobs:
       - name: Restore self-hosted producer paths
         if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-suite-build.outputs.producer_mode == 'self-hosted'
+          && needs.fast-validation-suite-build.outputs.producer-mode == 'self-hosted'
         run: |
           sudo mkdir -p /var/lib/cassy-actions/runner/_work/cassy
           sudo ln -sfn "$GITHUB_WORKSPACE" /var/lib/cassy-actions/runner/_work/cassy/cassy

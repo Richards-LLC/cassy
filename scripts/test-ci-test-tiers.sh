@@ -66,6 +66,20 @@ job_block() {
     ' "$ci"
 }
 
+named_step_block() {
+    local block="$1" name="$2"
+    awk -v header="      - name: $name" '
+        $0 == header { inside = 1; next }
+        inside && /^      - / { exit }
+        inside { print }
+    ' <<<"$block"
+}
+
+named_step_position() {
+    local block="$1" name="$2"
+    awk -v header="      - name: $name" '$0 == header { print NR; exit }' <<<"$block"
+}
+
 release_job_block() {
     local job="$1"
     awk -v header="  ${job}:" '
@@ -176,7 +190,7 @@ require_absent "$route" 'actions/checkout' 'runner route does not execute merge-
 
 require_text "$suite_build" 'needs: fast-validation-runner-route' 'required archive build waits for explicit runner routing'
 require_text "$suite_build" 'fromJSON(needs.fast-validation-runner-route.outputs.runner)' 'archive build receives the fail-safe selected runner labels'
-require_text "$suite_build" 'producer_mode: ${{ needs.fast-validation-runner-route.outputs.mode }}' 'archive exposes its selected producer mode to hosted shards'
+require_text "$suite_build" 'producer-mode: ${{ needs.fast-validation-runner-route.outputs.mode }}' 'archive exposes its selected producer mode to hosted shards'
 require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode != 'self-hosted'" 'archive rejects an untrusted self-hosted route before assignment'
 require_text "$suite_build" "github.event_name == 'merge_group'" 'self-hosted archive is restricted to merge-queue events'
 require_text "$suite_build" "github.repository == 'Richards-LLC/cassy'" 'self-hosted archive pins the canonical repository'
@@ -185,12 +199,58 @@ require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 
 require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" 'self-hosted setup is limited to selected merge-queue validation'
 require_text "$suite_build" 'Verify merge-queue self-hosted trust boundary' 'self-hosted archive verifies queue-only trust at execution'
 require_text "$suite_build" 'refs/heads/gh-readonly-queue/*' 'self-hosted archive rejects non-queue refs'
-require_text "$suite_build" 'Verify private self-hosted sccache' 'merge-queue archive verifies its dedicated local cache service'
-require_text "$suite_build" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'required self-hosted archive pins the private cache port'
-require_text "$suite_build" 'continue-on-error: true' 'self-hosted cache verification cannot fail the merge queue'
-require_text "$suite_build" 'cas-065a' 'self-hosted cache fallback cites the tracked server defect'
-require_text "$suite_build" "echo 'RUSTC_WRAPPER=' >> \"\$GITHUB_ENV\"" 'self-hosted archive clears the compiler wrapper before Cargo'
-require_absent "$suite_build" 'SCCACHE_GHA_ENABLED=false' 'self-hosted archive does not inject a cache backend prerequisite'
+probe_step="$(named_step_block "$suite_build" 'Verify private self-hosted sccache')"
+disable_step="$(named_step_block "$suite_build" 'Disable sccache for the self-hosted suite archive')"
+archive_step="$(named_step_block "$suite_build" 'Build full suite archive')"
+require_text "$probe_step" 'continue-on-error: true' 'self-hosted cache probe itself cannot fail the merge queue'
+require_text "$probe_step" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'self-hosted cache probe pins the private cache port'
+require_text "$probe_step" 'cas-065a' 'self-hosted cache probe cites the tracked server defect'
+require_text "$disable_step" "steps.classify-diff.outputs.rust-unaffected != 'true'" 'wrapper disable step requires Rust work'
+require_text "$disable_step" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" 'wrapper disable step is self-hosted only'
+require_text "$disable_step" "echo 'RUSTC_WRAPPER=' >> \"\$GITHUB_ENV\"" 'wrapper disable step clears the compiler wrapper before Cargo'
+require_absent "$disable_step" 'SCCACHE_GHA_ENABLED=false' 'wrapper disable step does not inject a cache backend prerequisite'
+
+disable_position="$(named_step_position "$suite_build" 'Disable sccache for the self-hosted suite archive')"
+archive_position="$(named_step_position "$suite_build" 'Build full suite archive')"
+suite_archive_fail_open_contract_holds() {
+    local probe="$1" disable="$2" archive="$3" disable_position="$4" archive_position="$5"
+    [[ "$probe" == *'continue-on-error: true'* ]] \
+        && [[ "$disable" == *"steps.classify-diff.outputs.rust-unaffected != 'true'"* ]] \
+        && [[ "$disable" == *"needs.fast-validation-runner-route.outputs.mode == 'self-hosted'"* ]] \
+        && [[ "$disable" == *"echo 'RUSTC_WRAPPER=' >> \"\$GITHUB_ENV\""* ]] \
+        && [[ -n "$archive" ]] \
+        && [[ -n "$disable_position" && -n "$archive_position" ]] \
+        && (( disable_position < archive_position ))
+}
+
+if suite_archive_fail_open_contract_holds "${probe_step/continue-on-error: true/}" "$disable_step" "$archive_step" "$disable_position" "$archive_position"; then
+    printf 'FAIL suite-archive mutation removes probe fail-open\n'
+    fail=$((fail + 1))
+else
+    printf 'ok   suite-archive mutation catches removed probe fail-open\n'
+    pass=$((pass + 1))
+fi
+if suite_archive_fail_open_contract_holds "$probe_step" "${disable_step/self-hosted/hosted}" "$archive_step" "$disable_position" "$archive_position"; then
+    printf 'FAIL suite-archive mutation removes wrapper-disable self-hosted gate\n'
+    fail=$((fail + 1))
+else
+    printf 'ok   suite-archive mutation catches removed wrapper-disable self-hosted gate\n'
+    pass=$((pass + 1))
+fi
+if suite_archive_fail_open_contract_holds "$probe_step" "${disable_step/RUSTC_WRAPPER=/RUSTC_WRAPPER=sccache}" "$archive_step" "$disable_position" "$archive_position"; then
+    printf 'FAIL suite-archive mutation restores compiler wrapper\n'
+    fail=$((fail + 1))
+else
+    printf 'ok   suite-archive mutation catches restored compiler wrapper\n'
+    pass=$((pass + 1))
+fi
+if suite_archive_fail_open_contract_holds "$probe_step" "$disable_step" "$archive_step" "$archive_position" "$disable_position"; then
+    printf 'FAIL suite-archive mutation reorders wrapper disable after archive build\n'
+    fail=$((fail + 1))
+else
+    printf 'ok   suite-archive mutation catches wrapper disable after archive build\n'
+    pass=$((pass + 1))
+fi
 require_text "$suite_shards" 'runs-on: ubuntu-latest' 'required suite shards retain hosted parallel execution and availability'
 
 scoped="$(job_block scoped-validation)"
@@ -436,7 +496,7 @@ require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the
 require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'
 require_text "$suite_shards" 'test -x target/debug/cas' 'shards verify the restored CLI runner remains executable'
 require_text "$suite_shards" 'Restore self-hosted producer paths' 'shards restore only required self-hosted producer paths'
-require_text "$suite_shards" "needs.fast-validation-suite-build.outputs.producer_mode == 'self-hosted'" 'producer compatibility links are gated to self-hosted archives'
+require_text "$suite_shards" "needs.fast-validation-suite-build.outputs.producer-mode == 'self-hosted'" 'producer compatibility links are gated to self-hosted archives'
 require_text "$suite_shards" 'cas-f83c' 'producer compatibility shim names the runtime-path follow-up'
 require_text "$suite_shards" 'sudo ln -sfn "$GITHUB_WORKSPACE" /var/lib/cassy-actions/runner/_work/cassy/cassy' 'shards restore the baked producer workspace path'
 require_text "$suite_shards" 'sudo ln -sfn "$GITHUB_WORKSPACE/target" /var/lib/cassy-actions/cache/cargo-target' 'shards restore the baked producer target path'
@@ -851,8 +911,10 @@ for job in build build-macos verify; do
     require_text "$block" './scripts/ci-sccache-summary.sh' "release $job publishes its own sccache hit stats"
 done
 
-# The single deliberate exemption. It measures a cold compiler, so a stats
+# The cold-build deliberate exemption. It measures a cold compiler, so a stats
 # summary there would report an alarming 0% for a lane that is working correctly.
+# The self-hosted suite archive is the separate cas-065a merge-queue exception:
+# its wrapper is cleared after the fail-open probe, never as a cache prerequisite.
 benchmark="$(job_block build-benchmark)"
 require_text "$benchmark" 'SCCACHE_GHA_ENABLED: "false"' 'Build Benchmark stays deliberately uncached'
 require_text "$benchmark" 'RUSTC_WRAPPER: ""' 'Build Benchmark clears the compiler wrapper'

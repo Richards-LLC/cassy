@@ -32,7 +32,7 @@ impl ScopedTaskView {
         // hint leaked a cross-project epic's id/title whenever the session
         // shared a Cassy project's task DB with another session/project.
         let unfocused_live_epics = if focused_epic_id.is_none() {
-            epic_groups
+            data.live_epic_groups()
                 .iter()
                 .filter(|group| epic_is_renderable_source_blind(data, &group.epic.id))
                 .map(|group| (group.epic.id.clone(), group.epic.title.clone()))
@@ -598,6 +598,18 @@ mod tests {
         // caller relies on `epic_groups` instead.
         let focused = ScopedTaskView::new(&data, Some("cas-focused"));
         assert!(focused.unfocused_live_epics.is_empty());
+    }
+
+    #[test]
+    fn scoped_task_view_unfocused_hint_excludes_closed_parent_residue() {
+        let mut data = data_for_scoping();
+        data.epic_tasks.iter_mut().find(|epic| epic.id == "cas-focused").expect("fixture includes focused epic").status = TaskStatus::Closed;
+        data.epic_tasks.push(task("cas-empty-open", "Open epic without child rows", TaskType::Epic, None, None));
+
+        let scoped = ScopedTaskView::new(&data, None);
+        let hint_ids: Vec<_> = scoped.unfocused_live_epics.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(hint_ids, vec!["cas-empty-open"]);
+        assert!(!hint_ids.contains(&"cas-focused"), "an Open child cannot make a Closed parent epic live again");
     }
 
     /// cas-6185c AC1: THE regression this fix-round exists for — the

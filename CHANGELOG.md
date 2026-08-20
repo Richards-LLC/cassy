@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-08-20
+
+### Added
+- **Twelve new built-in skills ship with every harness.** The Matt Pocock skill collection (writing-for-agents, diagnosing-bugs, domain-modeling, and nine more) is imported as `cas-` prefixed builtins for Claude, Codex, and Grok, with harness-correct tool aliases and MIT provenance recorded.
+- **`cas viktor key` completes Viktor setup with one pasted operator key.** The key is validated and stored machine-only with 0600 permissions — never in project state or environment files.
+- **One `cas update` now brings every project fully current.** `cas update --all-projects` discovers every local project and runs the whole chain per project — schema migration, skill sync, cloud team-membership refresh, and cloud sync — with per-project receipts, continuable failures, and dry-run support. The contrib `cas-update` helper delegates to it.
+- **Macs on Apple Silicon install with the standard one-liner.** `cas-install.sh` handles Darwin/aarch64 including Gatekeeper quarantine clearing, an Intel-Mac gate with a plain-language stop, and PATH wiring via `.zshenv` so non-interactive MCP spawns find the binary.
+- **Ambient recall now reads tool traffic and explains itself.** Trigger terms come from tool results and MCP queries (bounded and redacted), a strong-signal floor overrides the conversational precision gate, and every injection or silence carries a source-attributed decision trace.
+- **Dropped work announces itself.** Merge-queue ejections and worker delivery stalls push durable, episode-keyed relays to the supervisor and worker instead of leaving tasks waiting silently.
+
+### Changed
+- **A code change reaches main in under five minutes.** PR admission checks collapsed to seconds, merge-queue validation runs the full suite once on fast self-hosted hardware with runtime-path-portable test archives, and stale queue runs are cancelled by behavior-tested watchdogs.
+- **Release binaries are code-signed after stripping**, with a verification gate before packaging and a dispatch-only job for inspecting published artifacts' signatures.
+
+### Fixed
+- **Closed work stays closed.** Cloud pull can no longer silently resurrect terminal tasks: terminal status changes require an attributed reopen, and unattributed remote reopens park in the conflict journal exactly once.
+- **Epic close is fast and unambiguous.** Closing a large epic commits first and responds with a compact receipt in about a second; timeout messages state whether the write landed.
+- **Concurrent `cas-update` runs no longer corrupt a shared build.** The helper takes an atomic, holder-visible lock.
+- **CI cannot skip Rust validation for markdown compiled into the binary.** Everything under `cas-cli/src/` is rust-affecting, enforced by a mutation-proof guard.
+
 ## [3.3.0] - 2026-08-19
 
 ### Fixed

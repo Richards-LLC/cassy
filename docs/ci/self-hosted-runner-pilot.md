@@ -45,20 +45,25 @@ than hidden in the acceptance receipts.
 
 ### Second-listener receipts
 
-The first two-slot queue run proves that the Linux serialization was removed,
-but it does not meet the whole-queue six-minute target. The new slot was cold
-for preflight on this first use. Linux Fast Validation completed 4m02s after
-the run was created; macOS remained the critical path and brought the exact
-run total to 7m54s.
+Two consecutive two-slot queue runs prove that the original one-listener Linux
+serialization was removed, but neither meets the whole-queue six-minute
+target. The new slot was cold for preflight on the first run and reused its
+persistent target directory for the second run. macOS remained the critical
+path in both receipts.
 
 | Receipt | Total | Archive | Preflight | Doctests | Fast Validation | macOS Check |
 | --- | ---: | --- | --- | --- | ---: | ---: |
 | [PR #580](https://github.com/Richards-LLC/cassy/actions/runs/32419668295) | 7m54s | 1m38s, `soundwave-cas-ci` | 3m36s, `soundwave-cas-ci-2` (cold) | 1m21s, `soundwave-cas-ci` | 4m02s | 7m37s |
+| [PR #581](https://github.com/Richards-LLC/cassy/actions/runs/32420585590) | 7m39s | 3m00s, `soundwave-cas-ci-2` | 1m31s, `soundwave-cas-ci` | 1m22s, `soundwave-cas-ci` | 6m12s | 7m22s |
 
 The two self-hosted listeners accepted archive and preflight concurrently at
 21:29:50Z. Doctests started on slot 1 one second after archive completed, so
 no job used a shared Cargo target lock. The remaining measured floor was the
-hosted macOS job, not the trusted Linux route.
+hosted macOS job, not the trusted Linux route. In the second receipt, archive
+and doctests started concurrently at 21:40:46Z; preflight started on slot 1 one
+second after doctests completed. All three self-hosted jobs completed 3m15s
+after run creation, while the hosted shards extended the Linux rollup to 6m12s
+and macOS set the 7m39s whole-run total.
 
 ## Trust boundary
 

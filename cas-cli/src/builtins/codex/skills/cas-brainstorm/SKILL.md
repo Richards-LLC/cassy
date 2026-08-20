@@ -40,6 +40,10 @@ These exist because Cassy agents have a documented tendency to dump multiple que
 5. **Ask what the user is thinking BEFORE offering ideas.** This surfaces hidden context and prevents the user from anchoring on AI-generated framings. "What have you already considered?" is more valuable than "Here are 5 options."
 6. **Broad before narrow.** Start with problem, users, and value. Only narrow to constraints, exclusions, and edge cases after the big picture is clear.
 
+## Frontier-round mechanics
+
+Adapted from mattpocock/skills `grilling`, MIT © 2026 Matt Pocock. Treat unresolved choices as a design tree and ask the whole settled frontier in each round. Number each question, attach a recommended answer, and defer questions whose prerequisites are still open. Research facts through tools or delegated investigation; ask the user only for decisions. Recompute the frontier after every response until no material branch is implicit.
+
 ## Output Guidance
 
 - **Keep outputs concise.** Short sections, brief bullets, only enough detail to support the next decision.

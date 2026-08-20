@@ -18,9 +18,16 @@ current GitHub Release, installs `cas` at `~/.local/bin/cas`, and clears the
 macOS quarantine attribute so Gatekeeper does not block the first run.
 
 ```bash
+if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "Unsupported Intel Mac: this Cassy release is Apple Silicon only. Contact the operator."
+  exit 1
+fi
+
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 
-# The installer prints a PATH fix if needed. For this shell, if it did:
+# Persist the Cassy binary path for terminal and non-interactive MCP shells.
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.zshenv 2>/dev/null \
+  || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv
 export PATH="$HOME/.local/bin:$PATH"
 cas --version
 ```
@@ -32,6 +39,11 @@ cd /path/to/your/repo
 cas init
 cas doctor
 ```
+
+After a binary update, one `cas update` refreshes every discovered local Cassy
+project: schema, generated files and builtins, team membership, then cloud sync
+for cloud-linked projects. Preview the same sweep without changing state with
+`cas update --all-projects --dry-run`; set `CAS_PROJECT_ROOTS` to limit its scan.
 
 For Cassy Cloud, sign in once per machine, then confirm team scope from inside
 the initialized project:
@@ -76,7 +88,8 @@ Total time: **~30–45 minutes** end-to-end on a fresh machine (first `cargo bui
 ## Step 1 — Confirm your Mac
 
 ```bash
-# Should print "arm64". x86_64 means Intel Mac (proceed anyway, but expect rough edges).
+# Should print "arm64". Intel Macs cannot use the published release; contact
+# the operator instead of continuing with this installation guide.
 uname -m
 
 # macOS Sonoma (14) is the supported baseline. Older versions may work but are untested.
@@ -188,15 +201,15 @@ claude --version    # expect: 2.1.126 or newer
 ## Step 6 — Install Rust toolchain
 
 ```bash
-# Skip if `rustc --version` already works and reports >= 1.85.
+# Skip if `rustc --version` already works and reports >= 1.88.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 source "$HOME/.cargo/env"
 
-rustc --version   # expect: rustc 1.85+ ...
+rustc --version   # expect: rustc 1.88+ ...
 cargo --version
 ```
 
-> **Minimum supported Rust is 1.85** (edition 2024). rustup's `stable` channel has been on 1.85+ since early 2026 — no nightly required.
+> **Minimum supported Rust is 1.88** (edition 2024). rustup's `stable` channel has been on 1.88+ since mid-2026 — no nightly required.
 
 The installer offers to modify `~/.zshenv`, `~/.zshrc`, etc. on its own; accept the default. If you decline and `cargo` isn't found in new shells, add `. "$HOME/.cargo/env"` to `~/.zprofile`.
 
@@ -228,8 +241,8 @@ Add `~/.local/bin` to PATH if it isn't already:
 
 ```bash
 echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" || {
-  echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zprofile
-  exec zsh -l   # re-login so ~/.zprofile re-runs
+  echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshenv
+  export PATH="$HOME/.local/bin:$PATH"
 }
 ```
 
@@ -319,6 +332,7 @@ cargo build -p cas --profile release-fast
 install -m 0755 target/release-fast/cas ~/.local/bin/cas
 
 cas --version   # confirm new build
+cas update --all-projects   # refresh every local project without downloading a release
 ```
 
 Subsequent rebuilds are seconds (incremental cargo), unless `vendor/ghostty` changed — then libghostty-vt re-links via Zig (~30 s).
@@ -365,7 +379,7 @@ Xcode Command Line Tools missing or incomplete. Re-run `xcode-select --install` 
 ```bash
 echo $PATH | tr ':' '\n' | grep -E '\.local/bin'
 ```
-If nothing prints, redo the PATH export in Step 7 and run `exec zsh -l` (or open a new terminal tab).
+If nothing prints, redo the PATH export in Step 7 and open a new terminal tab.
 
 ### `cas: bad CPU type in executable`
 
@@ -384,6 +398,13 @@ claude --version    # confirm >= 2.1.126
 The shell Claude Code spawns has a different `$PATH` than your interactive zsh. Either:
 - Use the absolute path in `.mcp.json` (`"command": "/Users/you/.local/bin/cas"`), or
 - Move your `$PATH` exports from `~/.zprofile` to `~/.zshenv` so they apply to non-interactive shells too.
+
+### `cas` is killed immediately with `Killed: 9` and no dialog
+
+This is distinct from Gatekeeper: it indicates an invalid or missing Mach-O
+signature. Re-run the published-binary installer to replace the executable. If
+the replacement is also killed, contact the operator; removing quarantine will
+not fix a signature failure.
 
 ### Gatekeeper popup: `"cas" cannot be opened because the developer cannot be verified`
 

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      macos_artifact_url:
+        description: Published Darwin tarball URL to inspect with codesign
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +25,7 @@ env:
 jobs:
   verify:
     name: Verify Release Inputs
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -82,6 +89,7 @@ jobs:
 
   build:
     name: Build Linux x86_64
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -173,6 +181,7 @@ jobs:
 
   build-macos:
     name: Build macOS ARM64
+    if: github.event_name == 'push'
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
     # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
     runs-on: macos-26
@@ -223,6 +232,10 @@ jobs:
           mkdir -p package
           cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
           strip package/cas
+          # `strip` invalidates an ad-hoc Mach-O signature. Re-sign the exact
+          # executable we publish, then fail before packaging if it is invalid.
+          codesign --sign - --force package/cas
+          codesign --verify --verbose=4 package/cas
           cp LICENSE package/
           cd package
           tar -czvf cas-aarch64-apple-darwin.tar.gz cas LICENSE
@@ -246,8 +259,36 @@ jobs:
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
 
+  # A dispatch-only receipt path lets an operator inspect a published asset on
+  # the macOS tooling that actually enforces Mach-O signatures. It never builds
+  # or publishes a release, so it is safe to run against historical archives.
+  verify-published-macos-signature:
+    name: Verify published macOS signature
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - name: Download published Darwin asset
+        env:
+          MACOS_ARTIFACT_URL: ${{ inputs.macos_artifact_url }}
+        run: |
+          archive="$RUNNER_TEMP/cas-aarch64-apple-darwin.tar.gz"
+          package="$RUNNER_TEMP/package"
+          curl --fail --location --retry 3 "$MACOS_ARTIFACT_URL" --output "$archive"
+          mkdir -p "$package"
+          tar -xzf "$archive" -C "$package"
+          test -x "$package/cas"
+
+      - name: Record and verify Mach-O signature
+        run: |
+          package="$RUNNER_TEMP/package"
+          codesign -dv "$package/cas"
+          codesign --verify --verbose=4 "$package/cas"
+
   release:
     name: Create Release
+    if: github.event_name == 'push'
     needs: [verify, build, build-macos]
     runs-on: ubuntu-latest
     permissions:

@@ -1,5 +1,11 @@
 # Operating Discipline — Staying Reachable and Staying Alive
 
+## Marked throwaway prototypes
+
+Adapted from mattpocock/skills `prototype`, MIT © 2026 Matt Pocock. A prototype exists to answer one stated design question and is throwaway from day one. Mark it clearly, keep it near the code or UI it explores, avoid persistence and production-grade polish, and surface the state or variant being tested.
+
+When it settles a decision, capture the question and verdict in `mcp__cs__task`, `mcp__cs__spec`, or `mcp__cs__memory`. Keep the prototype itself off the delivery branch or remove it after the decision; only validated production changes belong in the task’s deliverable. Never create an unmarked root-level script, parallel tracker, or context-file workflow.
+
 Proactive habits that keep a worker useful for a whole shift. The other references are about
 moments (closing, breaking, looking things up); this one is about how you run continuously.
 Two failure modes cost real money on 2026-08-06 (GH #121) and both are fully preventable:

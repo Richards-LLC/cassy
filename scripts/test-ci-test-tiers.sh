@@ -875,6 +875,9 @@ release_text="$(<"$release")"
 release_linux="$(release_job_block build)"
 release_macos="$(release_job_block build-macos)"
 release_publish="$(release_job_block release)"
+release_signature_receipt="$(release_job_block verify-published-macos-signature)"
+scoped_validation="$(job_block scoped-validation)"
+fast_preflight="$(job_block fast-validation-preflight)"
 require_absent "$release_linux" 'needs: verify' 'Linux release build starts in parallel with input verification'
 require_absent "$release_macos" 'needs: verify' 'macOS release build starts in parallel with input verification'
 require_text "$release_publish" 'needs: [verify, build, build-macos]' 'release publication waits for verification and both platform builds'
@@ -887,6 +890,15 @@ require_text "$release_linux" 'check-blake3-no-avx512-build.sh "target/x86_64-un
 require_text "$release_linux" 'test-check-portable-x86_64-isa.sh package/cas' 'Linux release audits the exact stripped executable'
 require_text "$release_linux" 'name: cas-x86_64-unknown-linux-gnu' 'Linux release asset remains required'
 require_text "$release_macos" 'name: cas-aarch64-apple-darwin' 'macOS release asset remains required'
+require_text "$release_macos" 'codesign --sign - --force package/cas' 'macOS release re-signs the binary after stripping'
+require_text "$release_macos" 'codesign --verify --verbose=4 package/cas' 'macOS release verifies the final package signature'
+require_text "$release_text" 'workflow_dispatch:' 'release workflow exposes a manual signature-receipt dispatch'
+require_text "$release_text" 'macos_artifact_url:' 'manual signature receipt accepts a published artifact URL'
+require_text "$release_signature_receipt" 'runs-on: macos-26' 'signature receipt runs on macOS'
+require_text "$release_signature_receipt" 'codesign -dv "$package/cas"' 'signature receipt prints macOS signature details'
+require_text "$release_signature_receipt" 'codesign --verify --verbose=4 "$package/cas"' 'signature receipt rejects an invalid macOS signature'
+require_text "$scoped_validation" './scripts/test-cas-install.sh' 'Scoped Validation runs portable installer fixtures'
+require_text "$fast_preflight" './scripts/test-cas-install.sh' 'Fast Validation preflight runs portable installer fixtures'
 require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
 require_text "$(<"$release")" 'refusing to replace its assets' 'release rerun with an existing release fails loudly'
 require_text "$(<"$release")" 'RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release' 'release rerun names its recovery procedure'

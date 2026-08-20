@@ -1137,6 +1137,26 @@ impl CloudConfig {
         Self::load_from(&path)
     }
 
+    /// Load a project's cloud config and apply the machine-wide login when the
+    /// project has no local credentials.
+    ///
+    /// Unlike [`Self::load`], this is rooted at an explicit `.cas` directory.
+    /// Cross-project callers must use it instead of consulting the process
+    /// working directory (which may be a factory worktree for another
+    /// project). As with `load`, caching inherited credentials is best-effort.
+    pub fn load_from_cas_dir_inheriting_user_credentials(cas_dir: &Path) -> Result<Self, CasError> {
+        let mut config = Self::load_from_cas_dir(cas_dir)?;
+        let changed = Self::load_user()
+            .map(|user| config.inherit_credentials_from(&user))
+            .unwrap_or(false);
+        if changed {
+            if let Err(error) = config.save_to_cas_dir(cas_dir) {
+                tracing::debug!(%error, cas_dir = %cas_dir.display(), "could not cache inherited user cloud credentials");
+            }
+        }
+        Ok(config)
+    }
+
     /// Save cloud config to .cas/cloud.json
     pub fn save(&self) -> Result<(), CasError> {
         let path = Self::config_path()?;
@@ -1451,6 +1471,33 @@ mod tests {
             Some("project-token"),
             "an explicit project credential must not be overwritten"
         );
+    }
+
+    #[test]
+    fn explicit_project_team_survives_explicit_root_credential_inheritance() {
+        let (_guard, _temp, user_path, project_path) = machine_fixture();
+        CloudConfig {
+            token: Some("user-level-token".to_string()),
+            ..Default::default()
+        }
+        .save_to(&user_path)
+        .unwrap();
+        CloudConfig {
+            team_id: Some("explicit-team-id".to_string()),
+            team_slug: Some("explicit-team".to_string()),
+            ..Default::default()
+        }
+        .save_to(&project_path)
+        .unwrap();
+
+        let loaded = CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+            project_path.parent().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(loaded.token.as_deref(), Some("user-level-token"));
+        assert_eq!(loaded.team_id.as_deref(), Some("explicit-team-id"));
+        assert_eq!(loaded.team_slug.as_deref(), Some("explicit-team"));
     }
 
     #[test]

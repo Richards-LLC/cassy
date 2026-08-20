@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# cas-update — build CAS from source, install it, migrate/sync every local CAS
-# project, then safely turn over processes still executing the previous binary.
+# cas-update — build CAS from source, install it, delegate the native
+# all-project refresh, then safely turn over processes still executing the
+# previous binary.
 #
 # Canonical source: contrib/shell-helpers/cas-update
 # Install with:     contrib/shell-helpers/install.sh
 #
 # Usage:
-#   cas-update                      # build, install, migrate/sync, turn over stale CAS
-#   cas-update --no-restart         # build/install/migrate/sync; leave runtimes untouched
+#   cas-update                      # build, install, refresh all projects, turn over stale CAS
+#   cas-update --no-restart         # build/install/refresh all projects; leave runtimes untouched
 #   cas-update --build-only         # build/install only; implies --no-restart
-#   cas-update --sync-only          # migrate/sync only; never changes runtime processes
+#   cas-update --sync-only          # native all-project refresh only; never changes runtime processes
 #   cas-update --branch <name>      # build from a non-main branch
 #   cas-update --no-pull            # use the currently checked-out source
 #   cas-update --debug              # use the dev profile instead of release-fast
@@ -602,33 +603,18 @@ discover_projects() {
 }
 
 sync_projects() {
-  step "Migrate + sync all CAS projects"
-  local projects=() db proj out sub combined schema skills failed=0
-  while IFS= read -r db; do
-    proj="$(dirname "$(dirname "$db")")"; [ "$proj" = "$HOME" ] || projects+=("$proj")
-  done < <(discover_projects)
-  info "found ${#projects[@]} project(s) under $SCAN_ROOTS"
-  for proj in "${projects[@]}"; do
-    if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] $proj: --schema-only, --sync"; continue; fi
-    combined=""
-    for sub in --schema-only --sync; do
-      if out="$(cd "$proj" && "$CAS_INSTALL" update "$sub" 2>&1)"; then combined="$combined\n$out"; else
-        error "$proj: cas update $sub failed: $out"; failed=$((failed + 1)); break
-      fi
-    done
-    schema="$(printf '%b' "$combined" | grep -oE 'Schema (up to date|migrated to) \(v[0-9]+\)' | head -1 || true)"
-    skills="$(printf '%b' "$combined" | grep -oE 'Synced [0-9]+ skills, removed [0-9]+' | head -1 || true)"
-    info "$proj: ${schema:-schema current}${skills:+; $skills}"
-  done
-  [ "$failed" -eq 0 ] || return 1
+  step "Refresh every CAS project natively"
+  local args=(update --all-projects)
+  [ "$DRY_RUN" = "1" ] && args+=(--dry-run)
+  info "delegating migration, skills, team membership, and cloud sync to cas (${SCAN_ROOTS})"
+  CAS_PROJECT_ROOTS="$SCAN_ROOTS" "$CAS_INSTALL" "${args[@]}"
 }
 
 sync_user_builtins() {
-  step "Distribute user-level built-ins"
-  if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] $CAS_INSTALL update --user"; return; fi
-  local out
-  out="$("$CAS_INSTALL" update --user 2>&1)" || { error "user-level sync failed: $out"; return 1; }
-  printf '%s\n' "$out" | grep -E '~/.claude:|~/.codex:' | sed 's/^/  /' || true
+  # `cas update --all-projects` includes user-level built-ins. Kept as a
+  # no-op shell function so older callers sourcing this helper retain a stable
+  # function surface without reintroducing duplicated sync behavior.
+  :
 }
 
 print_summary() {

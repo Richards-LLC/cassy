@@ -270,8 +270,9 @@ verify_install() {
   echo ""
   bold "Next steps:"
   echo "  1. Initialize a project:  cd your-project && cas init"
-  echo "  2. Start a session:       cas factory"
-  echo "  3. Check the docs:        cas --help"
+  echo "  2. Refresh all projects:  cas update --all-projects"
+  echo "  3. Start a session:       cas factory"
+  echo "  4. Check the docs:        cas --help"
   echo ""
 }
 

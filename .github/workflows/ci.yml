@@ -200,6 +200,10 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      - name: Test portable installer fixtures
+        if: steps.pr-dedupe.outputs.covered != 'true'
+        run: ./scripts/test-cas-install.sh
+
       - uses: ./.github/actions/setup-rust-linux
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
@@ -279,6 +283,9 @@ jobs:
         uses: ./.github/actions/classify-required-diff
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+      - name: Test portable installer fixtures
+        run: ./scripts/test-cas-install.sh
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'

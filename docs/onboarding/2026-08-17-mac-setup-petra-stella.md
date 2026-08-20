@@ -8,9 +8,15 @@ Date: 2026-08-17 · Revised 2026-08-20 for the supported macOS release installer
 
 ## 1. Prerequisites
 
-Apple Silicon (M1–M4). Check: `uname -m` → `arm64`.
+This published-binary path supports Apple Silicon (M1–M4) only. Its first
+command stops on Intel so an unsupported Mac never reaches the installer.
 
 ```bash
+if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "Unsupported Intel Mac: this Cassy release is Apple Silicon only. Contact the operator."
+  exit 1
+fi
+
 # Homebrew (skip if `brew --version` works)
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null \
@@ -24,7 +30,8 @@ npm install -g @anthropic-ai/claude-code
 
 Claude Code ≥ 2.1.126 is required (earlier 2.1.117–2.1.125 had a factory-mode rendering crash); a fresh install today is far past that.
 
-Steps 1 and 2 are safe to paste twice: each `~/.zprofile` line is appended only when it is not already present, so a re-run cannot duplicate it.
+Steps 1 and 2 are safe to paste twice: each shell-config line is appended only
+when it is not already present, so a re-run cannot duplicate it.
 
 ## 2. Install the Cassy binary
 
@@ -32,10 +39,13 @@ Steps 1 and 2 are safe to paste twice: each `~/.zprofile` line is appended only 
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 ```
 
-The installer prints a PATH fix if `~/.local/bin` is absent from your shell.
+Put `~/.local/bin` in `~/.zshenv`, not only `~/.zprofile` or `~/.zshrc`: MCP
+subprocesses can start non-interactive shells and must inherit the same PATH.
 Apply it for this shell, then confirm the installed release:
 
 ```bash
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.zshenv 2>/dev/null \
+  || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv
 export PATH="$HOME/.local/bin:$PATH"
 cas --version
 ```
@@ -54,7 +64,7 @@ cas update --user    # seeds the harness dirs that exist: ~/.claude, ~/.codex, ~
 
 Skip `cas doctor` for now — it reports on a *project*, and you do not have one yet. Step 7 runs it in the right place.
 
-From now on, upgrading is a single command — `cas update` — which fetches the latest release, replaces the binary, and runs schema migrations. Run it when release announcements land in #cas-internal; nothing else to maintain.
+From now on, upgrading is a single command — `cas update` — which fetches the latest release, replaces the binary, then refreshes every local Cassy project (schema, skills, team membership, and cloud-linked sync). To rehearse that sweep without replacing the binary, run `cas update --all-projects --dry-run`.
 
 ## 4. Hub service (Commander access)
 
@@ -142,8 +152,9 @@ Then start working: bare `cas` launches the factory TUI with defaults.
 
 ## Troubleshooting
 
-- Binary killed instantly on first run → Gatekeeper: `xattr -d com.apple.quarantine ~/.local/bin/cas`.
-- `cas` not found → `~/.local/bin` missing from PATH; re-check the `~/.zprofile` line, then open a new terminal (or `source ~/.zprofile`).
+- `cas` exits immediately with `Killed: 9` and **no Gatekeeper dialog** → the Mach-O signature is invalid or missing. Re-run the installer to replace the binary; if it persists, contact the operator. Do not treat this as a quarantine problem.
+- Gatekeeper shows **“cas cannot be opened because the developer cannot be verified”** → clear quarantine: `xattr -d com.apple.quarantine ~/.local/bin/cas`.
+- `cas` not found → `~/.local/bin` is missing from PATH; re-check the `~/.zshenv` line, then open a new terminal (or `source ~/.zshenv`).
 - `Cassy not initialized` from a cloud command → you are outside a project. `cas login`, `cas logout` and `cas whoami` work anywhere; `cas doctor`, `cas cloud status` and `cas cloud team show` need you to `cd` into a `cas init`-ed project.
 - `cas init` refuses with "is your home directory" → that is the guard working; `cd` into the project first.
 - Hub unreachable from hub.petrastella.io → `cas hub service status`; confirm Tailscale is connected; re-pair if the Commander shows "Machine needs pairing".

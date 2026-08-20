@@ -11,10 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cas-cli must live under repo root")
-        .to_path_buf()
+    cas::test_paths::workspace_root()
 }
 
 fn load(rel: &str) -> String {

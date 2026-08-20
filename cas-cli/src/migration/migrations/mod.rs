@@ -539,7 +539,7 @@ mod tests {
     /// the moment one appears.
     #[test]
     fn test_every_migration_file_is_declared_and_registered() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/migration/migrations");
+        let dir = crate::test_paths::crate_root().join("src/migration/migrations");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             // Source tree unavailable (packaged/vendored build) — nothing to check.
             return;

@@ -320,10 +320,7 @@ fn render_diff(claude: &[String], twin: &[String], claude_label: &str, twin_labe
 // ---------------------------------------------------------------------------
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cas-cli must live under repo root")
-        .to_path_buf()
+    cas::test_paths::workspace_root()
 }
 
 fn builtins_root() -> PathBuf {

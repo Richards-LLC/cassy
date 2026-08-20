@@ -154,9 +154,7 @@ const PERSONA_FILES: &[&str] = &[
 ];
 
 fn workspace_root() -> PathBuf {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // CARGO_MANIFEST_DIR is .../cas-cli — workspace root is its parent.
-    manifest.parent().expect("cas-cli has a parent").to_path_buf()
+    cas::test_paths::workspace_root()
 }
 
 fn load_persona_corpus(mirror: &str) -> String {

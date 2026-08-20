@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// Roots that contain shipped source code. Tests, fixtures, and benches are
 /// excluded — they are allowed to construct pull URLs freely.
 fn production_source_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+    cas::test_paths::crate_root().join("src")
 }
 
 /// Recursively collect every `.rs` file under `dir`.
@@ -206,7 +206,7 @@ fn pull_url_hits(root: &Path) -> Vec<(PathBuf, Vec<usize>)> {
 
 #[test]
 fn pull_url_scan_ignores_cfg_test_module_fixture() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let fixture = cas::test_paths::crate_root()
         .join("tests")
         .join("fixtures")
         .join("pull_scoping")

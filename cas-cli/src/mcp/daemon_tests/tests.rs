@@ -1014,11 +1014,7 @@ fn every_production_agent_pid_assignment_has_nearby_fingerprint_stamp() {
         }
     }
 
-    // Resolve cas-cli/src relative to this file. CARGO_MANIFEST_DIR points at
-    // cas-cli/ so append `src/`.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR must be set in cargo test context");
-    let src_root = PathBuf::from(manifest_dir).join("src");
+    let src_root = crate::test_paths::crate_root().join("src");
     assert!(
         src_root.exists(),
         "cas-cli/src must exist at {}",

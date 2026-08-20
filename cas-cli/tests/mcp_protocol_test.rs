@@ -607,7 +607,7 @@ fn test_mcp_task_create_cannot_escape_cas_sandbox() {
     // Model a test process launched by a factory worker: both store resolvers
     // initially point at a live project, along with an arbitrary future CAS_*
     // variable that a fixed scrub list would miss.
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+    let mut cmd = Command::new(support::cas_binary());
     cmd.env("CAS_ROOT", live_store_sentinel.cas_root())
         .env("CAS_DIR", live_store_sentinel.cas_root())
         .env("CLAUDE_PROJECT_DIR", live_store_sentinel.path())
@@ -715,7 +715,7 @@ fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
 
     // Prove the same overwrite is applied to the serve path, even when a
     // caller seeds hostile HOME/XDG values on the command itself.
-    let mut serve = Command::new(env!("CARGO_BIN_EXE_cas"));
+    let mut serve = Command::new(support::cas_binary());
     serve
         .env("HOME", &host_home)
         .env("XDG_CONFIG_HOME", &host_xdg);

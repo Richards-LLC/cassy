@@ -30,7 +30,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const MAX_RETRIES: i32 = 5;
 
 fn production_source_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+    cas::test_paths::crate_root().join("src")
 }
 
 fn make_logged_in_cas_root(endpoint: &str) -> TempDir {

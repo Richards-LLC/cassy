@@ -827,7 +827,7 @@ mod tests {
         supervisor.factory_session = Some("factory-1".to_string());
         agents.register(&supervisor).unwrap();
 
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixture = crate::test_paths::crate_root()
             .join("tests/fixtures/mock_mcp_viktor_thread_server.py");
         let config = cmcp_core::config::ServerConfig::Stdio {
             command: "python3".to_string(),
@@ -908,7 +908,7 @@ mod tests {
     }
 
     async fn inbound_fixture_engine(cas_root: &Path) -> cmcp_core::ProxyEngine {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixture = crate::test_paths::crate_root()
             .join("tests/fixtures/mock_mcp_viktor_inbound_server.py");
         let config = cmcp_core::config::ServerConfig::Stdio {
             command: "python3".to_string(),

@@ -64,6 +64,7 @@ pub mod sentry;
 pub mod store;
 pub mod sync;
 pub mod telemetry;
+pub mod test_paths;
 pub mod tracing;
 pub mod ui;
 pub mod worktree;
@@ -162,7 +163,7 @@ pub(crate) mod test_support {
 
         let mut hits = Vec::new();
         visit(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+            crate::test_paths::crate_root().join("src").as_path(),
             &mut hits,
         );
         assert!(

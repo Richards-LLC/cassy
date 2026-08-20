@@ -14,49 +14,11 @@ use tempfile::TempDir;
 /// Resolve an archive-consumable `cas` binary without trusting a producer path
 /// baked into an integration-test executable.
 pub fn cas_binary() -> PathBuf {
-    runtime_binary(
-        "cas",
-        option_env!("CARGO_BIN_EXE_cas").map(PathBuf::from),
-    )
+    cas::test_paths::binary("cas", option_env!("CARGO_BIN_EXE_cas").map(PathBuf::from))
 }
 
 pub fn workspace_root() -> PathBuf {
-    for key in ["CAS_TEST_WORKSPACE_ROOT", "NEXTEST_WORKSPACE_ROOT"] {
-        if let Some(path) = std::env::var_os(key).map(PathBuf::from).filter(|path| path.is_dir()) {
-            return path;
-        }
-    }
-    for base in [std::env::current_dir().ok(), std::env::current_exe().ok()].into_iter().flatten() {
-        if let Some(root) = base.ancestors().find(|path| path.join("Cargo.toml").is_file()) {
-            return root.to_path_buf();
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cas-cli manifest has workspace parent")
-        .to_path_buf()
-}
-
-fn runtime_binary(name: &str, baked: Option<PathBuf>) -> PathBuf {
-    let upper = name.to_ascii_uppercase().replace('-', "_");
-    for key in [format!("CAS_TEST_BIN_{upper}"), format!("NEXTEST_BIN_EXE_{upper}"), format!("CARGO_BIN_EXE_{upper}")] {
-        if let Some(path) = std::env::var_os(&key).map(PathBuf::from).filter(|path| path.is_file()) {
-            return path;
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors() {
-            let candidate = ancestor.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    let candidate = std::env::current_dir().unwrap_or_default().join("target/debug").join(name);
-    if candidate.is_file() {
-        return candidate;
-    }
-    baked.unwrap_or_else(|| PathBuf::from(name))
+    cas::test_paths::workspace_root()
 }
 
 /// A temporary CAS project whose subprocesses cannot inherit a live CAS store.

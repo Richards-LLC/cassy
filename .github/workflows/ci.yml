@@ -318,6 +318,8 @@ jobs:
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
     needs: fast-validation-runner-route
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
+    outputs:
+      producer_mode: ${{ needs.fast-validation-runner-route.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -375,6 +377,9 @@ jobs:
         if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
           && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        # cas-065a: cache isolation stays observable, but its TCP failure must
+        # not block the merge queue while the server defect is investigated.
+        continue-on-error: true
         run: |
           set -euo pipefail
           test "${SCCACHE_SERVER_PORT:?}" = 4227
@@ -384,7 +389,13 @@ jobs:
           esac
           sccache rustc -vV
           sccache --show-stats
-          echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
+
+      - name: Disable sccache for the self-hosted suite archive
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        # cas-065a: the cache is an optimization, not a merge-queue prerequisite.
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
 
       # Debug info is stripped from the archived test binaries (cas-59d3).
       # Every shard downloads this whole artifact, so its size is multiplied by
@@ -414,7 +425,10 @@ jobs:
       # upload-artifact intentionally does not preserve executable mode bits.
       - name: Package CLI runner
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: tar -czf fast-validation-suite-runner.tar.gz target/debug/cas
+        run: |
+          tar -C "${CARGO_TARGET_DIR:-target}/debug" \
+            --transform='s,^cas$,target/debug/cas,' \
+            -czf fast-validation-suite-runner.tar.gz cas
 
       - name: Upload full suite archive and CLI runner
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
@@ -489,12 +503,30 @@ jobs:
           tar -xzf fast-validation-suite-runner.tar.gz
           test -x target/debug/cas
 
+      # cas-f83c: CARGO_BIN_EXE_* and CARGO_MANIFEST_DIR are baked into
+      # archived test binaries. Keep these links only for self-hosted archive
+      # producers until runtime-path-robust tests replace the compatibility shim.
+      - name: Restore self-hosted producer paths
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-suite-build.outputs.producer_mode == 'self-hosted'
+        run: |
+          sudo mkdir -p /var/lib/cassy-actions/runner/_work/cassy
+          sudo ln -sfn "$GITHUB_WORKSPACE" /var/lib/cassy-actions/runner/_work/cassy/cassy
+          sudo mkdir -p /var/lib/cassy-actions/cache
+          sudo ln -sfn "$GITHUB_WORKSPACE/target" /var/lib/cassy-actions/cache/cargo-target
+
       # count:1/3 through count:3/3 are disjoint and exhaustive. Keep
       # --no-fail-fast so failures never mask later binaries; doctests stay in
-      # their own required lane because nextest cannot run them.
+      # their own required lane because nextest cannot run them. Remap the
+      # self-hosted producer workspace to this hosted checkout (cas-c4a5).
+      # Insta also resolves snapshots at runtime from its producer path, so
+      # pin its workspace root to this hosted checkout.
       - name: Test full suite shard ${{ matrix.shard }}/3
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --no-fail-fast --partition count:${{ matrix.shard }}/3
+        env:
+          INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
+        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and

@@ -3355,7 +3355,7 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
             service
                 .cas_task_reopen(Parameters(TaskReopenRequest {
                     id: id_a.clone(),
-                    reason: None,
+                    reason: Some("new commit requires a fresh close cycle".to_string()),
                 }))
                 .await
                 .expect("reopen returns"),

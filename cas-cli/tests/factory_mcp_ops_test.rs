@@ -6578,7 +6578,7 @@ async fn test_062d_lifecycle_reopen_pushes_ready() {
         .inner
         .cas_task_reopen(Parameters(cas::mcp::tools::TaskReopenRequest {
             id: "cas-062d-reopen".to_string(),
-            reason: None,
+            reason: Some("new ready cycle after supervisor review".to_string()),
         }))
         .await
         .expect("reopen should succeed");

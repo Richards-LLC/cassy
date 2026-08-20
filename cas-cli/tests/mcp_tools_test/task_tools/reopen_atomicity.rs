@@ -1,5 +1,5 @@
 use crate::support::*;
-use cas::mcp::tools::{TaskReopenRequest, TaskUpdateRequest};
+use cas::mcp::tools::TaskReopenRequest;
 use cas::store::{
     open_agent_store, open_event_store, open_recording_store, open_supervisor_queue_store,
     open_task_store, open_verification_store,
@@ -47,7 +47,6 @@ struct ClosedFixture {
     service: cas::mcp::CasCore,
     task_id: String,
     old_epic_id: String,
-    new_epic_id: String,
     dispatch_id: String,
 }
 
@@ -77,13 +76,6 @@ impl ClosedFixture {
         );
         old_epic.task_type = cas::types::TaskType::Epic;
         task_store.add(&old_epic).expect("old epic");
-        let mut new_epic = Task::new(
-            format!("cas-new-epic-{suffix}"),
-            "Replacement parent epic".to_string(),
-        );
-        new_epic.task_type = cas::types::TaskType::Epic;
-        task_store.add(&new_epic).expect("new epic");
-
         let mut task = Task::new(
             format!("cas-reopen-{suffix}"),
             "Failure-atomic reopen".to_string(),
@@ -139,7 +131,6 @@ impl ClosedFixture {
             service,
             task_id: task.id,
             old_epic_id: old_epic.id,
-            new_epic_id: new_epic.id,
             dispatch_id: dispatch.id,
         }
     }
@@ -148,25 +139,10 @@ impl ClosedFixture {
         self.temp.path().join(".cas")
     }
 
-    fn update_request(&self) -> TaskUpdateRequest {
-        TaskUpdateRequest {
-            blocked_by: None,
+    fn reopen_request(&self) -> TaskReopenRequest {
+        TaskReopenRequest {
             id: self.task_id.clone(),
-            title: None,
-            notes: None,
-            priority: None,
-            labels: None,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            demo_statement: None,
-            execution_note: None,
-            external_ref: None,
-            assignee: None,
-            status: Some("open".to_string()),
-            epic: Some(self.new_epic_id.clone()),
-            epic_verification_owner: None,
-            depth: None,
+            reason: Some("exercise atomic terminal reopen".to_string()),
         }
     }
 }
@@ -230,7 +206,7 @@ fn install_failure(conn: &Connection, name: &str, body: &str) {
 }
 
 #[tokio::test]
-async fn update_reopen_rolls_back_every_later_write_and_retries_idempotently() {
+async fn reopen_rolls_back_every_later_write_and_retries_idempotently() {
     let fixture = ClosedFixture::new("update");
     let _env_lock = env_test_lock();
     let _env = EnvGuard::set(&[
@@ -253,13 +229,6 @@ async fn update_reopen_rolls_back_every_later_write_and_retries_idempotently() {
             format!("BEFORE UPDATE ON tasks WHEN OLD.id = '{}'", fixture.task_id),
         ),
         (
-            "fail_reopen_dependency",
-            format!(
-                "BEFORE DELETE ON dependencies WHEN OLD.from_id = '{}'",
-                fixture.task_id
-            ),
-        ),
-        (
             "fail_reopen_event",
             format!(
                 "BEFORE INSERT ON events WHEN NEW.entity_id = '{}'",
@@ -277,7 +246,7 @@ async fn update_reopen_rolls_back_every_later_write_and_retries_idempotently() {
         install_failure(&conn, name, &body);
         let result = fixture
             .service
-            .cas_task_update(Parameters(fixture.update_request()))
+            .cas_task_reopen(Parameters(fixture.reopen_request()))
             .await;
         assert!(result.is_err(), "{name} must surface");
         conn.execute_batch(&format!("DROP TRIGGER {name};"))
@@ -287,7 +256,7 @@ async fn update_reopen_rolls_back_every_later_write_and_retries_idempotently() {
 
     fixture
         .service
-        .cas_task_update(Parameters(fixture.update_request()))
+        .cas_task_reopen(Parameters(fixture.reopen_request()))
         .await
         .expect("retry after failures");
     let after = snapshot(&fixture);
@@ -300,7 +269,7 @@ async fn update_reopen_rolls_back_every_later_write_and_retries_idempotently() {
         .get_dependencies(&fixture.task_id)
         .expect("parents");
     assert_eq!(parents.len(), 1);
-    assert_eq!(parents[0].to_id, fixture.new_epic_id);
+    assert_eq!(parents[0].to_id, fixture.old_epic_id);
     assert_eq!(
         cas_store::get_verification_dispatch(&fixture.cas_dir(), &fixture.dispatch_id)
             .expect("dispatch")
@@ -310,10 +279,10 @@ async fn update_reopen_rolls_back_every_later_write_and_retries_idempotently() {
 
     let retry = fixture
         .service
-        .cas_task_update(Parameters(fixture.update_request()))
+        .cas_task_reopen(Parameters(fixture.reopen_request()))
         .await
-        .expect("exact update retry");
-    assert!(extract_text(retry).contains("No changes specified"));
+        .expect("exact reopen retry");
+    assert!(extract_text(retry).contains("idempotently"));
     assert_eq!(
         snapshot(&fixture),
         after,

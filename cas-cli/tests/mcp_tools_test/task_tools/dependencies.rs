@@ -668,6 +668,7 @@ async fn task_update_blocked_by_rejects_the_epic_set_in_the_same_call() {
 #[tokio::test]
 async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
     let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -701,15 +702,22 @@ async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
         "a rejected reopen+blocked_by call must not write any dependency"
     );
 
-    // Reopen first, then add the blocker: the documented two-call path works.
+    // Reopen first through the attributed supervisor-only action, then add
+    // the blocker: the documented two-call path works.
+    unsafe {
+        std::env::set_var("CAS_AGENT_ROLE", "supervisor");
+    }
     service
         .task(Parameters(task_req(serde_json::json!({
-            "action": "update",
+            "action": "reopen",
             "id": dependent_id,
-            "status": "open",
+            "reason": "dependency review requires a fresh work cycle",
         }))))
         .await
-        .expect("reopen should succeed on its own");
+        .expect("attributed supervisor reopen should succeed on its own");
+    unsafe {
+        std::env::remove_var("CAS_AGENT_ROLE");
+    }
     service
         .task(Parameters(task_req(serde_json::json!({
             "action": "update",

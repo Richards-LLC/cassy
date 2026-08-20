@@ -139,7 +139,7 @@ async fn cancel_refuses_blank_reason_without_mutation() {
 }
 
 #[tokio::test]
-async fn direct_status_updates_cannot_cancel_or_reopen_cancelled_work() {
+async fn direct_status_updates_cannot_change_terminal_work() {
     let (temp, core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -186,6 +186,28 @@ async fn direct_status_updates_cannot_cancel_or_reopen_cancelled_work() {
         persisted.terminal_outcome,
         Some(TaskTerminalOutcome::Cancelled { .. })
     ));
+
+    let mut closed = Task::new(
+        "cas-closed-update-bypass".into(),
+        "guard terminal reopen verb".into(),
+    );
+    closed.status = TaskStatus::Closed;
+    closed.closed_at = Some(chrono::Utc::now());
+    store.add(&closed).unwrap();
+    let direct_closed_reopen: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": closed.id,
+        "status": "in_progress"
+    }))
+    .unwrap();
+    let error = core
+        .cas_task_update(Parameters(direct_closed_reopen))
+        .await
+        .expect_err("direct Closed -> active update must use the attributed reopen action");
+    assert!(error.message.contains("action=reopen"), "{}", error.message);
+    assert_eq!(
+        store.get("cas-closed-update-bypass").unwrap().status,
+        TaskStatus::Closed
+    );
 }
 
 #[tokio::test]
@@ -271,6 +293,9 @@ async fn registered_supervisor_can_reopen_cancelled_task_and_clear_outcome() {
     assert!(
         reopened
             .notes
-            .contains("Reopened: replacement was reverted")
+            .contains("Reopened: actor=test-agent (test-session-")
+            && reopened.notes.contains(") reason=replacement was reverted"),
+        "reopen audit must retain both the registered actor identity and reason: {:?}",
+        reopened.notes
     );
 }

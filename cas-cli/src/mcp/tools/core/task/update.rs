@@ -548,11 +548,36 @@ impl CasCore {
                 data: None,
             });
         }
-        let reopening_closed = task.status == TaskStatus::Closed
-            && req
-                .status
-                .as_deref()
-                .is_some_and(|status| status.eq_ignore_ascii_case(&TaskStatus::Open.to_string()));
+        if task.is_terminal() && req.status.is_some() {
+            if task.status == TaskStatus::Closed
+                && req
+                    .blocked_by
+                    .as_deref()
+                    .is_some_and(|blocked_by| !blocked_by.trim().is_empty())
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "TASK UPDATE REJECTED: reopening a closed task {} cannot be combined \
+                         with blocked_by. Use task action=reopen with a non-empty reason so \
+                         supervisor authority and the attributed audit trail are recorded, then \
+                         add blockers with a separate update call.",
+                        task.id
+                    )),
+                    data: None,
+                });
+            }
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "TASK UPDATE REJECTED: terminal task {} may change status only through task \
+                     action=reopen with a non-empty reason so supervisor authority and the \
+                     attributed audit trail are recorded atomically.",
+                    task.id
+                )),
+                data: None,
+            });
+        }
         if req
             .status
             .as_deref()
@@ -582,22 +607,20 @@ impl CasCore {
                 data: None,
             });
         }
-        if !reopening_closed {
-            if let Err(message) = super::lifecycle::proof_scope::guard_task_proof_scope(
-                &self.cas_root,
-                &task,
-                super::lifecycle::proof_scope::ProofScopeOperation::TaskUpdate {
-                    request: &req,
-                    target_repo_supplied: target_repo.is_some(),
-                    target_branch_supplied: target_branch.is_some(),
-                },
-            ) {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message.to_string()),
-                    data: None,
-                });
-            }
+        if let Err(message) = super::lifecycle::proof_scope::guard_task_proof_scope(
+            &self.cas_root,
+            &task,
+            super::lifecycle::proof_scope::ProofScopeOperation::TaskUpdate {
+                request: &req,
+                target_repo_supplied: target_repo.is_some(),
+                target_branch_supplied: target_branch.is_some(),
+            },
+        ) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message.to_string()),
+                data: None,
+            });
         }
         // Resolving an existing work target is necessary only when this call
         // changes its branch. Unrelated task fields (notably the first
@@ -622,8 +645,6 @@ impl CasCore {
         let prior_assignee = task.assignee.clone();
 
         let mut changes = Vec::new();
-        let mut atomic_parent_dependency = cas_store::ParentDependencyUpdate::Unchanged;
-
         if let Some(title) = req.title {
             task.title = title;
             changes.push("title");
@@ -1166,10 +1187,6 @@ impl CasCore {
                 task.status = new_status;
                 changes.push("status");
             }
-            if reopening_closed {
-                task.closed_at = None;
-                task.deliverables.factory_branch_anchor = None;
-            }
         }
 
         // Captured before `req.epic` is consumed below — the blocked_by guard
@@ -1238,28 +1255,23 @@ impl CasCore {
                 None => existing_parent_deps.is_empty(),
             };
             if !already_matches {
-                if reopening_closed {
-                    atomic_parent_dependency =
-                        cas_store::ParentDependencyUpdate::Replace(replacement);
-                } else {
-                    for dep in existing_parent_deps {
-                        task_store
-                            .remove_dependency(&req.id, &dep.to_id)
-                            .map_err(|e| McpError {
-                                code: ErrorCode::INTERNAL_ERROR,
-                                message: Cow::from(format!(
-                                    "Failed to remove existing epic dependency: {e}"
-                                )),
-                                data: None,
-                            })?;
-                    }
-                    if let Some(dep) = replacement.as_ref() {
-                        task_store.add_dependency(dep).map_err(|e| McpError {
+                for dep in existing_parent_deps {
+                    task_store
+                        .remove_dependency(&req.id, &dep.to_id)
+                        .map_err(|e| McpError {
                             code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!("Failed to add epic dependency: {e}")),
+                            message: Cow::from(format!(
+                                "Failed to remove existing epic dependency: {e}"
+                            )),
                             data: None,
                         })?;
-                    }
+                }
+                if let Some(dep) = replacement.as_ref() {
+                    task_store.add_dependency(dep).map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to add epic dependency: {e}")),
+                        data: None,
+                    })?;
                 }
                 changes.push("epic");
             }
@@ -1297,22 +1309,6 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!("Task {} cannot block itself.", req.id)),
-                    data: None,
-                });
-            }
-
-            // Reopening rewrites the task atomically as Open; a fresh blocker
-            // would immediately contradict that status. Reject the combination
-            // explicitly rather than persisting an Open-but-blocked task.
-            if reopening_closed {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "blocked_by cannot be combined with reopening a closed task \
-                         (status=open). Reopen first, then add blockers with a second \
-                         `update blocked_by=...` call."
-                            .to_string(),
-                    ),
                     data: None,
                 });
             }
@@ -1475,66 +1471,13 @@ impl CasCore {
                 })
                 .unwrap_or_else(|| "unknown".into())
         });
-        let lifecycle_outbox = if reopening_closed {
-            let actor = lifecycle_actor.as_deref().unwrap_or("unknown");
-            let agent_store = self.open_agent_store().map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to prepare reopen lifecycle: {error}")),
-                data: None,
-            })?;
-            let occurrence = crate::mcp::tools::core::task::lifecycle::supervisor_push::occurrence_from_updated_at(task.updated_at);
-            let outbox = crate::mcp::tools::core::task::lifecycle::supervisor_push::prepare_task_lifecycle_outbox(
-                agent_store.as_ref(),
-                &task.id,
-                &task.title,
-                TaskStatus::Closed,
-                TaskStatus::Open,
-                actor,
-                None,
-                crate::mcp::tools::core::task::lifecycle::supervisor_push::LifecycleTransition::ReadyReopened,
-                &occurrence,
-            );
-            if outbox.is_some() {
-                crate::store::open_supervisor_queue_store(&self.cas_root).map_err(|error| {
-                    McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Failed to initialize reopen lifecycle outbox: {error}"
-                        )),
-                        data: None,
-                    }
-                })?;
-            }
-            outbox
-        } else {
-            None
-        };
-
-        if reopening_closed {
-            cas_store::reopen_closed_task_atomic(
-                &self.cas_root,
-                &task,
-                original_updated_at,
-                atomic_parent_dependency,
-                lifecycle_outbox.as_ref(),
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to atomically reopen task: {e}")),
-                data: None,
-            })?;
-        } else {
-            // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
-            // pushed below matches the persisted row. (The `reopening_closed`
-            // branch above goes through `reopen_exact_with_conn`, which writes
-            // `task.updated_at` through verbatim as its optimistic-concurrency
-            // key, so its occurrence is already consistent.)
-            task.updated_at = task_store.update(&task).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to update: {e}")),
-                data: None,
-            })?;
-        }
+        // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
+        // pushed below matches the persisted row.
+        task.updated_at = task_store.update(&task).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to update: {e}")),
+            data: None,
+        })?;
 
         // cas-062d: push blocked / ready-reopened transitions.
         if let Some((old_st, new_st)) = lifecycle_status_change {
@@ -1611,7 +1554,7 @@ mod status_transition_tests {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
         EpicCloseGateOutcome, run_epic_close_merge_gate,
     };
-    use cas_types::{Task, TaskStatus, TaskType};
+    use cas_types::{Agent, Task, TaskStatus, TaskType};
     use tempfile::TempDir;
 
     fn git(repo: &std::path::Path, args: &[&str]) -> String {
@@ -1630,7 +1573,7 @@ mod status_transition_tests {
     }
 
     #[tokio::test]
-    async fn task_update_closed_to_in_progress_clears_factory_branch_anchor() {
+    async fn task_update_rejects_terminal_status_changes_and_reopen_clears_factory_branch_anchor() {
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-q", "-b", "main"]);
@@ -1652,6 +1595,12 @@ mod status_transition_tests {
         let core = CasCore::with_daemon(cas_dir, None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
+        let agent_store = core.open_agent_store().unwrap();
+        agent_store.init().unwrap();
+        agent_store
+            .register(&Agent::new("supervisor-agent".into(), "supervisor".into()))
+            .unwrap();
+        core.set_agent_id_for_testing("supervisor-agent".into());
 
         let mut task = Task::new("cas-anchor".into(), "Anchored closed task".into());
         task.status = TaskStatus::Closed;
@@ -1666,10 +1615,40 @@ mod status_transition_tests {
             "status": "in_progress"
         }))
         .unwrap();
-        core.cas_task_update(Parameters(req)).await.unwrap();
+        let error = core
+            .cas_task_update(Parameters(req))
+            .await
+            .expect_err("generic update must not silently reopen a terminal task");
+        assert!(error.message.contains("action=reopen"), "{}", error.message);
+        assert_eq!(store.get("cas-anchor").unwrap().status, TaskStatus::Closed);
+
+        // The attributed supervisor-only reopen path remains the sanctioned
+        // way to start a fresh close cycle.
+        unsafe {
+            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
+        }
+        core.cas_task_reopen(Parameters(TaskReopenRequest {
+            id: "cas-anchor".into(),
+            reason: Some("delivery needs a fresh review cycle".into()),
+        }))
+        .await
+        .unwrap();
+        unsafe {
+            std::env::remove_var("CAS_AGENT_ROLE");
+        }
 
         let updated = store.get("cas-anchor").unwrap();
-        assert_eq!(updated.status, TaskStatus::InProgress);
+        assert_eq!(updated.status, TaskStatus::Open);
+        assert!(
+            updated
+                .notes
+                .contains("actor=supervisor (supervisor-agent)")
+        );
+        assert!(
+            updated
+                .notes
+                .contains("reason=delivery needs a fresh review cycle")
+        );
         assert!(
             updated.deliverables.factory_branch_anchor.is_none(),
             "a Closed -> non-Closed transition must invalidate the prior close cycle's anchor"

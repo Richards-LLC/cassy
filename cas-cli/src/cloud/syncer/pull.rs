@@ -368,10 +368,11 @@ fn rejects_terminal_regression(local: &Task, remote: &Task) -> bool {
     !has_explicit_remote_reopen(remote, local.closed_at)
 }
 
-/// Cassy's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened: <reason>`
-/// into the task's replicated note timeline. Treat that timestamped record as
-/// the reopening event; a bare active task row, even one with a newer
-/// `updated_at`, is not authorization to undo a close/cancellation.
+/// Cassy's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened:
+/// actor=<agent> reason=<reason>` into the task's replicated note timeline.
+/// Treat that timestamped, attributed record as the reopening event; a bare
+/// active task row, even one with a newer `updated_at`, is not authorization to
+/// undo a close/cancellation.
 fn has_explicit_remote_reopen(
     remote: &Task,
     local_closed_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -384,7 +385,17 @@ fn has_explicit_remote_reopen(
         else {
             return false;
         };
-        if !event.trim_start().starts_with("Reopened:") {
+        let Some(audit) = event.trim_start().strip_prefix("Reopened:") else {
+            return false;
+        };
+        let Some((actor, reason)) = audit
+            .trim()
+            .strip_prefix("actor=")
+            .and_then(|audit| audit.split_once(" reason="))
+        else {
+            return false;
+        };
+        if actor.trim().is_empty() || reason.trim().is_empty() {
             return false;
         }
         let Ok(timestamp) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
@@ -804,7 +815,13 @@ impl CloudSyncer {
         // historical backfill (GH #192). Once a project has established a
         // watermark, retain the existing behavior: healthy empty incremental
         // pulls advance to the server clock.
-        if (had_prior_watermark || result.total_pulled() > 0)
+        // A locally-retained conflict (including a terminal-row rejection) is
+        // still a successfully consumed, project-scoped server row. Advance
+        // past it so an unattributed reopen is journaled once rather than
+        // fetched and rejected forever. Foreign/malformed rows never reach
+        // `conflicts_resolved`, so the GH #192 empty/wrong-bucket safeguard
+        // remains intact.
+        if (had_prior_watermark || result.total_pulled() > 0 || result.conflicts_resolved > 0)
             && let Some(pulled_at) = body.pulled_at
         {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);
@@ -2082,7 +2099,7 @@ mod web_close_tests {
         remote.close_reason = None;
         remote.updated_at = chrono::Utc::now() + chrono::Duration::minutes(1);
         remote.notes = format!(
-            "[{}] Reopened: regression found after deployment",
+            "[{}] Reopened: actor=remote-supervisor reason=regression found after deployment",
             chrono::Utc::now().format("%Y-%m-%d %H:%M")
         );
         assert!(matches!(
@@ -2099,7 +2116,41 @@ mod web_close_tests {
         assert!(
             reopened
                 .notes
-                .contains("prior_close_reason=original delivery merged")
+            .contains("prior_close_reason=original delivery merged")
+        );
+    }
+
+    #[test]
+    fn terminal_sync_rejects_unattributed_reopen_note() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
+        queue.init().unwrap();
+        let syncer = CloudSyncer::new(queue, CloudConfig::default(), CloudSyncerConfig::default());
+
+        let mut local = Task::new("cas-unattributed-reopen".into(), "closed task".into());
+        local.status = TaskStatus::Closed;
+        local.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        store.add(&local).unwrap();
+
+        let mut remote = local.clone();
+        remote.status = TaskStatus::Open;
+        remote.closed_at = None;
+        remote.updated_at = chrono::Utc::now() + chrono::Duration::minutes(1);
+        remote.notes = format!(
+            "[{}] Reopened: regression found after deployment",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M")
+        );
+
+        assert!(matches!(
+            syncer.upsert_task(&*store, remote, "sync-unattributed", "personal_pull"),
+            Ok(UpsertResult::Skipped)
+        ));
+        assert_eq!(
+            store.get("cas-unattributed-reopen").unwrap().status,
+            TaskStatus::Closed,
+            "sync must not accept a terminal exit lacking actor and reason"
         );
     }
 }

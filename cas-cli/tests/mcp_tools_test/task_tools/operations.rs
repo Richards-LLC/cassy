@@ -88,6 +88,143 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     );
 }
 
+/// GH #515: close must publish the committed epic outcome before a huge
+/// stranded-branch audit payload is written. The fixture has 31 child lanes
+/// and a 200 KB supervisor narrative, the incident shape that previously
+/// exhausted the MCP response budget.
+#[tokio::test]
+async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let session_id = format!("test-session-{}", std::process::id());
+    let mut supervisor = agent_store.get(&session_id).expect("registered caller");
+    supervisor.role = cas::types::AgentRole::Supervisor;
+    agent_store.update(&supervisor).expect("make caller supervisor");
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").expect("write seed");
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+
+    let epic = service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            depth: Some("light".to_string()),
+            title: "large override epic".to_string(),
+            description: None,
+            priority: 2,
+            task_type: "epic".to_string(),
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
+        }))
+        .await
+        .expect("create epic");
+    let epic_id = extract_task_id(&extract_text(epic))
+        .expect("epic id")
+        .to_string();
+    let mut stored_epic = task_store.get(&epic_id).expect("stored epic");
+    stored_epic.branch = Some("main".to_string());
+    task_store.update(&stored_epic).expect("set epic branch");
+
+    for child in 0..31 {
+        let worker = format!("worker-{child:02}");
+        git(&["checkout", "-q", "-b", &format!("factory/{worker}"), "main"]);
+        let file = format!("lane-{child:02}.txt");
+        std::fs::write(temp.path().join(&file), format!("lane {child}\n")).expect("write lane");
+        git(&["add", &file]);
+        git(&["commit", "-q", "-m", &format!("lane {child}")]);
+        git(&["checkout", "-q", "main"]);
+
+        let child_task = service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                epic: Some(epic_id.clone()),
+                ..basic_create(&format!("child {child}"), None)
+            }))
+            .await
+            .expect("create child");
+        let child_id = extract_task_id(&extract_text(child_task))
+            .expect("child id")
+            .to_string();
+        let mut stored_child = task_store.get(&child_id).expect("stored child");
+        stored_child.status = cas::types::TaskStatus::Closed;
+        stored_child.assignee = Some(worker);
+        task_store.update(&stored_child).expect("close child fixture");
+    }
+
+    let narrative = format!(
+        "GH515-NARRATIVE-START: I diffed each of the 31 child branches against main and recorded the measured result. {} GH515-NARRATIVE-END",
+        "evidence retained for each branch; ".repeat(7_000)
+    );
+    assert!(narrative.len() > 200_000, "large-narrative precondition");
+    let started = std::time::Instant::now();
+    let close = service
+        .cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: Some(narrative.clone()),
+            id: epic_id.clone(),
+            reason: Some("override incident-shaped epic close".to_string()),
+            bypass_code_review: None,
+            code_review_findings: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+        .await
+        .expect("close epic");
+    let elapsed = started.elapsed();
+    let receipt = extract_text(close);
+    assert!(
+        receipt.contains("Closed task:") && receipt.contains("epic close committed"),
+        "close must return the compact committed receipt: {receipt}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "close waited for the large note instead of returning its committed receipt: {elapsed:?}"
+    );
+    assert_eq!(
+        task_store.get(&epic_id).expect("closed epic").status,
+        cas::types::TaskStatus::Closed,
+        "the terminal mutation must commit before the compact receipt"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let stored = task_store.get(&epic_id).expect("read closed epic");
+        if stored.notes.contains("GH515-NARRATIVE-START")
+            && stored.notes.contains("GH515-NARRATIVE-END")
+            && stored.notes.len() >= narrative.len()
+        {
+            break;
+        }
+        let current = task_store.get(&epic_id).expect("read current epic");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the full override narrative must land durably after the compact close receipt; task notes contain {} bytes",
+            current.notes.len()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn test_task_show() {
     let (_temp, service) = setup_cas();

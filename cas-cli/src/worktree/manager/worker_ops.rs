@@ -2,9 +2,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::types::Worktree;
-use crate::worktree::external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
+use crate::worktree::external_symlinks::{
+    ExternalSymlink, scan_external_symlinks_into, scan_project_node_modules_symlinks_into,
+};
 use crate::worktree::git::GitOperations;
-use crate::worktree::manager::{WorktreeError, WorktreeManager, WorktreeResult, symlink_project_config};
+use crate::worktree::manager::{
+    WorktreeError, WorktreeManager, WorktreeResult, symlink_project_config,
+};
 
 /// Describes a worker worktree that was left on disk because it held uncommitted work.
 ///
@@ -54,6 +58,18 @@ pub struct CleanupReport {
 }
 
 impl WorktreeManager {
+    /// External-link guard shared by every manager-owned worktree deletion.
+    /// `$HOME` links and primary-checkout `node_modules` links have different
+    /// roots, so keep their scans separate and combine their named evidence.
+    fn inbound_symlinks(&self, worktree_path: &std::path::Path) -> Vec<ExternalSymlink> {
+        let mut links = scan_external_symlinks_into(worktree_path);
+        links.extend(scan_project_node_modules_symlinks_into(
+            worktree_path,
+            &self.repo_root,
+        ));
+        links
+    }
+
     /// Calculate the worktree path for a factory worker
     pub fn worktree_path_for_worker(&self, worker_name: &str) -> PathBuf {
         self.worktree_root().join(worker_name)
@@ -254,23 +270,22 @@ impl WorktreeManager {
                 // `force` — force means "bypass git dirty-tree protection",
                 // not "I'm aware this will orphan $HOME symlinks".
                 if worktree.path.exists() {
-                    let links = scan_external_symlinks_into(&worktree.path);
+                    let links = self.inbound_symlinks(&worktree.path);
                     if !links.is_empty() {
-                        report.external_symlinks_blocked.push(ExternalSymlinkWarning {
-                            worker_name: name.clone(),
-                            path: worktree.path.clone(),
-                            links,
-                        });
+                        report
+                            .external_symlinks_blocked
+                            .push(ExternalSymlinkWarning {
+                                worker_name: name.clone(),
+                                path: worktree.path.clone(),
+                                links,
+                            });
                         self.workers.insert(name, worktree);
                         continue;
                     }
                 }
 
                 if !force && worktree.path.exists() {
-                    let file_count = self
-                        .git
-                        .uncommitted_file_count(&worktree.path)
-                        .unwrap_or(0);
+                    let file_count = self.git.uncommitted_file_count(&worktree.path).unwrap_or(0);
                     if file_count > 0 {
                         report.dirty_deferred.push(DirtyWorktreeWarning {
                             worker_name: name.clone(),
@@ -304,7 +319,7 @@ impl WorktreeManager {
             // cas-df97: live external symlinks block regardless of `force`
             // — see the identical guard in cleanup_workers.
             if worktree.path.exists() {
-                let links = scan_external_symlinks_into(&worktree.path);
+                let links = self.inbound_symlinks(&worktree.path);
                 if !links.is_empty() {
                     let warning = ExternalSymlinkWarning {
                         worker_name: worker_name.to_string(),
@@ -355,10 +370,7 @@ impl WorktreeManager {
     /// [`RemoveOutcome::DirtyDeferred`] so the caller can warn and mark the
     /// worker for later salvage. Callers who need to force-remove a dirty
     /// tree should use [`WorktreeManager::remove_worker`] with `force = true`.
-    pub fn attempt_remove_worker(
-        &mut self,
-        worker_name: &str,
-    ) -> WorktreeResult<RemoveOutcome> {
+    pub fn attempt_remove_worker(&mut self, worker_name: &str) -> WorktreeResult<RemoveOutcome> {
         let mut worktree = match self.workers.remove(worker_name) {
             Some(wt) => wt,
             None => return Ok(RemoveOutcome::NotTracked),
@@ -369,7 +381,7 @@ impl WorktreeManager {
             // state — this is the actual production path
             // (finalize_worker_worktree) that the reported incident went
             // through.
-            let links = scan_external_symlinks_into(&worktree.path);
+            let links = self.inbound_symlinks(&worktree.path);
             if !links.is_empty() {
                 let warning = ExternalSymlinkWarning {
                     worker_name: worker_name.to_string(),
@@ -380,10 +392,7 @@ impl WorktreeManager {
                 return Ok(RemoveOutcome::ExternalSymlinksBlocked(warning));
             }
 
-            let file_count = self
-                .git
-                .uncommitted_file_count(&worktree.path)
-                .unwrap_or(0);
+            let file_count = self.git.uncommitted_file_count(&worktree.path).unwrap_or(0);
             if file_count > 0 {
                 let warning = DirtyWorktreeWarning {
                     worker_name: worker_name.to_string(),

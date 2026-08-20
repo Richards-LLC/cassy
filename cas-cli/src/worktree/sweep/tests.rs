@@ -10,9 +10,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use crate::worktree::sweep::{
-    sweep_one_repo, Disposition, SweepOptions,
-};
+use crate::worktree::sweep::{Disposition, SweepOptions, sweep_one_repo};
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new("git")
@@ -78,9 +76,46 @@ fn sweep_clean_merged_worktree_removes_it() {
     let report = sweep_one_repo(&repo, SweepOptions::default());
 
     assert_eq!(report.worktrees.len(), 1);
-    assert!(matches!(report.worktrees[0].disposition, Disposition::Removed));
+    assert!(matches!(
+        report.worktrees[0].disposition,
+        Disposition::Removed
+    ));
     assert!(!wt.exists(), "worktree dir must be gone");
     assert!(report.prune_ran, "prune must run when worktrees existed");
+}
+
+/// GH #529: pnpm's package entries are symlinks. If the primary checkout has
+/// been repointed into an otherwise clean worker's virtual store, the sweep
+/// must preserve the worktree rather than creating a quiet module-resolution
+/// failure after successful-looking tests.
+#[cfg(unix)]
+#[test]
+fn sweep_refuses_worktree_with_primary_node_modules_link_into_it() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let repo = bootstrap_repo(&temp);
+    fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+    git_ok(&repo, &["add", ".gitignore"]);
+    git_ok(&repo, &["commit", "-q", "-m", "ignore dependency trees"]);
+    std::fs::write(repo.join("package.json"), "{}").unwrap();
+    let wt = add_worktree(&repo, "pnpm-store");
+    let package = wt.join("node_modules/.pnpm/pkg@1/node_modules/pkg");
+    fs::create_dir_all(&package).unwrap();
+    let link = repo.join("node_modules/pkg");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&package, &link).unwrap();
+
+    let report = sweep_one_repo(&repo, SweepOptions::default());
+    match &report.worktrees[0].disposition {
+        Disposition::SkippedExternalSymlinks { links } => {
+            assert_eq!(links.len(), 1, "links: {links:?}");
+            assert_eq!(links[0].link, link);
+        }
+        other => panic!("expected inbound-link refusal, got {other:?}"),
+    }
+    assert!(wt.exists(), "worktree must survive the refusal");
+    assert!(link.exists(), "primary checkout link must remain live");
 }
 
 #[test]
@@ -194,7 +229,13 @@ fn dry_run_makes_no_filesystem_changes() {
     assert!(clean.exists(), "dry run must not remove clean worktree");
     assert!(dirty.exists(), "dry run must not remove dirty worktree");
     assert!(
-        !repo.join(".cas/salvage").exists() || repo.join(".cas/salvage").read_dir().unwrap().next().is_none(),
+        !repo.join(".cas/salvage").exists()
+            || repo
+                .join(".cas/salvage")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none(),
         "dry run must not write a salvage patch"
     );
     assert!(!report.prune_ran, "dry run must not invoke git prune");
@@ -283,7 +324,10 @@ fn unknown_parent_branch_produces_error_not_silent_delete() {
             "expected Error(parent branch), got {other:?} — worktree with committed work was classified as something else"
         ),
     }
-    assert!(wt.exists(), "worktree with committed work must NOT be removed");
+    assert!(
+        wt.exists(),
+        "worktree with committed work must NOT be removed"
+    );
 }
 
 #[test]
@@ -304,10 +348,7 @@ fn symlink_worktree_path_is_refused_not_followed() {
     symlink(&external, &link).unwrap();
 
     let report = sweep_one_repo(&repo, SweepOptions::default());
-    let sneaky_rec = report
-        .worktrees
-        .iter()
-        .find(|r| r.worktree_path == link);
+    let sneaky_rec = report.worktrees.iter().find(|r| r.worktree_path == link);
     if let Some(rec) = sneaky_rec {
         // If the sweep classified at all, it must be Error("symlink").
         match &rec.disposition {

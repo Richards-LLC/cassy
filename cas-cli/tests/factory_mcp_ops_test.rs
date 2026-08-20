@@ -437,9 +437,7 @@ fn integration_test_process_path_mutation_is_isolated() {
 
     let mut hits = Vec::new();
     visit(
-        cas::test_paths::crate_root()
-            .join("tests")
-            .as_path(),
+        cas::test_paths::crate_root().join("tests").as_path(),
         &mut hits,
     );
     assert!(
@@ -2135,7 +2133,10 @@ async fn cas_a736_worker_status_reconciles_the_full_terminal_relay_backlog() {
             .mark_suppressed(prompt_id, Some("historical lifecycle occurrence expired"))
             .expect("suppress historical relay");
     }
-    assert_eq!(queue.list_undelivered_lifecycle_relays(10).unwrap().len(), 10);
+    assert_eq!(
+        queue.list_undelivered_lifecycle_relays(10).unwrap().len(),
+        10
+    );
 
     let text = get_text(
         &env.service
@@ -2148,7 +2149,10 @@ async fn cas_a736_worker_status_reconciles_the_full_terminal_relay_backlog() {
         "the terminal backlog must fully self-reconcile rather than leave a banner: {text}"
     );
     assert!(
-        queue.list_undelivered_lifecycle_relays(10).unwrap().is_empty(),
+        queue
+            .list_undelivered_lifecycle_relays(10)
+            .unwrap()
+            .is_empty(),
         "a second status read must not reintroduce an acknowledged terminal relay"
     );
 }
@@ -4345,6 +4349,30 @@ async fn test_gc_report_shows_pending_prompts() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_gc_report_names_dangling_primary_node_modules_link() {
+    let env = FactoryTestEnv::new();
+    let repo = env.cas_root.parent().expect("CAS root has checkout parent");
+    std::fs::write(repo.join("package.json"), "{}").unwrap();
+    let link = repo.join("node_modules/backend");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/deleted/cassy-worktree/node_modules/backend", &link).unwrap();
+
+    let report = env
+        .service
+        .factory(Parameters(factory_req("gc_report")))
+        .await
+        .expect("gc report");
+    let text = get_text(&report);
+    assert!(
+        text.contains("Dangling primary-checkout node_modules symlinks"),
+        "{text}"
+    );
+    assert!(text.contains(&link.display().to_string()), "{text}");
+    assert!(text.contains("package-manager install"), "{text}");
+}
+
 #[tokio::test]
 async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
     let env = FactoryTestEnv::new();
@@ -5785,11 +5813,7 @@ async fn test_worker_peer_message_does_not_confirm_supervisor_instruction() {
         ("CAS_FACTORY_SESSION", "peer-message-session"),
     ]);
     let env = FactoryTestEnv::new();
-    env.register_worker_with_id(
-        "test-agent-id",
-        "swift-fox",
-        Some("peer-message-session"),
-    );
+    env.register_worker_with_id("test-agent-id", "swift-fox", Some("peer-message-session"));
     env.register_worker_in_session("peer-worker", "peer-message-session");
     env.register_supervisor_in_session("supervisor", "peer-message-session");
     let instruction = env
@@ -7722,10 +7746,7 @@ async fn cas_dcf2_wake_starvation_is_top_line_status_not_a_lifecycle_relay_gh390
         .expect("enqueue");
     for _ in 0..3 {
         env.prompt_queue()
-            .record_wake_gate_decline(
-                message_id,
-                "pane has not been silent long enough",
-            )
+            .record_wake_gate_decline(message_id, "pane has not been silent long enough")
             .expect("record busy wake decline");
     }
     env.prompt_queue()
@@ -7840,8 +7861,9 @@ async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334
             .expect("worker inbox poll"),
     );
     assert!(
-        text.contains(&format!("notification_id={spawn_id} origin=spawn-boilerplate"))
-            && text.contains("delivery=first-delivery"),
+        text.contains(&format!(
+            "notification_id={spawn_id} origin=spawn-boilerplate"
+        )) && text.contains("delivery=first-delivery"),
         "the delayed spawn brief needs machine-readable origin, ID, time, and delivery state: {text}"
     );
     assert!(

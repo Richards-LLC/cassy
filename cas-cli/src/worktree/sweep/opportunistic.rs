@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 use crate::config::WorktreesConfig;
 use crate::store::known_repos::host_cas_dir;
 use crate::worktree::discovery::list_tracked_repos;
-use crate::worktree::salvage;
+use crate::worktree::{ExternalSymlink, salvage, scan_project_node_modules_symlinks_into};
 
 /// Disposition for a single worktree encountered by the opportunistic
 /// sweep. Narrower than `sweep::Disposition` because the TTL path has
@@ -49,6 +49,10 @@ pub enum OpportunisticOutcome {
     },
     /// Path was a symlink — refused.
     RefusedSymlink,
+    /// A primary-checkout JavaScript dependency link resolves into this
+    /// disposable worktree. Preserve it until the package-manager install is
+    /// repaired rather than creating a dangling virtual-store entry.
+    InboundSymlinksBlocked { links: Vec<ExternalSymlink> },
     /// Something blew up partway through; string captures the reason.
     Error { reason: String },
 }
@@ -85,7 +89,9 @@ impl SweepSummary {
                     self.salvaged += 1;
                     self.bytes_freed = self.bytes_freed.saturating_add(*bytes_freed);
                 }
-                OpportunisticOutcome::RefusedSymlink | OpportunisticOutcome::Error { .. } => {
+                OpportunisticOutcome::RefusedSymlink
+                | OpportunisticOutcome::InboundSymlinksBlocked { .. }
+                | OpportunisticOutcome::Error { .. } => {
                     self.errors += 1
                 }
             }
@@ -282,6 +288,11 @@ fn classify_and_act(
         return Ok(OpportunisticOutcome::Young {
             age_secs: age.as_secs(),
         });
+    }
+
+    let links = scan_project_node_modules_symlinks_into(worktree_path, repo_root);
+    if !links.is_empty() {
+        return Ok(OpportunisticOutcome::InboundSymlinksBlocked { links });
     }
 
     let dirty = has_uncommitted_changes(worktree_path)?;

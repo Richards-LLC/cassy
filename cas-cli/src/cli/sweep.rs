@@ -128,11 +128,7 @@ fn print_repo(report: &RepoSweepReport, _opts: SweepOptions) {
         "  → {} removed, {} skipped{}",
         report.removed_count(),
         report.skipped_count(),
-        if report.prune_ran {
-            ", prune ran"
-        } else {
-            ""
-        },
+        if report.prune_ran { ", prune ran" } else { "" },
     );
 }
 
@@ -143,6 +139,7 @@ fn badge(d: &Disposition) -> &'static str {
         Disposition::SkippedDirty { .. } => "[skip: dirty]   ",
         Disposition::SkippedUnmerged { .. } => "[skip: unmerged]",
         Disposition::SkippedDirtyUnmerged { .. } => "[skip: d+u]     ",
+        Disposition::SkippedExternalSymlinks { .. } => "[skip: links]   ",
         Disposition::WouldRemove => "[would remove]  ",
         Disposition::WouldSalvageAndRemove => "[would salvage] ",
         Disposition::Error { .. } => "[error]         ",
@@ -154,9 +151,9 @@ fn detail(d: &Disposition) -> Option<String> {
         Disposition::SalvagedAndRemoved { patch_path } => {
             Some(format!("patch: {}", patch_path.display()))
         }
-        Disposition::SkippedDirty { modified_files } => {
-            Some(format!("{modified_files} modified file(s); rerun with --salvage-dirty to capture"))
-        }
+        Disposition::SkippedDirty { modified_files } => Some(format!(
+            "{modified_files} modified file(s); rerun with --salvage-dirty to capture"
+        )),
         Disposition::SkippedUnmerged { unmerged_commits } => Some(format!(
             "{unmerged_commits} unmerged commit(s); merge or delete the branch first"
         )),
@@ -166,6 +163,15 @@ fn detail(d: &Disposition) -> Option<String> {
         } => Some(format!(
             "{modified_files} modified + {unmerged_commits} unmerged; \
              unmerged worktrees are never auto-removed"
+        )),
+        Disposition::SkippedExternalSymlinks { links } => Some(format!(
+            "{} live link(s) from primary node_modules resolve into this worktree; run the package-manager reinstall before retrying ({})",
+            links.len(),
+            links
+                .iter()
+                .map(|link| format!("{} -> {}", link.link.display(), link.target.display()))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         Disposition::Error { reason } => Some(reason.clone()),
         _ => None,
@@ -213,7 +219,11 @@ fn append_log_line(line: &str) {
         return;
     }
     let path = logs.join("global-sweep.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }

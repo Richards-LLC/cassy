@@ -16,6 +16,8 @@ migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
 watchdog="$repo_root/.github/workflows/merge-queue-watchdog.yml"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
 runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
+stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
+stale_queue_script="$repo_root/scripts/cancel-stale-non-merge-group-queued-runs.sh"
 
 pass=0
 fail=0
@@ -509,6 +511,119 @@ for job in panic-isolation-release panic-isolation-release-fast build-benchmark;
     require_absent "$block" 'refs/heads/main' "$job does not consume runners on ordinary main pushes"
     require_absent "$block" "github.event_name == 'pull_request'" "$job does not delay PR validation"
 done
+
+# Heavy validation must run only at protected integration points. A second
+# merge to main/staging must cancel each individual heavy lane from the older
+# tree, without ever sharing a concurrency group with schedule/dispatch work.
+require_text "$ci_text" '- staging' 'CI accepts staging integration pushes'
+heavy_job_contract_holds() {
+    local block="$1" group="$2"
+    [[ "$block" == *"group: $group"* ]] \
+        && [[ "$block" == *'cancel-in-progress: true'* ]] \
+        && [[ "$block" != *'refs/heads/epic/'* ]] \
+        && [[ "$block" != *'refs/heads/factory/'* ]]
+}
+
+for job in clippy test-compile-guard panic-isolation-release panic-isolation-release-fast build-benchmark; do
+    block="$(job_block "$job")"
+    group="heavy-tier-$job-\${{ github.event_name }}-\${{ github.ref }}"
+    require_text "$block" "group: $group" "$job uses an event- and ref-keyed heavy-tier group"
+    require_text "$block" 'cancel-in-progress: true' "$job cancels a superseded heavy run"
+    require_text "$block" 'github.event_name' "$job keeps scheduled/dispatch work separate from push work"
+
+    # Mutation coverage: each broken form must fail the same contract rather
+    # than merely relying on a reviewer to notice a missing YAML line.
+    missing_group="${block//group: $group/}"
+    if heavy_job_contract_holds "$missing_group" "$group"; then
+        printf 'FAIL heavy-tier mutation removes concurrency group: %s\n' "$job"
+        fail=$((fail + 1))
+    else
+        printf 'ok   heavy-tier mutation catches removed concurrency group: %s\n' "$job"
+        pass=$((pass + 1))
+    fi
+    flipped_cancel="${block/cancel-in-progress: true/cancel-in-progress: false}"
+    if heavy_job_contract_holds "$flipped_cancel" "$group"; then
+        printf 'FAIL heavy-tier mutation flips cancellation: %s\n' "$job"
+        fail=$((fail + 1))
+    else
+        printf 'ok   heavy-tier mutation catches disabled cancellation: %s\n' "$job"
+        pass=$((pass + 1))
+    fi
+    epic_trigger="$block"$'\n'"      || startsWith(github.ref, 'refs/heads/epic/')"
+    if heavy_job_contract_holds "$epic_trigger" "$group"; then
+        printf 'FAIL heavy-tier mutation adds epic trigger: %s\n' "$job"
+        fail=$((fail + 1))
+    else
+        printf 'ok   heavy-tier mutation catches epic trigger: %s\n' "$job"
+        pass=$((pass + 1))
+    fi
+done
+
+for job in clippy test-compile-guard; do
+    block="$(job_block "$job")"
+    require_text "$block" "refs/heads/staging" "$job runs heavy validation on staging pushes"
+done
+
+# Stale QUEUED runs are a separate starvation class from cas-065a's
+# merge_group orphan watchdog. This sweep sees every queued event, excludes
+# merge_group, and rechecks the run before cancelling an eventually-consistent
+# list result.
+if [[ -x "$stale_queue_script" ]]; then
+    stale_watchdog_text="$(<"$stale_queue_watchdog")"
+    stale_queue_script_text="$(<"$stale_queue_script")"
+    require_text "$stale_watchdog_text" "cron: '*/5 * * * *'" 'stale queued-run watchdog uses GitHub’s five-minute floor'
+    require_text "$stale_watchdog_text" 'actions: write' 'stale queued-run watchdog may cancel a stranded run'
+    require_text "$stale_watchdog_text" "CASSY_NON_MERGE_GROUP_QUEUE_SECONDS: '1200'" 'stale queued-run watchdog pins a 20-minute threshold'
+    require_text "$stale_queue_script_text" 'actions/runs?status=queued' 'stale queued-run watchdog reads queued runs of every event'
+    require_text "$stale_queue_script_text" '[[ "$event" != merge_group ]]' 'stale queued-run watchdog excludes cas-065a merge-group scope'
+    require_text "$stale_queue_script_text" "gh api \"repos/\$repository/actions/runs/\$run_id\" --jq '.status'" 'stale queued-run watchdog rechecks status before cancellation'
+    require_text "$stale_queue_script_text" 'age_seconds > queue_seconds' 'stale queued-run watchdog preserves runs at or below its threshold'
+    require_text "$stale_queue_script_text" 'actions/runs/$run_id/cancel' 'stale queued-run watchdog cancels by run id'
+
+    stale_tmp="$(mktemp -d)"
+    mkdir -p "$stale_tmp/bin"
+    cat >"$stale_tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
+if [[ "$*" == *'actions/runs?status=queued&per_page=100'* ]]; then
+    cat <<'JSON'
+{"workflow_runs":[
+  {"id":101,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"main"},
+  {"id":102,"created_at":"1970-01-01T00:00:00Z","event":"merge_group","head_branch":"gh-readonly-queue/main/pr-1"},
+  {"id":103,"created_at":"1970-01-01T00:30:00Z","event":"pull_request","head_branch":"feature"},
+  {"id":104,"created_at":"1970-01-01T00:00:00Z","event":"workflow_dispatch","head_branch":"main"}
+]}
+JSON
+elif [[ "$*" == *'actions/runs/101'*'--jq .status'* ]]; then
+    printf '%s\n' queued
+elif [[ "$*" == *'actions/runs/104'*'--jq .status'* ]]; then
+    printf '%s\n' completed
+elif [[ "$*" == *'--method POST'*'actions/runs/101/cancel'* ]]; then
+    exit 0
+else
+    printf 'unexpected fake gh invocation: %s\n' "$*" >&2
+    exit 2
+fi
+EOF
+    chmod +x "$stale_tmp/bin/gh"
+    stale_output="$stale_tmp/output"
+    if GITHUB_REPOSITORY=example/repo CASSY_NOW_EPOCH=2000 FAKE_GH_LOG="$stale_tmp/gh.log" \
+        PATH="$stale_tmp/bin:$PATH" "$stale_queue_script" >"$stale_output" 2>&1; then
+        require_text "$(<"$stale_output")" 'cancelling stale queued run=101 event=push' 'stale queued push run is cancelled'
+        require_text "$(<"$stale_output")" 'skipping no-longer-queued run=104 current_status=completed' 'stale list entry is rechecked before cancellation'
+        require_absent "$(<"$stale_tmp/gh.log")" 'actions/runs/102' 'merge-group candidate is left to cas-065a'
+        require_absent "$(<"$stale_tmp/gh.log")" 'actions/runs/103' 'fresh queued run is retained'
+        require_text "$(<"$stale_tmp/gh.log")" 'actions/runs/101/cancel' 'stale queued push run receives a cancel request'
+        require_absent "$(<"$stale_tmp/gh.log")" 'actions/runs/104/cancel' 'status-raced queued run is not cancelled'
+    else
+        printf 'FAIL stale queued-run watchdog executes against queued-run fixture\n'
+        fail=$((fail + 1))
+    fi
+    rm -rf "$stale_tmp"
+else
+    printf 'FAIL stale queued-run watchdog script is executable\n'
+    fail=$((fail + 1))
+fi
 
 receipt_job="$(job_block record-pr-validation)"
 require_text "$ci_text" 'actions: read' 'CI may query validation receipt artifacts'

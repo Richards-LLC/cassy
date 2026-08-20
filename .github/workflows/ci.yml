@@ -33,6 +33,7 @@ on:
   push:
     branches:
       - main
+      - staging
       - "epic/**"
       - "factory/**"
     tags:
@@ -669,7 +670,14 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && github.ref == 'refs/heads/main')
+      && (github.ref == 'refs/heads/main'
+      || github.ref == 'refs/heads/staging'))
+    # Keep each heavy lane separate, but collapse superseded commits on the
+    # same integration ref. Event type keeps scheduled/manual runs independent
+    # of a rapid main or staging push.
+    concurrency:
+      group: heavy-tier-clippy-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -883,7 +891,13 @@ jobs:
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && github.ref == 'refs/heads/main')
+      && (github.ref == 'refs/heads/main'
+      || github.ref == 'refs/heads/staging'))
+    # See clippy: a newer integration commit cancels only this lane's stale
+    # work, while scheduled/manual work uses an event-distinct group.
+    concurrency:
+      group: heavy-tier-test-compile-guard-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -942,6 +956,9 @@ jobs:
     name: Panic Isolation — release profile (named subset, not the suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: heavy-tier-panic-isolation-release-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -976,6 +993,9 @@ jobs:
     name: Panic Isolation — release-fast profile (named subset, not the suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: heavy-tier-panic-isolation-release-fast-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1018,6 +1038,9 @@ jobs:
     name: Build Benchmark & Timings (measurement only, no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: heavy-tier-build-benchmark-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     # DELIBERATELY UNCACHED — the one compiling job exempt from the compiler
     # cache contract at the top of this file. It measures a genuinely cold

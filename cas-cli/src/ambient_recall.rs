@@ -26,6 +26,10 @@ const AMBIENT_RETRIEVAL_POLICY: &str = "ambient-recall-outcome-v1";
 /// Hook feedback is deliberately small: inputs beyond this boundary cannot
 /// increase matching work or be retained by the automatic capture pass.
 const TOOL_ACTIVITY_BYTE_CAP: usize = 32 * 1024;
+/// Persist only small, redacted trigger facts from tool traffic. Raw tool
+/// inputs/results are never retained by ambient recall.
+const TOOL_TRIGGER_PATH_CAP: usize = 16;
+const TOOL_TRIGGER_TERM_CAP: usize = 24;
 
 /// Automatic hooks are on the user's interactive critical path. Semantic
 /// recall may spend at most this long waiting for the optional provider; a
@@ -62,6 +66,7 @@ const UBIQUITOUS_TERM_DOCUMENT_FREQUENCY: f64 = 0.80;
 /// second retrieval corpus. Keep one record bounded even when a retriever has
 /// a large local candidate window.
 const RECALL_DECISION_CANDIDATE_CAP: usize = 24;
+const RECALL_DECISION_TERM_CAP: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -224,6 +229,7 @@ pub(crate) struct EvidenceCandidate {
     pub(crate) lexical_score: f64,
     pub(crate) lexical_eligible: bool,
     pub(crate) lexical_weak: bool,
+    pub(crate) strong_session_signal: bool,
     pub(crate) focus_mismatch: bool,
     pub(crate) semantic_score: Option<f64>,
     pub(crate) structural_score: f64,
@@ -254,6 +260,9 @@ pub(crate) struct RecallRequest {
     pub(crate) focus_epic_title: Option<String>,
     pub(crate) focus_epic_labels: Vec<String>,
     pub(crate) authored_evidence: Vec<String>,
+    pub(crate) tool_files: Vec<String>,
+    pub(crate) tool_result_terms: Vec<String>,
+    pub(crate) mcp_query_terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +277,9 @@ pub(crate) struct RecallQuery {
     pub(crate) symbols: Vec<String>,
     pub(crate) focus_terms: Vec<String>,
     pub(crate) authored_evidence: Vec<String>,
+    /// Terms accumulated from safe PostToolUse result and MCP-query context.
+    /// They can cross the conversational precision gate only in pairs.
+    pub(crate) tool_context_terms: Vec<String>,
 }
 
 impl RecallQuery {
@@ -275,13 +287,28 @@ impl RecallQuery {
         if !identity.is_eligible() {
             return None;
         }
-        let mut files = stable_values(&request.files, 16);
+        let base_files = stable_values(&request.files, 16);
+        let mut files = base_files.clone();
         let mut symbols = stable_values(&request.symbols, 16);
         let labels = stable_values(&request.task_labels, 12);
         let decisions = stable_values(&request.recent_decisions, 4);
         let seen = stable_values(&request.seen_evidence, 32);
         let focus_labels = stable_values(&request.focus_epic_labels, 12);
         let authored_evidence = stable_values(&request.authored_evidence, LEDGER_ENTRY_CAP);
+        let tool_files = stable_values(&request.tool_files, TOOL_TRIGGER_PATH_CAP);
+        let tool_result_terms = stable_values(&request.tool_result_terms, TOOL_TRIGGER_TERM_CAP);
+        let mcp_query_terms = stable_values(&request.mcp_query_terms, TOOL_TRIGGER_TERM_CAP);
+        let tool_context_terms = stable_values(
+            &[
+                tool_files.clone(),
+                tool_result_terms.clone(),
+                mcp_query_terms.clone(),
+            ]
+            .concat(),
+            TOOL_TRIGGER_TERM_CAP,
+        );
+        files.extend(tool_files.iter().cloned());
+        files = stable_values(&files, 16);
         // Keep ownership deterministic even when callers reuse their buffers.
         files.shrink_to_fit();
         symbols.shrink_to_fit();
@@ -299,11 +326,20 @@ impl RecallQuery {
         if !labels.is_empty() {
             lines.push(format!("labels={}", labels.join(",")));
         }
-        if !files.is_empty() {
-            lines.push(format!("files={}", files.join(",")));
+        if !base_files.is_empty() {
+            lines.push(format!("files={}", base_files.join(",")));
         }
         if !symbols.is_empty() {
             lines.push(format!("symbols={}", symbols.join(",")));
+        }
+        if !tool_files.is_empty() {
+            lines.push(format!("tool_files={}", tool_files.join(",")));
+        }
+        if !tool_result_terms.is_empty() {
+            lines.push(format!("tool_results={}", tool_result_terms.join(",")));
+        }
+        if !mcp_query_terms.is_empty() {
+            lines.push(format!("mcp_queries={}", mcp_query_terms.join(",")));
         }
         if !decisions.is_empty() {
             lines.push(format!("decisions={}", decisions.join(" | ")));
@@ -337,6 +373,7 @@ impl RecallQuery {
             symbols,
             focus_terms,
             authored_evidence,
+            tool_context_terms,
         })
     }
 }
@@ -398,6 +435,12 @@ fn decision_trigger_terms(query: &RecallQuery) -> Vec<RecallTriggerTerm> {
             ("file_path", value)
         } else if let Some(value) = line.strip_prefix("symbols=") {
             ("symbol", value)
+        } else if let Some(value) = line.strip_prefix("tool_files=") {
+            ("tool_file_path", value)
+        } else if let Some(value) = line.strip_prefix("tool_results=") {
+            ("tool_result", value)
+        } else if let Some(value) = line.strip_prefix("mcp_queries=") {
+            ("mcp_query", value)
         } else if let Some(value) = line.strip_prefix("decisions=") {
             ("recent_decision", value)
         } else if let Some(value) = line.strip_prefix("focus_title=") {
@@ -412,13 +455,12 @@ fn decision_trigger_terms(query: &RecallQuery) -> Vec<RecallTriggerTerm> {
         {
             let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
             if is_content_bearing_term(&term) || term.chars().any(|ch| ch.is_ascii_digit()) {
-                if !terms
-                    .iter()
-                    .any(|existing: &RecallTriggerTerm| existing.term == term)
-                {
+                if !terms.iter().any(|existing: &RecallTriggerTerm| {
+                    existing.term == term && existing.source == source
+                }) {
                     terms.push(RecallTriggerTerm { term, source });
                 }
-                if terms.len() == 10 {
+                if terms.len() == RECALL_DECISION_TERM_CAP {
                     return terms;
                 }
             }
@@ -434,6 +476,8 @@ fn decision_candidate_state(
 ) -> &'static str {
     if injected.contains(candidate.evidence_id.as_str()) {
         "injected"
+    } else if candidate.strong_session_signal {
+        "strong_signal_floor"
     } else if query.conversational && is_weak_lexical_only(candidate) {
         "precision_gate"
     } else if !candidate.binding
@@ -1536,6 +1580,15 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
     };
     let structural = if binding { 1.0 } else { 0.0 };
     let lexical_weak = !binding && matched.len() == 1;
+    let matched_tool_terms: Vec<&String> = query
+        .tool_context_terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .collect();
+    let strong_session_signal = matched_tool_terms.len() >= 2
+        && matched_tool_terms
+            .iter()
+            .any(|term| term.chars().any(|ch| ch.is_ascii_digit()) || term.len() >= 8);
     let focus_mismatch = !query.focus_terms.is_empty()
         && !binding
         && !query.focus_terms.iter().any(|term| haystack.contains(term));
@@ -1561,6 +1614,7 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
         lexical_score: lexical,
         lexical_eligible,
         lexical_weak,
+        strong_session_signal,
         focus_mismatch,
         semantic_score: None,
         structural_score: structural,
@@ -1923,6 +1977,11 @@ fn hook_request(
             }
         }
     }
+    let tool_context =
+        ToolTriggerContext::load(&tool_trigger_context_path(cas_root, &input.session_id));
+    request.tool_files = tool_context.file_paths;
+    request.tool_result_terms = tool_context.result_terms;
+    request.mcp_query_terms = tool_context.mcp_query_terms;
     if table_exists(&conn, "code_symbols") {
         let mut symbols = Vec::new();
         for file in request.files.iter().take(8) {
@@ -2100,11 +2159,15 @@ impl RecallLedger {
 
 fn sort_candidates(candidates: &mut [EvidenceCandidate]) {
     candidates.sort_by(|a, b| {
-        b.binding
-            .cmp(&a.binding)
-            .then_with(|| a.stale.cmp(&b.stale))
-            .then_with(|| b.relevance.total_cmp(&a.relevance))
-            .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+        b.strong_session_signal
+            .cmp(&a.strong_session_signal)
+            .then_with(|| {
+                b.binding
+                    .cmp(&a.binding)
+                    .then_with(|| a.stale.cmp(&b.stale))
+                    .then_with(|| b.relevance.total_cmp(&a.relevance))
+                    .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+            })
     });
 }
 
@@ -2302,12 +2365,187 @@ fn record_pending_outcomes(
     changed
 }
 
-/// Best-effort PostToolUse capture. Only tool name/input are considered, so
-/// the injected context itself cannot make every card look used.
+/// Bounded, redacted trigger facts accumulated from PostToolUse traffic.
+/// This sidecar deliberately contains no raw tool output or query text.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ToolTriggerContext {
+    #[serde(default)]
+    file_paths: Vec<String>,
+    #[serde(default)]
+    result_terms: Vec<String>,
+    #[serde(default)]
+    mcp_query_terms: Vec<String>,
+}
+
+impl ToolTriggerContext {
+    fn load(path: &Path) -> Self {
+        fs::read(path)
+            .ok()
+            .filter(|bytes| bytes.len() <= TOOL_ACTIVITY_BYTE_CAP)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &Path) {
+        let Ok(bytes) = serde_json::to_vec(self) else {
+            return;
+        };
+        if bytes.len() > TOOL_ACTIVITY_BYTE_CAP {
+            return;
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let temporary = path.with_extension("tmp");
+        if fs::write(&temporary, bytes).is_ok() {
+            let _ = fs::rename(temporary, path);
+        }
+    }
+}
+
+fn tool_trigger_context_path(cas_root: &Path, session_id: &str) -> PathBuf {
+    cas_root
+        .join("cache/ambient-recall/tool-context")
+        .join(format!("{}.json", &stable_hash(session_id)[..24]))
+}
+
+fn is_sensitive_tool_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "password",
+        "secret",
+        "authorization:",
+        "bearer ",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn collect_result_terms(value: &serde_json::Value, terms: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if !is_sensitive_tool_text(text) => {
+            for raw in text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+            {
+                let term = raw.trim_matches(['-', '_']).to_ascii_lowercase();
+                if (is_content_bearing_term(&term) || term.chars().any(|ch| ch.is_ascii_digit()))
+                    && !terms.contains(&term)
+                {
+                    terms.push(term);
+                    if terms.len() == TOOL_TRIGGER_TERM_CAP {
+                        return;
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_result_terms(value, terms);
+                if terms.len() == TOOL_TRIGGER_TERM_CAP {
+                    return;
+                }
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_result_terms(value, terms);
+                if terms.len() == TOOL_TRIGGER_TERM_CAP {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_tool_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_tool_paths(value, paths);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                let key = key.to_ascii_lowercase();
+                if (key.contains("path") || key == "file" || key == "files") && value.is_string() {
+                    if let Some(path) = value.as_str().map(|path| clean_scalar(path, 240)) {
+                        if !path.is_empty() && !paths.contains(&path) {
+                            paths.push(path);
+                        }
+                    }
+                } else {
+                    collect_tool_paths(value, paths);
+                }
+                if paths.len() == TOOL_TRIGGER_PATH_CAP {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_mcp_query_terms(value: &serde_json::Value, terms: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_mcp_query_terms(value, terms);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                let key = key.to_ascii_lowercase();
+                if matches!(key.as_str(), "query" | "q" | "search") {
+                    collect_result_terms(value, terms);
+                } else {
+                    collect_mcp_query_terms(value, terms);
+                }
+                if terms.len() == TOOL_TRIGGER_TERM_CAP {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn record_ambient_tool_trigger_context(input: &cas_core::hooks::types::HookInput, cas_root: &Path) {
+    if input.session_id.trim().is_empty() {
+        return;
+    }
+    let path = tool_trigger_context_path(cas_root, &input.session_id);
+    let mut context = ToolTriggerContext::load(&path);
+    if let Some(tool_input) = input.tool_input.as_ref() {
+        collect_tool_paths(tool_input, &mut context.file_paths);
+        if input
+            .tool_name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("mcp__") || name.starts_with("cas__"))
+        {
+            collect_mcp_query_terms(tool_input, &mut context.mcp_query_terms);
+        }
+    }
+    if let Some(result) = input.tool_response.as_ref() {
+        collect_result_terms(result, &mut context.result_terms);
+    }
+    context.file_paths = stable_values(&context.file_paths, TOOL_TRIGGER_PATH_CAP);
+    context.result_terms = stable_values(&context.result_terms, TOOL_TRIGGER_TERM_CAP);
+    context.mcp_query_terms = stable_values(&context.mcp_query_terms, TOOL_TRIGGER_TERM_CAP);
+    context.save(&path);
+}
+
+/// Best-effort PostToolUse capture. Trigger facts are persisted independently
+/// of feedback so a Read/result can make the next conversational turn recall.
 pub(crate) fn record_ambient_tool_usage(
     input: &cas_core::hooks::types::HookInput,
     cas_root: &Path,
 ) {
+    record_ambient_tool_trigger_context(input, cas_root);
     let path = ledger_path(cas_root, &input.session_id);
     let mut ledger = RecallLedger::load(&path);
     if !ledger
@@ -2430,52 +2668,66 @@ pub(crate) fn render_packet(
     // already contains non-weak rows. This keeps fallback complementary even
     // when the only local hits are common corpus words that evade the bounded
     // document-frequency floor.
-    for weak_pass in [false, true] {
-        for candidate in delta.iter().filter(|candidate| {
-            let weak_lexical_only =
-                !candidate.binding && candidate.lexical_weak && candidate.semantic_score.is_none();
-            weak_lexical_only == weak_pass
-        }) {
-            if injected.len() == cap {
-                break;
-            }
-            if query.conversational && is_weak_lexical_only(candidate) {
-                continue;
-            }
-            let independently_semantic = candidate
-                .semantic_score
-                .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR);
-            if !candidate.binding && !candidate.lexical_eligible && !independently_semantic {
-                continue;
-            }
-            let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
-            if lexical_only
-                && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP)
-            {
-                continue;
-            }
-            if weak_pass && weak_lexical_injected == non_weak_injected {
-                continue;
-            }
-            let Some(why_relevant) = injection_reason(candidate) else {
-                continue;
-            };
-            let mut candidate = candidate.clone();
-            candidate.why_relevant = why_relevant;
-            let card = render_card(&candidate);
-            if full.len() + 1 + card.len() + footer_reserve > byte_budget {
-                break;
-            }
-            full.push('\n');
-            full.push_str(&card);
-            injected.push(candidate);
-            if lexical_only {
-                lexical_injected += 1;
-            }
-            if weak_pass {
-                weak_lexical_injected += 1;
-            } else {
-                non_weak_injected += 1;
+    for strong_pass in [true, false] {
+        for weak_pass in [false, true] {
+            for candidate in delta.iter().filter(|candidate| {
+                let weak_lexical_only = !candidate.binding
+                    && candidate.lexical_weak
+                    && candidate.semantic_score.is_none();
+                candidate.strong_session_signal == strong_pass && weak_lexical_only == weak_pass
+            }) {
+                if injected.len() == cap {
+                    break;
+                }
+                if query.conversational
+                    && is_weak_lexical_only(candidate)
+                    && !candidate.strong_session_signal
+                {
+                    continue;
+                }
+                let independently_semantic = candidate
+                    .semantic_score
+                    .is_some_and(|score| score >= SEMANTIC_INJECTION_FLOOR);
+                if !candidate.binding
+                    && !candidate.lexical_eligible
+                    && !independently_semantic
+                    && !candidate.strong_session_signal
+                {
+                    continue;
+                }
+                let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
+                if lexical_only
+                    && !candidate.strong_session_signal
+                    && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP)
+                {
+                    continue;
+                }
+                if weak_pass
+                    && !candidate.strong_session_signal
+                    && weak_lexical_injected == non_weak_injected
+                {
+                    continue;
+                }
+                let Some(why_relevant) = injection_reason(candidate) else {
+                    continue;
+                };
+                let mut candidate = candidate.clone();
+                candidate.why_relevant = why_relevant;
+                let card = render_card(&candidate);
+                if full.len() + 1 + card.len() + footer_reserve > byte_budget {
+                    break;
+                }
+                full.push('\n');
+                full.push_str(&card);
+                injected.push(candidate);
+                if lexical_only {
+                    lexical_injected += 1;
+                }
+                if weak_pass {
+                    weak_lexical_injected += 1;
+                } else {
+                    non_weak_injected += 1;
+                }
             }
         }
     }
@@ -2533,6 +2785,9 @@ fn is_weak_lexical_only(candidate: &EvidenceCandidate) -> bool {
 /// lexical label without matched terms is neither: preserve stronger selector
 /// evidence when available, otherwise leave the row out of the injection.
 fn injection_reason(candidate: &EvidenceCandidate) -> Option<String> {
+    if candidate.strong_session_signal {
+        return Some("strong accumulated tool-session signal".to_string());
+    }
     let existing = candidate.why_relevant.trim();
     if !existing.is_empty() && existing != "lexical match:" && existing != "lexical(weak) match:" {
         return Some(existing.to_string());
@@ -2649,11 +2904,15 @@ pub(crate) fn retrieve_candidates(
         .count();
     candidates.retain(|candidate| !authored_evidence.contains(&candidate.evidence_id));
     candidates.sort_by(|a, b| {
-        b.binding
-            .cmp(&a.binding)
-            .then_with(|| a.stale.cmp(&b.stale))
-            .then_with(|| b.relevance.total_cmp(&a.relevance))
-            .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+        b.strong_session_signal
+            .cmp(&a.strong_session_signal)
+            .then_with(|| {
+                b.binding
+                    .cmp(&a.binding)
+                    .then_with(|| a.stale.cmp(&b.stale))
+                    .then_with(|| b.relevance.total_cmp(&a.relevance))
+                    .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+            })
     });
     candidates.truncate(policy.candidate_cap);
     Some(RecallCandidates {
@@ -2668,6 +2927,7 @@ fn fuse_candidate(existing: &mut EvidenceCandidate, incoming: EvidenceCandidate)
     existing.lexical_score = existing.lexical_score.max(incoming.lexical_score);
     existing.lexical_eligible |= incoming.lexical_eligible;
     existing.lexical_weak &= incoming.lexical_weak;
+    existing.strong_session_signal |= incoming.strong_session_signal;
     existing.focus_mismatch |= incoming.focus_mismatch;
     existing.semantic_score = match (existing.semantic_score, incoming.semantic_score) {
         (Some(a), Some(b)) => Some(a.max(b)),
@@ -2810,6 +3070,7 @@ mod tests {
             lexical_score: 0.8,
             lexical_eligible: true,
             lexical_weak: false,
+            strong_session_signal: false,
             focus_mismatch: false,
             semantic_score: None,
             structural_score: 0.0,
@@ -3656,6 +3917,173 @@ mod tests {
         assert!(trace.contains("gh-553-weak-memory"), "{trace}");
         assert!(trace.contains("\"source\":\"prompt\""), "{trace}");
         assert!(trace.contains("\"lexical_score\":"), "{trace}");
+    }
+
+    #[test]
+    fn strong_accumulated_tool_signal_overrides_conversational_precision_gate() {
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "How should we proceed after that?".into(),
+                tool_result_terms: vec!["twilio".into(), "30034".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(query.conversational);
+        let mut strong = candidate("twilio-title", EvidenceScope::Project("project-a".into()));
+        strong.snippet = "Twilio A2P staging recovery".into();
+        strong.lexical_eligible = false;
+        strong.lexical_weak = true;
+        strong.strong_session_signal = true;
+        strong.why_relevant = "lexical(weak) match: twilio".into();
+        let (packet, injected) = render_packet(
+            &identity,
+            &query,
+            &RecallCandidates {
+                candidates: vec![strong],
+                rejected_scope: 0,
+                authored_evidence: Vec::new(),
+                rejected_authored: 0,
+            },
+            &mut RecallLedger::default(),
+        )
+        .expect("strong accumulated tool context must inject a title on conversational prose");
+        assert_eq!(injected.len(), 1);
+        assert!(packet.full.contains("Twilio A2P staging recovery"));
+        assert!(
+            packet
+                .full
+                .contains("strong accumulated tool-session signal")
+        );
+    }
+
+    #[test]
+    fn tool_trigger_context_drops_sensitive_results_instead_of_retaining_them() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "secret-tool-result".into(),
+            tool_name: Some("Read".into()),
+            tool_response: Some(serde_json::json!({
+                "stdout": "Authorization: Bearer never-store-this-token 30034"
+            })),
+            ..Default::default()
+        };
+        record_ambient_tool_usage(&input, &cas_root);
+        let path = tool_trigger_context_path(&cas_root, &input.session_id);
+        assert!(ToolTriggerContext::load(&path).result_terms.is_empty());
+        assert!(
+            !fs::read_to_string(path)
+                .unwrap()
+                .contains("never-store-this-token")
+        );
+    }
+
+    #[test]
+    fn gh_553_tool_traffic_context_injects_and_records_feedback() {
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let entries = crate::store::open_store_local(&cas_root).unwrap();
+        for (id, title, content) in [
+            (
+                "2026-06-05-2",
+                "Twilio A2P staging delivery",
+                "Investigate error 30034 when sms-sender.service.ts reports undelivered messages.",
+            ),
+            (
+                "2026-06-05-3",
+                "Twilio A2P undelivered recovery",
+                "Staging SMS sender error 30034 requires A2P delivery diagnosis.",
+            ),
+        ] {
+            entries
+                .add(&Entry {
+                    id: id.into(),
+                    title: Some(title.into()),
+                    content: content.into(),
+                    ..Entry::default()
+                })
+                .unwrap();
+        }
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "gh-553-tool-traffic".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: input.session_id.clone(),
+                tool_name: Some("Read".into()),
+                tool_input: Some(serde_json::json!({"file_path": "src/sms-sender.service.ts"})),
+                tool_response: Some(
+                    serde_json::json!({"stdout": "Twilio A2P staging error 30034: message undelivered"}),
+                ),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: input.session_id.clone(),
+                tool_name: Some("mcp__cs__search".into()),
+                tool_input: Some(serde_json::json!({"query": "Twilio A2P 30034 staging"})),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+
+        let packet = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("How should we proceed after that?"),
+            false,
+        )
+        .expect("tool-only Twilio signals must inject on a conversational turn");
+        assert!(packet.full.contains("2026-06-05-2"));
+        assert!(packet.full.contains("2026-06-05-3"));
+        assert!(
+            packet
+                .full
+                .contains("strong accumulated tool-session signal")
+        );
+
+        record_ambient_tool_usage(
+            &cas_core::hooks::types::HookInput {
+                session_id: input.session_id.clone(),
+                tool_name: Some("Read".into()),
+                tool_input: Some(serde_json::json!({
+                    "selected": ["2026-06-05-2", "2026-06-05-3"]
+                })),
+                ..Default::default()
+            },
+            &cas_root,
+        );
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!((groups[0].total, groups[0].used), (2, 2));
+
+        let trace = fs::read_dir(cas_root.join("cache/ambient-recall/decisions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| fs::read_to_string(entry.path()).unwrap())
+            .collect::<String>();
+        assert!(trace.contains("\"source\":\"tool_file_path\""), "{trace}");
+        assert!(trace.contains("\"source\":\"tool_result\""), "{trace}");
+        assert!(trace.contains("\"source\":\"mcp_query\""), "{trace}");
     }
 
     #[test]

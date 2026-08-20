@@ -6923,39 +6923,95 @@ pub(crate) fn worker_reports_usage_limit(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
 ) -> bool {
+    matches!(
+        worker_usage_limit_evidence(cas_root, agent),
+        UsageLimitEvidence::Limited { .. }
+    )
+}
+
+/// The rollout scanner has three states.  In particular, an unreadable or
+/// unresolved rollout is not a recovery: callers retain a previously-open
+/// episode until they have affirmative later-turn evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UsageLimitEvidence {
+    Limited { first_evidence: String },
+    Recovered,
+    Unavailable,
+}
+
+pub(crate) fn worker_usage_limit_evidence(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> UsageLimitEvidence {
     let cli = worker_cli_from_agent(agent);
     let rollout = worker_transcript_path_for_agent(cas_root, agent);
-    codex_rollout_reports_usage_limit(rollout.as_deref(), cli)
+    codex_rollout_usage_limit_evidence(rollout.as_deref(), cli)
 }
 
 fn codex_rollout_reports_usage_limit(
     rollout: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
 ) -> bool {
+    matches!(
+        codex_rollout_usage_limit_evidence(rollout, cli),
+        UsageLimitEvidence::Limited { .. }
+    )
+}
+
+fn codex_rollout_usage_limit_evidence(
+    rollout: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+) -> UsageLimitEvidence {
     if cli != cas_mux::SupervisorCli::Codex {
-        return false;
+        return UsageLimitEvidence::Recovered;
     }
     let Some(rollout) = rollout else {
-        return false;
+        return UsageLimitEvidence::Unavailable;
     };
     let Ok(metadata) = std::fs::metadata(rollout) else {
-        return false;
+        return UsageLimitEvidence::Unavailable;
     };
     const TAIL_BYTES: u64 = 256 * 1024;
     let start = metadata.len().saturating_sub(TAIL_BYTES);
     let Ok(mut file) = std::fs::File::open(rollout) else {
-        return false;
+        return UsageLimitEvidence::Unavailable;
     };
     use std::io::{Read, Seek, SeekFrom};
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return false;
+        return UsageLimitEvidence::Unavailable;
     }
     let mut tail = String::new();
     if file.read_to_string(&mut tail).is_err() {
-        return false;
+        return UsageLimitEvidence::Unavailable;
     }
-    tail.contains("You've hit your usage limit")
-        && (tail.contains("\"has_credits\":false") || tail.contains("\"has_credits\": false"))
+    // Rollouts are append-only JSONL.  A limit line that is followed by a
+    // successful terminal turn is historical rollout text, not a live outage.
+    // Keep the record timestamp (or its byte offset as a legacy fallback) as
+    // the durable episode identity used by daemon restarts and retry keys.
+    let mut latest_terminal = None;
+    for (line_index, line) in tail.lines().enumerate() {
+        let limited = line.contains("You've hit your usage limit")
+            && (line.contains("\"has_credits\":false") || line.contains("\"has_credits\": false"));
+        let completed = line.contains("\"type\":\"task_complete\"")
+            || line.contains("\"type\": \"task_complete\"");
+        if limited {
+            let timestamp = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("timestamp")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("tail-{}", start + line_index as u64));
+            latest_terminal = Some(UsageLimitEvidence::Limited {
+                first_evidence: timestamp,
+            });
+        } else if completed {
+            latest_terminal = Some(UsageLimitEvidence::Recovered);
+        }
+    }
+    latest_terminal.unwrap_or(UsageLimitEvidence::Recovered)
 }
 
 fn synthesized_codex_transcript_path(clone_path: &str, session_id: &str) -> String {
@@ -8506,6 +8562,37 @@ mod tests {
             Some(rollout.path()),
             cas_mux::SupervisorCli::Claude
         ));
+    }
+
+    #[test]
+    fn codex_usage_limit_requires_the_latest_terminal_rollout_outcome() {
+        let rollout = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rollout.path(),
+            concat!(
+                r#"{"timestamp":"2026-08-20T12:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-20T12:01:00Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            codex_rollout_usage_limit_evidence(Some(rollout.path()), cas_mux::SupervisorCli::Codex),
+            UsageLimitEvidence::Recovered,
+            "a later successful terminal turn clears historical rollout text"
+        );
+
+        std::fs::write(
+            rollout.path(),
+            r#"{"timestamp":"2026-08-20T12:02:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_rollout_usage_limit_evidence(Some(rollout.path()), cas_mux::SupervisorCli::Codex),
+            UsageLimitEvidence::Limited {
+                first_evidence: "2026-08-20T12:02:00Z".to_string(),
+            }
+        );
     }
 
     /// cas-4a5e: a typo'd/missing codex config_dir must fail with a message

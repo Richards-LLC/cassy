@@ -430,4 +430,43 @@ mod cas_20ac_ack_tests {
             "an acknowledged worker-attention relay must remain absent after a store reopen"
         );
     }
+
+    #[test]
+    fn every_worker_attention_kind_acks_its_linked_prompt() {
+        for kind in [
+            "worker_idle",
+            "worker_stalled",
+            "worker_delivery_stalled",
+            "worker_unavailable",
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let prompt_queue = open_prompt_queue_store(temp.path()).expect("prompt queue");
+            let supervisor_queue =
+                open_supervisor_queue_store(temp.path()).expect("supervisor queue");
+            let durable_id = supervisor_queue
+                .notify("supervisor-id", kind, "{}", NotificationPriority::High)
+                .expect("durable notice");
+            let prompt_id = match prompt_queue
+                .enqueue_idempotent(
+                    &format!("lifecycle-wake:worker-attention:{durable_id}"),
+                    "supervisor",
+                    &format!(
+                        "<worker-attention kind=\"{kind}\" worker=\"quiet-ibis\" notification_id=\"{durable_id}\">\\nrelay\\n</worker-attention>"
+                    ),
+                    None,
+                    Some(&format!("{kind}: quiet-ibis")),
+                    Some(NotificationPriority::High),
+                    &format!("worker-attention-outbox:{durable_id}"),
+                )
+                .expect("linked prompt")
+            {
+                EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+            };
+
+            let ack = acknowledge_linked_lifecycle_notification(temp.path(), durable_id)
+                .expect("ack bridge")
+                .expect("attention event must be bridged");
+            assert_eq!(ack.prompt_id, Some(prompt_id), "{kind}");
+        }
+    }
 }

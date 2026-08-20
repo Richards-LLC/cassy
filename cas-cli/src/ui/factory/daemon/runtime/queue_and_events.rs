@@ -1090,6 +1090,10 @@ pub(super) fn normal_delivery_probe_action(
     }
 }
 
+fn normal_delivery_probe_targets_worker(pane: &str, target: &str, supervisor_pane: &str) -> bool {
+    pane != supervisor_pane && target != "supervisor"
+}
+
 /// cas-ac7e (GH #130): an urgent row whose payload has been typed into a pane
 /// and whose wake is still unproven.
 #[derive(Debug, Clone)]
@@ -1326,28 +1330,48 @@ impl FactoryDaemon {
         };
         let workers: std::collections::HashSet<&str> =
             self.app.worker_names().iter().map(String::as_str).collect();
-        let unavailable: std::collections::HashSet<String> = active
-            .iter()
-            .filter(|agent| {
-                agent.role == cas_types::AgentRole::Worker
-                    && agent.factory_session.as_deref() == Some(self.session_name.as_str())
-                    && workers.contains(agent.name.as_str())
-                    && crate::mcp::tools::service::factory_ops::worker_reports_usage_limit(
-                        self.app.cas_dir(),
-                        agent,
-                    )
-            })
-            .map(|agent| agent.name.clone())
-            .collect();
-        self.reported_unavailable_workers
-            .retain(|worker| unavailable.contains(worker));
-        for worker in unavailable {
-            if self.reported_unavailable_workers.insert(worker.clone()) {
-                super::lifecycle::enqueue_worker_unavailable_relay(self.app.cas_dir(), &worker);
+        for agent in active.iter().filter(|agent| {
+            agent.role == cas_types::AgentRole::Worker
+                && agent.factory_session.as_deref() == Some(self.session_name.as_str())
+                && workers.contains(agent.name.as_str())
+        }) {
+            match crate::mcp::tools::service::factory_ops::worker_usage_limit_evidence(
+                self.app.cas_dir(),
+                agent,
+            ) {
+                crate::mcp::tools::service::factory_ops::UsageLimitEvidence::Recovered => {
+                    // Only affirmative newer terminal completion closes an
+                    // episode. A failed rollout read must not reset dedupe.
+                    self.reported_unavailable_workers.remove(&agent.id);
+                }
+                crate::mcp::tools::service::factory_ops::UsageLimitEvidence::Unavailable => {}
+                crate::mcp::tools::service::factory_ops::UsageLimitEvidence::Limited {
+                    first_evidence,
+                } => {
+                    let occurrence = format!("{}:{first_evidence}", agent.id);
+                    if self.reported_unavailable_workers.get(&agent.id) == Some(&occurrence) {
+                        continue;
+                    }
+                    if matches!(
+                        super::lifecycle::enqueue_worker_unavailable_relay(
+                            self.app.cas_dir(),
+                            &agent.name,
+                            &occurrence,
+                        ),
+                        super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                    ) {
+                        self.reported_unavailable_workers
+                            .insert(agent.id.clone(), occurrence);
+                    } else {
+                        continue;
+                    }
+                }
+            }
+            if self.reported_unavailable_workers.contains_key(&agent.id) {
                 tracing::warn!(
                     target: "cas::coordination",
                     stage = "worker_usage_limited",
-                    worker = %worker,
+                    worker = %agent.name,
                     "terminal harness availability record relayed to supervisor"
                 );
             }
@@ -1476,18 +1500,38 @@ impl FactoryDaemon {
                     );
                 }
                 NormalDeliveryProbeAction::FlagSupervisor => {
-                    self.normal_delivery_probes.remove(&row_id);
+                    // A supervisor pane is not a worker-health incident. The
+                    // probe was created via an alias, so guard both the pane
+                    // and addressed target before emitting worker wording.
+                    if !normal_delivery_probe_targets_worker(
+                        &pane,
+                        &target,
+                        self.app.supervisor_name(),
+                    ) {
+                        self.normal_delivery_probes.remove(&row_id);
+                        continue;
+                    }
                     // A normal message that was transport-delivered, then
                     // ignored across the bounded retry window is worker-health
                     // evidence, not merely an informational inbox row. Route it
                     // through the durable worker-attention outbox so every
                     // harness reaches the owning supervisor without a manual
                     // worker_status poll (cas-986a).
-                    super::lifecycle::enqueue_worker_delivery_stalled_relay(
+                    let relay = super::lifecycle::enqueue_worker_delivery_stalled_relay(
                         self.app.cas_dir(),
                         &pane,
                         row_id,
                     );
+                    if !matches!(
+                        relay,
+                        super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                    ) {
+                        // The durable/prompt outbox has not confirmed this
+                        // incident. Keep the probe so the next sweep retries
+                        // with its stable message-id occurrence key.
+                        continue;
+                    }
+                    self.normal_delivery_probes.remove(&row_id);
                     let notice = format!(
                         "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then produced no pane output for two watchdog windows. A single normal nudge was attempted; a durable worker-attention relay was sent to the supervisor; no urgent escalation was sent.</system-notice>"
                     );
@@ -9214,5 +9258,26 @@ mod urgent_wake_probe_tests {
             NormalDeliveryProbeAction::Observed,
             "any post-delivery pane output closes the watchdog"
         );
+    }
+
+    #[test]
+    fn normal_delivery_watchdog_never_labels_the_supervisor_as_a_worker() {
+        use super::normal_delivery_probe_targets_worker;
+
+        assert!(!normal_delivery_probe_targets_worker(
+            "supervisor-pane",
+            "worker",
+            "supervisor-pane"
+        ));
+        assert!(!normal_delivery_probe_targets_worker(
+            "supervisor-pane",
+            "supervisor",
+            "other-supervisor-pane"
+        ));
+        assert!(normal_delivery_probe_targets_worker(
+            "quiet-ibis",
+            "quiet-ibis",
+            "supervisor-pane"
+        ));
     }
 }

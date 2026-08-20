@@ -6,7 +6,7 @@ use crate::ui::factory::daemon::imports::*;
 fn enqueue_worker_attention_relay(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
-) {
+) -> WorkerAttentionRelayOutcome {
     let (kind, worker, task_id, elapsed_secs) = match event {
         crate::ui::factory::director::DirectorEvent::WorkerIdle {
             worker,
@@ -23,7 +23,7 @@ fn enqueue_worker_attention_relay(
             Some(task_id.as_str()),
             Some(*elapsed_secs),
         ),
-        _ => return,
+        _ => return WorkerAttentionRelayOutcome::NotApplicable,
     };
     let detail = match (kind, task_id, elapsed_secs) {
         ("worker_stalled", Some(task), Some(elapsed)) => format!(
@@ -32,7 +32,15 @@ fn enqueue_worker_attention_relay(
         ),
         _ => format!("Worker {worker} is idle with no active task and needs supervisor attention."),
     };
-    enqueue_worker_attention_relay_detail(cas_dir, kind, worker, task_id, elapsed_secs, &detail);
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        kind,
+        worker,
+        task_id,
+        elapsed_secs,
+        &detail,
+        &format!("{kind}:{worker}:{}", task_id.unwrap_or("")),
+    )
 }
 
 /// Persist one confirmed worker stoppage through the same durable supervisor
@@ -43,7 +51,7 @@ pub(super) fn enqueue_worker_delivery_stalled_relay(
     cas_dir: &std::path::Path,
     worker: &str,
     message_id: i64,
-) {
+) -> WorkerAttentionRelayOutcome {
     let detail = format!(
         "Worker {worker} produced no pane output after normal message {message_id} and its bounded retry."
     );
@@ -54,13 +62,18 @@ pub(super) fn enqueue_worker_delivery_stalled_relay(
         None,
         None,
         &detail,
-    );
+        &format!("delivery:{message_id}"),
+    )
 }
 
 /// Surface a terminal harness-side refusal even when its MCP child continues
 /// heartbeating. The evidence is collected from the harness artifact, not
 /// inferred from heartbeat age.
-pub(super) fn enqueue_worker_unavailable_relay(cas_dir: &std::path::Path, worker: &str) {
+pub(super) fn enqueue_worker_unavailable_relay(
+    cas_dir: &std::path::Path,
+    worker: &str,
+    occurrence: &str,
+) -> WorkerAttentionRelayOutcome {
     let detail = format!(
         "Worker {worker}'s harness reported a terminal unavailable state while its process may still heartbeat."
     );
@@ -71,7 +84,18 @@ pub(super) fn enqueue_worker_unavailable_relay(cas_dir: &std::path::Path, worker
         None,
         None,
         &detail,
-    );
+        occurrence,
+    )
+}
+
+/// A relay is consumed by an in-memory detector only after both durable lanes
+/// are confirmed. `Pending` deliberately leaves that detector eligible for a
+/// retry; the occurrence key makes the replay idempotent after a partial write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkerAttentionRelayOutcome {
+    Persisted { notification_id: i64 },
+    Pending,
+    NotApplicable,
 }
 
 fn enqueue_worker_attention_relay_detail(
@@ -81,7 +105,8 @@ fn enqueue_worker_attention_relay_detail(
     task_id: Option<&str>,
     elapsed_secs: Option<u64>,
     detail: &str,
-) {
+    occurrence: &str,
+) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
     };
@@ -90,25 +115,23 @@ fn enqueue_worker_attention_relay_detail(
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         tracing::warn!("worker attention relay skipped: agent store unavailable");
-        return;
+        return WorkerAttentionRelayOutcome::Pending;
     };
     let Some(supervisor) =
         resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
     else {
-        return;
+        return WorkerAttentionRelayOutcome::Pending;
     };
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         tracing::warn!(worker = %worker, kind, "worker attention relay skipped: supervisor queue unavailable");
-        return;
+        return WorkerAttentionRelayOutcome::Pending;
     };
-    // The event detector emits once per episode. The timestamp distinguishes a
-    // later recovered-and-stalled episode while the queue dedupes retries of
-    // this exact durable occurrence.
-    let occurrence = chrono::Utc::now().to_rfc3339();
+    // `occurrence` identifies the detected episode, not this delivery attempt.
+    // A retry after a durable-only write must reuse it across daemon restarts.
     let key = format!(
         "worker-attention:{}:{kind}:{worker}:{}:{occurrence}",
         factory_session.as_deref().unwrap_or(""),
-        task_id.unwrap_or("")
+        occurrence
     );
     let payload = serde_json::json!({
         "kind": kind,
@@ -129,21 +152,25 @@ fn enqueue_worker_attention_relay_detail(
     ) {
         Ok(NotifyIdempotentResult::Created(id)) => id,
         Ok(NotifyIdempotentResult::AlreadyExists {
-            id: _,
+            id,
             prompt_delivered: true,
-        }) => return,
+        }) => {
+            return WorkerAttentionRelayOutcome::Persisted {
+                notification_id: id,
+            };
+        }
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: false,
         }) => id,
         Err(error) => {
             tracing::error!(worker = %worker, kind, %error, "worker attention relay durable enqueue failed");
-            return;
+            return WorkerAttentionRelayOutcome::Pending;
         }
     };
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         tracing::error!(worker = %worker, kind, notification_id, "worker attention relay left pending: prompt queue unavailable");
-        return;
+        return WorkerAttentionRelayOutcome::Pending;
     };
     let body = format!(
         "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `coordination action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
@@ -159,11 +186,13 @@ fn enqueue_worker_attention_relay_detail(
         &format!("worker-attention-outbox:{notification_id}"),
     ) {
         tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
-        return;
+        return WorkerAttentionRelayOutcome::Pending;
     }
     if let Err(error) = supervisor_queue.mark_prompt_delivered(notification_id) {
         tracing::warn!(notification_id, %error, "worker attention relay prompt stamp failed; idempotent replay remains safe");
+        return WorkerAttentionRelayOutcome::Pending;
     }
+    WorkerAttentionRelayOutcome::Persisted { notification_id }
 }
 
 #[cfg(test)]
@@ -205,16 +234,21 @@ mod worker_attention_tests {
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         register_supervisor(&cas_dir, "worker-attention-test");
 
-        enqueue_worker_attention_relay(
+        let _ = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::WorkerIdle {
                 worker: "calm-owl".to_string(),
                 active_task: None,
             },
         );
-        enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42);
-        enqueue_worker_unavailable_relay(&cas_dir, "limited-codex");
-        enqueue_worker_attention_relay(
+        let _ = enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42);
+        let _ = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
+        let replay = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
+        assert!(matches!(
+            replay,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let _ = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::WorkerStalled {
                 worker: "steady-otter".to_string(),
@@ -226,7 +260,7 @@ mod worker_attention_tests {
 
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 4, "a persisted occurrence replays idempotently");
         assert!(rows.iter().all(|row| {
             row.target == "supervisor"
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
@@ -440,7 +474,7 @@ impl FactoryDaemon {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
-            reported_unavailable_workers: std::collections::HashSet::new(),
+            reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),

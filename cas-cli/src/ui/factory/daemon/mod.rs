@@ -236,7 +236,10 @@ pub struct FactoryDaemon {
     /// Workers whose harness has reported a terminal unavailable state in the
     /// current session. One supervisor relay per episode; removal permits a
     /// later recovered-and-exhausted worker to surface again.
-    reported_unavailable_workers: std::collections::HashSet<String>,
+    /// Agent generation -> stable evidence occurrence.  This survives a
+    /// transient unreadable rollout in-process; the relay's idempotency key
+    /// reconstructs the same episode after a daemon restart.
+    reported_unavailable_workers: std::collections::HashMap<String, String>,
     /// Last bounded rollout scan for terminal harness availability evidence.
     last_usage_limit_scan: Option<Instant>,
     /// In-flight spawns cancelled by a shutdown that targeted that specific

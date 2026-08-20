@@ -4,22 +4,13 @@
 # excluded here.
 set -euo pipefail
 
-repository="${GITHUB_REPOSITORY:-Richards-LLC/cassy}"
-queue_seconds="${CASSY_NON_MERGE_GROUP_QUEUE_SECONDS:-1200}"
-now_epoch="${CASSY_NOW_EPOCH:-$(date -u +%s)}"
-
-if [[ ! "$repository" =~ ^[^/]+/[^/]+$ ]]; then
-    echo "GITHUB_REPOSITORY must be an owner/repository slug" >&2
-    exit 2
-fi
-if [[ ! "$queue_seconds" =~ ^[0-9]+$ ]] || (( queue_seconds == 0 )); then
-    echo "CASSY_NON_MERGE_GROUP_QUEUE_SECONDS must be a positive integer" >&2
-    exit 2
-fi
-if [[ ! "$now_epoch" =~ ^[0-9]+$ ]]; then
-    echo "CASSY_NOW_EPOCH must be epoch seconds" >&2
-    exit 2
-fi
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=watchdog-policy.sh
+source "$script_dir/watchdog-policy.sh"
+watchdog_policy_init
+repository="$WATCHDOG_REPOSITORY"
+queue_seconds="$WATCHDOG_THRESHOLD_SECONDS"
+now_epoch="$WATCHDOG_NOW_EPOCH"
 
 queued_runs="$(gh api "repos/$repository/actions/runs?status=queued&per_page=100")"
 while IFS=$'\t' read -r run_id created_at event head_branch; do
@@ -44,5 +35,5 @@ while IFS=$'\t' read -r run_id created_at event head_branch; do
 
     printf 'cancelling stale queued run=%s event=%s age_seconds=%s threshold_seconds=%s ref=%s\n' \
         "$run_id" "$event" "$age_seconds" "$queue_seconds" "$head_branch"
-    gh api --method POST "repos/$repository/actions/runs/$run_id/cancel" >/dev/null
+    watchdog_cancel_run "$run_id"
 done < <(jq -r '.workflow_runs[] | [.id, .created_at, .event, .head_branch] | @tsv' <<<"$queued_runs")

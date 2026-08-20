@@ -74,7 +74,10 @@ fn runtime_workspace_root() -> Option<PathBuf> {
 
 fn find_workspace_root(base: &Path) -> Option<PathBuf> {
     base.ancestors()
-        .find(|path| path.join("Cargo.toml").is_file())
+        .find(|path| {
+            std::fs::read_to_string(path.join("Cargo.toml"))
+                .is_ok_and(|manifest| manifest.contains("[workspace]"))
+        })
         .map(Path::to_path_buf)
 }
 
@@ -95,6 +98,17 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
 
         assert_eq!(find_workspace_root(&child).as_deref(), Some(temp.path()));
+    }
+
+    #[test]
+    fn skips_member_manifests_for_the_workspace_root() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"member\"]\n").unwrap();
+        let member = temp.path().join("member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();
+
+        assert_eq!(find_workspace_root(&member).as_deref(), Some(temp.path()));
     }
 
     #[test]

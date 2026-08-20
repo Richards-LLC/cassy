@@ -19,9 +19,11 @@ use cas::types::{Entry, EntryType, Scope};
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-#[allow(deprecated)]
 fn cas_cmd() -> Command {
-    Command::cargo_bin("cas").unwrap()
+    Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ))
 }
 
 #[test]

@@ -9,9 +9,11 @@
 use assert_cmd::Command;
 use serde_json::Value;
 
-#[allow(deprecated)]
 fn cas_cmd() -> Command {
-    Command::cargo_bin("cas").unwrap()
+    Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ))
 }
 
 #[test]

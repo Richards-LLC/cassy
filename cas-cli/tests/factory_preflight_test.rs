@@ -73,14 +73,15 @@ fn project(with_mcp: bool) -> TempDir {
     dir
 }
 
-#[allow(deprecated)]
 fn command(project: &TempDir, home: &TempDir) -> Command {
     command_at(project.path(), home)
 }
 
-#[allow(deprecated)]
 fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
-    let mut command = Command::cargo_bin("cas").unwrap();
+    let mut command = Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ));
     command
         .current_dir(cwd)
         .env("HOME", home.path())
@@ -91,9 +92,11 @@ fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
     command
 }
 
-#[allow(deprecated)]
 fn human_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
-    let mut command = Command::cargo_bin("cas").unwrap();
+    let mut command = Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ));
     command
         .current_dir(cwd)
         .env("HOME", home.path())

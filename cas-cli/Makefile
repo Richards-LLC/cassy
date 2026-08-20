@@ -216,6 +216,10 @@ test-ci-tiers:
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
+	cd .. && ./scripts/test-release-latency-receipt.sh
+	cd .. && ./scripts/test-detect-pending-release.sh
+	cd .. && ./scripts/test-find-release-prebuild.sh
+	cd .. && ./scripts/test-check-release-runner-trust.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh

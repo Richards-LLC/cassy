@@ -203,6 +203,20 @@ if ! "$PUBLISH_TAG"; then
     exit 0
 fi
 
+# Tell the operator, before the tag exists, which publication path the tag will
+# take (cas-3b7c0). A missing prebuild is not an error — the tag still ships via
+# the cold build path — but it is the difference between a ~2 minute and a
+# ~15 minute publication, and that is worth knowing before pushing, not after.
+prebuild_status="$(GITHUB_REPOSITORY="${RELEASE_REPO:-Richards-LLC/cassy}" \
+    GITHUB_SHA="$(git rev-parse HEAD)" \
+    ./scripts/find-release-prebuild.sh 2>/dev/null || true)"
+if grep -q '^found=true' <<<"$prebuild_status"; then
+    echo "Prebuilt release artifacts are ready; the tag will publish without compiling."
+else
+    echo "NOTE: no prebuilt artifacts for this commit yet — the tag will build them inline (historically 13-26 min)."
+    echo "      Wait for the Release Prebuild workflow on this commit to finish if you want the fast path."
+fi
+
 echo "Pushing annotated tag $TAG to trigger the authoritative Release workflow..."
 git push origin "$TAG"
 
@@ -219,4 +233,5 @@ if "$MANUAL_PUBLISH"; then
 else
     echo "CI now owns release creation. Do not upload dist/local-audit archives or announce their digests."
     echo "After CI publishes both assets, run scripts/release-published-receipt.sh $TAG."
+    echo "Then run scripts/release-latency-receipt.sh $TAG for the tag-to-published timing receipt."
 fi

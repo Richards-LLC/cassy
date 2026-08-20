@@ -872,6 +872,7 @@ fi
 require_text "$ci_text" 'SCCACHE_GHA_ENABLED: "true"' 'CI enables GitHub cache-v2 backend'
 require_text "$(<"$release")" 'SCCACHE_GHA_ENABLED: "true"' 'release enables GitHub cache-v2 backend'
 release_text="$(<"$release")"
+release_verify="$(release_job_block verify)"
 release_linux="$(release_job_block build)"
 release_macos="$(release_job_block build-macos)"
 release_publish="$(release_job_block release)"
@@ -880,13 +881,13 @@ scoped_validation="$(job_block scoped-validation)"
 fast_preflight="$(job_block fast-validation-preflight)"
 require_absent "$release_linux" 'needs: verify' 'Linux release build starts in parallel with input verification'
 require_absent "$release_macos" 'needs: verify' 'macOS release build starts in parallel with input verification'
-require_text "$release_publish" 'needs: [verify, build, build-macos]' 'release publication waits for verification and both platform builds'
+require_text "$release_publish" 'needs: [prebuilt-lookup, verify, build, build-macos]' 'release publication waits for verification and both platform supply paths'
 for platform_build in "$release_linux" "$release_macos"; do
     require_text "$platform_build" '--profile "$RELEASE_PROFILE"' 'platform release build uses the thin-LTO profile'
     require_text "$platform_build" 'strip package/cas' 'platform package strips symbols before publication'
     require_text "$platform_build" '$RELEASE_DIR/cas' 'platform package selects the configured profile output'
 done
-require_text "$release_linux" 'check-blake3-no-avx512-build.sh "target/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"' 'Linux release audits BLAKE3 inputs from the selected profile'
+require_text "$release_linux" 'check-blake3-no-avx512-build.sh "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"' 'Linux release audits BLAKE3 inputs from the selected profile'
 require_text "$release_linux" 'test-check-portable-x86_64-isa.sh package/cas' 'Linux release audits the exact stripped executable'
 require_text "$release_linux" 'name: cas-x86_64-unknown-linux-gnu' 'Linux release asset remains required'
 require_text "$release_macos" 'name: cas-aarch64-apple-darwin' 'macOS release asset remains required'
@@ -938,6 +939,131 @@ echo 'ok   partial-release retry refuses loudly and does not upload replacement 
 GITHUB_REF=refs/tags/v9.9.9 FAKE_RELEASE_EXISTS=1 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body"
 grep -qF 'release create v9.9.9' "$retry_tmp/creates"
 echo 'ok   first release run creates the release when no object exists'
+
+# ---------------------------------------------------------------------------
+# Fast release publication contract (cas-3b7c0 / GH #449).
+#
+# Measured baseline before this lane existed: tag push -> published release ran
+# 13m18s (v3.1.0), 14m55s (v3.0.0), 20m03s (v3.2.0) and 26m26s (v2.72.0). The
+# critical path was ALWAYS the two cold platform builds — `Create Release`
+# itself never took more than 23s. macOS ARM64 alone cost 12-21 minutes and
+# cannot move to the fleet, so the artifacts are built when the release-PR
+# merges and the tag only publishes them.
+#
+# Everything below pins the properties that make that safe: the prebuild is an
+# accelerator with a preserved cold fallback, publication is fail-closed on
+# exactly one complete supply path, the codesign gate travels with whichever
+# job produces Darwin bytes, and the self-hosted routing keeps the cas-6981
+# trust posture with a hosted fail-safe.
+# ---------------------------------------------------------------------------
+prebuild="$repo_root/.github/workflows/release-prebuild.yml"
+prebuild_text="$(<"$prebuild")"
+
+prebuild_job_block() {
+    local job="$1"
+    awk -v header="  ${job}:" '
+        $0 == header { inside = 1; next }
+        inside && /^  [A-Za-z0-9_-]+:$/ { exit }
+        inside { print }
+    ' "$prebuild"
+}
+
+prebuild_gate="$(prebuild_job_block pending-release)"
+prebuild_route="$(prebuild_job_block prebuild-runner-route)"
+prebuild_linux="$(prebuild_job_block build)"
+prebuild_macos="$(prebuild_job_block build-macos)"
+release_lookup="$(release_job_block prebuilt-lookup)"
+release_route="$(release_job_block release-runner-route)"
+
+# Trigger surface. A public fork must not be able to reach the persistent box
+# through the new workflow, and the standing CI-load policy keeps the heavy
+# tier off factory/*, epic/*, tags and pull requests.
+require_text "$prebuild_text" 'push:' 'release prebuild runs on canonical repository pushes'
+require_text "$prebuild_text" '      - main' 'release prebuild is limited to main'
+for forbidden_event in pull_request: pull_request_target: workflow_run: issue_comment: repository_dispatch:; do
+    require_absent "$prebuild_text" "$forbidden_event" "release prebuild rejects event before runner assignment: $forbidden_event"
+done
+require_absent "$prebuild_text" '- "factory/**"' 'release prebuild never fires on factory branches'
+require_absent "$prebuild_text" '- "epic/**"' 'release prebuild never fires on epic branches'
+require_absent "$prebuild_text" 'tags:' 'release prebuild never fires on tags'
+require_text "$prebuild_text" 'cancel-in-progress: false' 'a prebuild is never cancelled out from under the tag that will adopt it'
+
+# The gate is what keeps an ordinary main push from costing two release builds.
+require_text "$prebuild_gate" './scripts/detect-pending-release.sh' 'release prebuild gates the heavy tier on a pending release tree'
+require_text "$prebuild_linux" "needs.pending-release.outputs.pending == 'true'" 'Linux prebuild only runs for a pending release tree'
+require_text "$prebuild_macos" "needs.pending-release.outputs.pending == 'true'" 'macOS prebuild only runs for a pending release tree'
+
+# Prebuilt bytes must be indistinguishable from what the tag-time fallback
+# would have produced, including every audit and the codesign gate (cas-67c1).
+for platform_prebuild in "$prebuild_linux" "$prebuild_macos"; do
+    require_text "$platform_prebuild" '--profile "$RELEASE_PROFILE"' 'prebuilt artifact uses the shipped release profile'
+    require_text "$platform_prebuild" 'strip package/cas' 'prebuilt artifact strips symbols before packaging'
+done
+require_text "$prebuild_linux" 'check-blake3-no-avx512-build.sh' 'Linux prebuild audits BLAKE3 build inputs'
+require_text "$prebuild_linux" 'test-check-portable-x86_64-isa.sh package/cas' 'Linux prebuild audits the exact stripped executable'
+require_text "$prebuild_macos" 'codesign --sign - --force package/cas' 'macOS prebuild re-signs the binary after stripping'
+require_text "$prebuild_macos" 'codesign --verify --verbose=4 package/cas' 'macOS prebuild verifies the signature it publishes'
+require_text "$prebuild_macos" 'runs-on: macos-26' 'macOS prebuild stays on the supported hosted image'
+require_text "$prebuild_linux" 'name: cas-x86_64-unknown-linux-gnu' 'prebuilt Linux artifact uses the adopted asset name'
+require_text "$prebuild_macos" 'name: cas-aarch64-apple-darwin' 'prebuilt macOS artifact uses the adopted asset name'
+
+# Self-hosted routing: label selected before assignment, opt-in variable, and
+# an execution-time trust guard on the machine itself.
+for route in "$prebuild_route" "$release_route"; do
+    require_text "$route" 'vars.CASSY_RELEASE_SELF_HOSTED' 'release routing requires explicit self-hosted opt-in'
+    require_text "$route" 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' 'release routing selects the isolated runner label set'
+    require_text "$route" 'runner=["ubuntu-latest"]' 'release routing fails safe to hosted runners'
+    require_absent "$route" 'actions/checkout' 'release routing does not execute source before label selection'
+done
+require_text "$prebuild_linux" './scripts/check-release-runner-trust.sh' 'Linux prebuild reasserts the trust boundary on the box'
+require_text "$release_verify" './scripts/check-release-runner-trust.sh' 'release verification reasserts the trust boundary on the box'
+require_text "$release_linux" './scripts/check-release-runner-trust.sh' 'fallback Linux build reasserts the trust boundary on the box'
+require_text "$(<"$repo_root/scripts/check-release-runner-trust.sh")" 'refs/heads/main | refs/tags/v*' 'trust guard admits only release-prep and release-tag refs'
+
+# The publishing job holds the only write-scoped token in the release. It must
+# never execute on the shared persistent box.
+require_text "$release_publish" 'runs-on: ubuntu-latest' 'the write-scoped publish job stays on hosted runners'
+require_absent "$release_publish" 'cas-ci-32core' 'the write-scoped publish job cannot be routed to the box'
+
+# Adoption is fail-safe on lookup and fail-closed on publication.
+require_text "$release_lookup" './scripts/find-release-prebuild.sh' 'release looks up prebuilt artifacts for the tagged commit'
+require_text "$release_lookup" 'actions: read' 'prebuilt lookup takes only read scope'
+require_text "$release_linux" "needs.prebuilt-lookup.outputs.found != 'true'" 'the cold Linux build remains the fallback when no prebuild exists'
+require_text "$release_macos" "needs.prebuilt-lookup.outputs.found != 'true'" 'the cold macOS build remains the fallback when no prebuild exists'
+require_text "$release_publish" "needs.prebuilt-lookup.outputs.found == 'true'" 'publication distinguishes the adopted path'
+require_text "$release_publish" "needs.build.result == 'skipped'" 'adoption requires the platform builds to have actually been skipped'
+require_text "$release_publish" "needs.build-macos.result == 'skipped'" 'adoption requires the macOS build to have actually been skipped'
+require_text "$release_publish" "needs.build.result == 'success'" 'the fallback path requires a successful Linux build'
+require_text "$release_publish" "needs.build-macos.result == 'success'" 'the fallback path requires a successful macOS build'
+require_text "$release_publish" "needs.verify.result == 'success'" 'no supply path can publish without the release-input gate'
+require_text "$release_publish" 'gh run download' 'publication adopts artifacts from the prebuild run'
+require_text "$release_publish" './scripts/check-portable-x86_64-isa.sh publish-audit/cas' 'publication re-audits the exact Linux executable it is about to publish'
+require_text "$release_publish" 'sha256sum release/*.tar.gz' 'publication records the digests of the exact published bytes'
+
+# The latency claim itself must be produced by a gate, not by eyeballing a run.
+latency_receipt="$repo_root/scripts/release-latency-receipt.sh"
+if [[ -x "$latency_receipt" ]]; then
+    require_text "$(<"$latency_receipt")" 'budget=600' 'the release latency receipt defaults to the ten-minute target'
+    require_text "$(<"$latency_receipt")" 'sort | first' 'latency is measured from the first run of the tag, never a rerun'
+    printf 'ok   release latency receipt is executable\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL release latency receipt must exist and be executable\n'
+    fail=$((fail + 1))
+fi
+
+for guard_script in detect-pending-release find-release-prebuild check-release-runner-trust release-latency-receipt; do
+    if [[ -x "$repo_root/scripts/test-$guard_script.sh" ]]; then
+        printf 'ok   %s has an executable self-test\n' "$guard_script"
+        pass=$((pass + 1))
+    else
+        printf 'FAIL %s has no executable self-test\n' "$guard_script"
+        fail=$((fail + 1))
+    fi
+    require_text "$(<"$repo_root/cas-cli/Makefile")" "test-$guard_script.sh" "test-ci-tiers runs the $guard_script self-test"
+done
+
+require_text "$(<"$repo_root/docs/ci/release-fast-publication.md")" 'tag push -> published' 'fast publication architecture is documented'
 rm -rf "$retry_tmp"
 trap - EXIT
 

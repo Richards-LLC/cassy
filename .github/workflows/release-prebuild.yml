@@ -1,0 +1,329 @@
+name: Release Prebuild
+
+# Build the shipped release artifacts at release-PR MERGE instead of at tag
+# time (cas-3b7c0, the undelivered half of GH #449).
+#
+# The release tree is final the moment the version-bump PR lands on main, so
+# the two cold platform builds — measured at 12-21 minutes each and the entire
+# critical path of every historical release — no longer have to happen while an
+# operator waits on a pushed tag. Release then only publishes bytes that
+# already exist.
+#
+# SECURITY BOUNDARY (cas-6981/cas-f5638): this workflow is push-to-main only.
+# A fork cannot emit a push in Richards-LLC/cassy, so untrusted code can never
+# reach the persistent runner through it. Do not add pull_request,
+# pull_request_target, workflow_run, issue_comment, or repository_dispatch.
+#
+# CI-LOAD POLICY: the heavy tier here is gated on a *pending release tree*.
+# Ordinary main pushes pay one ~20s ubuntu gate job and stop. factory/*,
+# epic/*, tags and pull requests never trigger this workflow at all.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Never cancel a prebuild: its artifacts are what a subsequent tag adopts, and
+# a cancelled prebuild silently degrades the next release to the slow path.
+concurrency:
+  group: release-prebuild-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_VERSION: "cas-v2"
+  # Keep aligned with release.yml: the prebuilt bytes must be the same bytes
+  # the tag-time fallback path would have produced.
+  RELEASE_PROFILE: release-fast
+  RELEASE_DIR: release-fast
+
+# NOTE ON RUSTC_WRAPPER: unlike release.yml this workflow deliberately does not
+# declare it at workflow scope. One of its lanes can run on the persistent box,
+# whose warm target directory — not the GitHub cache — is the thing that makes
+# it fast, and a workflow-scoped wrapper cannot be cleanly retracted per job.
+# Each hosted lane opts into sccache from its own probe step instead.
+
+jobs:
+  # Cheap gate. Every main push runs this and almost every main push stops
+  # here; only the release-prep tree opens the expensive lanes below.
+  pending-release:
+    name: Detect pending release tree
+    if: github.repository == 'Richards-LLC/cassy' && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    outputs:
+      pending: ${{ steps.detect.outputs.pending }}
+      version: ${{ steps.detect.outputs.version }}
+      tag: ${{ steps.detect.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - id: detect
+        name: Detect pending release tree
+        shell: bash
+        run: ./scripts/detect-pending-release.sh | tee -a "$GITHUB_OUTPUT"
+
+      - name: Report gate decision
+        run: |
+          echo "pending=${{ steps.detect.outputs.pending }} tag=${{ steps.detect.outputs.tag }}" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  # GitHub Actions cannot fall back after assigning an offline self-hosted
+  # runner — the job just stays queued forever. Select the label BEFORE
+  # assignment, exactly as ci.yml's merge-queue route does. The repository
+  # variable is opt-in and its absent/disabled state is the hosted fail-safe.
+  prebuild-runner-route:
+    name: Release prebuild — runner route
+    needs: pending-release
+    if: needs.pending-release.outputs.pending == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.route.outputs.runner }}
+      mode: ${{ steps.route.outputs.mode }}
+    steps:
+      - id: route
+        env:
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
+        run: |
+          if [[ "$SELF_HOSTED_ENABLED" == enabled ]]; then
+            echo 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' >> "$GITHUB_OUTPUT"
+            echo 'mode=self-hosted' >> "$GITHUB_OUTPUT"
+          else
+            echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'mode=hosted' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Prebuild Linux x86_64
+    needs: [pending-release, prebuild-runner-route]
+    if: >-
+      needs.pending-release.outputs.pending == 'true'
+      && (needs.prebuild-runner-route.outputs.mode != 'self-hosted'
+      || (github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && github.repository == 'Richards-LLC/cassy'
+      && github.event.repository.fork == false
+      && vars.CASSY_RELEASE_SELF_HOSTED == 'enabled'))
+    runs-on: ${{ fromJSON(needs.prebuild-runner-route.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ github.sha }}
+
+      - name: Verify release self-hosted trust boundary
+        if: needs.prebuild-runner-route.outputs.mode == 'self-hosted'
+        env:
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
+        run: ./scripts/check-release-runner-trust.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Linux linker
+        if: needs.prebuild-runner-route.outputs.mode == 'hosted'
+        run: |
+          sudo apt-get update
+          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+          sudo apt-get install -y binutils file gcc mold
+          gcc --version
+          mold --version
+
+      - name: Setup sccache
+        id: setup-sccache
+        if: needs.prebuild-runner-route.outputs.mode == 'hosted'
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        if: needs.prebuild-runner-route.outputs.mode == 'hosted'
+        shell: bash
+        run: |
+          if [[ "${{ steps.setup-sccache.outcome }}" == "success" ]] && sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache backend unavailable — building uncached"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+          fi
+
+      # cas-065a: the box's private sccache server is an optimization behind a
+      # warm persistent target directory, never a prerequisite. Its TCP defect
+      # must not fail a release prebuild.
+      - name: Use the isolated runner cache settings
+        if: needs.prebuild-runner-route.outputs.mode == 'self-hosted'
+        run: |
+          echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
+          echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
+
+      - name: Cache release dependencies
+        if: needs.prebuild-runner-route.outputs.mode == 'hosted'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-x86_64-${{ hashFiles('Cargo.lock') }}
+          cache-on-failure: true
+
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Build
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: |
+          # The subsequent build-input audit must inspect this build, never a
+          # stale BLAKE3 output restored from the target cache.
+          cargo clean -p blake3 --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu
+          cargo build -p cas --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu --locked
+
+      - name: Stage package
+        run: |
+          mkdir -p package
+          cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/cas" package/
+          strip package/cas
+          cp LICENSE package/
+
+      - name: Audit exact packaged Linux executable
+        run: |
+          ./scripts/check-blake3-no-avx512-build.sh "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"
+          ./scripts/test-check-portable-x86_64-isa.sh package/cas
+
+      - name: Package
+        run: |
+          cd package
+          tar -czvf cas-x86_64-unknown-linux-gnu.tar.gz cas LICENSE
+          mv cas-x86_64-unknown-linux-gnu.tar.gz ../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cas-x86_64-unknown-linux-gnu
+          path: cas-x86_64-unknown-linux-gnu.tar.gz
+          retention-days: 14
+
+      - name: Report sccache stats
+        if: always()
+        run: |
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Prebuild Linux x86_64"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
+
+  # There is no Mac in the fleet, so this stays on hosted macOS. Moving it off
+  # the tag's critical path is the entire reason this workflow exists: it is
+  # the slowest job in a release by a wide margin.
+  build-macos:
+    name: Prebuild macOS ARM64
+    needs: pending-release
+    if: needs.pending-release.outputs.pending == 'true'
+    # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
+    # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ github.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Setup sccache
+        id: setup-sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        shell: bash
+        run: |
+          if [[ "${{ steps.setup-sccache.outcome }}" == "success" ]] && sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache backend unavailable — building uncached"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache release dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos-aarch64-${{ hashFiles('Cargo.lock') }}
+          cache-on-failure: true
+
+      - name: Build
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo build -p cas --profile "$RELEASE_PROFILE" --target aarch64-apple-darwin --locked
+
+      # The codesign gate (cas-67c1) moves with the build. Whichever path
+      # produces the Darwin bytes signs and verifies them; nothing downstream
+      # can publish an unsigned or invalidly signed Mach-O.
+      - name: Package
+        run: |
+          mkdir -p package
+          cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
+          strip package/cas
+          # `strip` invalidates an ad-hoc Mach-O signature. Re-sign the exact
+          # executable we publish, then fail before packaging if it is invalid.
+          codesign --sign - --force package/cas
+          codesign --verify --verbose=4 package/cas
+          cp LICENSE package/
+          cd package
+          tar -czvf cas-aarch64-apple-darwin.tar.gz cas LICENSE
+          mv cas-aarch64-apple-darwin.tar.gz ../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cas-aarch64-apple-darwin
+          path: cas-aarch64-apple-darwin.tar.gz
+          retention-days: 14
+
+      - name: Report sccache stats
+        if: always()
+        run: |
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Prebuild macOS ARM64"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
+
+  prebuild-summary:
+    name: Release prebuild summary
+    needs: [pending-release, build, build-macos]
+    if: always() && needs.pending-release.outputs.pending == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report prebuild readiness
+        run: |
+          {
+            echo "## Release prebuild for ${{ needs.pending-release.outputs.tag }}"
+            echo
+            echo "commit: \`${{ github.sha }}\`"
+            echo "linux: ${{ needs.build.result }}"
+            echo "macos: ${{ needs.build-macos.result }}"
+            echo
+            if [[ "${{ needs.build.result }}" == success && "${{ needs.build-macos.result }}" == success ]]; then
+              echo "Pushing ${{ needs.pending-release.outputs.tag }} will adopt these artifacts and publish without compiling."
+            else
+              echo "Prebuild incomplete — the tag will fall back to building release artifacts inline."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

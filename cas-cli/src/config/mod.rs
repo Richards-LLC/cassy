@@ -82,8 +82,8 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory: Option<FactoryConfig>,
 
-    /// `[staging]` — durable staging path and tmpfs/ramfs warning thresholds
-    /// for hook-side large-write guardrails.
+    /// `[staging]` — durable staging, configured agent scratch paths, and
+    /// tmpfs/ramfs warning thresholds for hook-side write guardrails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staging: Option<StagingConfig>,
 

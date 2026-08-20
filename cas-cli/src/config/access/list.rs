@@ -170,6 +170,10 @@ impl Config {
                 staging.staging_dir.clone().unwrap_or_default(),
             ),
             (
+                "staging.scratch_root".to_string(),
+                staging.scratch_root.clone().unwrap_or_default(),
+            ),
+            (
                 "staging.tmpfs_warning_threshold_bytes".to_string(),
                 staging.tmpfs_warning_threshold_bytes.to_string(),
             ),

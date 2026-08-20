@@ -63,7 +63,7 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
     );
     registry.section_descriptions.insert(
         "staging",
-        "Durable staging paths and tmpfs write guardrails",
+        "Durable staging paths, agent scratch roots, and tmpfs write guardrails",
     );
     registry.section_descriptions.insert(
         "factory",

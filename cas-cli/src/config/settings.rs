@@ -229,6 +229,13 @@ pub struct StagingConfig {
     )]
     pub staging_dir: Option<String>,
 
+    /// Root for ephemeral agent-created files such as logs, generated fixtures,
+    /// and scratch checkouts. When configured, the PreToolUse workspace guard
+    /// permits writes below this root in addition to the worktree and durable
+    /// factory artifacts root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_root: Option<String>,
+
     /// Warn when cumulative session writes or tmpfs usage growth crosses this
     /// many bytes on a tmpfs/ramfs-backed mount. Default: 1 GiB.
     #[serde(default = "default_tmpfs_warning_threshold_bytes")]
@@ -245,6 +252,7 @@ impl Default for StagingConfig {
     fn default() -> Self {
         Self {
             staging_dir: None,
+            scratch_root: None,
             tmpfs_warning_threshold_bytes: default_tmpfs_warning_threshold_bytes(),
         }
     }
@@ -1143,15 +1151,17 @@ mod tests {
             DEFAULT_TMPFS_WARNING_THRESHOLD_BYTES
         );
         assert_eq!(sc.staging_dir, None);
+        assert_eq!(sc.scratch_root, None);
     }
 
     #[test]
     fn staging_config_roundtrips_staging_dir_and_threshold() {
-        let toml_str = "[staging]\nstaging_dir = \"/mnt/durable/cas-staging\"\ntmpfs_warning_threshold_bytes = 2048\n";
+        let toml_str = "[staging]\nstaging_dir = \"/mnt/durable/cas-staging\"\nscratch_root = \"/mnt/durable/cas-scratch\"\ntmpfs_warning_threshold_bytes = 2048\n";
         let parsed: std::collections::HashMap<String, StagingConfig> =
             toml::from_str(toml_str).expect("valid toml");
         let sc = parsed.get("staging").expect("section present");
         assert_eq!(sc.staging_dir.as_deref(), Some("/mnt/durable/cas-staging"));
+        assert_eq!(sc.scratch_root.as_deref(), Some("/mnt/durable/cas-scratch"));
         assert_eq!(sc.tmpfs_warning_threshold_bytes, 2048);
     }
 

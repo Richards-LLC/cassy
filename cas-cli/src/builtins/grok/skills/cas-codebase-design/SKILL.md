@@ -49,7 +49,7 @@ meaningful conventions; do not apply an "avoid service" rule there.
 
 Name the selected seam, the interface facts callers must learn, what complexity
 stays behind it, and the deletion-test result. If the choice is consequential,
-capture it in the active Cassy task or a `mcp__cas__spec` decision rather than a
+capture it in the active Cassy task or a `cas__spec` decision rather than a
 parallel architecture-record directory.
 
 For dependency categories and replacement testing, read

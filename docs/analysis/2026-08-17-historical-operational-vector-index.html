@@ -242,9 +242,9 @@
 
 </head>
 <body><a class="skip" href="#main">Skip to report</a><header><p>CAS operational intelligence · frozen evidence artifact</p></header><main id="main">
-<h1 id="historical-cas-operational-vector-index">Historical CAS
+<h1 id="historical-cassy-operational-vector-index">Historical Cassy
 operational vector index</h1>
-<p class="lead"><strong>Headline finding.</strong> Structural normalization removed <strong>92.17%</strong> of 1,033,752 candidate evidence chunks before embedding, turning 3.03 GB of CAS operational sources into 80,951 provenance-bearing semantic units without adding anything to live CAS search.</p>
+<p class="lead"><strong>Headline finding.</strong> Structural normalization removed <strong>92.17%</strong> of 1,033,752 candidate evidence chunks before embedding, turning 3.03 GB of Cassy operational sources into 80,951 provenance-bearing semantic units without adding anything to live Cassy search.</p>
 
 <div class="cards">
 <div class="card"><strong>3.03 GB</strong>eligible frozen source data<br><small>cut off 2026-08-17 13:44:57 UTC</small></div>
@@ -285,23 +285,25 @@ operational vector index</h1>
 <tr>
 <td>Estimated embedding tokens</td>
 <td style="text-align: right;">13,530,757</td>
-<td style="text-align: right;">unfiltered estimate¹</td>
-<td style="text-align: right;">-744,744,243</td>
+<td style="text-align: right;">758,141,679 unfiltered¹</td>
+<td style="text-align: right;">-744,610,922</td>
 <td style="text-align: right;">-98.22%</td>
 <td style="text-align: right;">54,123,027 retained characters</td>
 </tr>
 <tr>
 <td>Provider-list-price equivalent</td>
 <td style="text-align: right;">$1.759</td>
-<td style="text-align: right;">$97.27 unfiltered¹</td>
-<td style="text-align: right;">-$95.51</td>
-<td style="text-align: right;">-98.19%</td>
+<td style="text-align: right;">$98.56 unfiltered¹</td>
+<td style="text-align: right;">-$96.80</td>
+<td style="text-align: right;">-98.22%</td>
 <td style="text-align: right;">$0.13 / million tokens</td>
 </tr>
 </tbody>
 </table></div>
-<p>¹ The unfiltered estimate uses the deliberately conservative
-four-bytes-per-token approximation over 3.03 GB. It is a comparison
+<p>¹ The unfiltered comparison baseline is
+<code>3,032,566,716 eligible bytes / 4 bytes per token = 758,141,679 tokens</code>;
+at <code>$0.13 / million tokens</code>, that is <code>$98.56</code>
+before display rounding. It is a deliberately conservative comparison
 model, not a measured tokenizer count. Sources:
 <code>full-prepare.json</code>; <a
 href="https://platform.openai.com/docs/models/text-embedding-3-large">OpenAI's
@@ -392,7 +394,7 @@ filtering</h3>
 <td style="text-align: right;">637,929,328</td>
 </tr>
 <tr>
-<td>Claude CAS transcripts</td>
+<td>Claude Cassy transcripts</td>
 <td style="text-align: right;">628 files</td>
 <td style="text-align: right;">628 files</td>
 <td style="text-align: right;">464,310,658</td>
@@ -400,11 +402,11 @@ filtering</h3>
 <tr>
 <td>Codex transcript store</td>
 <td style="text-align: right;">2,018 files / 4,685,246,440 bytes</td>
-<td style="text-align: right;">821 CAS-cwd sessions</td>
+<td style="text-align: right;">821 Cassy-cwd sessions</td>
 <td style="text-align: right;">1,888,567,587</td>
 </tr>
 <tr>
-<td>Grok CAS transcript representations</td>
+<td>Grok Cassy transcript representations</td>
 <td style="text-align: right;">71 files / 100,708,411 bytes</td>
 <td style="text-align: right;">13 canonical
 <code>chat_history.jsonl</code> files</td>
@@ -464,7 +466,7 @@ knowledge, history, or code search.</p>
 <h3 id="privacy-and-embedding-receipt">Privacy and embedding
 receipt</h3>
 <p>The explicit task authorization covers one fixed historical embedding
-build. Text is redacted locally before the request. The CAS cloud
+build. Text is redacted locally before the request. The Cassy cloud
 contract maps <code>cas-embed-v1</code> to OpenAI
 <code>text-embedding-3-large</code> at 1,024 dimensions; the committed
 cloud response states that the endpoint persists neither text nor
@@ -714,8 +716,8 @@ candidate generator; hybrid/current-code evidence is the decision
 surface.</p>
 <h3 id="cross-channel-association">Cross-channel association</h3>
 <p>The frozen operational index is intentionally only one evidence
-channel. The labeled queries were also checked against the existing CAS
-surfaces:</p>
+channel. The labeled queries were also checked against the existing
+Cassy surfaces:</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -877,7 +879,7 @@ this cutoff artifact.</li>
 <li><strong>Corpus growth:</strong> the task was estimated at about 1
 GB; the fixed-cutoff eligible corpus is 3.03 GB because Codex and
 factory history grew after task creation. The inventory states both the
-discovery population and the selected CAS population.</li>
+discovery population and the selected Cassy population.</li>
 <li><strong>Snapshot time versus row update time:</strong> cutoff
 filters are applied to event creation timestamps. A row created before
 the cutoff but mutated between the cutoff and filesystem copy may
@@ -888,7 +890,8 @@ reliable timestamps. They preserve session/source provenance and an
 <code>unattributed</code> epoch instead of a fabricated timestamp.</li>
 <li><strong>Approximate tokens and list price:</strong> token count uses
 characters divided by four and cost uses the direct provider list price.
-The CAS service may meter differently; both are labeled estimates.</li>
+The Cassy service may meter differently; both are labeled
+estimates.</li>
 <li><strong>Dense similarity is non-causal:</strong> high cosine
 similarity associates descriptions, not mechanisms. Recommendations
 require corroboration from SQL, current code, task/issue state, and
@@ -941,7 +944,7 @@ evidence kept separate (<a
 href="https://arxiv.org/abs/2506.03691">LogSage, arXiv:2506.03691</a>).
 The price receipt uses the official OpenAI model page for
 <code>text-embedding-3-large</code>, retrieved 2026-08-17. These sources
-informed the method; all CAS findings above come from the frozen local
+informed the method; all Cassy findings above come from the frozen local
 corpus and committed code/history channels.</p>
 </main><footer><p>Markdown source: <a href="2026-08-17-historical-operational-vector-index.md">2026-08-17-historical-operational-vector-index.md</a>. Offline, dependency-free rendering.</p></footer></body>
 </html>

@@ -15,10 +15,10 @@
 |---|---:|---:|---:|---:|---:|
 | Eligible source bytes | 3,032,566,716 | 1,000,000,000 task estimate | +2,032,566,716 | +203.26% | 1 snapshot + 1,510 files |
 | Unique chunks sent for embedding | 80,951 | 1,033,752 candidates | -952,801 | -92.17% | 1,033,752 candidates |
-| Estimated embedding tokens | 13,530,757 | unfiltered estimate¹ | -744,744,243 | -98.22% | 54,123,027 retained characters |
-| Provider-list-price equivalent | $1.759 | $97.27 unfiltered¹ | -$95.51 | -98.19% | $0.13 / million tokens |
+| Estimated embedding tokens | 13,530,757 | 758,141,679 unfiltered¹ | -744,610,922 | -98.22% | 54,123,027 retained characters |
+| Provider-list-price equivalent | $1.759 | $98.56 unfiltered¹ | -$96.80 | -98.22% | $0.13 / million tokens |
 
-¹ The unfiltered estimate uses the deliberately conservative four-bytes-per-token approximation over 3.03 GB. It is a comparison model, not a measured tokenizer count. Sources: `full-prepare.json`; [OpenAI's `text-embedding-3-large` model page](https://platform.openai.com/docs/models/text-embedding-3-large), checked 2026-08-17.
+¹ The unfiltered comparison baseline is `3,032,566,716 eligible bytes / 4 bytes per token = 758,141,679 tokens`; at `$0.13 / million tokens`, that is `$98.56` before display rounding. It is a deliberately conservative comparison model, not a measured tokenizer count. Sources: `full-prepare.json`; [OpenAI's `text-embedding-3-large` model page](https://platform.openai.com/docs/models/text-embedding-3-large), checked 2026-08-17.
 
 <figure aria-describedby="reduction-summary">
 <svg viewBox="0 0 820 180" role="img" aria-labelledby="reduction-title reduction-desc">

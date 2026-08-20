@@ -1,20 +1,46 @@
 #!/usr/bin/env bash
 # Install the pinned GitHub runner and register it in the pre-created,
 # selected-repository/selected-workflow group. Run from a trusted checkout:
-#   SCCACHE_SOURCE="$(command -v sccache)" \
-#     sudo --preserve-env=RUNNER_TOKEN,SCCACHE_SOURCE scripts/install-cassy-actions-runner.sh
+#   RUNNER_SLOT=2 SCCACHE_SOURCE="$(command -v sccache)" \
+#     sudo --preserve-env=RUNNER_TOKEN,RUNNER_SLOT,SCCACHE_SOURCE \
+#       scripts/install-cassy-actions-runner.sh
 set -euo pipefail
 
 runner_user=cassy-actions
 runner_root=/var/lib/cassy-actions
-runner_dir="$runner_root/runner"
+runner_slot="${RUNNER_SLOT:-1}"
 runner_version=2.336.0
 runner_archive="actions-runner-linux-x64-${runner_version}.tar.gz"
 runner_url="https://github.com/actions/runner/releases/download/v${runner_version}/${runner_archive}"
 runner_sha256=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
 runner_group=cassy-public-trusted
-unit_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ops/systemd/cassy-actions-runner.service"
-wrapper_source="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ops/systemd/run-cassy-actions-runner.sh"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "$runner_slot" in
+    1)
+        runner_name=soundwave-cas-ci
+        runner_dir="$runner_root/runner"
+        cargo_target_dir="$runner_root/cache/cargo-target"
+        sccache_dir="$runner_root/cache/sccache"
+        service_name=cassy-actions-runner.service
+        wrapper_source="$repo_root/ops/systemd/run-cassy-actions-runner.sh"
+        wrapper_dest="$runner_root/run-service.sh"
+        ;;
+    2)
+        runner_name=soundwave-cas-ci-2
+        runner_dir="$runner_root/runner-2"
+        cargo_target_dir="$runner_root/cache/cargo-target-2"
+        sccache_dir="$runner_root/cache/sccache-2"
+        service_name=cassy-actions-runner-2.service
+        wrapper_source="$repo_root/ops/systemd/run-cassy-actions-runner-2.sh"
+        wrapper_dest="$runner_root/run-service-2.sh"
+        ;;
+    *)
+        echo "RUNNER_SLOT must be 1 or 2; got $runner_slot" >&2
+        exit 1
+        ;;
+esac
+unit_source="$repo_root/ops/systemd/$service_name"
 
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "run as root (sudo --preserve-env=RUNNER_TOKEN $0)" >&2
@@ -33,8 +59,8 @@ if ! id "$runner_user" >/dev/null 2>&1; then
     useradd --system --create-home --home-dir "$runner_root" --shell /usr/sbin/nologin "$runner_user"
 fi
 install -d -o "$runner_user" -g "$runner_user" -m 0750 \
-    "$runner_dir" "$runner_root/cache" "$runner_root/cache/cargo-target" \
-    "$runner_root/cache/sccache" "$runner_root/.cargo" \
+    "$runner_dir" "$runner_root/cache" "$cargo_target_dir" \
+    "$sccache_dir" "$runner_root/.cargo" \
     "$runner_root/.cargo/bin" "$runner_root/.rustup"
 chown -R "$runner_user:$runner_user" \
     "$runner_root/cache" "$runner_root/.cargo" "$runner_root/.rustup"
@@ -78,15 +104,15 @@ fi
         ./config.sh --unattended --replace \
         --url https://github.com/Richards-LLC \
         --token "$RUNNER_TOKEN" \
-        --name soundwave-cas-ci \
+        --name "$runner_name" \
         --runnergroup "$runner_group" \
         --labels cas-ci-32core,trusted-branches \
         --work _work
 )
 
 install -o "$runner_user" -g "$runner_user" -m 0755 \
-    "$wrapper_source" "$runner_root/run-service.sh"
-install -o root -g root -m 0644 "$unit_source" /etc/systemd/system/cassy-actions-runner.service
+    "$wrapper_source" "$wrapper_dest"
+install -o root -g root -m 0644 "$unit_source" "/etc/systemd/system/$service_name"
 systemctl daemon-reload
-systemctl enable --now cassy-actions-runner.service
-systemctl --no-pager --full status cassy-actions-runner.service
+systemctl enable --now "$service_name"
+systemctl --no-pager --full status "$service_name"

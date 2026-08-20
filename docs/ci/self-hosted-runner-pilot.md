@@ -21,6 +21,28 @@ not reach the pilot's two-minute target. This is an honest partial result;
 the private sccache service remains outside the workflow and is not a hidden
 prerequisite for the measurement.
 
+## Merge-queue latency follow-up
+
+The first routing change exposed a single-listener queue rather than a slow
+individual lane. GitHub may assign the archive, preflight, and doctest jobs in
+any order, but one `soundwave-cas-ci` listener can execute only one at a time.
+
+| Queue run | Total | Archive | Preflight | Doctests | Limiting observation |
+| --- | ---: | ---: | ---: | ---: | --- |
+| [PR #568](https://github.com/Richards-LLC/cassy/actions/runs/32399555279) | 5m32s | 1m20s, `soundwave-cas-ci` | 3m28s, hosted | 2m36s, hosted | Hosted comparison; Linux lanes ran in parallel. |
+| [PR #576](https://github.com/Richards-LLC/cassy/actions/runs/32413795966) | 7m07s | 1m28s | 2m26s | 2m12s | All three `soundwave-cas-ci` jobs serialized for 6m08s. |
+| [PR #577](https://github.com/Richards-LLC/cassy/actions/runs/32414486769) | 6m03s | 1m30s | 1m20s | 1m09s | Linux rollup finished in 4m57s; macOS finished at 6m02s. |
+| [PR #578](https://github.com/Richards-LLC/cassy/actions/runs/32415089032) | 11m19s | 1m25s | 1m18s | 0m51s | Archive was assigned third, delaying hosted shards; macOS independently took 11m04s. |
+
+The hosted-cache option has one demonstrated sub-six-minute run (#568), but it
+depends on two hosted compiler caches staying warm and adds main-push compiler
+work after the exact tree was already validated. It also does nothing for the
+observed macOS variance. The selected option is a second trusted listener with
+the same labels. That directly bounds the Linux serialization: two of the
+three compiling jobs start together, and the third waits for at most one warm
+job instead of two. macOS remains an independent floor and is reported rather
+than hidden in the acceptance receipts.
+
 ## Trust boundary
 
 `Richards-LLC/cassy` is public. GitHub warns that persistent self-hosted runners
@@ -82,18 +104,26 @@ the workflow can repair after assignment; treat the variable as a readiness
 lease and disable it before any maintenance. This preserves a concrete hosted
 fallback instead of wedging planned queue work.
 
-The listener runs as the non-login `cassy-actions` system account under
-`cassy-actions-runner.service`. Its checkout, Cargo target directory, Rust
-toolchain, and sccache live under `/var/lib/cassy-actions`, never under `.cas`
-or the factory worktrees. The unit has no privileges or Docker access, applies
-systemd filesystem/device/kernel hardening, uses `nice=10` and best-effort
-`ionice=7`, caps Cargo at 12 jobs, and reserves 2,048 cgroup task slots. This
+Two listeners run as the non-login `cassy-actions` system account under
+`cassy-actions-runner.service` and `cassy-actions-runner-2.service`. Their
+checkouts, Cargo target directories, Rust toolchain, and sccache live under
+`/var/lib/cassy-actions`, never under `.cas` or the factory worktrees. The
+listeners share the read-only toolchain but not mutable build state:
+
+| Slot | Runner | Checkout | Cargo target | sccache | Port |
+| --- | --- | --- | --- | --- | ---: |
+| 1 | `soundwave-cas-ci` | `runner` | `cache/cargo-target` | `cache/sccache` | 4227 |
+| 2 | `soundwave-cas-ci-2` | `runner-2` | `cache/cargo-target-2` | `cache/sccache-2` | 4228 |
+
+Both units have no privileges or Docker access and apply
+systemd filesystem/device/kernel hardening, use `nice=10` and best-effort
+`ionice=7`, cap Cargo at 12 jobs, and reserve 2,048 cgroup task slots. This
 does not raise compilation concurrency: it prevents sccache plus 12 parallel
 rustc/linker process trees from exhausting the distro's 512-task service
-default and returning `EAGAIN` while spawning a compiler. One listener and one
-workflow concurrency group enforce host job concurrency 1. The runner uses dedicated sccache port
-4227; the default port belongs to the operator's cache server and must not be
-shared across Unix users. The systemd launch wrapper starts sccache before the
+default and returning `EAGAIN` while spawning a compiler. The two 12-way caps
+leave eight of the host's 32 logical CPUs outside Cargo's job budget. Dedicated
+sccache ports 4227 and 4228 prevent either slot from finding the operator's
+default-port cache or the other listener's server. The systemd launch wrapper starts sccache before the
 GitHub listener, outside Runner.Worker's per-step process tracking; starting it
 inside one workflow step causes the runner to reap it before Cargo's next step.
 The launch wrapper then uses GitHub's `bin/runsvc.sh`, which translates systemd
@@ -139,15 +169,18 @@ gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID \\
   --jq '{restricted_to_workflows, selected_workflows}'
 ```
 
-Generate a short-lived organization registration token, then run from a trusted
-checkout:
+Generate a short-lived organization registration token for each registration,
+then run from a trusted checkout. `RUNNER_SLOT` defaults to `1`; provisioning
+slot 2 is explicit so rerunning the installer cannot silently change the
+existing listener:
 
 ```bash
-RUNNER_TOKEN=... SCCACHE_SOURCE="$(command -v sccache)" \
-  sudo --preserve-env=RUNNER_TOKEN,SCCACHE_SOURCE scripts/install-cassy-actions-runner.sh
+RUNNER_TOKEN=... RUNNER_SLOT=2 SCCACHE_SOURCE="$(command -v sccache)" \
+  sudo --preserve-env=RUNNER_TOKEN,RUNNER_SLOT,SCCACHE_SOURCE \
+    scripts/install-cassy-actions-runner.sh
 ```
 
-Verify the runner reports `online` before enabling the job:
+Verify both runner names report `online` before enabling the job:
 
 ```bash
 gh api orgs/Richards-LLC/actions/runners
@@ -167,6 +200,7 @@ merge-queue routing and advisory assignment first, then stop the listener:
 gh variable set CASSY_SELF_HOSTED_PILOT --repo Richards-LLC/cassy --body disabled
 gh variable set CASSY_MERGE_QUEUE_SELF_HOSTED --repo Richards-LLC/cassy --body disabled
 sudo systemctl stop cassy-actions-runner.service
+sudo systemctl stop cassy-actions-runner-2.service
 ```
 
 Audit without exposing tokens:
@@ -175,7 +209,7 @@ Audit without exposing tokens:
 gh api orgs/Richards-LLC/actions/runner-groups
 gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID/repositories
 gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID/runners
-systemctl show cassy-actions-runner.service \
+systemctl show cassy-actions-runner.service cassy-actions-runner-2.service \
   -p User -p Group -p Nice -p CPUWeight -p IOWeight -p TasksCurrent -p TasksMax \
   -p ReadWritePaths
 ```

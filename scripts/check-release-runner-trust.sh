@@ -29,18 +29,6 @@ case "${GITHUB_REF:?}" in
     *) fail "ref is outside the trusted release set: $GITHUB_REF" ;;
 esac
 
-case "${CARGO_TARGET_DIR:?}" in
-    /var/lib/cassy-actions/*) ;;
-    *) fail "CARGO_TARGET_DIR is not isolated from factory worktrees" ;;
-esac
-
-case "${SCCACHE_DIR:?}" in
-    /var/lib/cassy-actions/*) ;;
-    *) fail "SCCACHE_DIR is not isolated from the operator cache" ;;
-esac
-
-test "${SCCACHE_SERVER_PORT:?}" = 4227 \
-    || fail "SCCACHE_SERVER_PORT is not the runner's private port"
-test "$(id -u)" -ne 0 || fail "release lane must not run as root on the shared box"
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-cassy-actions-runner-isolation.sh"
 
 echo "release runner trust contract satisfied: ref=$GITHUB_REF target=$CARGO_TARGET_DIR"

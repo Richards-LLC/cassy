@@ -16,6 +16,11 @@ migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
 watchdog="$repo_root/.github/workflows/merge-queue-watchdog.yml"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
 runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
+runner_unit_2="$repo_root/ops/systemd/cassy-actions-runner-2.service"
+runner_wrapper_2="$repo_root/ops/systemd/run-cassy-actions-runner-2.sh"
+runner_installer="$repo_root/scripts/install-cassy-actions-runner.sh"
+runner_isolation="$repo_root/scripts/check-cassy-actions-runner-isolation.sh"
+release_runner_trust="$repo_root/scripts/check-release-runner-trust.sh"
 stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
 stale_queue_script="$repo_root/scripts/cancel-stale-non-merge-group-queued-runs.sh"
 watchdog_policy="$repo_root/scripts/watchdog-policy.sh"
@@ -141,9 +146,7 @@ require_text "$self_hosted_text" 'permissions:' 'self-hosted workflow declares e
 require_text "$self_hosted_text" 'contents: read' 'self-hosted workflow token is read-only'
 require_text "$self_hosted_text" 'CARGO_BUILD_JOBS: "12"' 'self-hosted compile leaves CPU capacity for the worker fleet'
 require_text "$self_hosted_text" 'RUSTC_WRAPPER: ""' 'pilot archive timing is not coupled to sccache availability'
-require_text "$self_hosted_text" 'CARGO_TARGET_DIR is not isolated from factory worktrees' 'self-hosted job fails if host isolation is lost'
-require_text "$self_hosted_text" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'self-hosted job pins its isolated sccache server'
-require_text "$self_hosted_text" 'SCCACHE_DIR is not isolated from the operator cache' 'self-hosted job rejects the operator sccache directory'
+require_text "$self_hosted_text" './scripts/check-cassy-actions-runner-isolation.sh' 'self-hosted job verifies an approved target/cache/port tuple'
 require_absent "$self_hosted_text" 'sccache --start-server' 'workflow steps cannot start a cache server that Runner.Worker will reap'
 require_absent "$self_hosted_text" 'sccache --zero-stats' 'pilot workflow does not depend on a cache server for its first receipt'
 require_text "$self_hosted_text" 'cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst' 'self-hosted pilot measures the same suite archive'
@@ -161,10 +164,54 @@ require_text "$pilot_doc" 'approval_policy=all_external_contributors' 'pilot pin
 require_text "$pilot_doc" 'Ephemeral/JIT runners remain future' 'pilot records the deferred runner-isolation alternative'
 
 runner_unit_text="$(<"$runner_unit")"
+runner_unit_2_text="$(<"$runner_unit_2")"
 require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
 require_text "$runner_unit_text" 'Environment=SCCACHE_IDLE_TIMEOUT=0' 'runner keeps its private sccache server alive between merge-queue jobs'
 require_text "$runner_unit_text" 'TasksMax=2048' 'runner reserves enough cgroup task slots for parallel sccache compiler spawns'
+require_text "$runner_unit_2_text" 'WorkingDirectory=/var/lib/cassy-actions/runner-2' 'slot 2 has an independent runner checkout'
+require_text "$runner_unit_2_text" 'Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target-2' 'slot 2 has an independent Cargo target'
+require_text "$runner_unit_2_text" 'Environment=SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache-2' 'slot 2 has an independent sccache directory'
+require_text "$runner_unit_2_text" 'Environment=SCCACHE_SERVER_PORT=4228' 'slot 2 has an independent sccache server port'
+require_text "$runner_unit_2_text" '/var/lib/cassy-actions/run-service-2.sh' 'slot 2 unit starts its dedicated wrapper'
+require_text "$(<"$runner_wrapper_2")" '/var/lib/cassy-actions/runner-2/bin/runsvc.sh' 'slot 2 wrapper starts its independent listener'
+require_text "$(<"$runner_installer")" 'RUNNER_SLOT must be 1 or 2' 'runner installer rejects unbounded slot identifiers'
+require_text "$(<"$runner_installer")" 'runner_name=soundwave-cas-ci-2' 'runner installer registers a distinct slot-2 name'
+require_text "$(<"$runner_installer")" 'service_name=cassy-actions-runner-2.service' 'runner installer enables the slot-2 unit'
+require_text "$(<"$release_runner_trust")" 'check-cassy-actions-runner-isolation.sh' 'release trust guard accepts only approved slot tuples'
 require_text "$pilot_doc" '2,048 cgroup task slots' 'pilot documents the parallel sccache task-slot budget'
+
+if [[ -x "$runner_isolation" ]]; then
+    if CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target \
+        SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache \
+        SCCACHE_SERVER_PORT=4227 "$runner_isolation" >/dev/null; then
+        printf 'ok   runner isolation accepts slot 1 tuple\n'
+        pass=$((pass + 1))
+    else
+        printf 'FAIL runner isolation must accept slot 1 tuple\n'
+        fail=$((fail + 1))
+    fi
+    if CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target-2 \
+        SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache-2 \
+        SCCACHE_SERVER_PORT=4228 "$runner_isolation" >/dev/null; then
+        printf 'ok   runner isolation accepts slot 2 tuple\n'
+        pass=$((pass + 1))
+    else
+        printf 'FAIL runner isolation must accept slot 2 tuple\n'
+        fail=$((fail + 1))
+    fi
+    if CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target \
+        SCCACHE_DIR=/var/lib/cassy-actions/cache/sccache-2 \
+        SCCACHE_SERVER_PORT=4228 "$runner_isolation" >/dev/null 2>&1; then
+        printf 'FAIL runner isolation must reject a mixed slot tuple\n'
+        fail=$((fail + 1))
+    else
+        printf 'ok   runner isolation rejects a mixed slot tuple\n'
+        pass=$((pass + 1))
+    fi
+else
+    printf 'FAIL runner isolation script must be executable\n'
+    fail=$((fail + 1))
+fi
 
 if [[ -x "$watchdog_script" ]]; then
     watchdog_text="$(<"$watchdog")"
@@ -209,6 +256,8 @@ require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 
 require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" 'self-hosted setup is limited to selected merge-queue validation'
 require_text "$suite_build" 'Verify merge-queue self-hosted trust boundary' 'self-hosted archive verifies queue-only trust at execution'
 require_text "$suite_build" 'refs/heads/gh-readonly-queue/*' 'self-hosted archive rejects non-queue refs'
+suite_trust_step="$(named_step_block "$suite_build" 'Verify merge-queue self-hosted trust boundary')"
+require_text "$suite_trust_step" './scripts/check-cassy-actions-runner-isolation.sh' 'self-hosted archive fail-closed trust step pins an approved slot tuple'
 for job in fast-validation-preflight fast-validation-docs; do
     block="$(job_block "$job")"
     require_text "$block" 'needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]' "$job waits for explicit runner routing and the main-push tree gate"
@@ -221,13 +270,15 @@ for job in fast-validation-preflight fast-validation-docs; do
     require_text "$block" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" "$job limits isolated runner setup to selected merge-queue validation"
     require_text "$block" 'Verify merge-queue self-hosted trust boundary' "$job verifies queue-only trust at execution"
     require_text "$block" 'refs/heads/gh-readonly-queue/*' "$job rejects non-queue refs on the isolated runner"
+    trust_step="$(named_step_block "$block" 'Verify merge-queue self-hosted trust boundary')"
+    require_text "$trust_step" './scripts/check-cassy-actions-runner-isolation.sh' "$job fail-closed trust step pins an approved slot tuple"
     require_text "$block" 'Verify private self-hosted sccache' "$job confirms the persistent compiler cache remains isolated"
 done
 probe_step="$(named_step_block "$suite_build" 'Verify private self-hosted sccache')"
 disable_step="$(named_step_block "$suite_build" 'Disable sccache for the self-hosted suite archive')"
 archive_step="$(named_step_block "$suite_build" 'Build full suite archive')"
 require_text "$probe_step" 'continue-on-error: true' 'self-hosted cache probe itself cannot fail the merge queue'
-require_text "$probe_step" 'test "${SCCACHE_SERVER_PORT:?}" = 4227' 'self-hosted cache probe pins the private cache port'
+require_absent "$probe_step" './scripts/check-cassy-actions-runner-isolation.sh' 'fail-open cache probe does not own the slot trust decision'
 require_text "$probe_step" 'cas-065a' 'self-hosted cache probe cites the tracked server defect'
 require_text "$disable_step" "steps.classify-diff.outputs.rust-unaffected != 'true'" 'wrapper disable step requires Rust work'
 require_text "$disable_step" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" 'wrapper disable step is self-hosted only'

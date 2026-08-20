@@ -53,6 +53,9 @@ expect_reject() {
 
 REF=refs/tags/v3.4.0 expect_accept 'an annotated release tag push is trusted'
 REF=refs/heads/main expect_accept 'the release-prep commit on main is trusted'
+TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target-2 \
+    SCCACHE=/var/lib/cassy-actions/cache/sccache-2 PORT=4228 \
+    expect_accept 'the second isolated runner slot is trusted'
 
 REF=refs/heads/factory/some-worker \
     expect_reject 'a factory branch cannot use the release lane' 'outside the trusted release set'
@@ -67,11 +70,14 @@ REPO=attacker/cassy-fork \
 ENABLED= \
     expect_reject 'routing that was never enabled is refused' 'not explicitly enabled'
 TARGET_DIR=/home/pippenz/Petrastella/cas-src/target \
-    expect_reject 'a factory worktree target directory is refused' 'not isolated from factory worktrees'
+    expect_reject 'a factory worktree target directory is refused' 'not an approved isolated slot tuple'
 SCCACHE=/home/pippenz/.cache/sccache \
-    expect_reject 'the operator cache directory is refused' 'not isolated from the operator cache'
+    expect_reject 'the operator cache directory is refused' 'not an approved isolated slot tuple'
 PORT=4226 \
-    expect_reject 'a foreign sccache port is refused' 'not the runner'"'"'s private port'
+    expect_reject 'a foreign sccache port is refused' 'not an approved isolated slot tuple'
+TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target \
+    SCCACHE=/var/lib/cassy-actions/cache/sccache-2 PORT=4228 \
+    expect_reject 'a mixed slot tuple is refused' 'not an approved isolated slot tuple'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

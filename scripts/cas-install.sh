@@ -52,21 +52,37 @@ detect_platform() {
 
   case "$os" in
     Linux)  os="unknown-linux-gnu" ;;
+    Darwin) os="apple-darwin" ;;
     *)
       error "Unsupported OS: $os"
-      error "Cassy currently only supports Linux. macOS/Windows support is planned."
+      error "Cassy supports Linux x86_64 and macOS on Apple Silicon."
       exit 1
       ;;
   esac
 
   case "$arch" in
     x86_64|amd64) arch="x86_64" ;;
+    arm64|aarch64)
+      if [ "$os" = "apple-darwin" ]; then
+        arch="aarch64"
+      else
+        error "Unsupported architecture: $arch"
+        error "Cassy currently publishes Linux x86_64 and macOS Apple Silicon binaries."
+        exit 1
+      fi
+      ;;
     *)
       error "Unsupported architecture: $arch"
-      error "Cassy currently only supports x86_64. ARM64 support is planned."
+      error "Cassy currently publishes Linux x86_64 and macOS Apple Silicon binaries."
       exit 1
       ;;
   esac
+
+  if [ "$os" = "apple-darwin" ] && [ "$arch" != "aarch64" ]; then
+    error "Unsupported architecture: $arch"
+    error "Cassy publishes a macOS Apple Silicon binary only; Intel Macs must build from source."
+    exit 1
+  fi
 
   PLATFORM="${arch}-${os}"
 }
@@ -184,7 +200,9 @@ download_and_install() {
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' EXIT
+  # Capture the path while the local exists; an EXIT trap that expands
+  # `$tmp_dir` later fails under `set -u` after this function has returned.
+  trap "rm -rf -- $(printf '%q' "$tmp_dir")" EXIT
 
   local archive_path="${tmp_dir}/${asset_name}"
 
@@ -215,6 +233,13 @@ download_and_install() {
     sudo install -m 755 "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
   else
     install -m 755 "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  fi
+
+  # GitHub-downloaded binaries can retain the quarantine attribute on macOS.
+  # Clearing it is harmless when the attribute is absent and lets the first
+  # `cas` invocation proceed without a Gatekeeper rejection.
+  if [ "$(uname -s)" = "Darwin" ] && command -v xattr &>/dev/null; then
+    xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
   fi
 }
 

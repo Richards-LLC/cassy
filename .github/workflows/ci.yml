@@ -75,8 +75,6 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/')))
@@ -224,17 +222,16 @@ jobs:
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
 
-  # Required checks always start: path selection happens in steps, never with
-  # job-level `paths` filters, so their exact ruleset contexts keep reporting.
-  # A Rust-unaffected diff short-circuits Rust work only; hub-web-only diffs
-  # still run the Commander asset validation below.
+  # Full Fast Validation runs exactly once on GitHub's canonical merge-queue
+  # tree. The required rollup below emits a cheap hosted PR admission context,
+  # then this job family validates the tree that will actually land. This avoids
+  # compiling the PR head and its merge tree back-to-back without widening the
+  # self-hosted route beyond merge_group.
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/')))
@@ -310,8 +307,6 @@ jobs:
     if: >-
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
@@ -464,8 +459,6 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/')))
@@ -540,8 +533,6 @@ jobs:
     if: >-
       always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
@@ -572,8 +563,6 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/')))
@@ -619,10 +608,10 @@ jobs:
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
 
-  # The repository ruleset requires this exact check name. It reports success
-  # only after preflight, all exhaustive nextest shards, and doctests pass.
-  # Queue (rather than cancel) matching head-SHA checks per cas-9eaf; because
-  # this fan-in does no compilation, a duplicate cannot inflate the PR path.
+  # The repository ruleset requires this exact check name. On merge_group it
+  # reports success only after preflight, all exhaustive nextest shards, and
+  # doctests pass. On a main PR it is a cheap hosted admission receipt; the
+  # canonical merged tree receives the exhaustive validation before it lands.
   fast-validation:
     name: Fast Validation
     if: >-
@@ -653,7 +642,13 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
+      - name: Admit protected PR to merge-queue validation
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Fast Validation is deferred to the canonical merge-queue tree."
+
       - name: Require every Fast Validation lane to pass
+        if: github.event_name != 'pull_request'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
           SUITE: ${{ needs.fast-validation-suite.result }}
@@ -722,7 +717,9 @@ jobs:
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
-  # Linux test suite on a more expensive runner.
+  # Linux test suite on a more expensive runner. The full check runs on the
+  # canonical merge-queue tree; main PRs emit only a hosted admission receipt
+  # so their code is not compiled twice before it can enter that queue.
   macos-check:
     name: macOS Check
     if: >-
@@ -750,38 +747,53 @@ jobs:
     # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
     # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
     # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.
-    runs-on: macos-26
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-26' }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
+      - name: Admit protected PR to merge-queue Darwin validation
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "macOS Check is deferred to the canonical merge-queue tree."
+
       - uses: actions/checkout@v4
+        if: github.event_name != 'pull_request'
         with:
           submodules: recursive
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - id: classify-diff
+        if: github.event_name != 'pull_request'
         uses: ./.github/actions/classify-required-diff
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Report Rust short-circuit
-        if: steps.classify-diff.outputs.rust-unaffected == 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected == 'true'
         run: echo "macOS Rust checks skipped for ${{ steps.classify-diff.outputs.class }} diff."
 
       - name: Install Rust
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       # ghostty_vt_sys builds its native library with Zig even for cargo check.
       - name: Install Zig
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         run: ./scripts/bootstrap-zig.sh
 
       # Zig discovers Darwin SDKs through xcrun, which follows DEVELOPER_DIR.
       # Keep this visible so runner-image/toolchain drift is diagnosable.
       - name: Report Apple and Zig toolchains
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         run: |
           echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           xcode-select --print-path
@@ -792,13 +804,17 @@ jobs:
           ./.context/zig/zig env
 
       - name: Setup sccache
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         id: setup-sccache
         continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         shell: bash
         run: |
           if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
@@ -809,25 +825,23 @@ jobs:
           fi
 
       - name: Cache cargo
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
       - name: Check workspace
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          github.event_name != 'pull_request'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check --workspace --all-targets
 
-      - name: Check (without MCP proxy)
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo check -p cas --no-default-features
-
       - name: Report sccache stats
-        if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: always() && github.event_name != 'pull_request' && steps.classify-diff.outputs.rust-unaffected != 'true'
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.

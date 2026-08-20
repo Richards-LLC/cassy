@@ -463,6 +463,24 @@ for job in "${required_pr_jobs[@]}"; do
     require_text "$block" 'cancel-in-progress: true' "$job releases runners held by its own superseded runs"
 done
 
+# Merge-queue latency contract (cas-6600): protected PRs emit both required
+# contexts quickly on hosted runners, then the canonical merge_group tree gets
+# the expensive Fast Validation and Darwin work. This retains coverage on the
+# exact tree that lands while avoiding a duplicate PR-head build.
+fast_admission="$(job_block fast-validation)"
+macos="$(job_block macos-check)"
+for job in fast-validation-runner-route fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs; do
+    require_absent "$(job_block "$job")" "github.event_name == 'pull_request'" \
+        "$job defers exhaustive PR-head work to the merge queue"
+done
+require_text "$fast_admission" 'Admit protected PR to merge-queue validation' 'Fast Validation emits a PR admission receipt'
+require_text "$fast_admission" "if: github.event_name == 'pull_request'" 'Fast Validation admission is PR-only'
+require_text "$fast_admission" "if: github.event_name != 'pull_request'" 'Fast Validation only gates dependencies on the canonical tree'
+require_text "$macos" "github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-26'" 'macOS PR admission stays hosted while queue validation uses macOS'
+require_text "$macos" 'Admit protected PR to merge-queue Darwin validation' 'macOS Check emits a PR admission receipt'
+require_text "$macos" "github.event_name != 'pull_request'" 'macOS compilation is deferred to the canonical tree'
+require_absent "$macos" 'cargo check -p cas --no-default-features' 'macOS does not duplicate the Linux no-MCP-proxy build'
+
 preflight="$(job_block fast-validation-preflight)"
 suite="$(job_block fast-validation-suite)"
 suite_build="$(job_block fast-validation-suite-build)"
@@ -507,6 +525,7 @@ require_text "$suite" 'needs: fast-validation-suite-shards' 'required full-suite
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
 require_text "$(<"$makefile")" '../scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast' 'local make test verifies CI workspace nextest scope'
 require_text "$docs" 'scripts/run-verified-tests.sh test -p cas --doc' 'doctest coverage remains in Fast Validation with an execution receipt'
+require_text "$preflight" 'cargo build -p cas --no-default-features' 'Linux preflight retains no-MCP-proxy compilation coverage'
 require_text "$(<"$real_store_guard")" 'run-verified-tests.sh' 'real-store guard requires an executed-test receipt'
 require_text "$(<"$migration_guard")" 'run-verified-tests.sh nextest run -p cas --test component_output_test' 'release migration snapshots require an executed-test receipt'
 if [[ -x "$verified" ]]; then

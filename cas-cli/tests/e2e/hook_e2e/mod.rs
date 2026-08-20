@@ -15,10 +15,7 @@ use std::path::PathBuf;
 
 /// Get the CAS project root directory
 fn cas_project_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf()
+    cas::test_paths::workspace_root()
 }
 
 // =============================================================================

@@ -1,7 +1,5 @@
 //! Regression checks for integration-test subprocess host isolation.
 
-use std::path::Path;
-
 const INIT_FIXTURES: &[&str] = &[
     "blame_attribution_test.rs",
     "cli_test.rs",
@@ -17,7 +15,7 @@ const INIT_FIXTURES: &[&str] = &[
 
 #[test]
 fn every_init_fixture_overrides_home_for_spawned_cas_children() {
-    let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let tests_dir = cas::test_paths::crate_root().join("tests");
     let mut missing = Vec::new();
 
     for relative in INIT_FIXTURES {
@@ -37,7 +35,7 @@ fn every_init_fixture_overrides_home_for_spawned_cas_children() {
 #[test]
 fn low_level_init_helper_has_no_host_registry_side_effect() {
     let source =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store/detect.rs"))
+        std::fs::read_to_string(cas::test_paths::crate_root().join("src/store/detect.rs"))
             .expect("read store/detect.rs");
 
     assert!(

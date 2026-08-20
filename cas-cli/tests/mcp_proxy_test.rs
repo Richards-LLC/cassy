@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 mod support;
 use support::CasSandbox;
 
+fn cas_binary() -> String {
+    support::cas_binary().to_string_lossy().into_owned()
+}
+
 fn test_proxy_caller() -> ProxyCaller {
     ProxyCaller {
         agent_id: "proxy-integration-test".to_string(),
@@ -555,7 +559,7 @@ fn nonempty_to_empty_restart_clears_public_proxy_state_without_a_live_engine() {
         env: HashMap::from([
             (
                 "CAS_TEST_BIN".to_string(),
-                env!("CARGO_BIN_EXE_cas").to_string(),
+                cas_binary(),
             ),
             (
                 "CAS_ROOT".to_string(),
@@ -848,7 +852,7 @@ async fn live_catalog_search_cache_and_restart_never_expose_unsafe_server_name()
         env: HashMap::from([
             (
                 "CAS_TEST_BIN".to_string(),
-                env!("CARGO_BIN_EXE_cas").to_string(),
+                cas_binary(),
             ),
             (
                 "CAS_ROOT".to_string(),
@@ -946,7 +950,7 @@ async fn live_catalog_search_cache_and_restart_never_expose_unsafe_server_name()
         "secret@example.invalid",
         "/bin/sh",
         "CAS_TEST_BIN",
-        env!("CARGO_BIN_EXE_cas"),
+        &cas_binary(),
         upstream_sandbox.path().to_string_lossy().as_ref(),
     ] {
         assert!(
@@ -984,7 +988,7 @@ exec env \
         env: HashMap::from([
             (
                 "CAS_TEST_BIN".to_string(),
-                env!("CARGO_BIN_EXE_cas").to_string(),
+                cas_binary(),
             ),
             (
                 "CAS_TEST_PID_FILE".to_string(),

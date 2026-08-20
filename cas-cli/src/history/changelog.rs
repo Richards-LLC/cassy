@@ -430,10 +430,7 @@ Oldest section.
     /// The real file on this repository, parsed end to end.
     #[test]
     fn parses_this_repositorys_own_changelog() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        let root = crate::test_paths::workspace_root();
         let Ok(text) = std::fs::read_to_string(root.join("CHANGELOG.md")) else {
             return; // not a source checkout; nothing to assert against
         };

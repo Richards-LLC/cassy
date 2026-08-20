@@ -409,7 +409,7 @@ async fn full_flag_clears_team_pull_watermark_via_queue() {
 /// location so the relative-path resolution is robust to `target/` layout.
 fn read_cloud_rs() -> String {
     let candidates = [
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/cloud.rs"),
+        cas::test_paths::crate_root().join("src/cli/cloud.rs"),
     ];
     for p in &candidates {
         if let Ok(content) = std::fs::read_to_string(p) {

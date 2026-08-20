@@ -33,8 +33,7 @@ use test_env_guard::TestEnvGuard;
 
 /// Resolve the fixture script relative to the cas-cli crate root.
 fn fixture_path() -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir)
+    cas::test_paths::crate_root()
         .join("tests")
         .join("fixtures")
         .join("mock_mcp_vercel_server.py")

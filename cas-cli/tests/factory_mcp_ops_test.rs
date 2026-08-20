@@ -437,7 +437,7 @@ fn integration_test_process_path_mutation_is_isolated() {
 
     let mut hits = Vec::new();
     visit(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        cas::test_paths::crate_root()
             .join("tests")
             .as_path(),
         &mut hits,
@@ -4153,10 +4153,7 @@ fn clear_context_command_really_resets_a_live_claude() {
     }
     // A directory Claude Code already trusts: the repo root this test is built
     // from. A fresh temp dir would stall on the trust dialog instead.
-    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .to_path_buf();
+    let cwd = cas::test_paths::workspace_root();
 
     let stripped: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key.starts_with("CLAUDE_CODE"))

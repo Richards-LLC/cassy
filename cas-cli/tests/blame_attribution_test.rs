@@ -14,7 +14,7 @@ fn git_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 
 /// Helper to run cas commands
 fn cas_cmd(dir: &std::path::Path) -> assert_cmd::Command {
-    let mut cmd = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = assert_cmd::Command::new(cas::test_paths::cas_binary());
     let home = dir.join(".test-home");
     let xdg = dir.join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();

@@ -12,7 +12,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn cas_cmd() -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     cmd.env_remove("CAS_ROOT");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
@@ -219,8 +219,8 @@ model = "claude-sonnet-4-6"
 /// persisted codex default from config.
 #[test]
 fn test_plain_factory_picks_up_persisted_default() {
-    use cas::config::{Config, LlmConfig, LlmRoleConfig};
     use cas::cli::FactoryArgs;
+    use cas::config::{Config, LlmConfig, LlmRoleConfig};
     use tempfile::TempDir;
 
     let cas_dir = TempDir::new().unwrap();

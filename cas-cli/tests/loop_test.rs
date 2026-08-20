@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 /// Create cas command for temp directory
 fn cas_cmd(dir: &TempDir) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = dir.path().join(".test-home");
     let xdg = dir.path().join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();

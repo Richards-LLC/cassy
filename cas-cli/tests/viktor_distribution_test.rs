@@ -5,7 +5,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn cas_cmd(root: &std::path::Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = root.join(".test-home");
     let xdg = root.join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();

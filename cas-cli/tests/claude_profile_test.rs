@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn cas_cmd(home: &std::path::Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let path = std::env::join_paths(std::iter::once(home.join("bin")).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))

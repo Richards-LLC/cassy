@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 /// Create cas command for temp directory
 pub(crate) fn cas_cmd(dir: &TempDir) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = dir.path().join(".test-home");
     let xdg = dir.path().join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();
@@ -221,8 +221,7 @@ pub(crate) fn add_entry(dir: &TempDir, content: &str) {
     std::thread::sleep(std::time::Duration::from_millis(20));
 }
 
-/// Test that Stop blocks when duplicate_detection is enabled and threshold is exceeded
-
-mod post_tool_and_flow;
 mod exit_and_summary;
 mod learning_rule_duplicate;
+/// Test that Stop blocks when duplicate_detection is enabled and threshold is exceeded
+mod post_tool_and_flow;

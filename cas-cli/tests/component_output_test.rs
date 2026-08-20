@@ -13,7 +13,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 fn cas_cmd(dir: &Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = dir.join(".test-home");
     let xdg = dir.join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();
@@ -221,9 +221,7 @@ fn status_empty_snapshot() {
 // ============================================================================
 
 fn cas_bin_path() -> String {
-    assert_cmd::cargo::cargo_bin!("cas")
-        .to_string_lossy()
-        .to_string()
+    cas::test_paths::cas_binary().to_string_lossy().to_string()
 }
 
 fn pty_cas_in_dir(dir: &TempDir, args: &[&str]) -> PtyRunner {

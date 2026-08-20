@@ -143,6 +143,12 @@ Fan-out is the most common pattern for EPICs with 3+ workers: one setup/spike ta
 
 ## Task Breakdown Guidelines
 
+## Vertical slices and wide refactors
+
+Adapted from mattpocock/skills `to-tickets`, MIT © 2026 Matt Pocock. Prefer tracer-bullet vertical slices: a task covers a narrow complete path, is independently demoable or verifiable, fits one fresh worker context, and declares only genuine Cassy dependency edges.
+
+For a codebase-wide mechanical change that cannot stay green as a vertical slice, sequence expand–contract: add the new form beside the old, migrate blast-radius-sized batches, then remove the old form after every batch. Use `mcp__cas__task` dependencies, not external tracker or scratch-file workflows.
+
 When breaking an epic into subtasks, apply these patterns:
 
 **Demo statements** — Every subtask must have a `demo_statement` describing what can be demonstrated when complete. Example: `demo_statement="User types a query and results filter live"`. If a task has no demo-able output, it may be a horizontal slice — restructure it into a vertical slice that delivers observable value.

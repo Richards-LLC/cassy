@@ -6500,10 +6500,10 @@ fn anchored_delivery_content_gate(
                  `{parent_branch}`, but its tree effect is absent from the current \
                  target tree. Reachability alone cannot prove delivery.\n\n\
                  Dropped path(s): {}\n\n\
-                 A later merge conflict resolution discarded these changes. Restore the \
-                 missing delivery content on the assigned factory branch, commit \
-                 it, and retry close; do not re-merge the already-reachable anchor \
-                 for task {task_id}.",
+                 Cassy measured the missing tree effect; it cannot identify the \
+                 change that removed it. Restore the missing delivery content on \
+                 the assigned factory branch, commit it, and retry close; do not \
+                 re-merge the already-reachable anchor for task {task_id}.",
             paths.join(", ")
         ))),
         DeliveryContentPresence::Unknown { reason } => {
@@ -6516,6 +6516,33 @@ fn anchored_delivery_content_gate(
                  commit and target tree for task {task_id}, then retry."
             )))
         }
+    }
+}
+
+/// Choose the content-proof anchor for a parked delivery. The immutable
+/// parked anchor remains the task's attribution boundary, but a descendant
+/// factory tip that is already integrated is the final delivery a worker
+/// actually submitted. Proving the old anchor in that shape mistakes the
+/// task's own later correction for content loss.
+///
+/// A recycled branch cannot clear an older task: advancing to the live tip is
+/// allowed only when the recorded anchor is its ancestor and that exact tip is
+/// already reachable from the target. Unmerged serial work therefore keeps
+/// the historical task-specific anchor and continues through the existing
+/// fail-closed checks.
+fn delivery_content_anchor_at_close<'a>(
+    repo_path: &std::path::Path,
+    recorded_anchor: &'a str,
+    factory_branch: &'a str,
+    parent_branch: &str,
+) -> &'a str {
+    if git_ref_exists(repo_path, factory_branch)
+        && git_commit_is_ancestor(repo_path, recorded_anchor, factory_branch)
+        && commit_is_merged_into_parent(repo_path, factory_branch, parent_branch)
+    {
+        factory_branch
+    } else {
+        recorded_anchor
     }
 }
 
@@ -6658,11 +6685,22 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     let commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
     let stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
     if stranded == 0 {
-        if let Some(anchor) = trusted_anchor
-            && let Some(rejection) =
+        if let Some(recorded_anchor) = trusted_anchor {
+            // The local parent ref may be stale immediately after the
+            // supervisor merges a PR. Refresh before selecting a descendant
+            // branch tip that only origin currently proves integrated.
+            let _ = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            let anchor = delivery_content_anchor_at_close(
+                repo_path,
+                recorded_anchor,
+                factory_branch.as_str(),
+                parent_branch,
+            );
+            if let Some(rejection) =
                 anchored_delivery_content_gate(&task.id, repo_path, anchor, parent_branch)
-        {
-            return rejection;
+            {
+                return rejection;
+            }
         }
         return MergeStateGateOutcome::Proceed;
     }
@@ -6705,11 +6743,18 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             KnownUnmergedCount::KnownZero
         )
     {
-        if let Some(anchor) = trusted_anchor
-            && let Some(rejection) =
+        if let Some(recorded_anchor) = trusted_anchor {
+            let anchor = delivery_content_anchor_at_close(
+                repo_path,
+                recorded_anchor,
+                factory_branch.as_str(),
+                parent_branch,
+            );
+            if let Some(rejection) =
                 anchored_delivery_content_gate(&task.id, repo_path, anchor, parent_branch)
-        {
-            return rejection;
+            {
+                return rejection;
+            }
         }
         return MergeStateGateOutcome::Proceed;
     }
@@ -6725,11 +6770,18 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     let remote_aware_stranded =
         count_unmerged_against_targets(repo_path, commit_ish, parent_branch);
     if remote_aware_stranded == Some(0) {
-        if let Some(anchor) = trusted_anchor
-            && let Some(rejection) =
+        if let Some(recorded_anchor) = trusted_anchor {
+            let anchor = delivery_content_anchor_at_close(
+                repo_path,
+                recorded_anchor,
+                factory_branch.as_str(),
+                parent_branch,
+            );
+            if let Some(rejection) =
                 anchored_delivery_content_gate(&task.id, repo_path, anchor, parent_branch)
-        {
-            return rejection;
+            {
+                return rejection;
+            }
         }
         return MergeStateGateOutcome::Proceed;
     }
@@ -18545,6 +18597,61 @@ mod merge_state_gate_tests {
         assert!(note.contains(&receipt), "{note}");
     }
 
+    /// cas-0c19: a task may evolve its own delivery in a second commit after
+    /// the first close attempt records the first commit as the parked anchor.
+    /// Once the whole branch tip is merged, the close gate must prove that
+    /// final tip, rather than misclassifying the older implementation's
+    /// replaced hunks as delivery content dropped by integration.
+    #[test]
+    fn same_task_descendant_tip_merged_with_evolved_hunks_proceeds_cas_0c19() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        std::fs::write(p.join("viktor.rs"), "pub fn delivery() { legacy(); }\n").unwrap();
+        git(p, &["add", "viktor.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-0c19): add delivery"]);
+        let first_attempt_anchor = rev_parse_local(p, "HEAD");
+
+        // The same task corrects its own implementation before the branch is
+        // merged. This replaces the exact hunk from the parked first attempt.
+        std::fs::write(p.join("viktor.rs"), "pub fn delivery() { evolved(); }\n").unwrap();
+        git(p, &["add", "viktor.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-0c19): evolve delivery"]);
+        let merged_branch_tip = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+
+        assert!(git_commit_is_ancestor(p, &first_attempt_anchor, "main"));
+        assert!(git_commit_is_ancestor(p, &merged_branch_tip, "main"));
+        assert_eq!(
+            delivery_content_presence_on_target(p, &first_attempt_anchor, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["viktor.rs".to_string()]
+            },
+            "precondition: the old anchor's exact hunk was intentionally replaced"
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(p, &merged_branch_tip, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["viktor.rs".to_string()]
+            },
+            "precondition: the merged branch tip's final effect is present"
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(first_attempt_anchor);
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "same-task descendant tip merged intact must close rather than claim content loss"
+        );
+    }
+
     /// cas-b278 / GH #324: ancestry survives a later conflicting merge even
     /// when that merge's resolution removes the delivery. Both the task close
     /// gate and epic_status must inspect the current target tree, refuse the
@@ -18641,6 +18748,11 @@ mod merge_state_gate_tests {
             MergeStateGateOutcome::Reject(message) => {
                 assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
                 assert!(message.contains("credits.rs"), "{message}");
+                assert!(message.contains("measured the missing tree effect"), "{message}");
+                assert!(
+                    !message.contains("merge conflict resolution discarded"),
+                    "dropped-content rejection must report the measurement, not infer a cause: {message}"
+                );
             }
             other => panic!("reachable-but-dropped delivery must reject close, got {other:?}"),
         }

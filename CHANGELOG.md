@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- **Installing Cassy now leaves a working `cas` in a new terminal.** The installer detects whether its install directory is on PATH in your *login* shell, offers to add a marker-guarded guard to the right startup file (`.zshenv` on zsh, so the non-interactive shells MCP clients spawn also see it; `.bashrc` or `.profile` on bash), never edits the same file twice, and prints the exact line to add if you decline or there is no terminal to ask on. It then checks the result by running `cas --version` in a fresh login shell and only reports success when that actually works.
+- **A brand-new machine gets one friendly line.** Typing `cas` before anything is configured now names the next command instead of printing a factory preflight's list of everything missing.
+
 ## [3.4.1] - 2026-08-20
 
 ### Changed

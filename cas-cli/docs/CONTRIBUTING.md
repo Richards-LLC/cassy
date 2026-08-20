@@ -34,7 +34,12 @@ subagent invoking `cas` via absolute path) can promote a stale copy and
 silently reintroduce fixed bugs.
 
 - `scripts/cas-install.sh` installs to `~/.local/bin/cas` and warns about any
-  other `cas` binaries it finds on PATH.
+  other `cas` binaries it finds on PATH. It also offers to wire that directory
+  onto PATH in the **login** shell's startup file (zsh `.zshenv`, bash
+  `.bashrc`/`.profile`), guarded by `# >>> cassy path >>>` markers so a re-run
+  is a no-op, and verifies the result with `cas --version` in a fresh login
+  shell before claiming the install succeeded. `CAS_WIRE_PATH=1|0` overrides the
+  prompt; the rc-edit seam is covered by `scripts/test-cas-install.sh`.
 - On startup, `cas` itself scans PATH and emits a single-line stderr warning
   when duplicates with diverging mtimes are present. Silence it with
   `CAS_SUPPRESS_DUPLICATE_WARNING=1`, or force it on in non-TTY contexts with

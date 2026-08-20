@@ -200,6 +200,17 @@ curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas
 
 Installs the latest release binary to `~/.local/bin/cas`. Override with `CAS_INSTALL_DIR`, `CAS_VERSION`, or `CAS_REPO`.
 
+Pipe it to `bash`, not `sh` — a piped script has no shebang, and the installer
+is written for bash.
+
+If the install directory is not already on your PATH, the installer offers to
+add a marker-guarded guard to your **login** shell's startup file (`.zshenv` for
+zsh, `.bashrc` or `.profile` for bash), and re-running it never adds the block
+twice. It then verifies by running `cas --version` in a fresh login shell and
+reports success only when that works. Decline with `CAS_WIRE_PATH=0` (it prints
+the exact line instead), accept without a prompt with `CAS_WIRE_PATH=1`; an
+unattended run with no terminal available never edits a startup file.
+
 ### macOS (Apple Silicon)
 
 ```bash

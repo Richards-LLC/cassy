@@ -136,6 +136,7 @@ make_build_fixture() {
   printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
     'printf "%s\\n" "$PWD" >>"$CAS_UPDATE_CARGO_LOG"' \
     'printf "%s\\n" "${ZIG:-}" >>"$CAS_UPDATE_ZIG_LOG"' \
+    'if [ -n "${CAS_UPDATE_CARGO_BLOCK_FILE:-}" ]; then touch "${CAS_UPDATE_CARGO_STARTED_FILE:?}"; while [ ! -f "$CAS_UPDATE_CARGO_BLOCK_FILE" ]; do sleep 0.05; done; fi' \
     'mkdir -p "$CARGO_TARGET_DIR/release-fast"' \
     'marker=checked-out' \
     '[ -f "$PWD/upstream-marker" ] && marker=fetched' \
@@ -154,6 +155,7 @@ run_build_case() {
     export CAS_UPDATE_WORKTREE_ROOT="$tmp/build-worktrees"
     export CAS_UPDATE_CARGO_LOG="$tmp/cargo.log"
     export CAS_UPDATE_ZIG_LOG="$tmp/zig.log"
+    export CAS_UPDATE_SOURCE_ONLY=1
     export PATH="$tmp/tools:$PATH"
     unset ZIG
     # shellcheck source=../cas-update
@@ -225,6 +227,50 @@ test_build_uses_detached_fetched_worktree() {
     && [ "$(git -C "$stable_worktree" rev-parse --is-inside-work-tree)" = true ]; then
     pass 'a corrupted stable worktree is recreated and the fetched build continues'
   else fail 'a corrupted stable worktree is recreated and the fetched build continues'; fi
+  rm -rf "$tmp"
+}
+
+test_stable_build_worktree_lock() {
+  local tmp out first_out second_out stable_worktree first_pid stable_head
+  tmp="$(make_build_fixture)"
+  out="$tmp/out"; first_out="$tmp/first-out"; second_out="$tmp/second-out"
+  stable_worktree="$tmp/build-worktrees/cas-update-build"
+
+  (
+    export CAS_UPDATE_CARGO_BLOCK_FILE="$tmp/release-first-build"
+    export CAS_UPDATE_CARGO_STARTED_FILE="$tmp/first-build-started"
+    run_build_case "$tmp" "$first_out" 1 1
+  ) &
+  first_pid=$!
+  for _ in $(seq 1 100); do [ -f "$tmp/first-build-started" ] && break; sleep 0.05; done
+
+  if [ ! -f "$tmp/first-build-started" ]; then
+    touch "$tmp/release-first-build"; wait "$first_pid" || true
+    fail 'concurrent update fixture reaches the in-flight build boundary'
+    rm -rf "$tmp"
+    return
+  fi
+  stable_head="$(git -C "$stable_worktree" rev-parse HEAD)"
+  if ! run_build_case "$tmp" "$second_out" 1 1 \
+    && [ "$(git -C "$stable_worktree" rev-parse HEAD)" = "$stable_head" ] \
+    && assert_contains "$second_out" 'another cas-update holds' \
+    && assert_contains "$second_out" 'refusing to reset the shared build worktree'; then
+    pass 'a concurrent cas-update refuses before it can reset the in-flight stable worktree'
+  else fail 'a concurrent cas-update refuses before it can reset the in-flight stable worktree'; fi
+
+  touch "$tmp/release-first-build"
+  if wait "$first_pid"; then
+    pass 'the winning cas-update finishes after its build gate releases'
+  else fail 'the winning cas-update finishes after its build gate releases'; fi
+
+  mkdir -p "$tmp/build-worktrees/.cas-update.lock"
+  printf '%s\n' 99999999 >"$tmp/build-worktrees/.cas-update.lock/pid"
+  printf '%s\n' 2000-01-01T00:00:00Z >"$tmp/build-worktrees/.cas-update.lock/started_at"
+  if run_build_case "$tmp" "$out" 1 1 \
+    && assert_contains "$out" 'Recovering stale cas-update lock' \
+    && [ ! -d "$tmp/build-worktrees/.cas-update.lock" ]; then
+    pass 'a dead lock holder is recovered without bricking later updates'
+  else fail 'a dead lock holder is recovered without bricking later updates'; fi
   rm -rf "$tmp"
 }
 
@@ -386,6 +432,7 @@ test_installer
 test_updater_ancestry_is_protected
 test_main_exit_and_help
 test_build_uses_detached_fetched_worktree
+test_stable_build_worktree_lock
 
 if [ "$failures" -ne 0 ]; then
   printf '%s of %s tests failed\n' "$failures" "$tests" >&2

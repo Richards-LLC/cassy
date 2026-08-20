@@ -53,6 +53,7 @@ SERVER_REGISTRY_ROOTS="${CAS_UPDATE_SERVER_REGISTRY_ROOTS:-}"
 WAIT_STEPS="${CAS_UPDATE_WAIT_STEPS:-20}"
 WAIT_SLEEP="${CAS_UPDATE_WAIT_SLEEP:-0.25}"
 BUILD_WORKTREE_DIR=""
+BUILD_WORKTREE_LOCK_DIR=""
 
 BRANCH="main"
 DO_BUILD=1
@@ -525,8 +526,9 @@ build_and_install() {
   if [ "$DO_PULL" = "1" ] && [ "$DRY_RUN" != "1" ]; then
     worktree_root="${CAS_UPDATE_WORKTREE_ROOT:-$(dirname "$source_root_abs")/.cas-update-worktrees}"
     mkdir -p "$worktree_root"
+    acquire_build_worktree_lock "$worktree_root" || return 1
     if ! prepare_build_worktree "$worktree_root" "$fetched_commit"; then
-      BUILD_WORKTREE_DIR=""
+      cleanup_build_worktree
       error "could not prepare detached build worktree"
       return 1
     fi
@@ -664,7 +666,48 @@ cleanup() {
 cleanup_build_worktree() {
   # The fetched-build worktree is deliberately persistent: Cargo fingerprints
   # workspace manifests by absolute path, so removing it defeats target reuse.
+  release_build_worktree_lock
   BUILD_WORKTREE_DIR=""
+}
+
+release_build_worktree_lock() {
+  [ -n "$BUILD_WORKTREE_LOCK_DIR" ] || return 0
+  # Never remove a lock that a newer updater acquired after ours became stale.
+  if [ "$(cat "$BUILD_WORKTREE_LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$BUILD_WORKTREE_LOCK_DIR"
+  fi
+  BUILD_WORKTREE_LOCK_DIR=""
+}
+
+acquire_build_worktree_lock() {
+  local worktree_root="$1" lock_dir holder_pid holder_started
+  lock_dir="$worktree_root/.cas-update.lock"
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" >"$lock_dir/pid"
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$lock_dir/started_at"
+    BUILD_WORKTREE_LOCK_DIR="$lock_dir"
+    return 0
+  fi
+
+  holder_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+  holder_started="$(cat "$lock_dir/started_at" 2>/dev/null || true)"
+  if [[ "$holder_pid" =~ ^[0-9]+$ ]] && kill -0 "$holder_pid" 2>/dev/null; then
+    error "another cas-update holds $lock_dir (PID $holder_pid, started ${holder_started:-unknown}); refusing to reset the shared build worktree"
+    return 1
+  fi
+
+  warn "Recovering stale cas-update lock at $lock_dir (former PID ${holder_pid:-unknown}, started ${holder_started:-unknown})"
+  rm -rf "$lock_dir"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    holder_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    holder_started="$(cat "$lock_dir/started_at" 2>/dev/null || true)"
+    error "another cas-update acquired $lock_dir during stale-lock recovery (PID ${holder_pid:-unknown}, started ${holder_started:-unknown}); refusing to reset the shared build worktree"
+    return 1
+  fi
+  printf '%s\n' "$$" >"$lock_dir/pid"
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$lock_dir/started_at"
+  BUILD_WORKTREE_LOCK_DIR="$lock_dir"
 }
 
 recreate_build_worktree() {

@@ -12,7 +12,8 @@ command remains `cas`.
 - Team registration now fails loudly rather than appearing to work silently.
   A clear default team is automatically adopted for a new project.
 - The Mac instructions no longer replace the shell halfway through a pasted
-  block. They set the current shell PATH and persist it in `~/.zprofile`.
+  block. They set the current shell PATH and persist Cassy's binary path in
+  `~/.zshenv` so MCP subprocesses inherit it too.
 - `cas init` now refuses to scaffold the home directory by accident.
 - Cassy 3.0.0 is the product name; its command remains `cas`.
 
@@ -23,38 +24,38 @@ print `arm64`. If it does not, stop and message Daniel — the published Mac
 release is Apple Silicon only. Then install the normal prerequisites:
 
 ```zsh
+if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "Unsupported Intel Mac: this Cassy release is Apple Silicon only. Contact the operator."
+  exit 1
+fi
+
 brew install git node
 npm install -g @anthropic-ai/claude-code
 ```
 
-Use `~/.zprofile` for PATH exports because it runs once for a login shell;
-`~/.zshrc` runs for every interactive shell. This puts Homebrew and user-local
-programs on the PATH now and in new terminals:
+Keep Homebrew's login-shell setup in `~/.zprofile`, but put Cassy's
+`~/.local/bin` path in `~/.zshenv` so terminal and non-interactive MCP shells
+receive it. This updates the current shell too:
 
 ```zsh
 grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
 eval "$(/opt/homebrew/bin/brew shellenv)"
-grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zprofile 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zprofile
+grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zshenv 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshenv
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## 2. Install Cassy
 
 ```zsh
-mkdir -p ~/.local/bin && cd "$(mktemp -d)"
-curl -fsSL -o cas.tar.gz https://github.com/Richards-LLC/cassy/releases/latest/download/cas-aarch64-apple-darwin.tar.gz
-tar -xzf cas.tar.gz
-mv cas ~/.local/bin/cas && chmod +x ~/.local/bin/cas
-xattr -d com.apple.quarantine ~/.local/bin/cas 2>/dev/null || true
+curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 cas --version
 mkdir -p ~/.claude
 cas update --user
 ```
 
-The release workflow does not publish a checksum beside this tarball. This is a
-trust-on-first-use download from the official GitHub release URL; if Daniel
-provides a release digest, run `shasum -a 256 cas.tar.gz` and compare it before
-extracting.
+The installer downloads the official published release and clears its macOS
+quarantine attribute. It is the supported path; do not replace it with a
+hand-written curl-and-tar sequence.
 
 `cas update --user` refreshes Cassy integrations only for AI tool directories
 that already exist; it does not install Claude, Codex, or Grok.

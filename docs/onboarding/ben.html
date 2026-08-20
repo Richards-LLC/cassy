@@ -24,7 +24,7 @@
     <ul>
       <li><strong>Cloud sign-in is dependable:</strong> use the token Daniel gives you; no broken browser approval step and no repeated rate-limit polling.</li>
       <li><strong>Team setup is honest:</strong> a failure is reported rather than hidden, and a clear default team is adopted automatically for a new project.</li>
-      <li><strong>The Mac instructions paste cleanly:</strong> they no longer replace your shell halfway through a block.</li>
+      <li><strong>The Mac instructions paste cleanly:</strong> they no longer replace your shell halfway through a block, and MCP subprocesses inherit Cassy's PATH.</li>
       <li><strong><code>cas init</code> protects your home folder:</strong> it stops you from creating a project in <code>~</code> by mistake.</li>
       <li><strong>CAS is now Cassy:</strong> the name changed in version 3.0.0; the command stays <code>cas</code>.</li>
     </ul>
@@ -32,27 +32,28 @@
 
   <section class="card">
     <div class="number">1</div><h2>Put the basics in place</h2>
-    <p>On an Apple Silicon Mac, first run <code>uname -m</code>. It must print <code>arm64</code>; if it does not, stop and message Daniel because the published Mac release is Apple Silicon only. Then install the normal tools. Keep executable paths in <code>~/.zprofile</code>: it runs once for each login shell, while <code>~/.zshrc</code> runs for every interactive shell.</p>
-    <pre><code>brew install git node
+    <p>On an Apple Silicon Mac, first run <code>uname -m</code>. It must print <code>arm64</code>; if it does not, stop and contact the operator because the published Mac release is Apple Silicon only. Keep Homebrew's login-shell setup in <code>~/.zprofile</code>, but put Cassy's binary path in <code>~/.zshenv</code> so MCP subprocesses inherit it too.</p>
+    <pre><code>if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "Unsupported Intel Mac: this Cassy release is Apple Silicon only. Contact the operator."
+  exit 1
+fi
+
+brew install git node
 npm install -g @anthropic-ai/claude-code
 
 grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
 eval "$(/opt/homebrew/bin/brew shellenv)"
-grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zprofile 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zprofile
+grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zshenv 2>/dev/null || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshenv
 export PATH="$HOME/.local/bin:$PATH"</code></pre>
   </section>
 
   <section class="card">
     <div class="number">2</div><h2>Install Cassy</h2>
-    <pre><code>mkdir -p ~/.local/bin && cd "$(mktemp -d)"
-curl -fsSL -o cas.tar.gz https://github.com/Richards-LLC/cassy/releases/latest/download/cas-aarch64-apple-darwin.tar.gz
-tar -xzf cas.tar.gz
-mv cas ~/.local/bin/cas && chmod +x ~/.local/bin/cas
-xattr -d com.apple.quarantine ~/.local/bin/cas 2>/dev/null || true
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 cas --version
 mkdir -p ~/.claude
 cas update --user</code></pre>
-    <p>The release workflow does not publish a checksum beside this tarball. This is a trust-on-first-use download from the official GitHub release URL; if Daniel provides a digest, run <code>shasum -a 256 cas.tar.gz</code> and compare it before extracting.</p>
+    <p>The installer downloads the official published release and clears its macOS quarantine attribute. It is the supported path; do not replace it with a hand-written curl-and-tar sequence.</p>
     <p><code>cas update --user</code> refreshes Cassy’s built-ins for AI tools that are already installed; it does not install Claude, Codex, or Grok for you.</p>
   </section>
 

@@ -8,6 +8,8 @@ managed_by: cas
 
 Imported and adapted from mattpocock/skills `wizard`, MIT © 2026 Matt Pocock.
 
-Use a stage-by-stage Bash wizard for a repeatable manual procedure. Inspect the project, enumerate every manual step, URL, destination, and secret classification, then confirm the ordered plan with the user. Copy `template.sh`; edit only after `STAGES`; keep one focused action per stage; hide secrets and confirm irreversible actions.
+Use a wizard for a repeatable manual procedure: a person drives external dashboards and confirms irreversible steps while the script gives one precise stage at a time. First inspect the project and enumerate every manual step, its source URL, destination, and whether its value is secret. Confirm the ordered stage plan with the user before authoring it.
 
-Run `bash -n` and static tracing, never an end-to-end interactive run. Keep decisions and proof in `mcp__cas__task`; do not create parallel tracker, setup, or context files.
+Copy [template.sh](template.sh) to a task-appropriate script path and edit only the section after `STAGES`. Give each stage one focused action, open the exact URL before asking for a value, hide secrets, and confirm before irreversible actions. Keep generated procedures in the task’s approved output area unless the user asks for a maintained repository runbook.
+
+Run `bash -n` and static tracing only; do not run a wizard end-to-end because it opens browsers and blocks on human input. Keep task decisions and proof in `mcp__cs__task`; this skill never creates a parallel tracker, setup system, or context file.

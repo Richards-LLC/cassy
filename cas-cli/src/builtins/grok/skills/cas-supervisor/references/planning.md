@@ -145,9 +145,9 @@ Fan-out is the most common pattern for EPICs with 3+ workers: one setup/spike ta
 
 ## Vertical slices and wide refactors
 
-Adapted from mattpocock/skills `to-tickets`, MIT © 2026 Matt Pocock. Prefer tracer-bullet vertical slices: each task is a narrow complete path, independently demoable or verifiable, fits one fresh worker context, and has only genuine Cassy dependency edges.
+Adapted from mattpocock/skills `to-tickets`, MIT © 2026 Matt Pocock. Prefer tracer-bullet vertical slices: each task cuts a narrow but complete path through the affected layers, is independently demoable or verifiable, and fits one fresh worker context. Give every task only its genuine blocking edges and work the unblocked frontier.
 
-For a wide mechanical refactor that cannot stay green as a vertical slice, use expand–contract: add alongside the old form, migrate blast-radius-sized batches, and remove the old form after all batches. Use `mcp__cas__task`, not external tracker or scratch-file workflows.
+For a mechanical, codebase-wide change that cannot land green as a vertical slice, use **expand–contract** instead: first add the new form beside the old; then migrate call sites in blast-radius-sized batches, each blocked by expansion; finally remove the old form only after every migration batch completes. Preserve Cassy task dependencies with `cas__task`; never substitute external tracker or scratch-file workflows.
 
 When breaking an epic into subtasks, apply these patterns:
 

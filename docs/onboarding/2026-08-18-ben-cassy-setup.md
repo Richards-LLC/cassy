@@ -148,7 +148,9 @@ cas-update --sync-only
 cas-update --no-restart
 ```
 
-`--sync-only` migrates/syncs projects without a build or process change.
+`--sync-only` delegates the native all-project refresh without a build or
+process change. The binary sweeps every project under `CAS_PROJECT_ROOTS`
+(schema, skills/builtins, team membership, then cloud sync for linked projects).
 `--no-restart` builds, installs, migrates, and syncs but leaves runtimes alone.
 
 ## 7. Optional `update-ai`

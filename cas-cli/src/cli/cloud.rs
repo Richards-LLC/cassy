@@ -1403,7 +1403,7 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
     use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
     use std::sync::Arc;
 
-    let config = CloudConfig::load()?;
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if !config.is_logged_in() {
         return Ok(());
     }
@@ -2021,7 +2021,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
 
     use crate::cloud::{CloudSyncer, CloudSyncerConfig, PushScope, resolve_canonical_id};
 
-    let config = CloudConfig::load_from_cas_dir(cas_root)?;
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if config.token.is_none() {
         anyhow::bail!("Not logged in. Run 'cas login' first");
     }
@@ -2195,7 +2195,7 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
 
     use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue};
 
-    let config = CloudConfig::load()?;
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     if config.token.is_none() {
         anyhow::bail!("Not logged in. Run 'cas login' first");
     }
@@ -2458,7 +2458,9 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         if stale {
             // Only refresh when we have a token; load from project config
             // (that's where the token lives after login).
-            if let Ok(proj_cfg) = CloudConfig::load() {
+            if let Ok(proj_cfg) =
+                CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+            {
                 if let Some(token) = proj_cfg.token.as_deref() {
                     match fetch_and_cache_teams(&proj_cfg.endpoint, token) {
                         FetchTeamsOutcome::Updated { team_count } => {
@@ -2531,7 +2533,7 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
     // had just run. This step either confirms the registration or fails the
     // whole command with the real reason.
     if !args.dry_run {
-        let cloud_config = CloudConfig::load()?;
+        let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
         ensure_team_project_registration(&cloud_config, cas_root, cli, args.full)?;
     }
 
@@ -2552,7 +2554,7 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         // wrappers; this is where the team rows reach the server. Team
         // push failure is isolated from the personal drain above (which
         // already succeeded by now) and from the pull below (best-effort).
-        let cloud_config = CloudConfig::load()?;
+        let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
         execute_team_push(&cloud_config, cas_root, cli)?;
 
         // Personal pull AND team pull happen transitively here:

@@ -3,17 +3,19 @@
 //! Downloads and installs the latest version from GitHub releases,
 //! and runs schema migrations for the local database.
 
+use std::collections::BTreeSet;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::Args;
 
 use crate::builtins::{
-    SyncResult, mark_missing_owned_references_for_replacement,
-    prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
+    SyncResult, mark_missing_owned_references_for_replacement, prune_stale_user_skills_for_harness,
+    sync_all_builtins_for_harness,
 };
 use crate::cli::Cli;
+use crate::cli::cloud::{CloudSyncArgs, execute_sync};
 use crate::cli::factory_tooling;
 use crate::cli::hook::{
     configure_claude_hooks, configure_mcp_server, provision_codex_project,
@@ -21,6 +23,7 @@ use crate::cli::hook::{
 };
 use crate::cli::init::{generate_cas_skill, update_claude_md};
 use crate::cli::update::preview::{build_update_transaction, show_enhanced_dry_run};
+use crate::cloud::{CloudConfig, FetchTeamsOutcome, fetch_and_cache_teams, maybe_adopt_team_scope};
 use crate::migration::{check_migrations, run_migrations};
 use crate::store::{open_rule_store, open_skill_store};
 use crate::sync::{SkillSyncer, Syncer};
@@ -167,12 +170,26 @@ pub struct UpdateArgs {
     /// Keep backup files after successful update
     #[arg(long)]
     pub keep_backup: bool,
+
+    /// Refresh every discovered local Cassy project after updating.
+    ///
+    /// Performs schema migration, generated-file/builtin sync, cloud team
+    /// membership refresh, and cloud sync for every cloud-linked project.
+    #[arg(long)]
+    pub all_projects: bool,
 }
 
 pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     // Note: update command accepts Option<&Path> because it can run without an initialized Cassy
     // (e.g., binary update only, or checking for updates before init)
     let current_version = env!("CARGO_PKG_VERSION");
+
+    // This is also the no-download entry point for a host which already has
+    // the desired binary. It deliberately does the same complete sweep that a
+    // successful ordinary `cas update` performs below.
+    if args.all_projects {
+        return refresh_all_projects(args, cli, cas_root);
+    }
 
     // Handle user-level builtin distribution (~/.claude, ~/.codex)
     if args.user {
@@ -203,8 +220,8 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         return check_for_updates(current_version, cli, cas_root);
     }
 
-    // Full update: binary + schema + sync files
-    let mut steps = UpdateStepTracker::new(3, !cli.json);
+    // Full update: binary + every local project's migration/sync/cloud state.
+    let mut steps = UpdateStepTracker::new(2, !cli.json);
     steps.run("Updating Cassy binary", || {
         perform_update(args, current_version, cli)
     })?;
@@ -215,18 +232,8 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         fmt.newline()?;
     }
 
-    steps.run("Applying schema updates", || {
-        run_schema_migrations(args, cli, cas_root)
-    })?;
-    if !cli.json {
-        let mut out = io::stdout();
-        let theme = ActiveTheme::default();
-        let mut fmt = Formatter::stdout(&mut out, theme);
-        fmt.newline()?;
-    }
-
-    steps.run("Syncing .claude/.codex files", || {
-        sync_claude_files(cli, cas_root)
+    steps.run("Refreshing all local Cassy projects", || {
+        refresh_all_projects(args, cli, cas_root)
     })?;
 
     if !cli.json {
@@ -238,6 +245,327 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     Ok(())
+}
+
+/// Outcome printed in the final all-projects receipt. Phase failures are kept
+/// as data so one bad checkout never prevents the remaining projects from
+/// becoming current.
+#[derive(Debug, Clone)]
+enum ProjectPhase {
+    Ok(String),
+    Skipped(String),
+    Planned(String),
+    Failed(String),
+}
+
+impl ProjectPhase {
+    fn summary(&self) -> String {
+        match self {
+            Self::Ok(detail) => format!("ok: {detail}"),
+            Self::Skipped(detail) => format!("skipped: {detail}"),
+            Self::Planned(detail) => format!("dry-run: {detail}"),
+            Self::Failed(detail) => format!("FAILED: {detail}"),
+        }
+    }
+
+    fn failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
+struct ProjectRefreshReceipt {
+    project: PathBuf,
+    migration: ProjectPhase,
+    skills: ProjectPhase,
+    membership: ProjectPhase,
+    cloud: ProjectPhase,
+}
+
+impl ProjectRefreshReceipt {
+    fn failed(&self) -> bool {
+        [&self.migration, &self.skills, &self.membership, &self.cloud]
+            .into_iter()
+            .any(ProjectPhase::failed)
+    }
+}
+
+/// Implement the post-update host sweep natively. The old contrib helper
+/// spawned `cas update --schema-only` and `cas update --sync` once per path;
+/// doing it in-process avoids source-checkout-only behavior and lets cloud
+/// phases operate on explicit project roots rather than the updater's cwd.
+fn refresh_all_projects(
+    args: &UpdateArgs,
+    cli: &Cli,
+    current_cas_root: Option<&Path>,
+) -> anyhow::Result<()> {
+    let projects = discover_local_projects(current_cas_root);
+    let mut receipts = Vec::with_capacity(projects.len());
+
+    if !cli.json {
+        println!(
+            "Refreshing {} local Cassy project(s){}",
+            projects.len(),
+            if args.dry_run { " (DRY RUN)" } else { "" }
+        );
+    }
+
+    for project in projects {
+        let cas_root = project.join(".cas");
+        if !cli.json {
+            println!("\n  {}", project.display());
+        }
+
+        // Run each phase independently. A malformed database must be visible
+        // in the receipt, but must not leave another project stale.
+        let migration = run_project_phase("migration", args.dry_run, || {
+            run_schema_migrations(args, cli, Some(&cas_root))
+        });
+        let skills = run_project_phase("skills", args.dry_run, || {
+            sync_claude_files(cli, Some(&cas_root))
+        });
+        let membership = refresh_project_membership(&cas_root, args.dry_run);
+        let cloud = sync_project_cloud(&cas_root, args.dry_run, cli);
+
+        receipts.push(ProjectRefreshReceipt {
+            project,
+            migration,
+            skills,
+            membership,
+            cloud,
+        });
+    }
+
+    let user_builtins = if args.dry_run {
+        ProjectPhase::Planned("user-level builtins".to_string())
+    } else {
+        match sync_user_builtins(cli) {
+            Ok(()) => ProjectPhase::Ok("user-level builtins".to_string()),
+            Err(error) => ProjectPhase::Failed(error.to_string()),
+        }
+    };
+    print_project_refresh_summary(&receipts, &user_builtins, cli);
+
+    if receipts.iter().any(ProjectRefreshReceipt::failed) || user_builtins.failed() {
+        anyhow::bail!(
+            "one or more projects were not fully refreshed; see the per-project phase summary above"
+        );
+    }
+    Ok(())
+}
+
+fn run_project_phase(
+    name: &str,
+    dry_run: bool,
+    operation: impl FnOnce() -> anyhow::Result<()>,
+) -> ProjectPhase {
+    if dry_run {
+        return ProjectPhase::Planned(name.to_string());
+    }
+    match operation() {
+        Ok(()) => ProjectPhase::Ok(name.to_string()),
+        Err(error) => ProjectPhase::Failed(format!("{name}: {error:#}")),
+    }
+}
+
+/// Refresh the user-level membership cache and resolve the project scope
+/// without changing an explicit project team selection or canonical project
+/// pin. `maybe_adopt_team_scope` already carries that precedence contract.
+fn refresh_project_membership(cas_root: &Path, dry_run: bool) -> ProjectPhase {
+    if !cas_root.join("cloud.json").exists() {
+        return ProjectPhase::Skipped("not cloud-linked".to_string());
+    }
+
+    let user = match CloudConfig::load_user() {
+        Ok(config) => config,
+        Err(error) => return ProjectPhase::Failed(format!("could not read login: {error}")),
+    };
+    let project = match CloudConfig::load_from_cas_dir(cas_root) {
+        Ok(config) => config,
+        Err(error) => {
+            return ProjectPhase::Failed(format!("could not read project cloud config: {error}"));
+        }
+    };
+    let token = user.token.as_deref().or(project.token.as_deref());
+    let Some(token) = token else {
+        return ProjectPhase::Skipped("not logged in — run cas login".to_string());
+    };
+
+    if dry_run {
+        return ProjectPhase::Planned("refresh memberships and validate selected team".to_string());
+    }
+
+    match fetch_and_cache_teams(&project.endpoint, token) {
+        FetchTeamsOutcome::Updated { team_count } => match maybe_adopt_team_scope(cas_root) {
+            Ok(adoption) => ProjectPhase::Ok(format!(
+                "refreshed {team_count} membership(s); {adoption:?}"
+            )),
+            Err(error) => ProjectPhase::Failed(format!(
+                "memberships refreshed but project scope could not be validated: {error}"
+            )),
+        },
+        FetchTeamsOutcome::Empty => ProjectPhase::Ok(
+            "no team selected — run cas cloud team set if this project should use team scope"
+                .to_string(),
+        ),
+        FetchTeamsOutcome::AuthFailed => {
+            ProjectPhase::Failed("credentials rejected — run cas login".to_string())
+        }
+        FetchTeamsOutcome::NetworkError(error) => {
+            ProjectPhase::Failed(format!("membership refresh failed: {error}"))
+        }
+    }
+}
+
+fn sync_project_cloud(cas_root: &Path, dry_run: bool, cli: &Cli) -> ProjectPhase {
+    if !cas_root.join("cloud.json").exists() {
+        return ProjectPhase::Skipped("not cloud-linked".to_string());
+    }
+    let config = match CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root) {
+        Ok(config) => config,
+        Err(error) => return ProjectPhase::Failed(format!("could not read cloud config: {error}")),
+    };
+    if !config.is_logged_in() {
+        return ProjectPhase::Skipped("not logged in — run cas login".to_string());
+    }
+    if dry_run {
+        return ProjectPhase::Planned("cloud sync".to_string());
+    }
+    match execute_sync(
+        &CloudSyncArgs {
+            dry_run: false,
+            full: false,
+            rehome: false,
+        },
+        cli,
+        cas_root,
+    ) {
+        Ok(()) => ProjectPhase::Ok("cloud sync".to_string()),
+        Err(error) => ProjectPhase::Failed(format!("cloud sync: {error:#}")),
+    }
+}
+
+fn print_project_refresh_summary(
+    receipts: &[ProjectRefreshReceipt],
+    user_builtins: &ProjectPhase,
+    cli: &Cli,
+) {
+    if cli.json {
+        let projects = receipts
+            .iter()
+            .map(|receipt| {
+                serde_json::json!({
+                    "project": receipt.project,
+                    "migration": receipt.migration.summary(),
+                    "skills": receipt.skills.summary(),
+                    "membership": receipt.membership.summary(),
+                    "cloud_sync": receipt.cloud.summary(),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::json!({ "projects": projects, "user_builtins": user_builtins.summary() })
+        );
+        return;
+    }
+
+    println!("\nProject refresh summary:");
+    for receipt in receipts {
+        println!("  {}", receipt.project.display());
+        println!("    migration:  {}", receipt.migration.summary());
+        println!("    skills:     {}", receipt.skills.summary());
+        println!("    membership: {}", receipt.membership.summary());
+        println!("    cloud sync: {}", receipt.cloud.summary());
+    }
+    let failed = receipts.iter().filter(|receipt| receipt.failed()).count();
+    println!(
+        "  Total: {} succeeded, {} failed; user builtins: {}",
+        receipts.len().saturating_sub(failed),
+        failed,
+        user_builtins.summary()
+    );
+}
+
+/// Discovery is the union of the host's known-repo registry and the legacy
+/// helper's scan roots. The latter is deliberately retained for binary-only
+/// machines that have never seeded `known_repos`.
+fn discover_local_projects(current_cas_root: Option<&Path>) -> Vec<PathBuf> {
+    let mut projects = BTreeSet::new();
+    if let Ok(known) = crate::worktree::discovery::list_tracked_repos() {
+        for repo in known.into_iter().filter(|repo| repo.healthy) {
+            projects.insert(canonical_path(&repo.path));
+        }
+    }
+
+    let roots = std::env::var_os("CAS_PROJECT_ROOTS")
+        .map(|raw| {
+            raw.to_string_lossy()
+                .split(',')
+                .filter(|root| !root.trim().is_empty())
+                .map(|root| PathBuf::from(root.trim()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| dirs::home_dir().into_iter().collect());
+    for root in roots {
+        scan_for_projects(&root, &mut projects);
+    }
+    if let Some(cas_root) = current_cas_root
+        && let Some(project) = cas_root.parent()
+    {
+        projects.insert(canonical_path(project));
+    }
+
+    // `~/.cas` is host state, not a project. The legacy helper made the same
+    // distinction and migrated it separately.
+    if let Some(home) = dirs::home_dir() {
+        projects.remove(&canonical_path(&home));
+    }
+    projects.into_iter().collect()
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn scan_for_projects(root: &Path, projects: &mut BTreeSet<PathBuf>) {
+    if root.join(".cas").is_dir() {
+        projects.insert(canonical_path(root));
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.file_type() else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.is_symlink() {
+            continue;
+        }
+        if matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(
+                "node_modules"
+                    | "target"
+                    | ".git"
+                    | ".cargo"
+                    | ".cache"
+                    | ".npm"
+                    | ".rustup"
+                    | ".pnpm-store"
+                    | ".venv"
+                    | "venv"
+                    | "dist"
+                    | "build"
+                    | ".next"
+                    | ".turbo"
+            )
+        ) {
+            continue;
+        }
+        scan_for_projects(&path, projects);
+    }
 }
 
 /// Sync rules, skills, and configuration to .claude/.codex directories
@@ -368,21 +696,12 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     // Capture explicit reference deletions before database skill sync can
     // rehydrate an older stored copy. Builtin sync consumes these one-shot
     // markers below and installs the current embedded reference.
-    mark_missing_owned_references_for_replacement(
-        cas_mux::SupervisorCli::Claude,
-        &claude_dir,
-    )?;
+    mark_missing_owned_references_for_replacement(cas_mux::SupervisorCli::Claude, &claude_dir)?;
     if codex_enabled {
-        mark_missing_owned_references_for_replacement(
-            cas_mux::SupervisorCli::Codex,
-            &codex_dir,
-        )?;
+        mark_missing_owned_references_for_replacement(cas_mux::SupervisorCli::Codex, &codex_dir)?;
     }
     if grok_enabled {
-        mark_missing_owned_references_for_replacement(
-            cas_mux::SupervisorCli::Grok,
-            &grok_dir,
-        )?;
+        mark_missing_owned_references_for_replacement(cas_mux::SupervisorCli::Grok, &grok_dir)?;
     }
 
     // Sync database skills (this may remove stale dirs)
@@ -690,8 +1009,14 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
     };
 
     if cli.json {
-        let claude_total = claude_result.as_ref().map(|r| r.total_updated()).unwrap_or(0);
-        let codex_total = codex_result.as_ref().map(|r| r.total_updated()).unwrap_or(0);
+        let claude_total = claude_result
+            .as_ref()
+            .map(|r| r.total_updated())
+            .unwrap_or(0);
+        let codex_total = codex_result
+            .as_ref()
+            .map(|r| r.total_updated())
+            .unwrap_or(0);
         let grok_total = grok_result.as_ref().map(|r| r.total_updated()).unwrap_or(0);
         let claude_present = claude_dir.exists();
         let codex_present = codex_dir.exists();

@@ -33,6 +33,11 @@ cas init
 cas doctor
 ```
 
+After a binary update, one `cas update` refreshes every discovered local Cassy
+project: schema, generated files and builtins, team membership, then cloud sync
+for cloud-linked projects. Preview the same sweep without changing state with
+`cas update --all-projects --dry-run`; set `CAS_PROJECT_ROOTS` to limit its scan.
+
 For Cassy Cloud, sign in once per machine, then confirm team scope from inside
 the initialized project:
 
@@ -319,6 +324,7 @@ cargo build -p cas --profile release-fast
 install -m 0755 target/release-fast/cas ~/.local/bin/cas
 
 cas --version   # confirm new build
+cas update --all-projects   # refresh every local project without downloading a release
 ```
 
 Subsequent rebuilds are seconds (incremental cargo), unless `vendor/ghostty` changed — then libghostty-vt re-links via Zig (~30 s).

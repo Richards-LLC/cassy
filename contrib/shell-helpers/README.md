@@ -9,11 +9,13 @@ contrib/shell-helpers/install.sh
 
 That copies the helper to `~/.local/bin/cas-update` (override the destination
 with `CAS_UPDATE_INSTALL_DIR`). The helper builds the current source checkout,
-atomically installs `~/.local/bin/cas`, migrates and syncs local projects, then
-turns over processes that still execute the exact pre-install binary bytes.
+atomically installs `~/.local/bin/cas`, then delegates the complete local
+project refresh to `cas update --all-projects` (schema, generated files and
+builtins, team membership refresh, and cloud sync for linked projects) before
+turning over processes that still execute the exact pre-install binary bytes.
 
 Plain `cas-update` performs the full workflow. `--no-restart` performs the
-build/install/migrate/sync portion without signalling any runtime. Both
+build/install/native-project-refresh portion without signalling any runtime. Both
 `--build-only` and `--sync-only` imply no runtime turnover. `--dry-run` is
 strictly non-mutating and prints the frozen process plan.
 

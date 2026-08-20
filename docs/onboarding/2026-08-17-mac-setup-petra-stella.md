@@ -54,7 +54,7 @@ cas update --user    # seeds the harness dirs that exist: ~/.claude, ~/.codex, ~
 
 Skip `cas doctor` for now — it reports on a *project*, and you do not have one yet. Step 7 runs it in the right place.
 
-From now on, upgrading is a single command — `cas update` — which fetches the latest release, replaces the binary, and runs schema migrations. Run it when release announcements land in #cas-internal; nothing else to maintain.
+From now on, upgrading is a single command — `cas update` — which fetches the latest release, replaces the binary, then refreshes every local Cassy project (schema, skills, team membership, and cloud-linked sync). To rehearse that sweep without replacing the binary, run `cas update --all-projects --dry-run`.
 
 ## 4. Hub service (Commander access)
 

@@ -318,6 +318,8 @@ jobs:
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
     needs: fast-validation-runner-route
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
+    outputs:
+      producer_mode: ${{ needs.fast-validation-runner-route.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -500,6 +502,19 @@ jobs:
         run: |
           tar -xzf fast-validation-suite-runner.tar.gz
           test -x target/debug/cas
+
+      # cas-f83c: CARGO_BIN_EXE_* and CARGO_MANIFEST_DIR are baked into
+      # archived test binaries. Keep these links only for self-hosted archive
+      # producers until runtime-path-robust tests replace the compatibility shim.
+      - name: Restore self-hosted producer paths
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-suite-build.outputs.producer_mode == 'self-hosted'
+        run: |
+          sudo mkdir -p /var/lib/cassy-actions/runner/_work/cassy
+          sudo ln -sfn "$GITHUB_WORKSPACE" /var/lib/cassy-actions/runner/_work/cassy/cassy
+          sudo mkdir -p /var/lib/cassy-actions/cache
+          sudo ln -sfn "$GITHUB_WORKSPACE/target" /var/lib/cassy-actions/cache/cargo-target
 
       # count:1/3 through count:3/3 are disjoint and exhaustive. Keep
       # --no-fail-fast so failures never mask later binaries; doctests stay in

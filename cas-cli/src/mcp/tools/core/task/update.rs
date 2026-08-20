@@ -627,8 +627,6 @@ impl CasCore {
         let prior_assignee = task.assignee.clone();
 
         let mut changes = Vec::new();
-        let mut atomic_parent_dependency = cas_store::ParentDependencyUpdate::Unchanged;
-
         if let Some(title) = req.title {
             task.title = title;
             changes.push("title");
@@ -1239,28 +1237,23 @@ impl CasCore {
                 None => existing_parent_deps.is_empty(),
             };
             if !already_matches {
-                if reopening_closed {
-                    atomic_parent_dependency =
-                        cas_store::ParentDependencyUpdate::Replace(replacement);
-                } else {
-                    for dep in existing_parent_deps {
-                        task_store
-                            .remove_dependency(&req.id, &dep.to_id)
-                            .map_err(|e| McpError {
-                                code: ErrorCode::INTERNAL_ERROR,
-                                message: Cow::from(format!(
-                                    "Failed to remove existing epic dependency: {e}"
-                                )),
-                                data: None,
-                            })?;
-                    }
-                    if let Some(dep) = replacement.as_ref() {
-                        task_store.add_dependency(dep).map_err(|e| McpError {
+                for dep in existing_parent_deps {
+                    task_store
+                        .remove_dependency(&req.id, &dep.to_id)
+                        .map_err(|e| McpError {
                             code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!("Failed to add epic dependency: {e}")),
+                            message: Cow::from(format!(
+                                "Failed to remove existing epic dependency: {e}"
+                            )),
                             data: None,
                         })?;
-                    }
+                }
+                if let Some(dep) = replacement.as_ref() {
+                    task_store.add_dependency(dep).map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to add epic dependency: {e}")),
+                        data: None,
+                    })?;
                 }
                 changes.push("epic");
             }
@@ -1298,22 +1291,6 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!("Task {} cannot block itself.", req.id)),
-                    data: None,
-                });
-            }
-
-            // Reopening rewrites the task atomically as Open; a fresh blocker
-            // would immediately contradict that status. Reject the combination
-            // explicitly rather than persisting an Open-but-blocked task.
-            if reopening_closed {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "blocked_by cannot be combined with reopening a closed task \
-                         (status=open). Reopen first, then add blockers with a second \
-                         `update blocked_by=...` call."
-                            .to_string(),
-                    ),
                     data: None,
                 });
             }
@@ -1476,66 +1453,13 @@ impl CasCore {
                 })
                 .unwrap_or_else(|| "unknown".into())
         });
-        let lifecycle_outbox = if reopening_closed {
-            let actor = lifecycle_actor.as_deref().unwrap_or("unknown");
-            let agent_store = self.open_agent_store().map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to prepare reopen lifecycle: {error}")),
-                data: None,
-            })?;
-            let occurrence = crate::mcp::tools::core::task::lifecycle::supervisor_push::occurrence_from_updated_at(task.updated_at);
-            let outbox = crate::mcp::tools::core::task::lifecycle::supervisor_push::prepare_task_lifecycle_outbox(
-                agent_store.as_ref(),
-                &task.id,
-                &task.title,
-                TaskStatus::Closed,
-                TaskStatus::Open,
-                actor,
-                None,
-                crate::mcp::tools::core::task::lifecycle::supervisor_push::LifecycleTransition::ReadyReopened,
-                &occurrence,
-            );
-            if outbox.is_some() {
-                crate::store::open_supervisor_queue_store(&self.cas_root).map_err(|error| {
-                    McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Failed to initialize reopen lifecycle outbox: {error}"
-                        )),
-                        data: None,
-                    }
-                })?;
-            }
-            outbox
-        } else {
-            None
-        };
-
-        if reopening_closed {
-            cas_store::reopen_closed_task_atomic(
-                &self.cas_root,
-                &task,
-                original_updated_at,
-                atomic_parent_dependency,
-                lifecycle_outbox.as_ref(),
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to atomically reopen task: {e}")),
-                data: None,
-            })?;
-        } else {
-            // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
-            // pushed below matches the persisted row. (The `reopening_closed`
-            // branch above goes through `reopen_exact_with_conn`, which writes
-            // `task.updated_at` through verbatim as its optimistic-concurrency
-            // key, so its occurrence is already consistent.)
-            task.updated_at = task_store.update(&task).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to update: {e}")),
-                data: None,
-            })?;
-        }
+        // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
+        // pushed below matches the persisted row.
+        task.updated_at = task_store.update(&task).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to update: {e}")),
+            data: None,
+        })?;
 
         // cas-062d: push blocked / ready-reopened transitions.
         if let Some((old_st, new_st)) = lifecycle_status_change {
@@ -1656,7 +1580,7 @@ mod status_transition_tests {
         let agent_store = core.open_agent_store().unwrap();
         agent_store.init().unwrap();
         agent_store
-            .add(&Agent::new("supervisor-agent".into(), "supervisor".into()))
+            .register(&Agent::new("supervisor-agent".into(), "supervisor".into()))
             .unwrap();
         core.set_agent_id_for_testing("supervisor-agent".into());
 

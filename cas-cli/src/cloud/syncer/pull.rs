@@ -815,7 +815,13 @@ impl CloudSyncer {
         // historical backfill (GH #192). Once a project has established a
         // watermark, retain the existing behavior: healthy empty incremental
         // pulls advance to the server clock.
-        if (had_prior_watermark || result.total_pulled() > 0)
+        // A locally-retained conflict (including a terminal-row rejection) is
+        // still a successfully consumed, project-scoped server row. Advance
+        // past it so an unattributed reopen is journaled once rather than
+        // fetched and rejected forever. Foreign/malformed rows never reach
+        // `conflicts_resolved`, so the GH #192 empty/wrong-bucket safeguard
+        // remains intact.
+        if (had_prior_watermark || result.total_pulled() > 0 || result.conflicts_resolved > 0)
             && let Some(pulled_at) = body.pulled_at
         {
             let _ = self.queue.set_metadata("last_pull_at", &pulled_at);

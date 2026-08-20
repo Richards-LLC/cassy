@@ -88,6 +88,141 @@ pub(super) fn enqueue_worker_unavailable_relay(
     )
 }
 
+/// A parked delivery whose PR was ejected must wake the supervisor *and* put
+/// a durable instruction in the delivering worker's inbox. The occurrence is
+/// a failed merge-group run ID when available, so a requeue naturally arms a
+/// new episode while repeated polls/restarts stay idempotent.
+pub(super) fn enqueue_merge_queue_ejection_relay(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    worker: &str,
+    pr_number: u64,
+    failed_run_id: Option<u64>,
+    occurrence: &str,
+) -> WorkerAttentionRelayOutcome {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+    };
+    use cas_store::{NotificationPriority, NotifyIdempotentResult};
+
+    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let Some(supervisor) =
+        resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
+    else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let detail = match failed_run_id {
+        Some(run_id) => format!(
+            "Delivery PR #{pr_number} for {task_id} left the merge queue after failed merge_group run {run_id}."
+        ),
+        None => format!(
+            "Delivery PR #{pr_number} for {task_id} left the merge queue without merging (dequeued or auto-merge disarmed)."
+        ),
+    };
+    let key = format!(
+        "merge-queue-ejection:{}:{task_id}:{pr_number}:{occurrence}",
+        factory_session.as_deref().unwrap_or("")
+    );
+    let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let payload = serde_json::json!({
+        "kind": "merge_queue_ejected",
+        "worker": worker,
+        "task_id": task_id,
+        "pr_number": pr_number,
+        "failed_run_id": failed_run_id,
+        "detail": detail,
+        "occurrence": occurrence,
+    })
+    .to_string();
+    let notification_id = match supervisor_queue.notify_idempotent(
+        &supervisor.agent_id,
+        "merge_queue_ejected",
+        &payload,
+        NotificationPriority::High,
+        &key,
+    ) {
+        Ok(NotifyIdempotentResult::Created(id)) => id,
+        Ok(NotifyIdempotentResult::AlreadyExists {
+            id,
+            prompt_delivered: true,
+        }) => {
+            return WorkerAttentionRelayOutcome::Persisted {
+                notification_id: id,
+            };
+        }
+        Ok(NotifyIdempotentResult::AlreadyExists {
+            id,
+            prompt_delivered: false,
+        }) => id,
+        Err(error) => {
+            tracing::error!(task_id, pr_number, %error, "merge-queue ejection durable enqueue failed");
+            return WorkerAttentionRelayOutcome::Pending;
+        }
+    };
+    let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let supervisor_body = format!(
+        "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}\nInspect the failed run and requeue or request changes.\n</worker-attention>"
+    );
+    let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
+    if prompt_queue.enqueue_idempotent(
+        &source,
+        "supervisor",
+        &supervisor_body,
+        factory_session.as_deref(),
+        Some(&format!("merge queue ejected: {task_id}")),
+        Some(NotificationPriority::High),
+        &format!("merge-queue-ejection-outbox:{notification_id}"),
+    ).is_err() || prompt_queue.enqueue_idempotent(
+        "merge-queue-ejection",
+        worker,
+        &format!("{detail}\nWait for the supervisor's merge recovery instructions before starting other work."),
+        factory_session.as_deref(),
+        Some(&format!("merge queue ejected: {task_id}")),
+        Some(NotificationPriority::High),
+        &format!("merge-queue-ejection-worker:{key}"),
+    ).is_err() {
+        return WorkerAttentionRelayOutcome::Pending;
+    }
+    let Ok(task_store) = crate::store::open_task_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let Ok(mut task) = task_store.get(task_id) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let marker = format!("merge-queue-ejection occurrence={occurrence}");
+    if !task.notes.contains(&marker) {
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let note = format!("[{timestamp}] 🚫 BLOCKER {detail} ({marker}).");
+        task.notes = if task.notes.is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", task.notes)
+        };
+        task.updated_at = chrono::Utc::now();
+        if let Err(error) = task_store.update(&task) {
+            tracing::warn!(task_id, %error, "merge-queue ejection task note write failed");
+            return WorkerAttentionRelayOutcome::Pending;
+        }
+    }
+    // Keep the durable outbox replayable until the task-note receipt exists;
+    // otherwise a one-off store failure would leave an alert with no audit
+    // trail while future polls short-circuited as already delivered.
+    if supervisor_queue
+        .mark_prompt_delivered(notification_id)
+        .is_err()
+    {
+        return WorkerAttentionRelayOutcome::Pending;
+    }
+    WorkerAttentionRelayOutcome::Persisted { notification_id }
+}
+
 /// A relay is consumed by an in-memory detector only after both durable lanes
 /// are confirmed. `Pending` deliberately leaves that detector eligible for a
 /// retry; the occurrence key makes the replay idempotent after a partial write.
@@ -283,6 +418,68 @@ mod worker_attention_tests {
                 && row.prompt.contains("limited-codex")
                 && row.prompt.contains("terminal unavailable state")
         }));
+    }
+
+    #[test]
+    fn merge_queue_ejection_relays_to_supervisor_and_worker_once_and_notes_task() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "merge-queue-ejection-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "merge-queue-ejection-test");
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-fc35".to_string(), "parked delivery".to_string());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("fast-jaguar-59".to_string());
+        task_store.add(&task).unwrap();
+
+        let first = enqueue_merge_queue_ejection_relay(
+            &cas_dir,
+            "cas-fc35",
+            "fast-jaguar-59",
+            556,
+            Some(32386300052),
+            "merge-group-run:32386300052",
+        );
+        let replay = enqueue_merge_queue_ejection_relay(
+            &cas_dir,
+            "cas-fc35",
+            "fast-jaguar-59",
+            556,
+            Some(32386300052),
+            "merge-group-run:32386300052",
+        );
+        assert!(matches!(
+            first,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        assert!(matches!(
+            replay,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one supervisor relay plus one worker inbox row"
+        );
+        assert!(rows.iter().any(|row| row.target == "supervisor"
+            && row.prompt.contains("failed merge_group run 32386300052")));
+        assert!(
+            rows.iter()
+                .any(|row| row.target == "fast-jaguar-59" && row.prompt.contains("PR #556"))
+        );
+        let persisted = task_store.get("cas-fc35").unwrap();
+        assert_eq!(
+            persisted
+                .notes
+                .matches("merge-queue-ejection occurrence=merge-group-run:32386300052")
+                .count(),
+            1
+        );
     }
 }
 
@@ -575,9 +772,21 @@ impl FactoryDaemon {
             .checked_sub(super::ci_watch::CI_WATCH_INTERVAL)
             .unwrap_or_else(std::time::Instant::now);
         let mut ci_watch_task: Option<
-            JoinHandle<Result<Vec<super::ci_watch::CiFailure>, super::ci_watch::CiWatchError>>,
+            JoinHandle<
+                Result<
+                    (
+                        Vec<super::ci_watch::CiFailure>,
+                        super::ci_watch::MergeQueuePoll,
+                    ),
+                    super::ci_watch::CiWatchError,
+                >,
+            >,
         > = None;
         let mut ci_watch_unavailable_reported = false;
+        // Queue membership is intentionally process-local: the durable relay
+        // key is the recovery boundary. A failed merge_group run also lets the
+        // first poll after a daemon restart recover a real ejection.
+        let mut last_merge_queue_membership = std::collections::BTreeSet::new();
         let refresh_interval = Duration::from_secs(2);
         let poll_interval = Duration::from_millis(100);
 
@@ -701,6 +910,28 @@ impl FactoryDaemon {
                     && last_ci_watch.elapsed() >= super::ci_watch::CI_WATCH_INTERVAL
                 {
                     let project = self.app.project_path().to_path_buf();
+                    let deliveries = crate::store::open_task_store(self.app.cas_dir())
+                        .ok()
+                        .and_then(|store| {
+                            store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|task| {
+                            let worker = task.assignee?;
+                            let branch = task
+                                .deliverables
+                                .parked_branch
+                                .or(task.branch)
+                                .unwrap_or_else(|| format!("factory/{worker}"));
+                            Some(super::ci_watch::AwaitingMergeDelivery {
+                                task_id: task.id,
+                                worker,
+                                branch,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let previously_queued = last_merge_queue_membership.clone();
                     let mut watched_branches =
                         std::collections::BTreeSet::from(["main".to_string()]);
                     if let Some(manager) = self.app.worktree_manager() {
@@ -723,7 +954,14 @@ impl FactoryDaemon {
                     }
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
-                        super::ci_watch::collect_failures(&transport, &watched_branches)
+                        let failures =
+                            super::ci_watch::collect_failures(&transport, &watched_branches)?;
+                        let queue_poll = super::ci_watch::collect_merge_queue_ejections(
+                            &transport,
+                            &deliveries,
+                            &previously_queued,
+                        )?;
+                        Ok((failures, queue_poll))
                     }));
                     last_ci_watch = std::time::Instant::now();
                 }
@@ -731,8 +969,35 @@ impl FactoryDaemon {
                 if ci_watch_task.as_ref().is_some_and(JoinHandle::is_finished) {
                     let task = ci_watch_task.take().expect("checked above");
                     match task.await {
-                        Ok(Ok(failures)) => {
+                        Ok(Ok((failures, queue_poll))) => {
                             ci_watch_unavailable_reported = false;
+                            last_merge_queue_membership = queue_poll.queued_prs;
+                            for ejection in queue_poll.ejections {
+                                match enqueue_merge_queue_ejection_relay(
+                                    self.app.cas_dir(),
+                                    &ejection.task_id,
+                                    &ejection.worker,
+                                    ejection.pr_number,
+                                    ejection.failed_run_id,
+                                    &ejection.occurrence,
+                                ) {
+                                    WorkerAttentionRelayOutcome::Persisted { notification_id } => {
+                                        tracing::warn!(
+                                            task_id = %ejection.task_id,
+                                            pr_number = ejection.pr_number,
+                                            failed_run_id = ?ejection.failed_run_id,
+                                            notification_id,
+                                            "queued durable merge-queue ejection relay for supervisor and worker"
+                                        )
+                                    }
+                                    WorkerAttentionRelayOutcome::Pending => tracing::warn!(
+                                        task_id = %ejection.task_id,
+                                        pr_number = ejection.pr_number,
+                                        "merge-queue ejection relay remains pending"
+                                    ),
+                                    WorkerAttentionRelayOutcome::NotApplicable => {}
+                                }
+                            }
                             if !failures.is_empty() {
                                 match crate::store::open_prompt_queue_store(self.app.cas_dir()) {
                                     Ok(queue) => {

@@ -157,6 +157,8 @@ require_text "$pilot_doc" 'restricted_to_workflows=false' 'runner-group policy p
 require_text "$pilot_doc" 'refs/heads/gh-readonly-queue/...' 'pilot documents queue-ref mismatch'
 require_text "$pilot_doc" 'selected-workflow wildcards are rejected' 'pilot records GitHub wildcard limitation'
 require_text "$pilot_doc" 'CARGO_CACHE_RUSTC_INFO=0' 'pilot documents Cargo rustc-info cache containment'
+require_text "$pilot_doc" 'approval_policy=all_external_contributors' 'pilot pins approval for every outside-contributor fork workflow'
+require_text "$pilot_doc" 'Ephemeral/JIT runners remain future' 'pilot records the deferred runner-isolation alternative'
 
 runner_unit_text="$(<"$runner_unit")"
 require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'

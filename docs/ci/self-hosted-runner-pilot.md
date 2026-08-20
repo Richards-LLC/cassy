@@ -24,8 +24,8 @@ prerequisite for the measurement.
 
 `Richards-LLC/cassy` is public. GitHub warns that persistent self-hosted runners
 should almost never execute public-repository pull request workflows because a
-fork can persistently compromise the machine. This runner therefore has three
-independent restrictions:
+fork can persistently compromise the machine. This runner therefore has four
+layered restrictions:
 
 1. `.github/workflows/self-hosted-fast-validation.yml` has only a canonical
    repository `push` trigger for `main`, `epic/**`, and `factory/**`. It has no
@@ -40,16 +40,28 @@ independent restrictions:
    ref conditions in a server-evaluated job `if` before runner assignment. The
    same guard requires repository variable `CASSY_SELF_HOSTED_PILOT=enabled`;
    absent or disabled is a clean skip, so registration or maintenance cannot
-   create a red/queued advisory run.
+   create a red/queued advisory run. These checked-in conditions are defense
+   in depth, not an independent boundary against a fork's pull-request head:
+   that head can modify its own workflow definition.
+4. The organization Actions fork-PR contributor approval policy is
+   `approval_policy=all_external_contributors`. Every fork workflow run from a
+   user who is not an organization member requires a maintainer with write
+   access to approve it before it executes. This is the required compensating
+   boundary for `restricted_to_workflows=false`; it must not be relaxed to a
+   first-time-contributor policy.
 
-Fork pull requests continue to run only the existing GitHub-hosted required
-checks. The CI route selects the box only when `github.event_name` is
-`merge_group` and the explicit control variable is enabled; the route job does
-not check out source, and the archive job repeats the selected-mode guard.
-Approval of a fork workflow does not grant it the selected runner group. The
-queue route's no-checkout selector, `merge_group`-only archive guard, canonical
-repository check, non-fork check, queue-ref check, and explicit readiness
-variable are all required; do not weaken them independently.
+Fork pull requests do not execute any workflow until this approval is given.
+Approval is a maintainer's explicit authorization to run the PR head, including
+its workflow changes; an approver must treat changes that request self-hosted
+labels as security-sensitive. The CI route selects the box only when
+`github.event_name` is `merge_group` and the explicit control variable is
+enabled; the route job does not check out source, and the archive job repeats
+the selected-mode guard. The queue route's no-checkout selector,
+`merge_group`-only archive guard, canonical-repository check, non-fork check,
+queue-ref check, and explicit readiness variable remain required defense in
+depth; do not weaken them independently. Ephemeral/JIT runners remain future
+hardening, but the operator chose the enforceable approval gate now rather than
+changing runner routing or retiring the merge-queue acceleration.
 
 ## Availability and isolation
 
@@ -106,7 +118,16 @@ Create `cassy-public-trusted` before registration with selected repository
 `Richards-LLC/cassy`, `allows_public_repositories=true`, and
 `restricted_to_workflows=false`. This is intentional: GitHub cannot match a
 selected workflow pinned to `main` against merge-queue refs and rejects a
-queue-ref wildcard. The checked-in CI route is the compensating boundary.
+queue-ref wildcard. The checked-in CI route is additional defense in depth.
+The required compensating boundary is the organization-wide
+`approval_policy=all_external_contributors` fork-PR approval control; the
+checked-in route is defense in depth. Record the live setting before and after
+any change:
+
+```bash
+gh api orgs/Richards-LLC/actions/permissions/fork-pr-contributor-approval
+gh api repos/Richards-LLC/cassy/actions/permissions/fork-pr-contributor-approval
+```
 
 After updating an existing group, read it back before enabling the route:
 

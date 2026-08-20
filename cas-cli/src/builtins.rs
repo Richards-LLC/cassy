@@ -480,6 +480,33 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/fallow/references/patterns.md",
         content: include_str!("builtins/skills/fallow/references/patterns.md"),
     },
+    // cas-writing-for-agents: adapted from mattpocock/skills (MIT, © 2026 Matt Pocock).
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL.md",
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/SKILL.md",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-domain-modeling/SKILL.md",
+        content: include_str!("builtins/skills/cas-domain-modeling/SKILL.md"),
+    },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/skills/cas-codebase-design/DEEPENING.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/skills/cas-tdd/tests.md") },
+    BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/skills/cas-tdd/mocking.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
 ];
 
 /// Built-in Workflow scripts shipped to `.claude/workflows/` on `cas update --sync`.
@@ -850,6 +877,33 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/fallow/references/patterns.md",
         content: include_str!("builtins/codex/skills/fallow/references/patterns.md"),
     },
+    // cas-writing-for-agents: Codex mirror of the MIT Matt Pocock import above.
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-domain-modeling/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-domain-modeling/SKILL.md"),
+    },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/codex/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DEEPENING.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/codex/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/codex/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/codex/skills/cas-tdd/tests.md") },
+    BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/codex/skills/cas-tdd/mocking.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/codex/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1263,6 +1317,33 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cli-routing/references/routing.md",
         content: include_str!("builtins/grok/skills/cli-routing/references/routing.md"),
     },
+    // cas-writing-for-agents: Grok mirror of the MIT Matt Pocock import above.
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL-MECHANICS.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-domain-modeling/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-domain-modeling/SKILL.md"),
+    },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/grok/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DEEPENING.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DEEPENING.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/DESIGN-IT-TWICE.md", content: include_str!("builtins/grok/skills/cas-codebase-design/DESIGN-IT-TWICE.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/grok/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/tests.md", content: include_str!("builtins/grok/skills/cas-tdd/tests.md") },
+    BuiltinFile { path: "skills/cas-tdd/mocking.md", content: include_str!("builtins/grok/skills/cas-tdd/mocking.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/grok/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/grok/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/grok/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/grok/skills/cas-to-questionnaire/SKILL.md") },
 ];
 
 /// A factory-critical capability that every harness must resolve from its own

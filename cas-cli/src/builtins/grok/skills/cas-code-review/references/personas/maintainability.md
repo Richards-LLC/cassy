@@ -10,6 +10,8 @@ Hunt for changes that make the codebase harder to read, reason about, extend, or
 
 ## In scope
 
+Adapted from mattpocock/skills `code-review`, MIT © 2026 Matt Pocock. Use a Fowler-style smell baseline as prompts, not a mechanical scorecard: duplicated code, long method, large class, long parameter list, divergent change, shotgun surgery, feature envy, data clumps, primitive obsession, switch statements, parallel inheritance hierarchies, and lazy classes. Report only evidence-backed changed-code smells that materially harm future comprehension.
+
 - Duplication: the diff introduces a block that already exists elsewhere (grep the repo), or copies a pattern that the codebase has already extracted into a helper.
 - Naming drift: a new symbol uses a convention that conflicts with its neighbors (e.g., `snake_case` in a `camelCase` file, `get_*` next to `fetch_*`), or a name that misrepresents what the code does.
 - Dead code: new branches, parameters, fields, or imports that are never read or always false. Distinct from `correctness`-level "unwired public API" — this is *internal* deadness.

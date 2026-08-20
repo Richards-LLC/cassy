@@ -36,7 +36,7 @@ pub(crate) fn acknowledge_linked_lifecycle_notification(
         // this bridge does not recognise them, `message_ack notification_id`
         // acknowledges only the durable row and leaves the linked prompt
         // relay visible in every later worker_status response.
-        "worker_idle" | "worker_stalled" => {
+        "worker_idle" | "worker_stalled" | "worker_delivery_stalled" | "worker_unavailable" => {
             format!("worker-attention-outbox:{notification_id}")
         }
         _ => return Ok(None),
@@ -375,7 +375,7 @@ mod cas_20ac_ack_tests {
         let durable_id = supervisor_queue
             .notify(
                 "supervisor-id",
-                "worker_idle",
+                "worker_delivery_stalled",
                 r#"{"worker":"quiet-ibis"}"#,
                 NotificationPriority::High,
             )
@@ -385,10 +385,10 @@ mod cas_20ac_ack_tests {
                 &format!("lifecycle-wake:worker-attention:{durable_id}"),
                 "supervisor",
                 &format!(
-                    "<worker-attention kind=\"worker_idle\" worker=\"quiet-ibis\" notification_id=\"{durable_id}\">\\nidle\\n</worker-attention>"
+                    "<worker-attention kind=\"worker_delivery_stalled\" worker=\"quiet-ibis\" notification_id=\"{durable_id}\">\\ndelivery stalled\\n</worker-attention>"
                 ),
                 None,
-                Some("worker_idle: quiet-ibis"),
+                Some("worker_delivery_stalled: quiet-ibis"),
                 Some(NotificationPriority::High),
                 &format!("worker-attention-outbox:{durable_id}"),
             )

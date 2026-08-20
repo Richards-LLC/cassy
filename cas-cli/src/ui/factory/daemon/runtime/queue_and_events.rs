@@ -1304,6 +1304,56 @@ pub(crate) struct InboxDeferredWrite {
 }
 
 impl FactoryDaemon {
+    /// Relay a terminal Codex account-limit record once per unavailable
+    /// episode. Codex keeps its MCP child alive after this terminal harness
+    /// refusal, so heartbeat alone would hide the stopped worker indefinitely.
+    pub(super) fn relay_usage_limited_workers(&mut self) {
+        const USAGE_LIMIT_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+        let now = std::time::Instant::now();
+        if self
+            .last_usage_limit_scan
+            .is_some_and(|last| now.saturating_duration_since(last) < USAGE_LIMIT_SCAN_INTERVAL)
+        {
+            return;
+        }
+        self.last_usage_limit_scan = Some(now);
+
+        let Ok(agents) = crate::store::open_agent_store(self.app.cas_dir()) else {
+            return;
+        };
+        let Ok(active) = agents.list(Some(cas_types::AgentStatus::Active)) else {
+            return;
+        };
+        let workers: std::collections::HashSet<&str> =
+            self.app.worker_names().iter().map(String::as_str).collect();
+        let unavailable: std::collections::HashSet<String> = active
+            .iter()
+            .filter(|agent| {
+                agent.role == cas_types::AgentRole::Worker
+                    && agent.factory_session.as_deref() == Some(self.session_name.as_str())
+                    && workers.contains(agent.name.as_str())
+                    && crate::mcp::tools::service::factory_ops::worker_reports_usage_limit(
+                        self.app.cas_dir(),
+                        agent,
+                    )
+            })
+            .map(|agent| agent.name.clone())
+            .collect();
+        self.reported_unavailable_workers
+            .retain(|worker| unavailable.contains(worker));
+        for worker in unavailable {
+            if self.reported_unavailable_workers.insert(worker.clone()) {
+                super::lifecycle::enqueue_worker_unavailable_relay(self.app.cas_dir(), &worker);
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "worker_usage_limited",
+                    worker = %worker,
+                    "terminal harness availability record relayed to supervisor"
+                );
+            }
+        }
+    }
+
     /// Bounce aged direct messages to their original sender. The prompt store
     /// owns the read/ack race and one-shot marker; this daemon layer adds the
     /// live recipient harness and the authoritative delivery-state context.
@@ -1427,8 +1477,19 @@ impl FactoryDaemon {
                 }
                 NormalDeliveryProbeAction::FlagSupervisor => {
                     self.normal_delivery_probes.remove(&row_id);
+                    // A normal message that was transport-delivered, then
+                    // ignored across the bounded retry window is worker-health
+                    // evidence, not merely an informational inbox row. Route it
+                    // through the durable worker-attention outbox so every
+                    // harness reaches the owning supervisor without a manual
+                    // worker_status poll (cas-986a).
+                    super::lifecycle::enqueue_worker_delivery_stalled_relay(
+                        self.app.cas_dir(),
+                        &pane,
+                        row_id,
+                    );
                     let notice = format!(
-                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then produced no pane output for two watchdog windows. A single normal nudge was attempted; no urgent escalation was sent.</system-notice>"
+                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then produced no pane output for two watchdog windows. A single normal nudge was attempted; a durable worker-attention relay was sent to the supervisor; no urgent escalation was sent.</system-notice>"
                     );
                     if let Err(error) = queue.enqueue_with_session(
                         "delivery-watchdog",

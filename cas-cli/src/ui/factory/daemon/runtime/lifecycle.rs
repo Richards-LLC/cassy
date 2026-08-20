@@ -7,11 +7,6 @@ fn enqueue_worker_attention_relay(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
 ) {
-    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
-    };
-    use cas_store::{NotificationPriority, NotifyIdempotentResult};
-
     let (kind, worker, task_id, elapsed_secs) = match event {
         crate::ui::factory::director::DirectorEvent::WorkerIdle {
             worker,
@@ -30,6 +25,68 @@ fn enqueue_worker_attention_relay(
         ),
         _ => return,
     };
+    let detail = match (kind, task_id, elapsed_secs) {
+        ("worker_stalled", Some(task), Some(elapsed)) => format!(
+            "Worker {worker} is stalled on {task} after {}m without activity.",
+            elapsed / 60
+        ),
+        _ => format!("Worker {worker} is idle with no active task and needs supervisor attention."),
+    };
+    enqueue_worker_attention_relay_detail(cas_dir, kind, worker, task_id, elapsed_secs, &detail);
+}
+
+/// Persist one confirmed worker stoppage through the same durable supervisor
+/// relay used by director-detected idle and stall events.  This is deliberately
+/// narrower than a normal-message delivery failure: callers invoke it only
+/// after a bounded wake retry has also produced no pane output.
+pub(super) fn enqueue_worker_delivery_stalled_relay(
+    cas_dir: &std::path::Path,
+    worker: &str,
+    message_id: i64,
+) {
+    let detail = format!(
+        "Worker {worker} produced no pane output after normal message {message_id} and its bounded retry."
+    );
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "worker_delivery_stalled",
+        worker,
+        None,
+        None,
+        &detail,
+    );
+}
+
+/// Surface a terminal harness-side refusal even when its MCP child continues
+/// heartbeating. The evidence is collected from the harness artifact, not
+/// inferred from heartbeat age.
+pub(super) fn enqueue_worker_unavailable_relay(cas_dir: &std::path::Path, worker: &str) {
+    let detail = format!(
+        "Worker {worker}'s harness reported a terminal unavailable state while its process may still heartbeat."
+    );
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "worker_unavailable",
+        worker,
+        None,
+        None,
+        &detail,
+    );
+}
+
+fn enqueue_worker_attention_relay_detail(
+    cas_dir: &std::path::Path,
+    kind: &str,
+    worker: &str,
+    task_id: Option<&str>,
+    elapsed_secs: Option<u64>,
+    detail: &str,
+) {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+    };
+    use cas_store::{NotificationPriority, NotifyIdempotentResult};
+
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         tracing::warn!("worker attention relay skipped: agent store unavailable");
@@ -58,6 +115,7 @@ fn enqueue_worker_attention_relay(
         "worker": worker,
         "task_id": task_id,
         "elapsed_secs": elapsed_secs,
+        "detail": detail,
         "factory_session": factory_session,
         "occurrence": occurrence,
     })
@@ -86,13 +144,6 @@ fn enqueue_worker_attention_relay(
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         tracing::error!(worker = %worker, kind, notification_id, "worker attention relay left pending: prompt queue unavailable");
         return;
-    };
-    let detail = match (kind, task_id, elapsed_secs) {
-        ("worker_stalled", Some(task), Some(elapsed)) => format!(
-            "Worker {worker} is stalled on {task} after {}m without activity.",
-            elapsed / 60
-        ),
-        _ => format!("Worker {worker} is idle with no active task and needs supervisor attention."),
     };
     let body = format!(
         "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `coordination action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
@@ -161,6 +212,8 @@ mod worker_attention_tests {
                 active_task: None,
             },
         );
+        enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42);
+        enqueue_worker_unavailable_relay(&cas_dir, "limited-codex");
         enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::WorkerStalled {
@@ -173,7 +226,7 @@ mod worker_attention_tests {
 
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 4);
         assert!(rows.iter().all(|row| {
             row.target == "supervisor"
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
@@ -185,6 +238,16 @@ mod worker_attention_tests {
         );
         assert!(rows.iter().any(|row| {
             row.prompt.contains("kind=\"worker_stalled\"") && row.prompt.contains("cas-d4ae")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.prompt.contains("kind=\"worker_delivery_stalled\"")
+                && row.prompt.contains("silent-codex")
+                && row.prompt.contains("normal message 42")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.prompt.contains("kind=\"worker_unavailable\"")
+                && row.prompt.contains("limited-codex")
+                && row.prompt.contains("terminal unavailable state")
         }));
     }
 }
@@ -377,6 +440,8 @@ impl FactoryDaemon {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
+            reported_unavailable_workers: std::collections::HashSet::new(),
+            last_usage_limit_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
@@ -718,6 +783,7 @@ impl FactoryDaemon {
 
                     // Send notifications for detected events
                     self.app.notify_events(&delivery_events);
+                    self.relay_usage_limited_workers();
 
                     // cas-d4ae: the detector has already emitted exactly one
                     // event for this idle/stall episode and the app just

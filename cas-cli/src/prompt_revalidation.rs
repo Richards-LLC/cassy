@@ -467,7 +467,9 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
     tag.starts_with("<worker-attention ")
         && matches!(
             xml_attribute(tag, "kind"),
-            Some("worker_idle" | "worker_stalled")
+            Some(
+                "worker_idle" | "worker_stalled" | "worker_delivery_stalled" | "worker_unavailable"
+            )
         )
         && xml_attribute(tag, "worker").is_some_and(|value| !value.is_empty())
         && xml_attribute(tag, "notification_id").is_some_and(|value| value.parse::<i64>().is_ok())
@@ -1494,6 +1496,12 @@ mod cas_3dcb_worker_died_relay_tests {
         assert!(is_supervisor_wake_envelope(&relay()));
         assert!(is_supervisor_wake_envelope(
             "<worker-attention kind=\"worker_stalled\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        assert!(is_supervisor_wake_envelope(
+            "<worker-attention kind=\"worker_delivery_stalled\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        assert!(is_supervisor_wake_envelope(
+            "<worker-attention kind=\"worker_unavailable\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
         ));
         assert!(is_supervisor_wake_envelope(
             "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\" old=\"in_progress\" \

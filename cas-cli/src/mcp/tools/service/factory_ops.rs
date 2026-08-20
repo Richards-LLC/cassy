@@ -6919,6 +6919,15 @@ pub(crate) fn default_codex_sessions_dir() -> Option<std::path::PathBuf> {
 /// machine-readable exhausted-credit state in the same bounded tail. A generic
 /// error, an old rate-limit record, or an unresolved rollout is not enough to
 /// declare a live worker unavailable.
+pub(crate) fn worker_reports_usage_limit(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> bool {
+    let cli = worker_cli_from_agent(agent);
+    let rollout = worker_transcript_path_for_agent(cas_root, agent);
+    codex_rollout_reports_usage_limit(rollout.as_deref(), cli)
+}
+
 fn codex_rollout_reports_usage_limit(
     rollout: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
@@ -10993,8 +11002,12 @@ effort = "high"
             "codex-kind-owl-71-session".to_string(),
             "kind-owl-71".to_string(),
         );
-        agent.metadata.insert("worker_cli".to_string(), "codex".to_string());
-        agent.metadata.insert("clone_path".to_string(), clone.to_string());
+        agent
+            .metadata
+            .insert("worker_cli".to_string(), "codex".to_string());
+        agent
+            .metadata
+            .insert("clone_path".to_string(), clone.to_string());
         agent
             .metadata
             .insert("worker_account_dir".to_string(), account_dir.to_string());

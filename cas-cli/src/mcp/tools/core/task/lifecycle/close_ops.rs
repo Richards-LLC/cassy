@@ -5171,6 +5171,17 @@ impl CasCore {
         }
 
         let old_status = task.status;
+        let reason = req
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "task reopen rejected: a non-empty reason is required to preserve the terminal-state audit trail",
+                )
+            })?;
         task.status = TaskStatus::Open;
         if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             // cas-cd24: closed-specific resets stay gated to the closed
@@ -5192,38 +5203,40 @@ impl CasCore {
         }
         task.updated_at = chrono::Utc::now();
 
-        // cas-cd24: capture the reopen/unblock reason on the audit trail —
-        // previously silently dropped (the dispatcher discarded `reason`
-        // for this action entirely; see `TaskRequest` -> `IdRequest` in
-        // `service/core.rs` before this fix). Mirrors the close-path
-        // `close_reason`/note pattern above in `cas_task_close`.
-        if let Some(reason) = &req.reason {
-            let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
-            let verb = if fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed {
-                "Review scope reset"
-            } else if old_status == TaskStatus::Blocked {
-                "Unblocked"
-            } else {
-                "Reopened"
-            };
-            let reopen_note = format!("[{timestamp}] {verb}: {reason}");
-            if task.notes.is_empty() {
-                task.notes = reopen_note;
-            } else {
-                task.notes = format!("{}\n\n{}", task.notes, reopen_note);
-            }
-        }
-
+        let actor_id = self.get_agent_id().map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("task reopen rejected: attributed actor is unavailable: {error}"),
+            )
+        })?;
         let actor = self
-            .get_agent_id()
-            .ok()
-            .and_then(|id| {
-                self.open_agent_store()
-                    .ok()
-                    .and_then(|s| s.get(&id).ok())
-                    .map(|a| a.name)
-            })
-            .unwrap_or_else(|| "unknown".into());
+            .open_agent_store()?
+            .get(&actor_id)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("task reopen rejected: attributed actor is unavailable: {error}"),
+                )
+            })?;
+        // Terminal exits must be independently intelligible after replication:
+        // the actor and the reason are both embedded in the note, rather than
+        // relying on ephemeral caller context or a generic updated_at stamp.
+        let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
+        let verb = if fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed {
+            "Review scope reset"
+        } else if old_status == TaskStatus::Blocked {
+            "Unblocked"
+        } else {
+            "Reopened"
+        };
+        let actor = format!("{} ({})", actor.name, actor.id).replace(['\n', '\r'], " ");
+        let reason = reason.replace(['\n', '\r'], " ");
+        let reopen_note = format!("[{timestamp}] {verb}: actor={actor} reason={reason}");
+        if task.notes.is_empty() {
+            task.notes = reopen_note;
+        } else {
+            task.notes = format!("{}\n\n{}", task.notes, reopen_note);
+        }
         // cas-ec74: the two atomic reopen paths below write `task.updated_at`
         // through verbatim (it is their optimistic-concurrency key), so this
         // occurrence is correct for them. The plain `update()` path re-stamps

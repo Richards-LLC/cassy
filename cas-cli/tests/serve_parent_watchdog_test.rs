@@ -71,7 +71,7 @@ impl OrphanRig {
 
         let script = format!(
             "{bin} serve < {fifo} > /dev/null 2> {log} & echo $! > {pid}; sleep 600",
-            bin = shell_quote(env!("CARGO_BIN_EXE_cas")),
+            bin = shell_quote(&support::cas_binary().to_string_lossy()),
             fifo = shell_quote(fifo.to_str().expect("utf-8 fifo path")),
             log = shell_quote(log_path.to_str().expect("utf-8 log path")),
             pid = shell_quote(pid_path.to_str().expect("utf-8 pid path")),

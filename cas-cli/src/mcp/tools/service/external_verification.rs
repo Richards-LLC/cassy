@@ -538,7 +538,7 @@ mod tests {
             .create_atomic(&task, &[], Some(&epic.id), Some(&agent.id))
             .unwrap();
 
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixture = crate::test_paths::crate_root()
             .join("tests/fixtures/mock_mcp_viktor_server.py");
         let upstream = ServerConfig::Stdio {
             command: "python3".to_string(),

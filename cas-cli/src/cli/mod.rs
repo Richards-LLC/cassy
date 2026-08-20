@@ -41,6 +41,8 @@ mod doctor;
 // cli::factory::wedged's transcript-mtime liveness primitives.
 pub(crate) mod factory;
 mod factory_tooling;
+// cas-c741: the one friendly line a brand-new machine gets from bare `cas`.
+pub mod first_run;
 // cas-fc6fa: read-only cross-project contamination scan used by `cas doctor`.
 pub mod foreign_rows;
 // cas-9e81: pub(crate) so factory_ops can reuse `config_gen`'s canonical
@@ -613,6 +615,16 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let command = match &cli.command {
         Some(cmd) => cmd,
         None => {
+            // cas-c741: someone who just ran the install one-liner and typed
+            // `cas` gets one line naming the next command, not the factory
+            // preflight's list of everything a fresh machine is missing.
+            if first_run::machine_is_unconfigured(
+                &crate::store::known_repos::host_cas_dir(),
+                cas_root,
+            ) {
+                println!("{}", first_run::front_door_hint());
+                return Ok(());
+            }
             let default_args = FactoryArgs::default();
             return factory::execute(&default_args, cli, cas_root);
         }

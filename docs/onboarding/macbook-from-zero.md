@@ -24,11 +24,31 @@ if [[ "$(uname -m)" != "arm64" ]]; then
 fi
 
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
+```
 
-# Persist the Cassy binary path for terminal and non-interactive MCP shells.
-grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.zshenv 2>/dev/null \
-  || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv
-export PATH="$HOME/.local/bin:$PATH"
+Run it with `bash`, not `sh`. A piped script has no shebang, so `| sh` would
+run it under a shell it is not written for.
+
+If `~/.local/bin` is not already on your PATH, the installer offers to add a
+marker-guarded guard to `~/.zshenv` and tells you what it did. Say yes. It then
+verifies the result by running `cas --version` in a fresh login shell, and only
+reports success if that works — so trust what it prints.
+
+Two things worth knowing about that file choice. `.zshenv`, not `.zshrc`,
+because zsh reads `.zshrc` only for *interactive* shells: a PATH exported there
+is invisible to the non-interactive shell a tool like Claude Code uses to spawn
+`cas serve`, which is exactly how MCP ends up reporting a missing binary on a
+machine where `cas` works fine in the terminal. And the guard is idempotent
+twice over — the installer will not add it a second time, and the block itself
+will not re-prepend if the file is sourced again.
+
+To skip the prompt entirely, set `CAS_WIRE_PATH=1` to accept or `CAS_WIRE_PATH=0`
+to decline; declining prints the exact line to add yourself. An unattended run
+with no terminal to ask on never edits a startup file.
+
+Then open a new terminal (or `source ~/.zshenv`) and confirm:
+
+```bash
 cas --version
 ```
 

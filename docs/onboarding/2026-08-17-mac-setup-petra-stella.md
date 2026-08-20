@@ -1,8 +1,8 @@
 # Cassy on a Mac from zero — Petra Stella team member guide
 
-Date: 2026-08-17 · Revised 2026-08-18 after a clean-install run found the step order, `cas cloud team`, and `cas update --user` claims wrong · Verified against: Cassy v2.72.0 (released 2026-08-17), `cas` CLI help and measured command behaviour on a live install · Audience: a new Petra Stella team member with an Apple Silicon Mac and terminal comfort.
+Date: 2026-08-17 · Revised 2026-08-20 for the supported macOS release installer and documented team-membership flow · Audience: a new Petra Stella team member with an Apple Silicon Mac and terminal comfort.
 
-**Time: about 15 minutes**, none of it compiling. This uses the published release binary, not a source build. (The older `docs/onboarding/macbook-from-zero.md` is the source-build path for people hacking on Cassy itself; it predates current releases — see Known gaps.)
+**Time: about 15 minutes**, none of it compiling. This uses the published release binary, not a source build. The [MacBook from zero guide](macbook-from-zero.md) has the same binary fast path plus the contributor source-build path.
 
 ---
 
@@ -28,22 +28,20 @@ Steps 1 and 2 are safe to paste twice: each `~/.zprofile` line is appended only 
 
 ## 2. Install the Cassy binary
 
-> **Heads-up (gap #469):** the documented one-liner installer (`cas-install.sh`) currently refuses macOS even though macOS builds ship with every release. Until that fix lands, download the release asset directly:
-
 ```bash
-mkdir -p ~/.local/bin && cd "$(mktemp -d)"
-curl -fsSL -o cas.tar.gz \
-  https://github.com/Richards-LLC/cassy/releases/latest/download/cas-aarch64-apple-darwin.tar.gz
-tar -xzf cas.tar.gz
-mv cas ~/.local/bin/cas && chmod +x ~/.local/bin/cas
-xattr -d com.apple.quarantine ~/.local/bin/cas 2>/dev/null || true  # Gatekeeper
-grep -qxF 'export PATH=$HOME/.local/bin:$PATH' ~/.zprofile 2>/dev/null \
-  || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zprofile
-export PATH=$HOME/.local/bin:$PATH   # this shell; ~/.zprofile covers new ones
-cas --version                        # expect: cas 2.72.0 (or newer)
+curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 ```
 
-The block used to end with `exec zsh -l`, which replaced the shell mid-paste so the lines after it never ran. `export PATH=…` does the same job for the current shell and lets the rest of the block finish. New terminals pick the PATH up from `~/.zprofile`.
+The installer prints a PATH fix if `~/.local/bin` is absent from your shell.
+Apply it for this shell, then confirm the installed release:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cas --version
+```
+
+It also clears the downloaded binary's `com.apple.quarantine` attribute, so no
+manual Gatekeeper command is necessary.
 
 ## 3. One-time Cassy setup
 
@@ -115,6 +113,17 @@ Since v2.72.0 sync is also honest: it prints a summary of any task-status change
 - **Pulling the team pool:** happens automatically with sync; `cas cloud team-memories` forces an immediate incremental pull for the current project (`--full` re-pulls everything, `--dry-run` previews).
 - Memories are project-scoped by the project's canonical slug, which auto-derives from the git remote — so `cas init` in a shared repo is all it takes for your context to line up with the team's.
 
+### Adding a new team member
+
+`cas cloud team` selects an existing membership; it cannot invite or grant one.
+Before a new teammate starts setup, a current Petra Stella Cloud team
+administrator must add the teammate's Cassy Cloud account email to the team.
+After that, the teammate runs `cas login --token <their-personal-api-key>` and,
+inside an initialized shared project, `cas cloud team show`. If they belong to
+multiple teams, they select this one with `cas cloud team set
+<team-slug-or-uuid>` and run `cas cloud sync`. If `team show` reports no team,
+the administrator should recheck the account email and membership.
+
 ## 7. Per project
 
 Run this from inside the project, never from your home directory — `cas init` scaffolds `.cas/`, `CLAUDE.md`, `.gitignore`, `.mcp.json` and `scripts/` into whatever directory you are standing in. (After v2.72.0 it refuses to do that in `$HOME` and tells you to `cd` first; on 2.72.0 itself it does it silently.)
@@ -140,12 +149,6 @@ Then start working: bare `cas` launches the factory TUI with defaults.
 - Hub unreachable from hub.petrastella.io → `cas hub service status`; confirm Tailscale is connected; re-pair if the Commander shows "Machine needs pairing".
 - Anything else → `cas doctor` first, then ask in #cas-internal.
 
-## Known gaps (filed 2026-08-17)
-
-- **[#469](https://github.com/Richards-LLC/cassy/issues/469)** `cas-install.sh` rejects macOS — the reason this guide hand-downloads the release asset. When fixed, step 2 collapses to one curl|bash line.
-- **[#470](https://github.com/Richards-LLC/cassy/issues/470)** the older from-zero doc is source-build-only with stale claims about release channels; this guide supersedes it for non-contributors.
-- **[#471](https://github.com/Richards-LLC/cassy/issues/471)** there is no CLI or documented flow for the *admin* side of team invites — a Petra Stella admin must invite your account in the Cassy Cloud web UI before `cas cloud team show` will show the team.
-
 ---
 
-Provenance: commands and flags verified against `cas 2.71.0/2.72.0` `--help` output and `cas config` defaults on the machine `soundwave-linux` (2026-08-17); release asset names and checksums from the published v2.72.0 GitHub release; memory-sharing semantics from the Cassy memory MCP contract and `cas memory`/`cas cloud team-memories` CLI. The 2026-08-18 revision additionally measured each step's real behaviour outside and inside a project (`cas login --token`, `cas whoami`, `cas cloud team show`, `cas cloud status`, `cas doctor`, `cas init`) and read `sync_user_builtins` in `cas-cli/src/cli/update.rs` for the `--user` claim.
+Provenance: current release assets include `cas-aarch64-apple-darwin.tar.gz`; the installer and its macOS flow are covered by `scripts/test-cas-install.sh`. Team selection is verified against the `cas cloud team` CLI contract: it resolves cached memberships but does not expose an invite mutation.

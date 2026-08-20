@@ -175,7 +175,7 @@ Knowledge stays local-first: the SQLite metadata and markdown bodies are the sou
 ## Quick Start
 
 ```bash
-# Install (Linux x86_64)
+# Install (Linux x86_64 or macOS Apple Silicon)
 curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
 
 # Initialize in your project — writes .mcp.json, .claude/settings.json hooks,
@@ -202,7 +202,14 @@ Installs the latest release binary to `~/.local/bin/cas`. Override with `CAS_INS
 
 ### macOS (Apple Silicon)
 
-The installer script is Linux-only today. Releases publish a macOS ARM64 tarball — grab `cas-aarch64-apple-darwin.tar.gz` from [Releases](https://github.com/Richards-LLC/cassy/releases) and drop `cas` on your `PATH`, or build from source. A full from-zero Mac walkthrough lives in [docs/onboarding/macbook-from-zero.md](docs/onboarding/macbook-from-zero.md).
+```bash
+curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
+```
+
+The installer downloads the release asset for Apple Silicon and clears its
+macOS quarantine attribute after installation. Intel Macs do not have a
+published release asset; build from source instead. A full from-zero Mac
+walkthrough lives in [docs/onboarding/macbook-from-zero.md](docs/onboarding/macbook-from-zero.md).
 
 ### Build from source
 

@@ -218,6 +218,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
 	cd .. && ./scripts/test-check-release-host.sh
+	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh
 
 # Type check

@@ -1,14 +1,67 @@
 # MacBook from zero to Cassy
 
-End-to-end setup for installing Cassy on a Mac **from `Richards-LLC/cassy`**, built from source. Assumes you are comfortable with a terminal but have never installed Cassy or Claude Code before.
+End-to-end setup for installing Cassy on a Mac. Most people should use the
+published Apple Silicon release below; the source-build path remains for Cassy
+contributors.
 
-> **What this is not.** This guide does not use the legacy public `install.sh` or Homebrew paths, which distributed **v1.0** (2026-03-12) and **v0.2.1** respectively — months behind the development tip at the time. It intentionally builds from the current source repository instead.
-
-> **Hard requirement:** Apple Silicon Mac (M1 / M2 / M3 / M4). The build itself works on Intel Mac, but the vendored Ghostty terminal renderer and several profiling paths are tested only on `aarch64-apple-darwin`. If you're on Intel, expect to debug.
+> **Release requirement:** Apple Silicon Mac (M1 / M2 / M3 / M4). Cassy publishes
+> `aarch64-apple-darwin` release assets, not Intel macOS assets. Intel Mac users
+> must use the contributor build path and should expect to debug its less-tested
+> renderer and profiling paths.
 
 ---
 
-## What you'll end up with
+## Fast path — install the published binary (about 5 minutes)
+
+On an Apple Silicon Mac, this is the normal installation path. It downloads the
+current GitHub Release, installs `cas` at `~/.local/bin/cas`, and clears the
+macOS quarantine attribute so Gatekeeper does not block the first run.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Richards-LLC/cassy/main/scripts/cas-install.sh | bash
+
+# The installer prints a PATH fix if needed. For this shell, if it did:
+export PATH="$HOME/.local/bin:$PATH"
+cas --version
+```
+
+Initialize a project and verify it before configuring any integrations:
+
+```bash
+cd /path/to/your/repo
+cas init
+cas doctor
+```
+
+For Cassy Cloud, sign in once per machine, then confirm team scope from inside
+the initialized project:
+
+```bash
+cas login --token <YOUR-PERSONAL-API-KEY>
+cas cloud team show
+cas cloud sync
+```
+
+### Add a teammate to Cassy Cloud
+
+There is no `cas cloud team invite` command because the Cloud membership API is
+administrator-owned. The working flow is:
+
+1. The teammate gives their Cassy Cloud account email to a current team
+   administrator.
+2. The administrator adds that account to the team in Petra Stella Cloud. This
+   authorization step must happen before the teammate can use team data.
+3. The teammate runs `cas login --token <their-personal-api-key>` and, from an
+   initialized shared project, runs `cas cloud team show`. If membership was
+   just changed, logging in again refreshes the cached memberships.
+4. If there is more than one team, the teammate selects the shared team with
+   `cas cloud team set <team-slug-or-uuid>`, then runs `cas cloud sync`.
+
+`cas cloud team` only selects from the account's existing memberships; it never
+creates or grants a membership. If step 3 still reports no team, the
+administrator needs to confirm that the account email and team are correct.
+
+## Contributor path — build from source
 
 - `cas` binary built from your fork at `~/.local/bin/cas`
 - Claude Code installed and configured to talk to `cas` over MCP

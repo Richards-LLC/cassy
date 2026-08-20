@@ -25,6 +25,11 @@ fi
 docs_only=true
 for file in "${files[@]}"; do
     case "$file" in
+        # `cas-cli/src` contains Rust compilation inputs beyond `.rs`: builtin
+        # guides, integration templates, and parser fixtures are embedded with
+        # `include_str!`/`include_bytes!`. Keep this directory fail-closed
+        # regardless of the file extension.
+        cas-cli/src/*) docs_only=false; break ;;
         docs/*|*.md) ;;
         *) docs_only=false; break ;;
     esac

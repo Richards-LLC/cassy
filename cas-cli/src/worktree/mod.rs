@@ -34,11 +34,14 @@ pub mod salvage;
 pub mod sweep;
 pub mod target_lock;
 
-pub use external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
+pub use external_symlinks::{
+    DanglingNodeModulesSymlink, ExternalSymlink, scan_dangling_node_modules_symlinks,
+    scan_external_symlinks_into, scan_project_node_modules_symlinks_into,
+};
 pub use git::{GitError, GitOperations};
 pub(crate) use manager::WorktreeError;
 pub use manager::{
     CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorktreeConfig,
     WorktreeManager, WorktreeResult, node_modules_setup_instruction, symlink_project_config,
 };
-pub use salvage::{salvage, SalvageError, SalvageOutcome, SkipReason};
+pub use salvage::{SalvageError, SalvageOutcome, SkipReason, salvage};

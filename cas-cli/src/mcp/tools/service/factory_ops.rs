@@ -3907,6 +3907,12 @@ impl CasService {
         // cas-b7dd (GH #88): processes still alive inside a worktree with no
         // live owner, plus registered servers whose session is gone.
         let orphan_processes = scan_orphan_processes(&self.inner.cas_root, &live_workers);
+        // GH #529: a pnpm virtual-store link can survive after its worktree
+        // does not. Surface that false-green condition in the regular factory
+        // report instead of relying on a later JS test runner to notice it.
+        let primary_checkout = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root);
+        let dangling_node_modules =
+            crate::worktree::scan_dangling_node_modules_symlinks(primary_checkout);
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
@@ -3926,6 +3932,21 @@ impl CasService {
             orphan_processes.servers.len(),
             orphan_processes.reapable_count(),
         ));
+        if !dangling_node_modules.is_empty() {
+            out.push_str(
+                "\nDangling primary-checkout node_modules symlinks (JS install is broken):\n",
+            );
+            for link in &dangling_node_modules {
+                out.push_str(&format!(
+                    "  - {} -> {}\n",
+                    link.link.display(),
+                    link.target.display(),
+                ));
+            }
+            out.push_str(
+                "  Remediation: run the repository's locked package-manager install from the primary checkout before relying on JS/TS tests.\n",
+            );
+        }
         out.push_str(&orphan_processes.render());
         out.push_str(&artifact_report.render());
 

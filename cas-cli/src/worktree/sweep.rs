@@ -18,7 +18,11 @@ use std::process::Command;
 use anyhow::Result;
 use tracing::{debug, warn};
 
-use crate::worktree::salvage::{self, SalvageOutcome};
+use crate::worktree::{
+    ExternalSymlink,
+    salvage::{self, SalvageOutcome},
+    scan_project_node_modules_symlinks_into,
+};
 
 pub mod opportunistic;
 
@@ -40,22 +44,36 @@ pub enum Disposition {
     /// Clean + merged → removed.
     Removed,
     /// Dirty; `--salvage-dirty` was set → salvage patch written then removed.
-    SalvagedAndRemoved { patch_path: PathBuf },
+    SalvagedAndRemoved {
+        patch_path: PathBuf,
+    },
     /// Dirty; `--salvage-dirty` was NOT set → skipped on disk.
-    SkippedDirty { modified_files: usize },
+    SkippedDirty {
+        modified_files: usize,
+    },
     /// Branch has commits not merged to the parent branch → skipped.
-    SkippedUnmerged { unmerged_commits: usize },
+    SkippedUnmerged {
+        unmerged_commits: usize,
+    },
     /// Dirty AND unmerged → skipped (reports both).
     SkippedDirtyUnmerged {
         modified_files: usize,
         unmerged_commits: usize,
+    },
+    /// A live symlink outside the worktree resolves into it. Removing the
+    /// worktree would convert a repairable package-manager mislink into a
+    /// broken checkout, so the operator must repair/reinstall first.
+    SkippedExternalSymlinks {
+        links: Vec<ExternalSymlink>,
     },
     /// Dry-run preview of what would happen without the flag.
     WouldRemove,
     WouldSalvageAndRemove,
     /// Worktree path vanished or is otherwise unreadable (reaped by another
     /// process mid-scan, permission error, etc.).
-    Error { reason: String },
+    Error {
+        reason: String,
+    },
 }
 
 impl Disposition {
@@ -65,6 +83,7 @@ impl Disposition {
             Disposition::SkippedDirty { .. }
                 | Disposition::SkippedUnmerged { .. }
                 | Disposition::SkippedDirtyUnmerged { .. }
+                | Disposition::SkippedExternalSymlinks { .. }
         )
     }
 
@@ -98,10 +117,16 @@ pub struct RepoSweepReport {
 
 impl RepoSweepReport {
     pub fn removed_count(&self) -> usize {
-        self.worktrees.iter().filter(|w| w.disposition.is_removed()).count()
+        self.worktrees
+            .iter()
+            .filter(|w| w.disposition.is_removed())
+            .count()
     }
     pub fn skipped_count(&self) -> usize {
-        self.worktrees.iter().filter(|w| w.disposition.is_skip()).count()
+        self.worktrees
+            .iter()
+            .filter(|w| w.disposition.is_skip())
+            .count()
     }
     pub fn bytes_reclaimed(&self) -> u64 {
         self.worktrees.iter().map(|w| w.bytes_reclaimed).sum()
@@ -145,10 +170,7 @@ pub fn sweep_one_repo(repo_root: &Path, opts: SweepOptions) -> RepoSweepReport {
     let entries = match std::fs::read_dir(&wt_root) {
         Ok(e) => e,
         Err(e) => {
-            report.repo_error = Some(format!(
-                "cannot read {}: {e}",
-                wt_root.display()
-            ));
+            report.repo_error = Some(format!("cannot read {}: {e}", wt_root.display()));
             return report;
         }
     };
@@ -307,6 +329,11 @@ fn sweep_one_worktree(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown");
+            let links = scan_project_node_modules_symlinks_into(worktree_path, repo_root);
+            if !links.is_empty() {
+                rec.disposition = Disposition::SkippedExternalSymlinks { links };
+                return rec;
+            }
             match salvage::salvage(worktree_path, repo_root, worker) {
                 Ok(Some(SalvageOutcome { patch_path, .. })) => {
                     let size = dir_size(worktree_path);
@@ -340,6 +367,11 @@ fn sweep_one_worktree(
             }
         }
         (false, false) => {
+            let links = scan_project_node_modules_symlinks_into(worktree_path, repo_root);
+            if !links.is_empty() {
+                rec.disposition = Disposition::SkippedExternalSymlinks { links };
+                return rec;
+            }
             if opts.dry_run {
                 rec.disposition = Disposition::WouldRemove;
                 return rec;
@@ -364,7 +396,9 @@ fn uncommitted_count(worktree_path: &Path) -> std::io::Result<usize> {
         .current_dir(worktree_path)
         .output()?;
     if !out.status.success() {
-        return Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).to_string()));
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()

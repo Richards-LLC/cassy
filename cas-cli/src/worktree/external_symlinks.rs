@@ -71,8 +71,82 @@ pub fn scan_external_symlinks_into(worktree_path: &Path) -> Vec<ExternalSymlink>
     let mut found = Vec::new();
     let mut budget = MAX_SCAN_ENTRIES;
     for (root, max_depth) in roots {
-        scan_dir(&root, 0, max_depth, &worktree_canon, &mut found, &mut budget);
+        scan_dir(
+            &root,
+            0,
+            max_depth,
+            &worktree_canon,
+            &mut found,
+            &mut budget,
+        );
     }
+    found
+}
+
+/// Scan the primary checkout's dependency tree for live links into a worker
+/// worktree. pnpm's default virtual store is per-project, so its ordinary
+/// install path does not cross-link worktrees. This guard instead protects the
+/// non-default `virtualStoreDir`/global-store configuration or a manual
+/// relink that makes package entries resolve through a disposable worktree.
+/// Unlike the `$HOME` scan above, this root is deliberately JS-only: a
+/// repository without a root `package.json` is untouched.
+///
+/// This is a guard, not a repair. A package-manager reinstall is the only
+/// reliable way to reconstruct its chosen virtual-store layout; removing the
+/// worktree first turns that recoverable mistake into a silent broken install.
+pub fn scan_project_node_modules_symlinks_into(
+    worktree_path: &Path,
+    project_root: &Path,
+) -> Vec<ExternalSymlink> {
+    if !project_root.join("package.json").is_file() {
+        return Vec::new();
+    }
+    let Ok(worktree_canon) = worktree_path.canonicalize() else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    let mut budget = MAX_SCAN_ENTRIES;
+    scan_dir(
+        &project_root.join("node_modules"),
+        0,
+        MAX_SCAN_DEPTH,
+        &worktree_canon,
+        &mut found,
+        &mut budget,
+    );
+    found
+}
+
+/// A dangling link in the primary checkout's JavaScript dependency tree.
+/// `target` is the resolved lexical destination (which intentionally need not
+/// exist) so remediation can name the deleted worktree rather than merely the
+/// link itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DanglingNodeModulesSymlink {
+    pub link: PathBuf,
+    pub target: PathBuf,
+}
+
+/// Find broken symlinks beneath a primary checkout's `node_modules` tree.
+///
+/// The scan is bounded and skips non-JS repositories. It is intentionally a
+/// report-only detector: `pnpm install --frozen-lockfile` (or the repository's
+/// chosen package-manager equivalent) owns repair of its virtual store.
+pub fn scan_dangling_node_modules_symlinks(project_root: &Path) -> Vec<DanglingNodeModulesSymlink> {
+    if !project_root.join("package.json").is_file() {
+        return Vec::new();
+    }
+
+    let mut found = Vec::new();
+    let mut budget = MAX_SCAN_ENTRIES;
+    scan_dangling_dir(
+        &project_root.join("node_modules"),
+        0,
+        MAX_SCAN_DEPTH,
+        &mut found,
+        &mut budget,
+    );
     found
 }
 
@@ -122,6 +196,49 @@ fn scan_dir(
 
         if meta.is_dir() && depth < max_depth {
             scan_dir(&path, depth + 1, max_depth, worktree_canon, found, budget);
+        }
+    }
+}
+
+fn scan_dangling_dir(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    found: &mut Vec<DanglingNodeModulesSymlink>,
+    budget: &mut usize,
+) {
+    if *budget == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            if path.canonicalize().is_err() {
+                let target = std::fs::read_link(&path)
+                    .map(|target| {
+                        if target.is_absolute() {
+                            target
+                        } else {
+                            path.parent().unwrap_or(dir).join(target)
+                        }
+                    })
+                    .unwrap_or_else(|_| PathBuf::from("<unreadable target>"));
+                found.push(DanglingNodeModulesSymlink { link: path, target });
+            }
+            continue;
+        }
+        if meta.is_dir() && depth < max_depth {
+            scan_dangling_dir(&path, depth + 1, max_depth, found, budget);
         }
     }
 }
@@ -214,7 +331,49 @@ mod tests {
             std::os::unix::fs::symlink(worktree.path().join("gone"), &link).unwrap();
 
             let found = scan_external_symlinks_into(worktree.path());
-            assert!(found.is_empty(), "a dangling link can't reference a live worktree: {found:?}");
+            assert!(
+                found.is_empty(),
+                "a dangling link can't reference a live worktree: {found:?}"
+            );
         });
+    }
+
+    #[test]
+    fn main_checkout_node_modules_link_into_worktree_is_detected() {
+        let project = TempDir::new().unwrap();
+        let worktree = TempDir::new().unwrap();
+        std::fs::write(project.path().join("package.json"), "{}").unwrap();
+        let target = worktree
+            .path()
+            .join("node_modules/.pnpm/pkg@1/node_modules/pkg");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = project.path().join("node_modules/pkg");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let found = scan_project_node_modules_symlinks_into(worktree.path(), project.path());
+        assert_eq!(found.len(), 1, "found: {found:?}");
+        assert_eq!(found[0].link, link);
+    }
+
+    #[test]
+    fn dangling_node_modules_link_is_reported_but_non_js_project_is_ignored() {
+        let project = TempDir::new().unwrap();
+        let link = project.path().join("node_modules/pkg");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/deleted/worktree/node_modules/pkg", &link).unwrap();
+
+        assert!(scan_dangling_node_modules_symlinks(project.path()).is_empty());
+        std::fs::write(project.path().join("package.json"), "{}").unwrap();
+        let found = scan_dangling_node_modules_symlinks(project.path());
+        assert_eq!(found.len(), 1, "found: {found:?}");
+        assert_eq!(found[0].link, link);
+        assert!(
+            found[0]
+                .target
+                .ends_with("deleted/worktree/node_modules/pkg")
+        );
     }
 }

@@ -97,6 +97,41 @@ fn reclaims_old_clean_worktree() {
     });
 }
 
+/// GH #529: the TTL-driven GC has a separate deletion path from the manual
+/// sweep. A live pnpm-style primary-checkout link into the aged worktree must
+/// block this path too, otherwise GC creates broken imports long after the
+/// linking mistake.
+#[cfg(unix)]
+#[test]
+fn preserves_old_worktree_linked_from_primary_node_modules() {
+    use std::os::unix::fs::symlink;
+
+    TestEnvGuard::run_with_temp_home(|home| {
+        ensure_host_schema().unwrap();
+        let repo = bootstrap_repo(home, "repo");
+        fs::write(repo.join("package.json"), "{}").unwrap();
+        let wt = add_worktree_aged(&repo, "pnpm-link", Duration::from_secs(48 * 3600));
+        let package = wt.join("node_modules/.pnpm/pkg@1/node_modules/pkg");
+        fs::create_dir_all(&package).unwrap();
+        let link = repo.join("node_modules/pkg");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&package, &link).unwrap();
+        register(&repo);
+
+        let summary = run_forced(&ttl_zero()).unwrap();
+        let outcome = &summary.per_repo[0].entries[0].1;
+        match outcome {
+            OpportunisticOutcome::InboundSymlinksBlocked { links } => {
+                assert_eq!(links.len(), 1, "links: {links:?}");
+                assert_eq!(links[0].link, link);
+            }
+            other => panic!("expected inbound-link refusal, got {other:?}"),
+        }
+        assert!(wt.exists(), "worktree must survive the refusal");
+        assert!(link.exists(), "dependency link must remain live");
+    });
+}
+
 #[test]
 fn salvages_old_dirty_worktree() {
     TestEnvGuard::run_with_temp_home(|home| {
@@ -109,7 +144,10 @@ fn salvages_old_dirty_worktree() {
         let s = run_forced(&ttl_zero()).unwrap();
         assert_eq!(s.salvaged, 1);
         assert_eq!(s.reclaimed, 0);
-        assert!(!wt.exists(), "dirty old worktree must be removed after salvage");
+        assert!(
+            !wt.exists(),
+            "dirty old worktree must be removed after salvage"
+        );
         let salvage_dir = repo.join(".cas/salvage");
         let patches: Vec<_> = fs::read_dir(&salvage_dir)
             .unwrap()
@@ -209,7 +247,10 @@ fn cross_repo_iteration_continues_on_failure() {
 
         let s = run_forced(&ttl_zero()).unwrap();
         assert_eq!(s.repos_visited, 2);
-        assert_eq!(s.reclaimed, 1, "healthy repo swept despite unhealthy sibling");
+        assert_eq!(
+            s.reclaimed, 1,
+            "healthy repo swept despite unhealthy sibling"
+        );
         assert!(!wt_a.exists());
         let unhealthy_rec = s
             .per_repo

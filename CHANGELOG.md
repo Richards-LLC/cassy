@@ -7,13 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-08-20
+
+### Changed
+- **A tagged release now publishes in about two minutes instead of fifteen.** The release tree is final the moment the version-bump PR lands, so both platform archives are built then, and tagging adopts those prebuilt artifacts instead of starting a cold cross-platform build on the tag's critical path. The Linux lane builds on the self-hosted runner. A tag with no usable prebuild still builds at tag time, so the slow path remains a working fallback rather than a failure.
+
+### Fixed
+- **The 3.4.0 notes below now describe what actually shipped.** Two entries overstated the release: the macOS install entry claimed shell-rc PATH wiring that is not in the installer, and the skills entry read as twelve new skills when eight new skill directories landed. Both are corrected in place below rather than left to mislead anyone reading the release history.
+
 ## [3.4.0] - 2026-08-20
 
 ### Added
-- **Twelve new built-in skills ship with every harness.** The Matt Pocock skill collection (writing-for-agents, diagnosing-bugs, domain-modeling, and nine more) is imported as `cas-` prefixed builtins for Claude, Codex, and Grok, with harness-correct tool aliases and MIT provenance recorded.
+- **Eight new built-in skills ship with every harness.** The Matt Pocock skill collection is imported for Claude, Codex, and Grok with harness-correct tool aliases and MIT provenance recorded: eight arrive as new `cas-` prefixed skill directories (writing-for-agents, diagnosing-bugs, domain-modeling, codebase-design, tdd, wizard, resolving-merge-conflicts, to-questionnaire) and four more are folded into existing builtins as reference material. (Corrected in 3.4.1; this entry originally said twelve new skills.)
 - **`cas viktor key` completes Viktor setup with one pasted operator key.** The key is validated and stored machine-only with 0600 permissions — never in project state or environment files.
 - **One `cas update` now brings every project fully current.** `cas update --all-projects` discovers every local project and runs the whole chain per project — schema migration, skill sync, cloud team-membership refresh, and cloud sync — with per-project receipts, continuable failures, and dry-run support. The contrib `cas-update` helper delegates to it.
-- **Macs on Apple Silicon install with the standard one-liner.** `cas-install.sh` handles Darwin/aarch64 including Gatekeeper quarantine clearing, an Intel-Mac gate with a plain-language stop, and PATH wiring via `.zshenv` so non-interactive MCP spawns find the binary.
+- **Macs on Apple Silicon install with the standard one-liner.** `cas-install.sh` handles Darwin/aarch64 including Gatekeeper quarantine clearing and an Intel-Mac gate with a plain-language stop. When the install directory is not on `PATH` it prints the `export PATH=...` line to add; it does not edit any shell startup file. (Corrected in 3.4.1; this entry originally claimed `.zshenv` PATH wiring, which did not ship.)
 - **Ambient recall now reads tool traffic and explains itself.** Trigger terms come from tool results and MCP queries (bounded and redacted), a strong-signal floor overrides the conversational precision gate, and every injection or silence carries a source-attributed decision trace.
 - **Dropped work announces itself.** Merge-queue ejections and worker delivery stalls push durable, episode-keyed relays to the supervisor and worker instead of leaving tasks waiting silently.
 

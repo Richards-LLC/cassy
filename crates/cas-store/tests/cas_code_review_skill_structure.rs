@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     for base in [std::env::current_dir().ok(), std::env::current_exe().ok()].into_iter().flatten() {
-        if let Some(root) = base.ancestors().find(|path| path.join("Cargo.toml").is_file()) {
+        if let Some(root) = base.ancestors().find(|path| {
+            std::fs::read_to_string(path.join("Cargo.toml"))
+                .is_ok_and(|manifest| manifest.contains("[workspace]"))
+        }) {
             return root.to_path_buf();
         }
     }

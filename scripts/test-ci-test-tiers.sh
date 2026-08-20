@@ -18,6 +18,8 @@ watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
 runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
 stale_queue_watchdog="$repo_root/.github/workflows/stale-queued-run-watchdog.yml"
 stale_queue_script="$repo_root/scripts/cancel-stale-non-merge-group-queued-runs.sh"
+watchdog_policy="$repo_root/scripts/watchdog-policy.sh"
+watchdog_behavior_test="$repo_root/scripts/test-watchdog-scripts.sh"
 
 pass=0
 fail=0
@@ -158,18 +160,23 @@ require_text "$pilot_doc" 'CARGO_CACHE_RUSTC_INFO=0' 'pilot documents Cargo rust
 
 runner_unit_text="$(<"$runner_unit")"
 require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
+require_text "$runner_unit_text" 'Environment=SCCACHE_IDLE_TIMEOUT=0' 'runner keeps its private sccache server alive between merge-queue jobs'
 
 if [[ -x "$watchdog_script" ]]; then
     watchdog_text="$(<"$watchdog")"
     watchdog_script_text="$(<"$watchdog_script")"
     require_text "$watchdog_text" "cron: '*/5 * * * *'" 'merge-queue watchdog runs at GitHub’s five-minute floor'
     require_text "$watchdog_text" 'actions: write' 'merge-queue watchdog may cancel an orphaned run'
-    require_text "$watchdog_text" "CASSY_MERGE_GROUP_HANG_SECONDS: '1200'" 'watchdog pins a 20-minute 2x-p95 threshold'
+    require_text "$watchdog_text" 'run: ./scripts/cancel-stale-merge-group-runs.sh' 'merge-queue watchdog invokes its cancellation script'
+    require_text "$watchdog_text" 'GITHUB_REPOSITORY: ${{ github.repository }}' 'merge-queue watchdog passes its explicit repository'
+    require_text "$watchdog_text" "CASSY_WATCHDOG_DRY_RUN: 'false'" 'merge-queue watchdog disables dry-run in scheduled execution'
     require_text "$watchdog_script_text" 'event=merge_group&status=in_progress' 'watchdog inspects in-progress merge-group runs'
     require_text "$watchdog_script_text" 'event=merge_group&status=queued' 'watchdog also reclaims queued pre-claim starvation'
     require_text "$watchdog_script_text" "printf '%s\\n%s\\n'" 'watchdog combines in-progress and queued API responses'
-    require_text "$watchdog_script_text" '.run_started_at // .created_at' 'watchdog measures queued starvation from queue creation'
-    require_text "$watchdog_script_text" 'actions/runs/$run_id/cancel' 'watchdog cancels stale runs by id'
+    require_text "$watchdog_script_text" 'Fast Validation — suite archive build' 'watchdog scopes merge-group cancellation to the archive job'
+    require_text "$watchdog_script_text" '.name == $name' 'watchdog scopes merge-group cancellation to CI workflow jobs'
+    require_text "$watchdog_script_text" 'current_job_status' 'watchdog rechecks archive job state before cancellation'
+    require_text "$(<"$watchdog_policy")" 'actions/runs/$run_id/cancel' 'watchdog cancels stale runs by id'
     require_text "$watchdog_script_text" 'age_seconds > hang_seconds' 'watchdog does not cancel at or below threshold'
 else
     printf 'FAIL merge-queue watchdog script is executable\n'
@@ -652,12 +659,14 @@ if [[ -x "$stale_queue_script" ]]; then
     stale_queue_script_text="$(<"$stale_queue_script")"
     require_text "$stale_watchdog_text" "cron: '*/5 * * * *'" 'stale queued-run watchdog uses GitHub’s five-minute floor'
     require_text "$stale_watchdog_text" 'actions: write' 'stale queued-run watchdog may cancel a stranded run'
-    require_text "$stale_watchdog_text" "CASSY_NON_MERGE_GROUP_QUEUE_SECONDS: '1200'" 'stale queued-run watchdog pins a 20-minute threshold'
+    require_text "$stale_watchdog_text" 'run: ./scripts/cancel-stale-non-merge-group-queued-runs.sh' 'stale queued-run watchdog invokes its cancellation script'
+    require_text "$stale_watchdog_text" 'GITHUB_REPOSITORY: ${{ github.repository }}' 'stale queued-run watchdog passes its explicit repository'
+    require_text "$stale_watchdog_text" "CASSY_WATCHDOG_DRY_RUN: 'false'" 'stale queued-run watchdog disables dry-run in scheduled execution'
     require_text "$stale_queue_script_text" 'actions/runs?status=queued' 'stale queued-run watchdog reads queued runs of every event'
     require_text "$stale_queue_script_text" '[[ "$event" != merge_group ]]' 'stale queued-run watchdog excludes cas-065a merge-group scope'
     require_text "$stale_queue_script_text" "gh api \"repos/\$repository/actions/runs/\$run_id\" --jq '.status'" 'stale queued-run watchdog rechecks status before cancellation'
     require_text "$stale_queue_script_text" 'age_seconds > queue_seconds' 'stale queued-run watchdog preserves runs at or below its threshold'
-    require_text "$stale_queue_script_text" 'actions/runs/$run_id/cancel' 'stale queued-run watchdog cancels by run id'
+    require_text "$(<"$watchdog_policy")" 'actions/runs/$run_id/cancel' 'stale queued-run watchdog cancels by id'
 
     stale_tmp="$(mktemp -d)"
     mkdir -p "$stale_tmp/bin"
@@ -683,6 +692,7 @@ else
     printf 'unexpected fake gh invocation: %s\n' "$*" >&2
     exit 2
 fi
+
 EOF
     chmod +x "$stale_tmp/bin/gh"
     stale_output="$stale_tmp/output"
@@ -701,6 +711,23 @@ EOF
     rm -rf "$stale_tmp"
 else
     printf 'FAIL stale queued-run watchdog script is executable\n'
+    fail=$((fail + 1))
+fi
+
+if [[ -x "$watchdog_policy" && -x "$watchdog_behavior_test" ]]; then
+    require_text "$(<"$watchdog_policy")" 'CASSY_WATCHDOG_STALE_SECONDS:-1200' 'both watchdogs share one threshold authority'
+    require_absent "$watchdog_text$stale_watchdog_text" '1200' 'watchdog workflows do not duplicate the threshold'
+    require_absent "$(<"$watchdog_policy")$watchdog_text$stale_watchdog_text" 'CASSY_MERGE_GROUP_HANG_SECONDS' 'legacy merge-group threshold has no second authority'
+    require_absent "$(<"$watchdog_policy")$watchdog_text$stale_watchdog_text" 'CASSY_NON_MERGE_GROUP_QUEUE_SECONDS' 'legacy queued threshold has no second authority'
+    if "$watchdog_behavior_test"; then
+        printf 'ok   watchdog behavior fixtures pass for both scripts\n'
+        pass=$((pass + 1))
+    else
+        printf 'FAIL watchdog behavior fixtures pass for both scripts\n'
+        fail=$((fail + 1))
+    fi
+else
+    printf 'FAIL watchdog policy and behavior fixtures are executable\n'
     fail=$((fail + 1))
 fi
 

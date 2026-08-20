@@ -19,6 +19,6 @@ jobs:
       - name: Cancel runs exceeding twice the suite-build p95
         env:
           GH_TOKEN: ${{ github.token }}
-          # Successful suite builds measured 288–576s; 20m exceeds 2x p95.
-          CASSY_MERGE_GROUP_HANG_SECONDS: '1200'
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          CASSY_WATCHDOG_DRY_RUN: 'false'
         run: ./scripts/cancel-stale-merge-group-runs.sh

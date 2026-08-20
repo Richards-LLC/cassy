@@ -42,7 +42,9 @@ These exist because Cassy agents have a documented tendency to dump multiple que
 
 ## Frontier-round mechanics
 
-Adapted from mattpocock/skills `grilling`, MIT © 2026 Matt Pocock. Treat unresolved choices as a design tree. Ask every currently settled frontier question in one numbered round, give a recommended answer, and defer dependent questions. Research facts with tools; reserve the user’s turns for decisions. Recompute until no material branch remains implicit.
+Adapted from mattpocock/skills `grilling`, MIT © 2026 Matt Pocock. Model unresolved decisions as a design tree. In each round, ask the full **frontier**: only questions whose prerequisites are already settled. Number every frontier question and include a recommended answer; do not ask a dependent question in the same round.
+
+Facts are agent work: inspect the codebase, Cassy context, tools, or delegated research before asking the user. Decisions are user work. Each answer reshapes the tree and reveals the next frontier; finish only when no material branch remains silently assumed.
 
 ## Output Guidance
 

@@ -10,7 +10,7 @@ Hunt for defects that make the changed code *wrong* — logic errors, broken exe
 
 ## In scope
 
-Adapted from mattpocock/skills `code-review`, MIT © 2026 Matt Pocock. Add **spec fidelity** to every review: compare changed behavior against task/spec acceptance criteria and identify an observable requirement the diff omits, reverses, or silently widens. Do not invent requirements; cite the exact task, spec, or documented contract.
+Adapted from mattpocock/skills `code-review`, MIT © 2026 Matt Pocock. Add **spec fidelity** to every review: compare changed behavior against the task/spec acceptance criteria and identify an observable requirement the diff omits, reverses, or silently widens. Do not invent requirements; cite the exact task, spec, or documented contract.
 
 - Off-by-one and boundary errors (loop bounds, slice indices, inclusive/exclusive ranges, empty-collection edge cases).
 - Null / `None` / `undefined` / `Option::None` propagation that reaches an unchecked dereference.

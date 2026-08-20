@@ -335,7 +335,7 @@ pub async fn run_daemon_after_fork(
         teams,
         notify_rx,
         dead_workers: std::collections::HashSet::new(),
-        reported_unavailable_workers: std::collections::HashSet::new(),
+        reported_unavailable_workers: std::collections::HashMap::new(),
         last_usage_limit_scan: None,
         cancelled_spawns: std::collections::HashSet::new(),
         last_idle_message_times: HashMap::new(),

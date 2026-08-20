@@ -71,8 +71,12 @@ shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
 
 **Standing operator CI-load policy:** factory/* pushes run only Scoped
 Validation; protected-default PRs run only the required Fast Validation and
-macOS Check lanes. The non-required full/heavy tier (Clippy, Test Compile
-Guard, Build Benchmark, and both Panic Isolation profiles) belongs only to
+macOS Check lanes. The merge queue validates its synthetic tree once; when its
+successful tree is pushed unchanged to main, the main-push Fast Validation and
+macOS lanes reuse that receipt and name the validating run. Direct pushes,
+bypass merges, receipt lookup failures, and changed trees still run those
+lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
+Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
 `scripts/test-ci-test-tiers.sh`, rather than relying on convention.

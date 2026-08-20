@@ -96,6 +96,36 @@ jobs:
             echo 'mode=hosted' >> "$GITHUB_OUTPUT"
           fi
 
+  # A merge queue validates a synthetic tree, then GitHub pushes that exact
+  # tree to main. Re-running the Fast Validation family on that push wastes
+  # hosted capacity without adding coverage. This gate is fail-closed: direct
+  # pushes, bypass merges, lookup failures, and any different tree run the
+  # complete suite normally.
+  fast-validation-main-push-dedupe:
+    name: Fast Validation — main-push tree dedupe
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-latest
+    outputs:
+      run-fast-validation: ${{ steps.tree-dedupe.outputs.run-fast-validation }}
+      validating-run-id: ${{ steps.tree-dedupe.outputs.validating-run-id }}
+      prior-run-url: ${{ steps.tree-dedupe.outputs.prior-run-url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - id: tree-dedupe
+        name: Check for successful merge-queue validation of this tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-ci-merge-queue-validation.sh
+
   # Factory pushes and PRs that do not target the protected default branch get
   # one cheap target-scoped lane. Main PRs use the full required lanes below;
   # do not spend an additional runner on this redundant subset there.
@@ -230,11 +260,13 @@ jobs:
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: fast-validation-main-push-dedupe
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -305,7 +337,8 @@ jobs:
   fast-validation-suite-build:
     name: Fast Validation — suite archive build
     if: >-
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
@@ -315,7 +348,7 @@ jobs:
       && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
-    needs: fast-validation-runner-route
+    needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
@@ -455,12 +488,13 @@ jobs:
   fast-validation-suite-shards:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
-    needs: fast-validation-suite-build
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [fast-validation-suite-build, fast-validation-main-push-dedupe]
     strategy:
       fail-fast: false
       matrix:
@@ -516,12 +550,13 @@ jobs:
   fast-validation-suite:
     name: Fast Validation — full suite
     if: >-
-      always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      always() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: fast-validation-suite-shards
+    needs: [fast-validation-suite-shards, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -546,11 +581,13 @@ jobs:
   fast-validation-docs:
     name: Fast Validation — doctests
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: fast-validation-main-push-dedupe
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -608,6 +645,7 @@ jobs:
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
     needs:
+      - fast-validation-main-push-dedupe
       - fast-validation-preflight
       - fast-validation-suite
       - fast-validation-docs
@@ -633,7 +671,9 @@ jobs:
           echo "Fast Validation is deferred to the canonical merge-queue tree."
 
       - name: Require every Fast Validation lane to pass
-        if: github.event_name != 'pull_request'
+        if: >-
+          github.event_name != 'pull_request'
+          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
           SUITE: ${{ needs.fast-validation-suite.result }}
@@ -642,6 +682,45 @@ jobs:
           test "$PREFLIGHT" = success
           test "$SUITE" = success
           test "$DOCS" = success
+
+      - name: Report successful merge-queue validation reused by this main push
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
+        run: |
+          echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }} already validated this exact tree: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}"
+          echo "Fast Validation reused successful merge-queue run [${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}](${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }})." >> "$GITHUB_STEP_SUMMARY"
+
+      # This artifact is published only after the merge-group Fast Validation
+      # fan-in passes. A later main push may reuse it only after the workflow
+      # itself concludes successfully, so it cannot turn a partial queue run
+      # into a false green shortcut.
+      - uses: actions/checkout@v4
+        if: github.event_name == 'merge_group'
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - id: merge-queue-tree
+        name: Compute successful merge-queue tree receipt
+        if: github.event_name == 'merge_group'
+        run: |
+          tree_hash="$(git rev-parse 'HEAD^{tree}')"
+          echo "hash=$tree_hash" >> "$GITHUB_OUTPUT"
+          printf 'tree=%s\ncommit=%s\nrun=%s/actions/runs/%s\n' \
+            "$tree_hash" "${{ github.sha }}" \
+            "${{ github.server_url }}/${{ github.repository }}" "${{ github.run_id }}" \
+            > merge-queue-validation-receipt.txt
+
+      - name: Publish successful merge-queue tree receipt
+        if: github.event_name == 'merge_group'
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-queue-validated-tree-${{ steps.merge-queue-tree.outputs.hash }}
+          path: merge-queue-validation-receipt.txt
+          retention-days: 30
+          if-no-files-found: error
 
   # Advisory lint, split out of Fast Validation so a lint pass never sits on the
   # critical path of the job that answers "do the tests pass?" (GH #142).
@@ -708,13 +787,16 @@ jobs:
   macos-check:
     name: macOS Check
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      always() && (github.event_name == 'pull_request'
+      || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true')
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: fast-validation-main-push-dedupe
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
     # push events) and cancel superseded runs. Keying on the head SHA put every
     # push in its own group, so a rapid second push left the first run's full

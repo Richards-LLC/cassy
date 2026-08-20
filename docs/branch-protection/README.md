@@ -10,8 +10,8 @@ The two required contexts are deliberately minimal, but neither removes coverage
 
 | Required context | Unique protection | Steady-state wall | Verdict |
 | --- | --- | --- | --- |
-| `Fast Validation` | Its rollup rejects a failed preflight, the full-suite fan-in (and every exhaustive nextest shard), **and doctests**. | Dominated by the suite archive build/shards; target is under five minutes after the self-hosted archive path. | Required. |
-| `macOS Check` | Darwin/Xcode/SDK compile surface that Linux does not exercise. | Measured about 4.2–4.3 minutes. | Required; no equivalent scoped macOS proof exists yet. |
+| `Fast Validation` | On the canonical `merge_group` tree, its rollup rejects a failed preflight, the full-suite fan-in (and every exhaustive nextest shard), **and doctests**. | Queue receipt 32367317728: 3m38 from merge-group start to the rollup. | Required; a main PR reports a cheap hosted admission context, then the merged tree receives the exhaustive check. |
+| `macOS Check` | On the canonical `merge_group` tree, Darwin/Xcode/SDK compilation that Linux does not exercise. | Queue receipt 32367317728: 4m43 before removing the duplicate no-MCP-proxy check. | Required; a main PR reports a cheap hosted admission context, then the merged tree receives the full Darwin compile. |
 
 `Fast Validation — doctests` is intentionally not a separate required context: the required
 `Fast Validation` fan-in already requires `fast-validation-docs` to succeed. Its coverage is
@@ -39,8 +39,11 @@ Verify afterwards, and roll back if needed:
 default branch if it is ever renamed. Substitute `"refs/heads/main"` if you prefer it pinned.
 
 The CI workflow must include the `merge_group` trigger and make both required contexts report
-on the synthetic merged-tree SHA. Without that trigger, merge-queue entries wait until their
-status-check timeout because no required context can report.
+on the synthetic merged-tree SHA. Main PR contexts are deliberately cheap hosted admissions:
+they let auto-merge enter the queue without compiling the PR head and the eventual merged tree
+back-to-back. The full Fast Validation and Darwin checks run only on the canonical merged tree
+before it lands. Without the `merge_group` trigger, entries wait until their status-check timeout
+because no required context can report.
 
 ### Validation performed
 
@@ -62,8 +65,8 @@ Live API application remains operator-visible and must be receipted.
 
 | Job (`name:`) | Triggers | Required? |
 | --- | --- | --- |
-| `Fast Validation` | `pull_request`, `merge_group`, push to `main`, schedule, dispatch | **Yes — the rollup, not the lower full-suite fan-in** |
-| `macOS Check` | `pull_request`, `merge_group`, push to `main`, schedule, dispatch | **Yes** — see below |
+| `Fast Validation` | Cheap hosted admission on `pull_request`; exhaustive rollup on `merge_group`, push to `main`, schedule, dispatch | **Yes — the rollup, not the lower full-suite fan-in** |
+| `macOS Check` | Cheap hosted admission on `pull_request`; Darwin compile on `merge_group`, push to `main`, schedule, dispatch | **Yes** — see below |
 | `Release-Profile & Build Guard (compile-only, no test suite)` | `if:` limits it to `schedule` or `refs/heads/main` | **No — must not be required** |
 
 **Release-Profile & Build Guard is excluded, and this is the load-bearing exclusion.** Its
@@ -73,10 +76,10 @@ permanently unmergeable. Its own renamed title already says it is compile-only w
 suite, so it is not the suite-executing gate anyway.
 
 **macOS Check is included**, per the standing "Linux-green ≠ merge-ready" discipline — macOS
-breakage has shipped before precisely because Linux was green. Two costs to accept knowingly:
-it runs on `macos-26` with a pinned Xcode 26.3 `DEVELOPER_DIR`, so runner or SDK trouble
-becomes a merge blocker, and macOS minutes are billed at a higher multiplier. If that proves
-too costly, drop it from the JSON — but drop it deliberately, not by forgetting it.
+breakage has shipped before precisely because Linux was green. Its full compile runs on
+`macos-26` with a pinned Xcode 26.3 `DEVELOPER_DIR` against the canonical merge-queue tree, so
+runner or SDK trouble remains a merge blocker. The PR admission job is hosted and intentionally
+does not claim Darwin coverage; it exists only to admit the PR to the tree that does provide it.
 
 ## 4. Factory flow
 

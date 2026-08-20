@@ -125,7 +125,10 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
     let task_store = open_task_store(&cas_dir).unwrap();
 
     let created = core
-        .cas_task_create(Parameters(create_req("light task — solo close", Some("light"))))
+        .cas_task_create(Parameters(create_req(
+            "light task — solo close",
+            Some("light"),
+        )))
         .await
         .expect("task_create should succeed");
     let id = extract_task_id(&extract_text(created))
@@ -144,7 +147,8 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -250,7 +254,10 @@ async fn test_deep_depth_solo_close_still_arms_verification_jail() {
     let task_store = open_task_store(&cas_dir).unwrap();
 
     let created = core
-        .cas_task_create(Parameters(create_req("deep task — solo close", Some("deep"))))
+        .cas_task_create(Parameters(create_req(
+            "deep task — solo close",
+            Some("deep"),
+        )))
         .await
         .expect("task_create should succeed");
     let id = extract_task_id(&extract_text(created))
@@ -269,7 +276,8 @@ async fn test_deep_depth_solo_close_still_arms_verification_jail() {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -306,7 +314,10 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
     let task_store = open_task_store(&cas_dir).unwrap();
 
     let created = core
-        .cas_task_create(Parameters(create_req("unset-depth task — solo close", None)))
+        .cas_task_create(Parameters(create_req(
+            "unset-depth task — solo close",
+            None,
+        )))
         .await
         .expect("task_create should succeed");
     let id = extract_task_id(&extract_text(created))
@@ -325,7 +336,8 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -533,7 +545,8 @@ async fn create_started_and_closed_light_task(core: &CasCore, title: &str) -> St
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -560,7 +573,7 @@ async fn test_worker_cannot_reopen_closed_task() {
     let result = core
         .cas_task_reopen(Parameters(TaskReopenRequest {
             id: id.clone(),
-            reason: None,
+            reason: Some("worker requests a fresh review cycle".to_string()),
         }))
         .await;
 
@@ -657,7 +670,11 @@ async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
         std::env::remove_var("CAS_AGENT_ROLE");
     }
 
-    assert!(error.message.contains("non-empty reason"), "{}", error.message);
+    assert!(
+        error.message.contains("non-empty reason"),
+        "{}",
+        error.message
+    );
     assert_eq!(task_store.get(&id).unwrap().status, TaskStatus::Closed);
 }
 
@@ -674,7 +691,10 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
     let task_store = open_task_store(&cas_dir).unwrap();
 
     let created = core
-        .cas_task_create(Parameters(create_req("blocked reopen with reason", Some("light"))))
+        .cas_task_create(Parameters(create_req(
+            "blocked reopen with reason",
+            Some("light"),
+        )))
         .await
         .expect("task_create should succeed");
     let id = extract_task_id(&extract_text(created))
@@ -698,7 +718,10 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
         let text = extract_text(
             core.cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
-                reason: Some("Withdrew the iOS background-auto-start AC — Apple does not permit it.".to_string()),
+                reason: Some(
+                    "Withdrew the iOS background-auto-start AC — Apple does not permit it."
+                        .to_string(),
+                ),
             }))
             .await
             .expect("supervisor reopen of a blocked task should succeed"),
@@ -720,7 +743,8 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
         "reopen must transition a Blocked task to Open"
     );
     assert!(
-        task.notes.contains("Withdrew the iOS background-auto-start AC"),
+        task.notes
+            .contains("Withdrew the iOS background-auto-start AC"),
         "reopen reason must be captured in the audit trail (task.notes): {:?}",
         task.notes
     );
@@ -802,7 +826,7 @@ async fn test_cd24_reopen_rejects_other_statuses_and_names_alternative() {
         let r = core
             .cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
-                reason: None,
+                reason: Some("exercise nonterminal reopen rejection".to_string()),
             }))
             .await;
         unsafe {
@@ -856,7 +880,10 @@ async fn test_start_on_closed_message_is_worker_appropriate() {
                 "worker-facing start-on-closed message should direct to the supervisor: {msg}"
             );
         }
-        Ok(ok) => panic!("expected start-on-closed to fail, got: {}", extract_text(ok)),
+        Ok(ok) => panic!(
+            "expected start-on-closed to fail, got: {}",
+            extract_text(ok)
+        ),
     }
 }
 
@@ -894,6 +921,9 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
                 "supervisor-facing message should not use the worker refusal wording: {msg}"
             );
         }
-        Ok(ok) => panic!("expected start-on-closed to fail, got: {}", extract_text(ok)),
+        Ok(ok) => panic!(
+            "expected start-on-closed to fail, got: {}",
+            extract_text(ok)
+        ),
     }
 }

@@ -5,7 +5,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn cas_cmd(root: &std::path::Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = root.join(".test-home");
     let xdg = root.join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();
@@ -114,7 +114,7 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
     // Now run `cas init` interactively (no --yes / --json / --force) with
     // stdin closed. This is the exact call shape that hung in production:
     // `cas init 2>&1 | tail -5` where stdin is the tty but gets EOF'd.
-    let bin = assert_cmd::cargo::cargo_bin!("cas");
+    let bin = cas::test_paths::cas_binary();
     let started = Instant::now();
     let mut child = StdCommand::new(bin)
         .current_dir(&temp)

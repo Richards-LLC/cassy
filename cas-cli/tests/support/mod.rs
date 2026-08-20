@@ -11,6 +11,16 @@ use std::process::Command;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// Resolve an archive-consumable `cas` binary without trusting a producer path
+/// baked into an integration-test executable.
+pub fn cas_binary() -> PathBuf {
+    cas::test_paths::binary("cas", option_env!("CARGO_BIN_EXE_cas").map(PathBuf::from))
+}
+
+pub fn workspace_root() -> PathBuf {
+    cas::test_paths::workspace_root()
+}
+
 /// A temporary CAS project whose subprocesses cannot inherit a live CAS store.
 ///
 /// Use [`CasSandbox::command`] for every `cas` subprocess. It removes all
@@ -53,7 +63,7 @@ impl CasSandbox {
             xdg_config_home,
         };
 
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+        let mut cmd = Command::new(cas_binary());
         if let Some(host_home) = host_home {
             cmd.env("HOME", host_home);
         }
@@ -80,7 +90,7 @@ impl CasSandbox {
 
     /// Build a `cas` command anchored to this sandbox.
     pub fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+        let mut cmd = Command::new(cas_binary());
         self.configure_command(&mut cmd);
         cmd
     }

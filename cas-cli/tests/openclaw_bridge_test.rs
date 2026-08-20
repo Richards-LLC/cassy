@@ -11,7 +11,7 @@ mod test_env_guard;
 use test_env_guard::TestEnvGuard;
 
 fn cas_cmd(project_dir: &std::path::Path, home: &std::path::Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     cmd.current_dir(project_dir);
     cmd.env("HOME", home);
     cmd.env_remove("CAS_ROOT");

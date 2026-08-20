@@ -19,12 +19,17 @@ use std::time::Duration;
 
 /// Path to the test_tui binary (built with --features test-tui)
 fn test_tui_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_test_tui") {
-        return path;
+    for key in ["CAS_TEST_BIN_TEST_TUI", "NEXTEST_BIN_EXE_TEST_TUI", "CARGO_BIN_EXE_test_tui"] {
+        if let Some(path) = std::env::var_os(key).filter(|path| std::path::Path::new(path).is_file()) {
+            return path.to_string_lossy().into_owned();
+        }
     }
-
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    format!("{}/../../target/debug/test_tui", manifest_dir)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(path) = exe.ancestors().map(|dir| dir.join("test_tui")).find(|path| path.is_file()) {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    format!("{}/../../target/debug/test_tui", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Helper to wait for TUI to fully render

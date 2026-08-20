@@ -380,10 +380,7 @@ fn capture_refuses_a_query_set_with_coverage_gaps() {
 
 #[test]
 fn the_committed_query_set_parses_and_covers_all_types_and_tiers() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("fixtures/retrieval-parity/queryset.toml");
+    let path = cas::test_paths::workspace_root().join("fixtures/retrieval-parity/queryset.toml");
     let set = QuerySet::load(&path).expect("the committed query set must be valid");
 
     // Every EntryType and MemoryTier variant, not just the ones this machine

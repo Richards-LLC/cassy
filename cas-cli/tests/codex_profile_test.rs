@@ -14,7 +14,7 @@ use std::process::{Command as StdCommand, Stdio};
 use tempfile::TempDir;
 
 fn cas_cmd(home: &std::path::Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let path = std::env::join_paths(std::iter::once(home.join("bin")).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))
@@ -40,7 +40,11 @@ fn home_with_profiles() -> TempDir {
     ] {
         std::fs::create_dir_all(home.path().join(dir)).unwrap();
     }
-    std::fs::write(home.path().join(".codex/config.toml"), "model = \"gpt-5\"\n").unwrap();
+    std::fs::write(
+        home.path().join(".codex/config.toml"),
+        "model = \"gpt-5\"\n",
+    )
+    .unwrap();
     std::fs::write(home.path().join(".codex/auth.json"), "{\"main\":true}").unwrap();
 
     let bin = home.path().join("bin");
@@ -162,7 +166,9 @@ fn non_tty_missing_named_profile_warns_then_reaches_factory() {
         .args(["codex", "support"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(".codex-support does not exist yet"))
+        .stderr(predicate::str::contains(
+            ".codex-support does not exist yet",
+        ))
         .stderr(predicate::str::contains("Using Codex account home:"))
         .stderr(predicate::str::contains(
             "Factory mode requires an interactive terminal",
@@ -221,10 +227,7 @@ fn bare_interactive_single_profile_shows_picker_and_keeps_main_default() {
             "\"$CAS_CODEX_PROFILE_TEST_BIN\" codex --bare",
             "/dev/null",
         ])
-        .env(
-            "CAS_CODEX_PROFILE_TEST_BIN",
-            assert_cmd::cargo::cargo_bin!("cas"),
-        )
+        .env("CAS_CODEX_PROFILE_TEST_BIN", cas::test_paths::cas_binary())
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".xdg"))
         .env("PATH", path)

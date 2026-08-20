@@ -32,11 +32,9 @@ use crate::fixtures::new_cas_instance;
 // =============================================================================
 
 fn cas_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_cas") {
-        return path;
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    format!("{}/../target/debug/cas", manifest_dir)
+    cas::test_paths::binary("cas", option_env!("CARGO_BIN_EXE_cas").map(Into::into))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn wait_for_screen_text(

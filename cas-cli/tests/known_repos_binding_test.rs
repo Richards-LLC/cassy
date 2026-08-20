@@ -21,7 +21,7 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 fn cas(home: &Path) -> assert_cmd::Command {
-    let mut command = assert_cmd::cargo::cargo_bin_cmd!("cas");
+    let mut command = assert_cmd::Command::new(cas::test_paths::cas_binary());
     command
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

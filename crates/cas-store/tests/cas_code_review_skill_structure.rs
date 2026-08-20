@@ -14,13 +14,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR here is `<workspace>/crates/cas-store` — two
-    // parents up is the workspace root, where the SKILL.md mirrors
-    // this test checks actually live.
+    for base in [std::env::current_dir().ok(), std::env::current_exe().ok()].into_iter().flatten() {
+        if let Some(root) = base.ancestors().find(|path| {
+            std::fs::read_to_string(path.join("Cargo.toml"))
+                .is_ok_and(|manifest| manifest.contains("[workspace]"))
+        }) {
+            return root.to_path_buf();
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
+        .parent().and_then(|p| p.parent()).expect("workspace root")
         .to_path_buf()
 }
 

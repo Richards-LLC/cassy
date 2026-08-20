@@ -23,9 +23,7 @@ pub struct HookTestEnv {
 pub const HOOK_TEST_SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 fn cas_bin() -> PathBuf {
-    env::var_os("CARGO_BIN_EXE_cas")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cas"))
+    cas::test_paths::binary("cas", None)
 }
 
 impl HookTestEnv {

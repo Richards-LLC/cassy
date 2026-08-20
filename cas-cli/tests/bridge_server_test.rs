@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 #[test]
 fn bridge_server_smoke() {
     let home = tempfile::tempdir().expect("isolated bridge HOME");
-    let cas_bin = assert_cmd::cargo::cargo_bin!("cas");
+    let cas_bin = cas::test_paths::cas_binary();
     let mut child = std::process::Command::new(cas_bin)
         .args(["bridge", "serve", "--json", "--port", "0"])
         .env("HOME", home.path())

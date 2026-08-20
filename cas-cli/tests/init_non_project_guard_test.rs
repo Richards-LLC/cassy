@@ -15,7 +15,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn cas_init_in(home: &Path, cwd: &Path, extra: &[&str]) -> std::process::Output {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     cmd.current_dir(cwd)
         .env("HOME", home)
         .env_remove("CAS_ROOT")

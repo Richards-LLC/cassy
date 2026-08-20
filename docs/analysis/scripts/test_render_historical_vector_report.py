@@ -11,6 +11,7 @@ from pathlib import Path
 
 ANALYSIS_DIR = Path(__file__).parents[1]
 SOURCE = ANALYSIS_DIR / "2026-08-17-historical-operational-vector-index.md"
+CHECKED_HTML = ANALYSIS_DIR / "2026-08-17-historical-operational-vector-index.html"
 RENDERER = Path(__file__).with_name("render_historical_vector_report.py")
 
 
@@ -56,6 +57,11 @@ class HistoricalVectorReportTests(unittest.TestCase):
         for cell in expected_cells:
             self.assertIn(cell, rendered)
         self.assertIn("3,032,566,716 eligible bytes / 4 bytes per token", rendered)
+
+        checked_html = CHECKED_HTML.read_text()
+        for cell in expected_cells:
+            self.assertIn(cell, checked_html)
+        self.assertIn("3,032,566,716 eligible bytes / 4 bytes per token", checked_html)
 
 
 if __name__ == "__main__":

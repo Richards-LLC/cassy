@@ -404,6 +404,7 @@ require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the
 require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'
 require_text "$suite_shards" 'test -x target/debug/cas' 'shards verify the restored CLI runner remains executable'
 require_text "$suite_shards" '--workspace-remap "$GITHUB_WORKSPACE"' 'shards remap the self-hosted archive workspace to their hosted checkout'
+require_text "$suite_shards" 'INSTA_WORKSPACE_ROOT: ${{ github.workspace }}' 'shards pin insta snapshot lookup to their hosted checkout'
 require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
 require_text "$suite" 'needs: fast-validation-suite-shards' 'required full-suite context fans in every shard'
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'

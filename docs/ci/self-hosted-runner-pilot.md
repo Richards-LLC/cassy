@@ -43,6 +43,23 @@ three compiling jobs start together, and the third waits for at most one warm
 job instead of two. macOS remains an independent floor and is reported rather
 than hidden in the acceptance receipts.
 
+### Second-listener receipts
+
+The first two-slot queue run proves that the Linux serialization was removed,
+but it does not meet the whole-queue six-minute target. The new slot was cold
+for preflight on this first use. Linux Fast Validation completed 4m02s after
+the run was created; macOS remained the critical path and brought the exact
+run total to 7m54s.
+
+| Receipt | Total | Archive | Preflight | Doctests | Fast Validation | macOS Check |
+| --- | ---: | --- | --- | --- | ---: | ---: |
+| [PR #580](https://github.com/Richards-LLC/cassy/actions/runs/32419668295) | 7m54s | 1m38s, `soundwave-cas-ci` | 3m36s, `soundwave-cas-ci-2` (cold) | 1m21s, `soundwave-cas-ci` | 4m02s | 7m37s |
+
+The two self-hosted listeners accepted archive and preflight concurrently at
+21:29:50Z. Doctests started on slot 1 one second after archive completed, so
+no job used a shared Cargo target lock. The remaining measured floor was the
+hosted macOS job, not the trusted Linux route.
+
 ## Trust boundary
 
 `Richards-LLC/cassy` is public. GitHub warns that persistent self-hosted runners

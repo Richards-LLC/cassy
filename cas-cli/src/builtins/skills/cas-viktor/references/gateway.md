@@ -3,9 +3,12 @@
 ## Provisioning
 
 `cas init` and `cas update --sync` install the `cas-viktor` skill for Claude, Codex, and Grok. Run
-`cas viktor` to see the credential-safe local status. It reports only whether
-`VIKTOR_API_KEY` is present, never its value. On the managed host, load the canonical
-credential file into the `cas serve` process; do not copy it to project configuration.
+`cas viktor` to see the credential-safe local status. When it reports no credential, get an
+operator-issued key and enter it once with `cas viktor key`, then paste it when prompted. The command
+performs one non-spending MCP handshake and tool-list validation before saving the key only in
+the machine-scoped Cassy configuration. An invalid or expired key is not saved and the command
+does not retry it. Start a new CAS session after a successful entry. `cas viktor` reports only
+whether a credential is present, never its value; do not copy a key to project configuration.
 
 At `cas serve` startup without `.cas/proxy.toml`, Cassy refreshes the user-scoped `viktor`
 upstream at `https://api.viktor.com/mcp` with the credential reference `env:VIKTOR_API_KEY`.
@@ -19,9 +22,10 @@ the required Viktor server and routes; the managed user configuration never wide
 
 If `server:viktor` discovery reports that the upstream is absent, do not treat that as an empty
 tool catalog or retry a run-starting call. Run `cas viktor` for the credential-safe connection
-state and durable pending run IDs. On daemon restart, Cassy alerts a live session supervisor when
-such watches cannot be polled; restore `VIKTOR_API_KEY` to `cas serve` and let the existing watch
-resume rather than starting a replacement run.
+state and durable pending run IDs. If no credential is configured, use the one-time
+`cas viktor key` setup command; otherwise investigate the reported upstream
+state. On daemon restart, Cassy alerts a live session supervisor when such watches cannot be
+polled; let the existing watch resume rather than starting a replacement run.
 
 ## Conversation flow
 

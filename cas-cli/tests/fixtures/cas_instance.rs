@@ -21,7 +21,7 @@ pub struct CasInstance {
 impl CasInstance {
     /// Create a new CAS command configured for this instance
     pub fn cas_cmd(&self) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+        let mut cmd = Command::new(cas::test_paths::cas_binary());
         configure_isolated_home(&mut cmd, self.temp_dir.path());
         cmd.current_dir(self.temp_dir.path());
         cmd.env("CAS_DIR", &self.cas_dir);
@@ -249,7 +249,7 @@ pub fn new_cas_instance() -> CasInstance {
     let cas_dir = temp_dir.path().join(".cas");
 
     // Initialize CAS (this now runs migrations automatically)
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     configure_isolated_home(&mut cmd, temp_dir.path());
     cmd.current_dir(temp_dir.path());
     // Clear CAS_ROOT to prevent env pollution from parent shell

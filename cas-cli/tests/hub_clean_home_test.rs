@@ -14,7 +14,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn cas_command(home: &Path, path: &OsStr) -> Command {
-    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut command = Command::new(cas::test_paths::cas_binary());
     command
         .env_clear()
         .env("HOME", home)
@@ -24,7 +24,7 @@ fn cas_command(home: &Path, path: &OsStr) -> Command {
 }
 
 fn cas_process_command(home: &Path, path: &OsStr) -> std::process::Command {
-    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut command = std::process::Command::new(cas::test_paths::cas_binary());
     command
         .env_clear()
         .env("HOME", home)

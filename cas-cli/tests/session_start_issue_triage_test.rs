@@ -6,7 +6,7 @@ use assert_cmd::Command;
 use tempfile::TempDir;
 
 fn cas_cmd(project: &TempDir) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = project.path().join(".test-home");
     let xdg = project.path().join(".test-xdg-config");
     fs::create_dir_all(&home).unwrap();

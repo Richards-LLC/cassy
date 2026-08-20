@@ -29,6 +29,14 @@ pub fn crate_root() -> PathBuf {
     workspace_root().join("cas-cli")
 }
 
+/// Finds the `cas` executable supplied alongside an archived test binary.
+///
+/// Unlike `assert_cmd::cargo::cargo_bin!`, this never embeds Cargo's producer
+/// target directory into the consumer test executable.
+pub fn cas_binary() -> PathBuf {
+    binary("cas", None)
+}
+
 /// Finds an executable supplied alongside an archived test binary.
 ///
 /// Explicit test configuration and nextest's runtime variable win. The
@@ -103,7 +111,11 @@ mod tests {
     #[test]
     fn skips_member_manifests_for_the_workspace_root() {
         let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"member\"]\n").unwrap();
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .unwrap();
         let member = temp.path().join("member");
         std::fs::create_dir_all(&member).unwrap();
         std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();

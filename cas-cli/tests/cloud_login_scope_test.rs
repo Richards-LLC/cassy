@@ -75,7 +75,7 @@ fn stop_canned_cloud(endpoint: &str, handle: std::thread::JoinHandle<()>) {
 /// A `cas` invocation confined to `home`: no real `~/.cas`, no ambient
 /// `CAS_ROOT`, and cwd under the caller's control.
 fn cas_command(home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     cmd.current_dir(cwd)
         .env("HOME", home)
         .env("CAS_USER_CLOUD_JSON", home.join(".cas").join("cloud.json"))
@@ -113,9 +113,10 @@ fn token_login_outside_a_project_succeeds_and_serves_every_project() {
         "login must not demand `cas init` when credentials are user-level; stderr: {stderr}"
     );
 
-    let user_config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.join(".cas").join("cloud.json")).unwrap())
-            .unwrap();
+    let user_config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".cas").join("cloud.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         user_config["token"].as_str(),
         Some("test-token"),
@@ -147,9 +148,10 @@ fn token_login_outside_a_project_succeeds_and_serves_every_project() {
         .output()
         .expect("run cas logout");
     assert!(logout.status.success());
-    let after: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.join(".cas").join("cloud.json")).unwrap())
-            .unwrap();
+    let after: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".cas").join("cloud.json")).unwrap(),
+    )
+    .unwrap();
     assert!(
         after["token"].is_null(),
         "logout must clear the user-level credential, got {after}"

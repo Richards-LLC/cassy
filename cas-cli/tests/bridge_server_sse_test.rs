@@ -13,7 +13,7 @@ mod test_env_guard;
 use test_env_guard::TestEnvGuard;
 
 fn cas_bin() -> std::path::PathBuf {
-    assert_cmd::cargo::cargo_bin!("cas").to_path_buf()
+    cas::test_paths::cas_binary()
 }
 
 #[test]

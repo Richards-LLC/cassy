@@ -13,7 +13,7 @@ const NOW: &str = "2026-07-31T12:00:00+00:00";
 const DEADLINE: &str = "2099-01-01T00:00:00+00:00";
 
 fn cas_cmd(dir: &TempDir) -> Command {
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("cas");
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = dir.path().join(".test-home");
     let xdg = dir.path().join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();

@@ -74,8 +74,11 @@ The listener runs as the non-login `cassy-actions` system account under
 toolchain, and sccache live under `/var/lib/cassy-actions`, never under `.cas`
 or the factory worktrees. The unit has no privileges or Docker access, applies
 systemd filesystem/device/kernel hardening, uses `nice=10` and best-effort
-`ionice=7`, and caps Cargo at 12 jobs. One listener and one workflow concurrency
-group enforce host job concurrency 1. The runner uses dedicated sccache port
+`ionice=7`, caps Cargo at 12 jobs, and reserves 2,048 cgroup task slots. This
+does not raise compilation concurrency: it prevents sccache plus 12 parallel
+rustc/linker process trees from exhausting the distro's 512-task service
+default and returning `EAGAIN` while spawning a compiler. One listener and one
+workflow concurrency group enforce host job concurrency 1. The runner uses dedicated sccache port
 4227; the default port belongs to the operator's cache server and must not be
 shared across Unix users. The systemd launch wrapper starts sccache before the
 GitHub listener, outside Runner.Worker's per-step process tracking; starting it
@@ -151,7 +154,8 @@ gh api orgs/Richards-LLC/actions/runner-groups
 gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID/repositories
 gh api orgs/Richards-LLC/actions/runner-groups/GROUP_ID/runners
 systemctl show cassy-actions-runner.service \
-  -p User -p Group -p Nice -p CPUWeight -p IOWeight -p ReadWritePaths
+  -p User -p Group -p Nice -p CPUWeight -p IOWeight -p TasksCurrent -p TasksMax \
+  -p ReadWritePaths
 ```
 
 To demonstrate hosted fallback, stop the service, push a Rust-touched commit on

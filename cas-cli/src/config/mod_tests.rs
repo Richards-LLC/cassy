@@ -131,9 +131,13 @@ fn config_set_supports_staging_keys_and_alias() {
     config
         .set("staging.tmpfs_warning_threshold_bytes", "2048")
         .unwrap();
+    config
+        .set("staging.scratch_root", "/mnt/agent-scratch")
+        .unwrap();
 
     let staging = config.staging.as_ref().expect("staging section");
     assert_eq!(staging.staging_dir.as_deref(), Some("/mnt/large-artifacts"));
+    assert_eq!(staging.scratch_root.as_deref(), Some("/mnt/agent-scratch"));
     assert_eq!(staging.tmpfs_warning_threshold_bytes, 2048);
 
     config.set("staging.staging_dir", "").unwrap();
@@ -142,6 +146,15 @@ fn config_set_supports_staging_keys_and_alias() {
             .staging
             .as_ref()
             .and_then(|staging| staging.staging_dir.as_deref()),
+        None
+    );
+
+    config.set("staging.scratch_root", "").unwrap();
+    assert_eq!(
+        config
+            .staging
+            .as_ref()
+            .and_then(|staging| staging.scratch_root.as_deref()),
         None
     );
 }

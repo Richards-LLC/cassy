@@ -285,6 +285,14 @@ impl Config {
                     Some(value.to_string())
                 };
             }
+            "staging.scratch_root" => {
+                let staging = self.staging.get_or_insert_with(StagingConfig::default);
+                staging.scratch_root = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+            }
             "staging.tmpfs_warning_threshold_bytes" => {
                 let staging = self.staging.get_or_insert_with(StagingConfig::default);
                 staging.tmpfs_warning_threshold_bytes = value

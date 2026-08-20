@@ -287,28 +287,39 @@ pub fn handle_pre_tool_use(
     // instead of calling open_*() directly, reducing ~11 SQLite connections to ~3-4.
     let mut stores = ToolHookStores::new(cas_root);
 
-    // Durable workspace contract (GH #196).  Factory file creation is
+    // Durable workspace contract (GH #196, GH #528). Factory file creation is
     // intentionally narrow: the checked-out worktree, a configured durable
-    // artifacts root, and the harness-provided scratchpad are sanctioned.
+    // artifacts root, an optional configured scratch root, system temp, and
+    // the harness-provided scratchpad are sanctioned.
     // Supervisors may also write the harness's per-project file-memory tree;
     // workers remain restricted to the original roots.
     // A scratchpad may itself be under /tmp, but it is explicitly ephemeral
     // and is rejected later if cited as close evidence.
     if is_factory_agent {
-        let factory = stores.config().factory();
+        let config = stores.config();
+        let factory = config.factory();
+        let scratch_root = config
+            .staging
+            .as_ref()
+            .and_then(|staging| staging.scratch_root.as_deref());
         if let Some(path) = factory_unsanctioned_write_path(
             input,
             &factory.artifacts_root,
+            scratch_root,
             crate::harness_policy::is_supervisor(input),
         ) {
-            let artifacts = crate::config::resolved_factory_artifacts_root(
-                factory.artifacts_root.as_deref(),
-            );
+            let artifacts =
+                crate::config::resolved_factory_artifacts_root(factory.artifacts_root.as_deref());
+            let scratch = scratch_root
+                .map(|root| format!(" or `{root}/...` for ephemeral scratch output"))
+                .unwrap_or_default();
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
-                    "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the worktree, durable artifacts root, or harness scratchpad is blocked: {}. Use your worktree, `{}/<task-id>/` for durable proof, or the harness scratchpad only for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
-                    path.display(), artifacts.display()
+                    "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the worktree, durable artifacts root, configured scratch root, system temp, or harness exceptions is blocked: {}. Use your worktree, `{}/<task-id>/` for durable proof{}; system temp is for tool-managed temporary files only.",
+                    path.display(),
+                    artifacts.display(),
+                    scratch
                 ),
             ));
         }
@@ -1460,6 +1471,7 @@ fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bo
 fn factory_unsanctioned_write_path(
     input: &HookInput,
     configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
     is_supervisor: bool,
 ) -> Option<std::path::PathBuf> {
     let tool = input.tool_name.as_deref()?;
@@ -1479,43 +1491,91 @@ fn factory_unsanctioned_write_path(
     };
 
     raw_paths.into_iter().find_map(|raw_path| {
-        unsanctioned_factory_path(input, configured_artifacts_root, is_supervisor, &raw_path)
+        unsanctioned_factory_path(
+            input,
+            configured_artifacts_root,
+            configured_scratch_root,
+            is_supervisor,
+            &raw_path,
+        )
     })
 }
 
 fn unsanctioned_factory_path(
     input: &HookInput,
     configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
     is_supervisor: bool,
     raw_path: &str,
 ) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let mut sanctioned = vec![std::path::PathBuf::from(&input.cwd)];
-    sanctioned.push(crate::config::resolved_factory_artifacts_root(
-        configured_artifacts_root.as_deref(),
+    let mut sanctioned = vec![lexically_normalize_path(std::path::PathBuf::from(
+        &input.cwd,
+    ))];
+    sanctioned.push(lexically_normalize_path(
+        crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref()),
     ));
+    if let Some(scratch_root) = configured_scratch_root.filter(|root| !root.trim().is_empty()) {
+        sanctioned.push(lexically_normalize_path(std::path::PathBuf::from(
+            scratch_root,
+        )));
+    }
+    // Do not turn a configured scratch root into a requirement for system
+    // tools. `std::env::temp_dir` respects the host's documented temp setup
+    // (`TMPDIR` et al.) and keeps explicit temp-file workflows working. It is
+    // deliberately kept separate: a test or unusual host can locate `$HOME`
+    // under `/tmp`, which must not turn arbitrary home writes into temp files.
+    let system_temp = lexically_normalize_path(std::env::temp_dir());
     for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
         if let Some(value) = std::env::var_os(key) {
-            sanctioned.push(std::path::PathBuf::from(value));
+            sanctioned.push(lexically_normalize_path(std::path::PathBuf::from(value)));
         }
     }
 
-    let path = if let Some(suffix) = raw_path.strip_prefix("~/") {
+    let raw_path = if let Some(suffix) = raw_path.strip_prefix("~/") {
         home.as_ref()?.join(suffix)
     } else if let Some(suffix) = raw_path.strip_prefix("$HOME/") {
         home.as_ref()?.join(suffix)
     } else {
         std::path::PathBuf::from(raw_path)
     };
-    if !path.is_absolute()
-        || is_non_creation_stream_device(&path)
+    let path = if raw_path.is_absolute() {
+        lexically_normalize_path(raw_path)
+    } else {
+        lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(raw_path))
+    };
+    let is_explicitly_sanctioned = sanctioned.iter().any(|root| path.starts_with(root));
+    let is_home_path = home.as_ref().is_some_and(|home| path.starts_with(home));
+    if is_non_creation_stream_device(&path)
         || is_harness_session_scratchpad(&path, &input.session_id)
         || (is_supervisor && is_harness_file_memory_path(&path, home.as_deref()))
-        || sanctioned.iter().any(|root| path.starts_with(root))
+        || is_explicitly_sanctioned
+        || (!is_home_path && path.starts_with(&system_temp))
     {
         return None;
     }
     Some(path)
+}
+
+/// Normalize `.` and `..` without requiring the target to exist. Write
+/// guardrails decide before creation, so `canonicalize` would both fail for
+/// the common case and make a configured root vulnerable to `root/../escape`.
+fn lexically_normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 /// The Claude harness persists its direct file memory per project below
@@ -1632,11 +1692,79 @@ mod workspace_contract_tests {
         ] {
             let input = bash_input(command, cwd.path());
             assert_eq!(
-                factory_unsanctioned_write_path(&input, &None, false),
+                factory_unsanctioned_write_path(&input, &None, None, false),
                 Some(home.path().join(expected)),
                 "write must remain guarded: {command}"
             );
         }
+    }
+
+    #[test]
+    fn configured_scratch_root_allows_its_children_and_denies_escape() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        let input = bash_input("true", cwd.path());
+        let scratch = std::path::PathBuf::from("/var/lib/cas-3bd6-scratch");
+        let scratch_root = scratch.to_string_lossy().to_string();
+        let outside = std::path::PathBuf::from("/var/lib/cas-3bd6-outside/stray.log");
+
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                Some(&scratch_root),
+                false,
+                &scratch.join("logs/build.log").to_string_lossy(),
+            ),
+            None,
+            "configured scratch root must permit nested output"
+        );
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                Some(&scratch_root),
+                false,
+                &scratch.join("../escape.log").to_string_lossy(),
+            ),
+            Some(scratch.parent().unwrap().join("escape.log")),
+            "a lexical parent traversal must not escape the configured root"
+        );
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                Some(&scratch_root),
+                false,
+                &outside.to_string_lossy(),
+            ),
+            Some(outside),
+            "configured scratch enforcement must deny unrelated host paths"
+        );
+    }
+
+    #[test]
+    fn system_temp_and_relative_worktree_writes_remain_sanctioned() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        let input = bash_input("true", cwd.path());
+
+        assert_eq!(
+            unsanctioned_factory_path(&input, &None, None, false, "relative-output.log"),
+            None,
+            "relative outputs resolve inside the current worktree"
+        );
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                None,
+                false,
+                &std::env::temp_dir()
+                    .join("cas-3bd6-tool-temp.log")
+                    .to_string_lossy(),
+            ),
+            None,
+            "system temp is an explicit workspace-contract exception"
+        );
     }
 }
 

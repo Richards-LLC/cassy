@@ -352,6 +352,23 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
     });
 
     registry.register(ConfigMeta {
+        key: "staging.scratch_root",
+        section: "staging",
+        name: "Agent Scratch Root",
+        description: "Configured root for ephemeral agent writes. The PreToolUse workspace guard permits file and directory creation below this root, while writes outside the worktree, durable artifacts root, system temp directory, and explicit harness exceptions are denied.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["staging", "scratch", "workspace", "guardrail", "pretooluse", "agent", "temporary"],
+        use_cases: &[
+            "Keep agent-generated logs and temporary fixtures under one disk-backed root",
+            "Enforce a host-specific scratch location without moving source or durable proof",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "staging.tmpfs_warning_threshold_bytes",
         section: "staging",
         name: "tmpfs Warning Threshold",

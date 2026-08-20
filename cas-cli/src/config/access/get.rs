@@ -80,6 +80,7 @@ impl Config {
             "staging.staging_dir" | "staging.large_artifact_dir" => {
                 Some(staging.staging_dir.unwrap_or_default())
             }
+            "staging.scratch_root" => Some(staging.scratch_root.unwrap_or_default()),
             "staging.tmpfs_warning_threshold_bytes" => {
                 Some(staging.tmpfs_warning_threshold_bytes.to_string())
             }

@@ -13,7 +13,7 @@ metadata:
 
 Actively sharpen a project's shared domain model while designing. This Cassy
 adaptation stores resolved language and decisions in the canonical CAS memory
-and spec surfaces, never in a parallel `CONTEXT.md` or ADR-file convention.
+and spec surfaces, never in a parallel local-file convention.
 
 ## During the session
 
@@ -44,4 +44,4 @@ task when it governs delivery.
 
 Before ending, ensure every resolved term or irreversible decision is either
 durably recorded in Cassy or explicitly left open. Do not create glossary,
-context-map, or ADR files that would compete with CAS memory/spec storage.
+or decision files that would compete with CAS memory/spec storage.

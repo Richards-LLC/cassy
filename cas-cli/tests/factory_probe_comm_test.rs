@@ -9,9 +9,11 @@ fn read_jsonl(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
-#[allow(deprecated)]
 fn cas_cmd() -> Command {
-    Command::cargo_bin("cas").unwrap()
+    Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ))
 }
 
 fn write_jsonl(path: &std::path::Path, values: &[Value]) {

@@ -18,7 +18,10 @@ const C496_SESSION: &str = "c496-0000-test-session-0000-000000000001";
 ///
 /// Factory variables are removed so each test controls its own environment.
 fn cas_cmd(dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("cas").expect("cas binary must be built");
+    let mut cmd = Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ));
     let home = dir.path().join(".test-home");
     let xdg = dir.path().join(".test-xdg-config");
     std::fs::create_dir_all(&home).unwrap();

@@ -127,6 +127,16 @@ gh variable set CASSY_RELEASE_SELF_HOSTED --body disabled   # before box mainten
 Disable it before any maintenance on the runner. Every lane then runs hosted,
 exactly as it did before this work.
 
+One listener serves the `cas-ci-32core` label, so a routed release lane runs
+one job at a time and can queue behind merge-queue validation. Two consequences
+worth knowing before enabling it:
+
+- In the fallback path, `verify` and `build` are designed to run in parallel;
+  routed to the box they serialise. Warm, that is still a few minutes against
+  13-26 minutes cold, but it is not free parallelism.
+- A release cut during heavy merge-queue traffic waits for the box. The hosted
+  fail-safe is one variable away if that ever matters more than the warm cache.
+
 ## Cutting a release on the fast path
 
 1. Merge the version-bump PR to `main`. `Release Prebuild` starts on that push.

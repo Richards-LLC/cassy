@@ -63,7 +63,10 @@ tag="v$version"
 # tags, and a stale local tag must never suppress a real prebuild.
 remote="${RELEASE_REMOTE:-origin}"
 if git ls-remote --tags --exit-code "$remote" "refs/tags/$tag" >/dev/null 2>&1; then
-    not_pending "$tag is already published"
+    # The disarming condition is the TAG existing, not the release object being
+    # published: once the tag is pushed its own workflow owns the artifacts, so
+    # prebuilding for that version can no longer help anything.
+    not_pending "$tag already exists on $remote"
 fi
 
 printf 'pending=true\n'

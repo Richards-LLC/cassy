@@ -142,7 +142,7 @@ pub fn execute(args: &ViktorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             }
         );
         if !report.credential_present {
-            println!("  setup: cas viktor key");
+            println!("  setup: cas viktor key (paste a key from the Viktor operator)");
             println!("  key source: get an operator-issued key from the Viktor operator");
         } else {
             println!("  credential source: {}", report.credential_source);

@@ -1973,6 +1973,12 @@ impl CasCore {
         // to take over must update epic_verification_owner first (or act
         // as the owner). Prevents a mis-routed director completion prompt
         // from racing the owning supervisor on `task close`.
+        // The stranded-branch override can carry a branch verdict for every
+        // child in a large epic. Keep that audit payload out of the close
+        // critical path: the compact closed row is the durable outcome the
+        // caller needs before its MCP deadline, and the full narrative is
+        // appended from a detached task after that row commits.
+        let mut deferred_epic_override_note = None;
         if task.task_type == TaskType::Epic {
             if let Some(ref owner) = task.epic_verification_owner {
                 let caller_id = self.get_agent_id().ok();
@@ -2179,9 +2185,11 @@ impl CasCore {
                                 SupervisorAuthorityError::Store(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: supervisor authority could not be checked ({error})."
                                 ),
-                                SupervisorAuthorityError::NotRegistered { caller_id, error } => format!(
-                                    "EPIC CLOSE OVERRIDE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
-                                ),
+                                SupervisorAuthorityError::NotRegistered { caller_id, error } => {
+                                    format!(
+                                        "EPIC CLOSE OVERRIDE REJECTED: caller `{caller_id}` is not a registered supervisor ({error})."
+                                    )
+                                }
                                 SupervisorAuthorityError::NotLive(caller) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: only a live registered supervisor may use stranded_branch_override. Caller `{}` has role {}.",
                                     caller.name, caller.role
@@ -2189,24 +2197,22 @@ impl CasCore {
                             }));
                         }
                     };
-                    // The waived gate output is stored verbatim: it already
-                    // names every branch and the measured verdict behind it, so
-                    // the note records what was actually true at override time
-                    // rather than only what the supervisor asserted.
-                    append_close_decision_note(
-                        task_store.as_ref(),
-                        &mut task,
-                        &format!(
-                            "decision: supervisor `{caller_name}` (role {caller_role}) overrode \
+                    // The waived gate output is stored verbatim, but not before
+                    // the close commit. A large epic can have dozens of verdicts;
+                    // synchronously copying the resulting multi-kilobyte task
+                    // notes row made the MCP response miss its 55s deadline
+                    // (GH #515). The detached append below is idempotent and runs
+                    // only after the Closed row is durable.
+                    deferred_epic_override_note = Some(format!(
+                        "decision: supervisor `{caller_name}` (role {caller_role}) overrode \
                              the epic stranded-branch gate for `{epic_id}`.\n\
                              Inspection narrative: {narrative}\n\
                              Waived gate output follows verbatim, including every measured \
                              branch verdict:\n{msg}",
-                            caller_name = caller.name,
-                            caller_role = caller.role,
-                            epic_id = req.id,
-                        ),
-                    );
+                        caller_name = caller.name,
+                        caller_role = caller.role,
+                        epic_id = req.id,
+                    ));
                 }
             }
         }
@@ -4337,6 +4343,11 @@ impl CasCore {
             data: None,
         })?;
 
+        let epic_override_note_pending = deferred_epic_override_note.is_some();
+        if let Some(note) = deferred_epic_override_note {
+            append_close_decision_note_detached(task_store.clone(), task.id.clone(), note);
+        }
+
         // Artifacts are validated under this task's configured durable root
         // before they can become receipt evidence. Index every supported text
         // artifact at the same close boundary; a search failure must never
@@ -4693,7 +4704,7 @@ impl CasCore {
             String::new()
         };
 
-        Ok(Self::success(format_close_success_message(
+        let mut receipt = format_close_success_message(
             &req.id,
             &task.title,
             &verification_note,
@@ -4703,7 +4714,13 @@ impl CasCore {
             &epic_close_msg,
             commit_nudge_msg,
             &auto_unblock_msg,
-        )))
+        );
+        if epic_override_note_pending {
+            receipt.push_str(
+                "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
+            );
+        }
+        Ok(Self::success(receipt))
     }
 
     /// Resolve the filesystem path for the **worker's isolated
@@ -9499,6 +9516,56 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
             "failed to persist close decision note"
         );
     }
+}
+
+/// Append a non-critical close audit payload after the terminal task row has
+/// committed. Dropping the request future (for example at the MCP 55s
+/// deadline) must not cancel this work: the caller already has a durable close
+/// outcome and can safely re-query while the note is written.
+fn append_close_decision_note_detached(
+    task_store: std::sync::Arc<dyn cas_store::TaskStore>,
+    task_id: String,
+    note: String,
+) {
+    tokio::spawn(async move {
+        let log_task_id = task_id.clone();
+        // The close transaction can still be releasing SQLite's write lock
+        // when this detached task wakes. Retry the idempotent append rather
+        // than silently dropping the audit narrative on that normal race.
+        for attempt in 1..=3 {
+            let store = task_store.clone();
+            let id = task_id.clone();
+            let note = note.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let mut task = store.get(&id)?;
+                if task.notes.contains(&note) {
+                    return Ok::<(), cas_store::StoreError>(());
+                }
+                let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+                let formatted = format!("[{timestamp}] {note}");
+                task.notes = if task.notes.is_empty() {
+                    formatted
+                } else {
+                    format!("{}\n\n{formatted}", task.notes)
+                };
+                task.updated_at = chrono::Utc::now();
+                store.update(&task).map(|_| ())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) if attempt == 3 => {
+                    tracing::warn!(task_id = %log_task_id, error = %error, "failed to append deferred epic close decision note after retries")
+                }
+                Err(error) if attempt == 3 => {
+                    tracing::warn!(task_id = %log_task_id, error = %error, "deferred epic close decision note task failed after retries")
+                }
+                Ok(Err(error)) => tracing::debug!(task_id = %log_task_id, attempt, error = %error, "retrying deferred epic close decision note"),
+                Err(error) => tracing::debug!(task_id = %log_task_id, attempt, error = %error, "retrying failed deferred epic close decision note task"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25 * attempt)).await;
+        }
+    });
 }
 
 fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) -> String {
@@ -15432,6 +15499,63 @@ mod code_review_gate_tests {
             code_review_findings: None,
             search_manifest: None,
             commit_receipt: None,
+        }
+    }
+
+    /// GH #515: a large epic override must commit its compact close outcome
+    /// without waiting for a note that contains every child verdict. This is
+    /// the isolated persistence half of the incident shape: 31 child rows,
+    /// each with a deliberately large verdict, are rendered as one audit note
+    /// and written only after the caller-facing path has returned.
+    #[tokio::test]
+    async fn large_epic_override_narrative_is_detached_and_lands_durably_gh_515() {
+        let cas_root = tempfile::tempdir().expect("temporary Cassy root");
+        let task_store = crate::store::open_task_store(cas_root.path()).expect("task store");
+        task_store.init().expect("initialize task store");
+
+        let mut epic = Task::new("cas-gh-515".to_string(), "large override epic".to_string());
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::Closed;
+        task_store.add(&epic).expect("add closed epic");
+
+        let verdicts = (0..31)
+            .map(|child| {
+                format!(
+                    "| cas-child-{child:02} | factory/worker-{child:02} | verdict: {} |",
+                    "content evolved after integration; ".repeat(256)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let note = format!(
+            "decision: supervisor `test` overrode the epic stranded-branch gate for `cas-gh-515`.\n\
+             Inspection narrative: compared all 31 branches with their landed target paths.\n\
+             Waived gate output follows verbatim, including every measured branch verdict:\n{verdicts}"
+        );
+        assert!(
+            note.len() > 200_000,
+            "fixture must retain the incident's large-note shape"
+        );
+
+        let started = std::time::Instant::now();
+        append_close_decision_note_detached(task_store.clone(), epic.id.clone(), note.clone());
+        let schedule_elapsed = started.elapsed();
+        assert!(
+            schedule_elapsed < std::time::Duration::from_millis(100),
+            "the committed close path must only schedule the large note, took {schedule_elapsed:?}"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let persisted = task_store.get(&epic.id).expect("read epic");
+            if persisted.notes.contains(&verdicts) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deferred override narrative did not land within the bounded regression window"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 

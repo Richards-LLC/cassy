@@ -53,7 +53,10 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .assert()
         .success();
     let dry_out = String::from_utf8_lossy(&dry.get_output().stdout);
-    assert!(dry_out.contains("2 project(s)"), "output was:\n{dry_out}");
+    assert!(
+        dry_out.contains("2 local Cassy project(s)"),
+        "output was:\n{dry_out}"
+    );
     assert!(dry_out.contains("DRY RUN"), "output was:\n{dry_out}");
     assert!(!missing.exists(), "dry run must not restore deleted skills");
 
@@ -64,6 +67,20 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         .assert()
         .success();
     let synced_out = String::from_utf8_lossy(&synced.get_output().stdout);
-    assert!(synced_out.contains("2 succeeded, 0 failed"), "output was:\n{synced_out}");
-    assert!(missing.is_file(), "native sweep must restore the stale builtin");
+    assert!(
+        synced_out.contains("2 succeeded, 0 failed"),
+        "output was:\n{synced_out}"
+    );
+    assert!(
+        synced_out.contains("membership: skipped: not cloud-linked"),
+        "offline/unlinked team phase must be an advisory skip; output was:\n{synced_out}"
+    );
+    assert!(
+        synced_out.contains("cloud sync: skipped: not cloud-linked"),
+        "offline/unlinked cloud phase must be an advisory skip; output was:\n{synced_out}"
+    );
+    assert!(
+        missing.is_file(),
+        "native sweep must restore the stale builtin"
+    );
 }

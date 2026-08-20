@@ -376,6 +376,25 @@ test_no_process_and_flag_semantics() {
   else fail 'build-only, sync-only, and no-restart have explicit non-overlapping semantics'; fi
 }
 
+test_native_project_refresh_delegation() {
+  local tmp out args
+  tmp="$(new_fixture)"; out="$tmp/out"; args="$tmp/cas-args"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$*" >"$CAS_UPDATE_ARGS_LOG"' >"$tmp/bin/cas"
+  chmod +x "$tmp/bin/cas"
+  if (
+    export HOME="$tmp/home" CAS_INSTALL="$tmp/bin/cas" CAS_PROJECT_ROOTS="$tmp/home"
+    export CAS_UPDATE_ARGS_LOG="$args" CAS_UPDATE_SOURCE_ONLY=1
+    source "$helper"
+    SCAN_ROOTS="$tmp/home"
+    sync_projects
+  ) >"$out" 2>&1 \
+    && [ "$(cat "$args")" = 'update --all-projects' ] \
+    && assert_contains "$out" 'delegating migration, skills, team membership, and cloud sync'; then
+    pass 'sync-only phase delegates the complete project refresh to native cas'
+  else fail 'sync-only phase delegates the complete project refresh to native cas'; fi
+  rm -rf "$tmp"
+}
+
 test_installer() {
   local tmp
   tmp="$(mktemp -d -t cas-update-install.XXXXXX)"
@@ -428,6 +447,7 @@ test_ownership_classification
 test_dry_run_and_opt_out
 test_stale_survivor_is_nonzero
 test_no_process_and_flag_semantics
+test_native_project_refresh_delegation
 test_installer
 test_updater_ancestry_is_protected
 test_main_exit_and_help

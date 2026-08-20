@@ -605,7 +605,7 @@ async fn test_supervisor_can_reopen_closed_task() {
         let text = extract_text(
             core.cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
-                reason: None,
+                reason: Some("post-close regression requires rework".to_string()),
             }))
             .await
             .expect("supervisor reopen should succeed"),
@@ -626,6 +626,39 @@ async fn test_supervisor_can_reopen_closed_task() {
         TaskStatus::Open,
         "supervisor reopen must transition the task back to Open"
     );
+    assert!(task.notes.contains("actor=test-agent"), "{:?}", task.notes);
+    assert!(
+        task.notes
+            .contains("reason=post-close regression requires rework"),
+        "{:?}",
+        task.notes
+    );
+}
+
+#[tokio::test]
+async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let id = create_started_and_closed_light_task(&core, "terminal reopen reason required").await;
+
+    unsafe {
+        std::env::set_var("CAS_AGENT_ROLE", "supervisor");
+    }
+    let error = core
+        .cas_task_reopen(Parameters(TaskReopenRequest {
+            id: id.clone(),
+            reason: Some("   ".to_string()),
+        }))
+        .await
+        .expect_err("terminal reopen without a reason must be rejected");
+    unsafe {
+        std::env::remove_var("CAS_AGENT_ROLE");
+    }
+
+    assert!(error.message.contains("non-empty reason"), "{}", error.message);
+    assert_eq!(task_store.get(&id).unwrap().status, TaskStatus::Closed);
 }
 
 /// cas-cd24 AC1: `reopen` on a Blocked task transitions it to Open and
@@ -721,7 +754,7 @@ async fn test_cd24_closed_reopen_still_clears_closed_at() {
         }
         core.cas_task_reopen(Parameters(TaskReopenRequest {
             id: id.clone(),
-            reason: None,
+            reason: Some("preserve close metadata regression coverage".to_string()),
         }))
         .await
         .expect("supervisor reopen should succeed");

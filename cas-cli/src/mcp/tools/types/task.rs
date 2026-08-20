@@ -297,11 +297,11 @@ pub struct TaskReopenRequest {
     #[schemars(description = "Task ID to reopen")]
     pub id: String,
 
-    /// Reopen reason (cas-cd24)
+    /// Required reopen reason (cas-b4fc)
     #[schemars(
-        description = "Reason for reopening (e.g. why a blocker was withdrawn or a \
-                       closed task needs rework). Recorded on the task's audit \
-                       trail as a note."
+        description = "Required reason for reopening (e.g. why a blocker was withdrawn or a \
+                       closed task needs rework). Recorded with the acting agent on the task's \
+                       audit trail as a note."
     )]
     #[serde(default)]
     pub reason: Option<String>,

@@ -549,6 +549,24 @@ impl CasCore {
             });
         }
         if task.is_terminal() && req.status.is_some() {
+            if task.status == TaskStatus::Closed
+                && req
+                    .blocked_by
+                    .as_deref()
+                    .is_some_and(|blocked_by| !blocked_by.trim().is_empty())
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "TASK UPDATE REJECTED: reopening a closed task {} cannot be combined \
+                         with blocked_by. Use task action=reopen with a non-empty reason so \
+                         supervisor authority and the attributed audit trail are recorded, then \
+                         add blockers with a separate update call.",
+                        task.id
+                    )),
+                    data: None,
+                });
+            }
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
@@ -1621,8 +1639,16 @@ mod status_transition_tests {
 
         let updated = store.get("cas-anchor").unwrap();
         assert_eq!(updated.status, TaskStatus::Open);
-        assert!(updated.notes.contains("actor=supervisor (supervisor-agent)"));
-        assert!(updated.notes.contains("reason=delivery needs a fresh review cycle"));
+        assert!(
+            updated
+                .notes
+                .contains("actor=supervisor (supervisor-agent)")
+        );
+        assert!(
+            updated
+                .notes
+                .contains("reason=delivery needs a fresh review cycle")
+        );
         assert!(
             updated.deliverables.factory_branch_anchor.is_none(),
             "a Closed -> non-Closed transition must invalidate the prior close cycle's anchor"

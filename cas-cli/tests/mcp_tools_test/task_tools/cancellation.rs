@@ -293,6 +293,9 @@ async fn registered_supervisor_can_reopen_cancelled_task_and_clear_outcome() {
     assert!(
         reopened
             .notes
-            .contains("Reopened: actor=test-agent reason=replacement was reverted")
+            .contains("Reopened: actor=test-agent (test-session-")
+            && reopened.notes.contains(") reason=replacement was reverted"),
+        "reopen audit must retain both the registered actor identity and reason: {:?}",
+        reopened.notes
     );
 }

@@ -289,8 +289,8 @@ pub fn handle_pre_tool_use(
 
     // Durable workspace contract (GH #196, GH #528). Factory file creation is
     // intentionally narrow: the checked-out worktree, a configured durable
-    // artifacts root, an optional configured scratch root, system temp, and
-    // the harness-provided scratchpad are sanctioned.
+    // artifacts root, an optional configured scratch root, and the
+    // harness-provided scratchpad are sanctioned.
     // Supervisors may also write the harness's per-project file-memory tree;
     // workers remain restricted to the original roots.
     // A scratchpad may itself be under /tmp, but it is explicitly ephemeral
@@ -316,7 +316,7 @@ pub fn handle_pre_tool_use(
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
-                    "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the worktree, durable artifacts root, configured scratch root, system temp, or harness exceptions is blocked: {}. Use your worktree, `{}/<task-id>/` for durable proof{}; system temp is for tool-managed temporary files only.",
+                    "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
                     path.display(),
                     artifacts.display(),
                     scratch
@@ -1520,12 +1520,6 @@ fn unsanctioned_factory_path(
             scratch_root,
         )));
     }
-    // Do not turn a configured scratch root into a requirement for system
-    // tools. `std::env::temp_dir` respects the host's documented temp setup
-    // (`TMPDIR` et al.) and keeps explicit temp-file workflows working. It is
-    // deliberately kept separate: a test or unusual host can locate `$HOME`
-    // under `/tmp`, which must not turn arbitrary home writes into temp files.
-    let system_temp = lexically_normalize_path(std::env::temp_dir());
     for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
         if let Some(value) = std::env::var_os(key) {
             sanctioned.push(lexically_normalize_path(std::path::PathBuf::from(value)));
@@ -1545,12 +1539,10 @@ fn unsanctioned_factory_path(
         lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(raw_path))
     };
     let is_explicitly_sanctioned = sanctioned.iter().any(|root| path.starts_with(root));
-    let is_home_path = home.as_ref().is_some_and(|home| path.starts_with(home));
     if is_non_creation_stream_device(&path)
         || is_harness_session_scratchpad(&path, &input.session_id)
         || (is_supervisor && is_harness_file_memory_path(&path, home.as_deref()))
         || is_explicitly_sanctioned
-        || (!is_home_path && path.starts_with(&system_temp))
     {
         return None;
     }
@@ -1743,7 +1735,7 @@ mod workspace_contract_tests {
     }
 
     #[test]
-    fn system_temp_and_relative_worktree_writes_remain_sanctioned() {
+    fn relative_worktree_writes_remain_sanctioned_and_bare_tmp_is_denied() {
         let cwd = tempfile::tempdir().expect("worktree");
         let input = bash_input("true", cwd.path());
 
@@ -1762,8 +1754,8 @@ mod workspace_contract_tests {
                     .join("cas-3bd6-tool-temp.log")
                     .to_string_lossy(),
             ),
-            None,
-            "system temp is an explicit workspace-contract exception"
+            Some(std::env::temp_dir().join("cas-3bd6-tool-temp.log")),
+            "bare system temp must remain outside the workspace contract"
         );
     }
 }

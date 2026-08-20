@@ -61,7 +61,7 @@ mod statusline;
 mod sync;
 mod update;
 pub mod update_transaction;
-mod viktor;
+pub(crate) mod viktor;
 
 use std::path::{Path, PathBuf};
 

@@ -332,7 +332,16 @@ async fn run_server_impl() -> anyhow::Result<()> {
             None
         });
         match cfg {
-            Ok(cfg) if !cfg.servers.is_empty() => {
+            Ok(mut cfg) if !cfg.servers.is_empty() => {
+                if std::env::var_os("VIKTOR_API_KEY").is_none() {
+                    match crate::cli::viktor::load_machine_credential() {
+                        Ok(Some(key)) => install_machine_viktor_credential(&mut cfg, key),
+                        Ok(None) => {}
+                        Err(error) => eprintln!(
+                            "[Cassy] Failed to load machine-scoped Viktor credential: {error}"
+                        ),
+                    }
+                }
                 eprintln!(
                     "[Cassy] Connecting to {} upstream MCP server(s)...",
                     cfg.servers.len()
@@ -510,6 +519,20 @@ pub(crate) async fn install_proxy_policy(
     let policy = cmcp_core::ExternalToolAllowlistPolicy::new(routes)
         .with_supervisor_delegation_routes(delegation_routes);
     engine.set_policy(std::sync::Arc::new(policy)).await;
+}
+
+/// Replace only Cassy's in-memory managed Viktor credential reference. Project
+/// configurations and operator-owned Viktor upstreams retain their own auth.
+#[cfg(feature = "mcp-proxy")]
+fn install_machine_viktor_credential(config: &mut cmcp_core::config::Config, key: String) {
+    let Some(cmcp_core::config::ServerConfig::Http { url, auth, .. }) =
+        config.servers.get_mut(cmcp_core::config::VIKTOR_SERVER)
+    else {
+        return;
+    };
+    if url == cmcp_core::config::VIKTOR_MCP_URL && auth.as_deref() == Some("env:VIKTOR_API_KEY") {
+        *auth = Some(key);
+    }
 }
 
 /// Total time budget for the eager store-init phase before `cas serve` aborts.
@@ -1252,6 +1275,8 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "mcp-proxy")]
+    use super::install_machine_viktor_credential;
     use super::{
         ensure_mcp_schema, open_startup_pull_entry_store, open_startup_pull_task_store,
         resolve_mcp_serve_root,
@@ -1262,6 +1287,36 @@ mod tests {
     use crate::types::{Entry, Task};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn machine_viktor_key_replaces_only_the_managed_memory_config() {
+        use cmcp_core::config::{Config as ProxyConfig, ServerConfig};
+
+        let mut managed = ProxyConfig::default();
+        assert!(managed.ensure_viktor_managed_default());
+        install_machine_viktor_credential(&mut managed, "machine-test-key".to_string());
+        assert!(matches!(
+            managed.servers.get("viktor"),
+            Some(ServerConfig::Http { auth: Some(auth), .. }) if auth == "machine-test-key"
+        ));
+
+        let mut operator_owned = ProxyConfig::default();
+        operator_owned.add_server(
+            "viktor".to_string(),
+            ServerConfig::Http {
+                url: "https://operator.example/mcp".to_string(),
+                auth: Some("env:OPERATOR_VIKTOR_KEY".to_string()),
+                headers: Default::default(),
+                oauth: false,
+            },
+        );
+        install_machine_viktor_credential(&mut operator_owned, "machine-test-key".to_string());
+        assert!(matches!(
+            operator_owned.servers.get("viktor"),
+            Some(ServerConfig::Http { auth: Some(auth), .. }) if auth == "env:OPERATOR_VIKTOR_KEY"
+        ));
+    }
 
     #[cfg(feature = "mcp-proxy")]
     #[tokio::test]

@@ -29,5 +29,5 @@ fn missing_viktor_key_gives_the_one_step_setup_command() {
         .args(["viktor"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("cas viktor key <operator-issued-key>"));
+        .stdout(predicate::str::contains("setup: cas viktor key"));
 }

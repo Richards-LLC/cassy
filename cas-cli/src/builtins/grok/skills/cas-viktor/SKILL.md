@@ -31,4 +31,6 @@ notification channel with `origin=viktor`; answer on the supplied thread with th
 
 The proxy has a fail-closed allowlist and holds the credential reference. Never handle,
 paste, request, log, or add `VIKTOR_API_KEY` to a project, artifact, prompt, or tool arguments.
-Use `cas viktor` for the credential-safe provisioning status; it never prints the key.
+If `cas viktor` says no credential is configured, get an operator-issued key and run
+`cas viktor key` once and paste it when prompted; this is the only supported key-entry path and it
+stores the key for the current machine, never the project. Start a new CAS session afterward.

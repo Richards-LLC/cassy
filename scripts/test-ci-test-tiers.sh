@@ -199,7 +199,7 @@ require_text "$route" 'mode=self-hosted' 'runner route exposes selected self-hos
 require_text "$route" 'mode=hosted' 'runner route exposes selected hosted fallback mode'
 require_absent "$route" 'actions/checkout' 'runner route does not execute merge-queue source before label selection'
 
-require_text "$suite_build" 'needs: fast-validation-runner-route' 'required archive build waits for explicit runner routing'
+require_text "$suite_build" 'needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]' 'required archive build waits for explicit runner routing and the main-push tree gate'
 require_text "$suite_build" 'fromJSON(needs.fast-validation-runner-route.outputs.runner)' 'archive build receives the fail-safe selected runner labels'
 require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode != 'self-hosted'" 'archive rejects an untrusted self-hosted route before assignment'
 require_text "$suite_build" "github.event_name == 'merge_group'" 'self-hosted archive is restricted to merge-queue events'
@@ -503,7 +503,7 @@ for job in fast-validation-runner-route fast-validation-preflight fast-validatio
 done
 require_text "$fast_admission" 'Admit protected PR to merge-queue validation' 'Fast Validation emits a PR admission receipt'
 require_text "$fast_admission" "if: github.event_name == 'pull_request'" 'Fast Validation admission is PR-only'
-require_text "$fast_admission" "if: github.event_name != 'pull_request'" 'Fast Validation only gates dependencies on the canonical tree'
+require_text "$fast_admission" "github.event_name != 'pull_request'" 'Fast Validation only gates dependencies on the canonical tree'
 require_text "$macos" "github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-26'" 'macOS PR admission stays hosted while queue validation uses macOS'
 require_text "$macos" 'Admit protected PR to merge-queue Darwin validation' 'macOS Check emits a PR admission receipt'
 require_text "$macos" "github.event_name != 'pull_request'" 'macOS compilation is deferred to the canonical tree'
@@ -537,7 +537,7 @@ for job in fast-validation-preflight fast-validation-docs clippy test-compile-gu
 done
 require_text "$suite_build" 'CARGO_TARGET_DIR:-target}/debug' 'suite packaging reads the configured Cargo target directory'
 require_text "$suite_build" "--transform='s,^cas$,target/debug/cas,'" 'suite packaging preserves the hosted runner archive layout'
-require_text "$suite_shards" 'needs: fast-validation-suite-build' 'shards wait for the shared test archive'
+require_text "$suite_shards" 'needs: [fast-validation-suite-build, fast-validation-main-push-dedupe]' 'shards wait for the shared test archive and main-push tree gate'
 require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
 require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'
 require_text "$suite_shards" 'test -x target/debug/cas' 'shards verify the restored CLI runner remains executable'
@@ -547,7 +547,7 @@ require_absent "$suite_shards" '/var/lib/cassy-actions/' 'shards do not depend o
 require_text "$suite_shards" '--workspace-remap "$GITHUB_WORKSPACE"' 'shards remap the self-hosted archive workspace to their hosted checkout'
 require_text "$suite_shards" 'INSTA_WORKSPACE_ROOT: ${{ github.workspace }}' 'shards pin insta snapshot lookup to their hosted checkout'
 require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
-require_text "$suite" 'needs: fast-validation-suite-shards' 'required full-suite context fans in every shard'
+require_text "$suite" 'needs: [fast-validation-suite-shards, fast-validation-main-push-dedupe]' 'required full-suite context fans in every shard after the main-push tree gate'
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
 require_text "$(<"$makefile")" '../scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast' 'local make test verifies CI workspace nextest scope'
 require_text "$docs" 'scripts/run-verified-tests.sh test -p cas --doc' 'doctest coverage remains in Fast Validation with an execution receipt'
@@ -761,6 +761,7 @@ require_text "$receipt_job" "git rev-parse 'HEAD^{tree}'" 'tree receipt keys exa
 require_text "$receipt_job" 'name: pr-validated-tree-${{ steps.tree.outputs.hash }}' 'tree receipt artifact is named by tree hash'
 
 tree_guard="$repo_root/scripts/check-ci-tree-validation.sh"
+merge_queue_guard="$repo_root/scripts/check-ci-merge-queue-validation.sh"
 guard_tmp="$(mktemp -d)"
 mkdir -p "$guard_tmp/bin"
 cat >"$guard_tmp/bin/gh" <<'EOF'
@@ -771,6 +772,12 @@ case "${FAKE_GH_MODE:?}:$*" in
   hit:*actions/runs/123*) printf '%s\n' '{"event":"pull_request","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/123"}' ;;
   wrong-event:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":456}}]}' ;;
   wrong-event:*actions/runs/456*) printf '%s\n' '{"event":"push","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/456"}' ;;
+  merge-hit:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":789}}]}' ;;
+  merge-hit:*actions/runs/789*) printf '%s\n' '{"event":"merge_group","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/789"}' ;;
+  merge-in-progress:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":790}}]}' ;;
+  merge-in-progress:*actions/runs/790*) printf '%s\n' '{"event":"merge_group","status":"in_progress","conclusion":null,"html_url":"https://example.test/actions/runs/790"}' ;;
+  merge-wrong-event:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":791}}]}' ;;
+  merge-wrong-event:*actions/runs/791*) printf '%s\n' '{"event":"push","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/791"}' ;;
   miss:*actions/artifacts*) printf '%s\n' '{"artifacts":[]}' ;;
   error:*) exit 1 ;;
   *) exit 2 ;;
@@ -798,7 +805,60 @@ for mode in miss wrong-event error; do
     require_text "$output_path" 'run-heavy=true' "$mode receipt evidence fails closed to heavy work"
     require_absent "$output_path" 'run-heavy=false' "$mode receipt evidence never dedupes"
 done
+
+run_merge_queue_guard() {
+    local mode="$1"
+    local output="$guard_tmp/$mode.output"
+    : >"$output"
+    GITHUB_OUTPUT="$output" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+        GITHUB_REPOSITORY=example/repo FAKE_GH_MODE="$mode" FAKE_GH_LOG="$guard_tmp/gh.log" \
+        PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
+    cat "$output"
+}
+
+merge_hit_output="$(run_merge_queue_guard merge-hit)"
+require_text "$merge_hit_output" 'run-fast-validation=false' 'matching successful merge-queue receipt skips main-push Fast Validation'
+require_text "$merge_hit_output" 'validating-run-id=789' 'matching merge-queue receipt exposes the validating run id'
+require_text "$merge_hit_output" 'prior-run-url=https://example.test/actions/runs/789' 'matching merge-queue receipt exposes the validating run URL'
+require_text "$(<"$guard_tmp/gh.log")" "merge-queue-validated-tree-$guard_tree" 'merge-queue lookup queries the exact current Git tree'
+for mode in miss merge-in-progress merge-wrong-event error; do
+    output_path="$(run_merge_queue_guard "$mode")"
+    require_text "$output_path" 'run-fast-validation=true' "$mode merge-queue evidence fails closed to Fast Validation"
+    require_absent "$output_path" 'run-fast-validation=false' "$mode merge-queue evidence never dedupes"
+done
+
+# Mutation coverage for the safety-critical event predicate: changing the
+# receipt trust from merge_group to push must make the merge-queue fixture run
+# the full suite rather than silently reusing an unrelated validation.
+mutated_guard="$guard_tmp/check-ci-merge-queue-validation-mutated.sh"
+sed 's/\.event == "merge_group"/.event == "push"/' "$merge_queue_guard" >"$mutated_guard"
+chmod +x "$mutated_guard"
+mutation_output="$guard_tmp/merge-event-mutation.output"
+: >"$mutation_output"
+GITHUB_OUTPUT="$mutation_output" GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    GITHUB_REPOSITORY=example/repo FAKE_GH_MODE=merge-hit FAKE_GH_LOG="$guard_tmp/gh.log" \
+    PATH="$guard_tmp/bin:$PATH" "$mutated_guard" >/dev/null
+require_text "$(<"$mutation_output")" 'run-fast-validation=true' 'mutating merge_group receipt trust prevents the shortcut'
+require_absent "$(<"$mutation_output")" 'run-fast-validation=false' 'mutated event predicate cannot skip the main-push suite'
 rm -rf "$guard_tmp"
+
+main_push_dedupe="$(job_block fast-validation-main-push-dedupe)"
+require_text "$main_push_dedupe" 'scripts/check-ci-merge-queue-validation.sh' 'main-push Fast Validation gate uses the merge-queue receipt guard'
+require_text "$main_push_dedupe" 'run-fast-validation: ${{ steps.tree-dedupe.outputs.run-fast-validation }}' 'main-push gate exports its fail-closed run decision'
+require_text "$main_push_dedupe" 'validating-run-id: ${{ steps.tree-dedupe.outputs.validating-run-id }}' 'main-push gate exports the validating merge-queue run id'
+require_text "$main_push_dedupe" 'prior-run-url: ${{ steps.tree-dedupe.outputs.prior-run-url }}' 'main-push gate exports the validating merge-queue run URL'
+
+for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs; do
+    block="$(job_block "$job")"
+    require_text "$block" 'fast-validation-main-push-dedupe' "$job waits for the main-push tree gate"
+    require_text "$block" "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'" "$job skips only a successfully receipt-matched main tree"
+done
+require_text "$macos" 'needs: fast-validation-main-push-dedupe' 'macOS Check waits for the same main-push tree gate'
+require_text "$macos" "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'" 'macOS Check skips only a successfully receipt-matched main tree'
+require_text "$fan_in" 'Report successful merge-queue validation reused by this main push' 'Fast Validation rollup gives the main-push shortcut a named receipt'
+require_text "$fan_in" 'needs.fast-validation-main-push-dedupe.outputs.validating-run-id' 'Fast Validation notice names the validating merge-queue run'
+require_text "$fan_in" 'merge-queue-validated-tree-${{ steps.merge-queue-tree.outputs.hash }}' 'successful merge-group Fast Validation publishes an exact-tree receipt'
+require_text "$fan_in" "git rev-parse 'HEAD^{tree}'" 'merge-group receipt keys exact Git contents'
 
 all_actions="$(<"$setup")$(<"$ci")$(<"$release")"
 require_text "$all_actions" 'mozilla-actions/sccache-action@v0.0.11' 'cache-v2-capable sccache action is pinned'

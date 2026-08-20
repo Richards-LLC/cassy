@@ -315,8 +315,7 @@ const MAX_UNFOCUSED_EPIC_ROWS: usize = 4;
 /// per frame (the exact pattern cas-eb7f deduped next door in the TASKS
 /// panel).
 fn unfocused_live_epic_groups(data: &DirectorData) -> Vec<cas_factory::EpicGroup> {
-    data.tasks_by_epic()
-        .0
+    data.live_epic_groups()
         .into_iter()
         .filter(|group| {
             crate::ui::factory::director::tasks::epic_is_renderable_source_blind(
@@ -438,7 +437,7 @@ fn render_unfocused_overview(
             .iter()
             .filter(|t| t.status == TaskStatus::InProgress)
             .count();
-        let queued = group.subtasks.len().saturating_sub(active);
+        let queued = group.subtasks.iter().filter(|task| task.status == TaskStatus::Open).count();
         let counts = format!("  {active} active, {queued} queued");
         let title_budget = (area.width as usize)
             .saturating_sub(group.epic.id.len() + 4 + counts.len())
@@ -606,7 +605,7 @@ fn render_summary_bar(
     let queue_count = data
         .ready_tasks
         .iter()
-        .filter(|t| t.status == TaskStatus::Open)
+        .filter(|task| data.is_live_queue_task(task))
         .count();
     let blocked_count = data
         .in_progress_tasks
@@ -1058,6 +1057,27 @@ mod tests {
             !text.contains("No focused epic"),
             "bare dead-zone placeholder must not render when live epics exist: {text}"
         );
+    }
+
+    #[test]
+    fn factory_radar_ignores_closed_epic_residue_and_counts_only_live_queue_tasks() {
+        let mut data = data_with_two_live_epics();
+        data.ready_tasks.push(subtask("cas-closed-child", "Stale queued child", TaskStatus::Open, "cas-closed", None));
+        data.epic_tasks.push(task("cas-closed", "Closed epic with residual queue row", TaskStatus::Closed, TaskType::Epic));
+        data.epic_tasks.push(task("cas-empty", "Open epic without children", TaskStatus::Open, TaskType::Epic));
+
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = ActiveTheme::default();
+        terminal.draw(|frame| {
+            render_with_focus(frame, frame.area(), &data, &theme, None, None, false, None, "supervisor", false);
+        }).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Live epics (3):"), "wrong liveness set: {text}");
+        assert!(text.contains("cas-empty"), "open empty epic must render: {text}");
+        assert!(!text.contains("cas-closed"), "closed epic and its residual child must not render: {text}");
+        assert!(text.contains("Queue 2"), "terminal residue inflated queue: {text}");
     }
 
     /// cas-582d AC3: unfocused with no session-visible live epics still

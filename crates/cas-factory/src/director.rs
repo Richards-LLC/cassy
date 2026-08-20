@@ -683,6 +683,58 @@ impl DirectorData {
 
         (groups, standalone)
     }
+
+    /// Epics that are live enough to appear in an unfocused factory overview.
+    ///
+    /// A residual Open child must never resurrect a terminal parent epic in a
+    /// pane. Conversely, an Open/InProgress epic remains useful orientation
+    /// even before its first child has been created, so it is retained with an
+    /// empty subtask list.
+    pub fn live_epic_groups(&self) -> Vec<EpicGroup> {
+        let (groups, _) = self.tasks_by_epic();
+        let mut grouped: HashMap<String, EpicGroup> = groups
+            .into_iter()
+            .map(|group| (group.epic.id.clone(), group))
+            .collect();
+
+        let mut live_groups: Vec<EpicGroup> = self
+            .epic_tasks
+            .iter()
+            .filter(|epic| matches!(epic.status, TaskStatus::Open | TaskStatus::InProgress))
+            .map(|epic| {
+                grouped.remove(&epic.id).unwrap_or_else(|| EpicGroup {
+                    epic: epic.clone(),
+                    subtasks: Vec::new(),
+                    has_active: false,
+                })
+            })
+            .collect();
+
+        live_groups.sort_by(|a, b| {
+            group_recency(b)
+                .cmp(&group_recency(a))
+                .then_with(|| a.has_active.cmp(&b.has_active).reverse())
+                .then_with(|| a.epic.priority.0.cmp(&b.epic.priority.0))
+                .then_with(|| a.epic.id.cmp(&b.epic.id))
+        });
+
+        live_groups
+    }
+
+    /// Whether an Open task belongs in the FACTORY queue counter.
+    ///
+    /// Standalone tasks are queueable on their own. Epic children require a
+    /// currently live parent; this prevents stale child rows from a Closed or
+    /// Cancelled epic inflating the actionable queue.
+    pub fn is_live_queue_task(&self, task: &TaskSummary) -> bool {
+        task.status == TaskStatus::Open
+            && task.epic.as_ref().is_none_or(|epic_id| {
+                self.epic_tasks.iter().any(|epic| {
+                    epic.id == *epic_id
+                        && matches!(epic.status, TaskStatus::Open | TaskStatus::InProgress)
+                })
+            })
+    }
 }
 
 /// Newest `updated_at` across an epic group (the epic row and all of its
@@ -1108,5 +1160,49 @@ mod tests {
             worker_summary.pending_supervisor_messages, 0,
             "a backed-off supervisor row must not permanently latch the idle transition"
         );
+    }
+
+    #[test]
+    fn live_epic_groups_exclude_terminal_parent_residue_and_keep_empty_open_epics() {
+        fn summary(id: &str, status: TaskStatus, task_type: TaskType, epic: Option<&str>) -> TaskSummary {
+            TaskSummary {
+                id: id.to_string(),
+                title: id.to_string(),
+                status,
+                priority: Priority::MEDIUM,
+                assignee: None,
+                task_type,
+                epic: epic.map(str::to_string),
+                branch: None,
+                updated_at: None,
+                epic_verification_owner: None,
+            }
+        }
+
+        let terminal_child = summary("cas-closed-child", TaskStatus::Open, TaskType::Task, Some("cas-closed"));
+        let live_child = summary("cas-open-child", TaskStatus::Open, TaskType::Task, Some("cas-open"));
+        let data = DirectorData {
+            ready_tasks: vec![terminal_child.clone(), live_child.clone()],
+            in_progress_tasks: Vec::new(),
+            epic_tasks: vec![
+                summary("cas-closed", TaskStatus::Closed, TaskType::Epic, None),
+                summary("cas-open", TaskStatus::Open, TaskType::Epic, None),
+                summary("cas-empty", TaskStatus::InProgress, TaskType::Epic, None),
+            ],
+            agents: Vec::new(),
+            activity: Vec::new(),
+            agent_id_to_name: HashMap::new(),
+            changes: Vec::new(),
+            git_loaded: false,
+            reminders: Vec::new(),
+            epic_closed_counts: HashMap::new(),
+        };
+
+        let live_groups = data.live_epic_groups();
+        let live_ids: Vec<_> = live_groups.iter().map(|group| group.epic.id.as_str()).collect();
+        assert_eq!(live_ids, vec!["cas-empty", "cas-open"]);
+        assert!(live_groups.iter().any(|group| group.epic.id == "cas-empty" && group.subtasks.is_empty()));
+        assert!(!data.is_live_queue_task(&terminal_child));
+        assert!(data.is_live_queue_task(&live_child));
     }
 }

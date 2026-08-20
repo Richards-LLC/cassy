@@ -1,7 +1,6 @@
 //! Credential-safe provisioning for the managed Viktor gateway.
 
 use std::{
-    collections::HashMap,
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -10,6 +9,9 @@ use std::{
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "mcp-proxy")]
+use std::collections::HashMap;
 
 use crate::cli::Cli;
 
@@ -192,6 +194,7 @@ fn save_operator_key(api_key: &str) -> anyhow::Result<()> {
         "Viktor API key is empty. Ask the operator for a key, then run `cas viktor key`."
     );
 
+    #[cfg(feature = "mcp-proxy")]
     validate_key(api_key)?;
     let path = credential_path()?;
     if let Some(parent) = path.parent() {
@@ -217,13 +220,19 @@ fn save_operator_key(api_key: &str) -> anyhow::Result<()> {
     file.sync_all()?;
     restrict_credential_permissions(&path)?;
 
+    #[cfg(feature = "mcp-proxy")]
     println!("Viktor key validated and saved for this machine.");
+    #[cfg(not(feature = "mcp-proxy"))]
+    println!(
+        "Viktor key saved for this machine without live validation; this Cassy build does not include the managed gateway."
+    );
     println!("Start a new CAS session to connect the managed Viktor gateway.");
     Ok(())
 }
 
 /// Validate only the upstream MCP handshake and tool listing. Neither action
 /// starts a Viktor run, so this setup check does not consume run credits.
+#[cfg(feature = "mcp-proxy")]
 fn validate_key(api_key: &str) -> anyhow::Result<()> {
     let config = cmcp_core::config::ServerConfig::Http {
         url: cmcp_core::config::VIKTOR_MCP_URL.to_string(),

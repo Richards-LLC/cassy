@@ -20,7 +20,11 @@ KillMode=mixed
 Nice=10
 CPUWeight=25
 IOWeight=25
-TasksMax=512
+# A 12-way cold Rust compile uses the sccache server plus enough rustc/linker
+# threads to exhaust the distro's 512-task default. Keep the CPU cap below,
+# but leave four times that many cgroup task slots so sccache can spawn rustc
+# during the archive's parallel fan-out (cas-aada).
+TasksMax=2048
 Environment=HOME=/var/lib/cassy-actions
 Environment=CARGO_HOME=/var/lib/cassy-actions/.cargo
 Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup

@@ -1,0 +1,25 @@
+name: Stale queued-run watchdog
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-stale-non-merge-group-queued-runs:
+    name: Cancel stale non-merge-group queued runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cancel queued runs exceeding normal scheduling time
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Twenty minutes is well above ordinary queue scheduling, yet
+          # promptly reclaims the 13-day release/main/PR starvation class.
+          CASSY_NON_MERGE_GROUP_QUEUE_SECONDS: '1200'
+        run: ./scripts/cancel-stale-non-merge-group-queued-runs.sh

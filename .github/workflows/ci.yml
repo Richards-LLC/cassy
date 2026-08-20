@@ -259,8 +259,9 @@ jobs:
   # Full Fast Validation runs exactly once on GitHub's canonical merge-queue
   # tree. The required rollup below emits a cheap hosted PR admission context,
   # then this job family validates the tree that will actually land. This avoids
-  # compiling the PR head and its merge tree back-to-back without widening the
-  # self-hosted route beyond merge_group.
+  # compiling the PR head and its merge tree back-to-back. When the explicitly
+  # trusted merge-queue runner is enabled, its persistent target and sccache
+  # make all three compiling Linux lanes warm across synthetic queue refs.
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
@@ -270,8 +271,13 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: fast-validation-main-push-dedupe
-    runs-on: ubuntu-latest
+      && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
+      || (github.event_name == 'merge_group'
+      && github.repository == 'Richards-LLC/cassy'
+      && github.event.repository.fork == false
+      && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
+    needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]
+    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -284,6 +290,20 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      - name: Verify merge-queue self-hosted trust boundary
+        if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        env:
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = merge_group
+          test "$GITHUB_REPOSITORY" = Richards-LLC/cassy
+          test "$SELF_HOSTED_ENABLED" = enabled
+          case "$GITHUB_REF" in
+            refs/heads/gh-readonly-queue/*) ;;
+            *) echo "self-hosted route received a non-queue ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
       - name: Test portable installer fixtures
         run: ./scripts/test-cas-install.sh
 
@@ -291,10 +311,39 @@ jobs:
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
         run: echo "Rust work skipped for ${{ steps.classify-diff.outputs.class }} diff."
 
-      - if: steps.classify-diff.outputs.rust-unaffected != 'true'
+      - if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted'
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
+
+      - name: Set up the isolated merge-queue runner
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig on the isolated merge-queue runner
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Verify private self-hosted sccache
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          test "${SCCACHE_SERVER_PORT:?}" = 4227
+          case "${SCCACHE_DIR:?}" in
+            /var/lib/cassy-actions/*) ;;
+            *) echo "SCCACHE_DIR is not isolated from the runner cache" >&2; exit 1 ;;
+          esac
+          sccache rustc -vV
+          sccache --show-stats
 
       - name: Build and test Commander web assets
         if: steps.classify-diff.outputs.web-check-needed == 'true'
@@ -594,8 +643,13 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: fast-validation-main-push-dedupe
-    runs-on: ubuntu-latest
+      && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
+      || (github.event_name == 'merge_group'
+      && github.repository == 'Richards-LLC/cassy'
+      && github.event.repository.fork == false
+      && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
+    needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]
+    runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -608,14 +662,57 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
 
+      - name: Verify merge-queue self-hosted trust boundary
+        if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        env:
+          SELF_HOSTED_ENABLED: ${{ vars.CASSY_MERGE_QUEUE_SELF_HOSTED }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = merge_group
+          test "$GITHUB_REPOSITORY" = Richards-LLC/cassy
+          test "$SELF_HOSTED_ENABLED" = enabled
+          case "$GITHUB_REF" in
+            refs/heads/gh-readonly-queue/*) ;;
+            *) echo "self-hosted route received a non-queue ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
         run: echo "Doctests skipped for ${{ steps.classify-diff.outputs.class }} diff."
 
-      - if: steps.classify-diff.outputs.rust-unaffected != 'true'
+      - if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted'
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation-docs
+
+      - name: Set up the isolated merge-queue runner
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig on the isolated merge-queue runner
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Verify private self-hosted sccache
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          test "${SCCACHE_SERVER_PORT:?}" = 4227
+          case "${SCCACHE_DIR:?}" in
+            /var/lib/cassy-actions/*) ;;
+            *) echo "SCCACHE_DIR is not isolated from the runner cache" >&2; exit 1 ;;
+          esac
+          sccache rustc -vV
+          sccache --show-stats
 
       # nextest does not run doctests; keep this separate so it never waits
       # behind the partitioned suite.

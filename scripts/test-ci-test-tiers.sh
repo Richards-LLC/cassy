@@ -209,6 +209,20 @@ require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 
 require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" 'self-hosted setup is limited to selected merge-queue validation'
 require_text "$suite_build" 'Verify merge-queue self-hosted trust boundary' 'self-hosted archive verifies queue-only trust at execution'
 require_text "$suite_build" 'refs/heads/gh-readonly-queue/*' 'self-hosted archive rejects non-queue refs'
+for job in fast-validation-preflight fast-validation-docs; do
+    block="$(job_block "$job")"
+    require_text "$block" 'needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]' "$job waits for explicit runner routing and the main-push tree gate"
+    require_text "$block" 'fromJSON(needs.fast-validation-runner-route.outputs.runner)' "$job receives the fail-safe selected runner labels"
+    require_text "$block" "needs.fast-validation-runner-route.outputs.mode != 'self-hosted'" "$job rejects an untrusted self-hosted route before assignment"
+    require_text "$block" "github.event_name == 'merge_group'" "$job limits self-hosted execution to merge-queue events"
+    require_text "$block" "github.repository == 'Richards-LLC/cassy'" "$job pins self-hosted execution to the canonical repository"
+    require_text "$block" "vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'" "$job repeats explicit self-hosted readiness opt-in"
+    require_text "$block" "needs.fast-validation-runner-route.outputs.mode == 'hosted'" "$job retains hosted setup as the fail-safe"
+    require_text "$block" "needs.fast-validation-runner-route.outputs.mode == 'self-hosted'" "$job limits isolated runner setup to selected merge-queue validation"
+    require_text "$block" 'Verify merge-queue self-hosted trust boundary' "$job verifies queue-only trust at execution"
+    require_text "$block" 'refs/heads/gh-readonly-queue/*' "$job rejects non-queue refs on the isolated runner"
+    require_text "$block" 'Verify private self-hosted sccache' "$job confirms the persistent compiler cache remains isolated"
+done
 probe_step="$(named_step_block "$suite_build" 'Verify private self-hosted sccache')"
 disable_step="$(named_step_block "$suite_build" 'Disable sccache for the self-hosted suite archive')"
 archive_step="$(named_step_block "$suite_build" 'Build full suite archive')"
@@ -1077,7 +1091,7 @@ require_text "$(<"$setup")" 'sccache backend unavailable — building uncached' 
 require_text "$(<"$setup")" 'echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"' 'sccache outage clears compiler wrapper'
 require_text "$(<"$setup")" 'echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"' 'sccache outage disables its backend'
 require_count "$all_actions" 'mozilla-actions/sccache-action@v0.0.11' '5' 'every sccache setup is accounted for'
-require_count "$all_actions" 'continue-on-error: true' '6' 'every sccache setup action and the self-hosted probe fail open'
+require_count "$all_actions" 'continue-on-error: true' '8' 'every sccache setup action and the self-hosted probes fail open'
 require_count "$all_actions" 'sccache --start-server' '5' 'every sccache setup probes backend availability'
 require_count "$all_actions" 'sccache backend unavailable — building uncached' '5' 'every sccache outage logs its uncached fallback'
 require_count "$all_actions" 'SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh' '5' 'every sccache fallback makes the action post hook harmless'

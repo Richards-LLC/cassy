@@ -418,6 +418,24 @@ if [[ -x "$classifier" ]]; then
     require_text "$("$classifier" 15edf2ef^ eab3901c)" 'version-bump' 'workspace-wide seven-file version bump fast-passes'
     require_text "$("$classifier" 66b059b4^ 66b059b4)" 'rust-touched' 'version bump plus changelog runs Rust tier'
     require_text "$("$classifier" bb7417ef^ bb7417ef)" 'rust-touched' 'code diff runs Rust tier'
+    builtin_markdown_base="237a6c7e^"
+    builtin_markdown_head="237a6c7e"
+    require_text "$("$classifier" "$builtin_markdown_base" "$builtin_markdown_head")" 'rust-touched' 'embedded builtin Markdown runs Rust tier'
+
+    # Mutation contract: the fixture changes only Markdown files under
+    # `cas-cli/src/builtins/`. Removing the source-tree guard must make it
+    # classify docs-only, so this test goes red if that guard disappears.
+    classifier_without_source_guard="$(mktemp)"
+    sed '/cas-cli\/src\/\*) docs_only=false; break ;;/d' "$classifier" >"$classifier_without_source_guard"
+    chmod +x "$classifier_without_source_guard"
+    if [[ "$("$classifier_without_source_guard" "$builtin_markdown_base" "$builtin_markdown_head")" == 'rust-touched' ]]; then
+        printf 'FAIL builtin Markdown mutation removes the compiled-source guard\n'
+        fail=$((fail + 1))
+    else
+        printf 'ok   builtin Markdown mutation catches removed compiled-source guard\n'
+        pass=$((pass + 1))
+    fi
+    rm -f "$classifier_without_source_guard"
 else
     printf 'FAIL CI diff classifier is executable\n'
     fail=$((fail + 1))

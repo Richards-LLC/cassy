@@ -161,6 +161,8 @@ require_text "$pilot_doc" 'CARGO_CACHE_RUSTC_INFO=0' 'pilot documents Cargo rust
 runner_unit_text="$(<"$runner_unit")"
 require_text "$runner_unit_text" 'Environment=CARGO_CACHE_RUSTC_INFO=0' 'runner does not persist failed sccache rustc probes across jobs'
 require_text "$runner_unit_text" 'Environment=SCCACHE_IDLE_TIMEOUT=0' 'runner keeps its private sccache server alive between merge-queue jobs'
+require_text "$runner_unit_text" 'TasksMax=2048' 'runner reserves enough cgroup task slots for parallel sccache compiler spawns'
+require_text "$pilot_doc" '2,048 cgroup task slots' 'pilot documents the parallel sccache task-slot budget'
 
 if [[ -x "$watchdog_script" ]]; then
     watchdog_text="$(<"$watchdog")"

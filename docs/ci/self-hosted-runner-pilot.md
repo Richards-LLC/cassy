@@ -2,9 +2,10 @@
 
 The push-triggered pilot is an advisory duplicate of the required hosted Fast
 Validation archive producer. Separately, the CI workflow may route the required
-archive producer for a `merge_group` tree to the same 32-core `soundwave` host.
+archive producer, preflight, and doctest lanes for a `merge_group` tree to the
+same 32-core `soundwave` host.
 The route is explicit and fail-safe: unless repository variable
-`CASSY_MERGE_QUEUE_SELF_HOSTED` is exactly `enabled`, the required archive runs
+`CASSY_MERGE_QUEUE_SELF_HOSTED` is exactly `enabled`, those required lanes run
 on GitHub-hosted Ubuntu. Pull-request work always remains hosted. The first
 real measurement kept the three exhaustive partitions in the same local job for
 evaluation; shard 1 stalled in three subprocess-spawning integration tests for
@@ -68,9 +69,9 @@ changing runner routing or retiring the merge-queue acceleration.
 The pilot job is not present in `docs/branch-protection/main-ruleset.json`. The
 ruleset still requires only the `Fast Validation` rollup and `macOS Check`.
 For ordinary PRs, and whenever the self-hosted control variable is absent or
-disabled, every Fast Validation component runs hosted. A merge-queue archive
-may use the trusted box only after the runner is confirmed online; its shards
-remain hosted and parallel.
+disabled, every Fast Validation component runs hosted. A merge-queue archive,
+preflight, and doctest lane may use the trusted box only after the runner is
+confirmed online; the exhaustive shards remain hosted and parallel.
 
 GitHub cannot reassign a job after it has been scheduled on an offline
 self-hosted label. The safe maintenance/offline-fallback sequence is therefore

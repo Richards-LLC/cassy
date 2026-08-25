@@ -977,10 +977,11 @@ impl PtyConfig {
     /// Create config for a Grok Build CLI instance (EPIC cas-8888, cas-6569
     /// Phase 2).
     ///
-    /// # Verified against the retained installed grok 0.2.114 binary
-    /// (2026-07-30; the host's default symlink was already 0.2.117).
+    /// # Verified against the installed grok 1.0.5 binary
+    /// (2026-08-25; the retained 0.2.114 receipt remains historical).
     /// The complete real `PtyConfig::grok` isolated-worker matrix is recorded
-    /// by `grok_factory_contract_runtime` and the typed conformance receipt.
+    /// by `grok_factory_contract_runtime` and the typed
+    /// `grok-build-1.0.5-2026-08-25` conformance receipt.
     /// - `-s/--session-id <uuid>`: "Use a specific session UUID for a NEW
     ///   conversation" — same anti-overwrite model as Claude, so (like
     ///   `claude()`) we always generate a fresh uuid rather than Codex's

@@ -740,15 +740,17 @@ pub struct TelemetryConfig {
 /// who want a different worker model add an explicit `[llm.worker] model
 /// = "..."` to their `.cas/config.toml`.
 ///
-/// The standard worker tier is Terra/high; Sol/high is reserved for explicit
-/// heavy and frontier routing. See cas-05e3, cas-fbac.
-pub const STOCK_WORKER_MODEL: &str = "gpt-5.6-terra";
+/// The standard worker tier is Luna/xhigh; Sol/high is reserved for explicit
+/// heavy and frontier routing. Terra is suspended as a routing target pending
+/// an explicit operator re-enable. See cas-05e3, cas-fbac, cas-e352.
+pub const STOCK_WORKER_MODEL: &str = "gpt-5.6-luna";
 
 /// Stock worker reasoning effort used as the final fallback for
 /// `[llm.worker.reasoning_effort]`. Same chain rules as
 /// [`STOCK_WORKER_MODEL`]: applied only when both the role override and
-/// the top-level `[llm] reasoning_effort` are unset. See cas-05e3, cas-fbac.
-pub const STOCK_WORKER_REASONING_EFFORT: &str = "high";
+/// the top-level `[llm] reasoning_effort` are unset. Luna is only used at its
+/// current maximum Cassy effort, xhigh. See cas-05e3, cas-fbac, cas-e352.
+pub const STOCK_WORKER_REASONING_EFFORT: &str = "xhigh";
 
 /// Stock worker harness used as the final fallback for `[llm.worker.harness]`.
 /// Same chain rules as [`STOCK_WORKER_MODEL`]: applied only when both the
@@ -790,7 +792,8 @@ pub struct LlmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Reasoning effort level: "low", "medium", or "high" (only supported by some models)
+    /// Reasoning effort level: "minimal", "low", "medium", "high", or
+    /// "xhigh" (only supported by some models)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 
@@ -1560,8 +1563,8 @@ harness = "codex"
         );
         // Sanity-check the constant values match the shipped routing policy.
         assert_eq!(STOCK_WORKER_HARNESS, "codex");
-        assert_eq!(STOCK_WORKER_MODEL, "gpt-5.6-terra");
-        assert_eq!(STOCK_WORKER_REASONING_EFFORT, "high");
+        assert_eq!(STOCK_WORKER_MODEL, "gpt-5.6-luna");
+        assert_eq!(STOCK_WORKER_REASONING_EFFORT, "xhigh");
     }
 
     /// Existing-user preservation: a top-level `[llm] model = "X"` (no

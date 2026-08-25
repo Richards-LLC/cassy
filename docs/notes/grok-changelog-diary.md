@@ -34,10 +34,11 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Version status
 
-- **Cassy validated against:** retained Grok Build **0.2.114**
-  (`grok 0.2.114 (0c78503879) [stable]`), verified live 2026-07-30 through the
+- **Cassy validated against:** Grok Build **1.0.5**
+  (`grok 1.0.5 (5115b46bc9) [stable]`), verified live 2026-08-25 through the
   complete isolated `PtyConfig::grok` worker matrix and recorded in the typed
-  `grok-build-0.2.114-2026-07-30` conformance receipt.
+  `grok-build-1.0.5-2026-08-25` conformance receipt. The prior
+  `grok-build-0.2.114-2026-07-30` receipt remains historical evidence.
 - **Locally installed and latest stable:** **1.0.5** (`grok 1.0.5 (5115b46bc9)
   [stable]`, checked 2026-08-25). The former 1.0.3 install has been superseded.
 - **Latest release-note evidence:** xAI's official [Grok Build
@@ -46,12 +47,12 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   0.2.115–0.2.117 and 1.0.0–1.0.3 sections; the flat
   `~/.grok/CHANGELOG.json` supplies no independent version attribution. The
   official page supplies the 0.2.118–0.2.120 and 1.0.4–1.0.5 attribution.
-- **Gap:** the validated pin remains 0.2.114 while the current release is 1.0.5.
-  The new 1.0.4–1.0.5 notes expose permission, subagent, MCP, worktree, hook,
-  environment, and transcript surfaces, so a fresh complete `PtyConfig::grok`
-  matrix is required before treating 1.0.5 as validated. There are no source
-  gaps for 1.0.4–1.0.5; the earlier 0.2.102–0.2.103 and 0.2.107–0.2.111 gaps
-  remain documented below.
+- **Gap:** the validated pin now matches the current installed/latest release at
+  1.0.5 after the complete live matrix and typed receipt. The 1.0.4–1.0.5 notes
+  expose permission, subagent, MCP, worktree, hook, environment, and transcript
+  surfaces; those checks passed for the 1.0.5 production path. There are no
+  source gaps for 1.0.4–1.0.5; the earlier 0.2.102–0.2.103 and 0.2.107–0.2.111
+  gaps remain documented below.
 
 ## Cassy ↔ Grok touchpoints (what a release can break)
 
@@ -123,7 +124,7 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | Cassy verdict | Pointer |
 |--------------|----------|-------------|---------|
-| 1.0.5 | Config overrides · safe worktree reclaim · hook/session/tool robustness | 👀 / ✅ | this doc |
+| 1.0.5 | Config overrides · safe worktree reclaim · hook/session/tool robustness | ✅ | this doc |
 | 1.0.4 | `GROK_SESSION_ID` · permission grants · hook/subagent/worktree/session recovery | 👀 / 🟢 | this doc |
 | 1.0.3 | Faster subagent spawning · session-info and high-refresh TUI polish | 🟢 / ⏭ | this doc |
 | 1.0.2 | Startup diagnostics · worktree fetch safety · hook/tool presentation | 🟢 / 👀 | this doc |
@@ -167,7 +168,8 @@ changelog](https://x.ai/build/changelog) (2026-08-15). The local
   persistent `cas__*` discovery plus explicit `--rules` and inherited identity;
   a launcher override must not suppress the configured server, replace the
   worker rules, or hide `CAS_SESSION_ID` / `CAS_FACTORY_WORKER_CLI=grok`. The
-  required 1.0.5 matrix is filed as **cas-444a**.
+  complete production matrix passed and is recorded in
+  `grok-build-1.0.5-2026-08-25`.
 - **Worktrees under `~/.grok/worktrees` are reclaimed automatically when safe,
   with protection for the last remaining copy.** → 👀 **watch — worktree
   containment.** This is a Grok-owned cleanup surface and does not authorize
@@ -544,10 +546,10 @@ changelog; no pre-0.2.100 entries inventable from this host.
 
 ## Backlog of opportunities (not required, tracked)
 
-- **1.0.5 validation:** the installed/latest release is materially newer than the
-  retained, validated 0.2.114 binary. Re-run the complete live checklist before
-  advancing the typed receipt or validated pin; linked follow-up **cas-444a**
-  tracks this required work.
+- **1.0.5 validation:** ✅ complete. The installed/latest release is validated
+  through the complete live checklist and typed
+  `grok-build-1.0.5-2026-08-25` receipt; the prior 0.2.114 receipt remains the
+  historical baseline.
 - **Changelog history depth:** find an authoritative release surface for the missing
   0.2.102–0.2.103 and 0.2.107–0.2.111 notes, plus any pre-0.2.100 history,
   before backfilling them. The companion JSON remains unversioned; keep every gap

@@ -73,23 +73,28 @@ impl HarnessConformanceReceipt {
     }
 }
 
-const CODEX_0146_RECEIPT: &str = include_str!("../conformance/codex-cli-0.146.0-2026-07-30.json");
+const CODEX_0149_RECEIPT: &str = include_str!("../conformance/codex-cli-0.149.1-2026-08-25.json");
 const GROK_02114_RECEIPT: &str = include_str!("../conformance/grok-build-0.2.114-2026-07-30.json");
+const GROK_0105_RECEIPT: &str = include_str!("../conformance/grok-build-1.0.5-2026-08-25.json");
 
-pub fn codex_0146_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
-    serde_json::from_str(CODEX_0146_RECEIPT)
+pub fn codex_0149_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
+    serde_json::from_str(CODEX_0149_RECEIPT)
 }
 
 pub fn grok_02114_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
     serde_json::from_str(GROK_02114_RECEIPT)
 }
 
+pub fn grok_0105_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
+    serde_json::from_str(GROK_0105_RECEIPT)
+}
+
 /// Latest recorded receipt for each harness that currently has typed evidence.
 /// Later preflight work can consume this without parsing comments or Markdown.
 pub fn harness_conformance_receipts() -> Result<Vec<HarnessConformanceReceipt>, serde_json::Error> {
     Ok(vec![
-        codex_0146_conformance_receipt()?,
-        grok_02114_conformance_receipt()?,
+        codex_0149_conformance_receipt()?,
+        grok_0105_conformance_receipt()?,
     ])
 }
 
@@ -99,12 +104,12 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn codex_0146_receipt_is_typed_complete_and_passes_every_required_check() {
-        let receipt = codex_0146_conformance_receipt().expect("embedded receipt must parse");
+    fn codex_0149_receipt_is_typed_complete_and_passes_every_required_check() {
+        let receipt = codex_0149_conformance_receipt().expect("embedded receipt must parse");
         assert_eq!(receipt.schema_version, 1);
         assert_eq!(receipt.harness, Harness::CodexCli);
-        assert_eq!(receipt.harness_version, "0.146.0");
-        assert_eq!(receipt.validated_at, "2026-07-30");
+        assert_eq!(receipt.harness_version, "0.149.1");
+        assert_eq!(receipt.validated_at, "2026-08-25");
         assert_eq!(receipt.result, ConformanceStatus::Pass);
         assert!(receipt.validates_pin());
 
@@ -180,8 +185,55 @@ mod tests {
     }
 
     #[test]
+    fn grok_0105_receipt_is_typed_complete_and_passes_every_required_check() {
+        let receipt = grok_0105_conformance_receipt().expect("embedded receipt must parse");
+        assert_eq!(receipt.schema_version, 1);
+        assert_eq!(receipt.harness, Harness::GrokBuild);
+        assert_eq!(receipt.harness_version, "1.0.5");
+        assert_eq!(
+            receipt.observed_default_harness_version.as_deref(),
+            Some("1.0.5")
+        );
+        assert_eq!(receipt.observed_default_matches_validated(), Some(true));
+        assert_eq!(receipt.validated_at, "2026-08-25");
+        assert_eq!(receipt.result, ConformanceStatus::Pass);
+        assert!(receipt.validates_pin());
+
+        let evidence_ids: HashSet<&str> = receipt
+            .evidence
+            .iter()
+            .map(|evidence| evidence.id.as_str())
+            .collect();
+        assert!(!receipt.checklist.is_empty());
+        for check in &receipt.checklist {
+            assert!(
+                !check.evidence_refs.is_empty(),
+                "{} must cite evidence",
+                check.id
+            );
+            assert!(
+                check
+                    .evidence_refs
+                    .iter()
+                    .all(|id| evidence_ids.contains(id.as_str())),
+                "{} cites missing evidence: {:?}",
+                check.id,
+                check.evidence_refs
+            );
+        }
+        assert!(
+            receipt
+                .checklist
+                .iter()
+                .filter(|check| check.required)
+                .all(|check| check.status == ConformanceStatus::Pass),
+            "a PASS receipt must pass every required check"
+        );
+    }
+
+    #[test]
     fn failed_required_check_blocks_pin_even_if_top_level_remains_pass() {
-        let mut receipt = codex_0146_conformance_receipt().unwrap();
+        let mut receipt = codex_0149_conformance_receipt().unwrap();
         receipt
             .checklist
             .iter_mut()

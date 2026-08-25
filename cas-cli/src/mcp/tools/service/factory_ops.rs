@@ -242,7 +242,11 @@ fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort>
 fn parse_spawn_cli(cli: Option<&str>) -> Result<Option<cas_mux::SupervisorCli>, String> {
     cli.map(|s| {
         s.parse::<cas_mux::SupervisorCli>()
-            .map_err(|_| format!("invalid cli value {s:?}: expected 'claude', 'codex', or 'grok'"))
+            .map_err(|_| {
+                format!(
+                    "invalid cli value {s:?}: expected 'claude', 'codex', 'grok', or 'opencode'"
+                )
+            })
     })
     .transpose()
 }
@@ -263,6 +267,8 @@ fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> &'static str {
         cas_mux::SupervisorCli::Codex => crate::config::STOCK_WORKER_MODEL,
         // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
         cas_mux::SupervisorCli::Grok => "grok-4.5",
+        // cas-a5da owns config-driven OpenCode model resolution; no fake default.
+        cas_mux::SupervisorCli::OpenCode => "opencode-model-required-until-cas-a5da",
     }
 }
 
@@ -6634,6 +6640,10 @@ pub(crate) fn resolve_transcript(
         cas_mux::SupervisorCli::Claude => {
             resolve_claude_transcript(base_dir, clone_path, session_id)
         }
+        // cas-7296 owns CAS↔OpenCode transcript mapping; invent no real path.
+        cas_mux::SupervisorCli::OpenCode => {
+            TranscriptResolution::Synthesized(String::new())
+        }
     }
 }
 
@@ -6741,6 +6751,8 @@ fn default_transcript_roots(cli: cas_mux::SupervisorCli) -> Vec<std::path::PathB
         cas_mux::SupervisorCli::Grok => default_grok_sessions_dir().into_iter().collect(),
         cas_mux::SupervisorCli::Codex => default_codex_sessions_dir().into_iter().collect(),
         cas_mux::SupervisorCli::Claude => default_claude_projects_dirs(),
+        // cas-7296 owns OpenCode transcript roots; shared SQLite is not a transcript.
+        cas_mux::SupervisorCli::OpenCode => Vec::new(),
     }
 }
 
@@ -7367,6 +7379,8 @@ fn worker_status_transcript_path_for_account(
             worker_status_path_from_resolution(cached.resolution, cli)
         }
         cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
+        // cas-7296 owns OpenCode worker-status session mapping.
+        cas_mux::SupervisorCli::OpenCode => None,
     }
 }
 
@@ -7429,6 +7443,8 @@ fn worker_status_path_from_resolution(
         // Keep Grok aligned with is-wedged's historical ambiguity selection.
         cas_mux::SupervisorCli::Grok => transcript_path_from_resolution(resolution),
         cas_mux::SupervisorCli::Claude => transcript_path_from_resolution(resolution),
+        // cas-7296 owns OpenCode transcript evidence.
+        cas_mux::SupervisorCli::OpenCode => None,
     }
 }
 

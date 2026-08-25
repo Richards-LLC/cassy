@@ -254,6 +254,8 @@ pub fn worker_coordination_tool() -> &'static str {
         SupervisorCli::Codex => "mcp__cs__coordination",
         SupervisorCli::Grok => "cas__coordination",
         SupervisorCli::Claude => "mcp__cas__coordination",
+        // cas-a5da owns the full OpenCode policy surface.
+        SupervisorCli::OpenCode => "cas_coordination",
     }
 }
 
@@ -272,6 +274,8 @@ pub fn supervisor_verification_tool() -> &'static str {
         SupervisorCli::Codex => "mcp__cs__verification",
         SupervisorCli::Grok => "cas__verification",
         SupervisorCli::Claude => "mcp__cas__verification",
+        // cas-a5da owns the full OpenCode policy surface.
+        SupervisorCli::OpenCode => "cas_verification",
     }
 }
 

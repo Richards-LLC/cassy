@@ -70,6 +70,8 @@ pub fn alt_screen_wheel_bytes(cli: cas_mux::SupervisorCli, up: bool) -> Vec<u8> 
                 SCROLL_DOWN_ARROWS.to_vec()
             }
         }
+        // cas-a5da owns OpenCode factory interaction; no wheel bytes measured.
+        cas_mux::SupervisorCli::OpenCode => Vec::new(),
     }
 }
 

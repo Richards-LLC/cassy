@@ -49,6 +49,7 @@ use std::time::{Duration, SystemTime};
 use crate::mcp::tools::service::factory_ops::{
     resolve_worker_transcript_path_for_account, worker_cli_from_agent, worker_scope_paths,
 };
+use crate::mcp::tools::service::opencode_liveness;
 
 /// Window in which a Claude transcript mtime counts as "recent" — used to
 /// distinguish a worker that is still writing tool results (alive or
@@ -773,6 +774,49 @@ where
     (state, evidence)
 }
 
+/// Overlay the mapped OpenCode session signal on the generic process/worktree
+/// classifier. The generic path is retained only as process/worktree evidence
+/// when the plugin mapping is absent; it never supplies a Claude transcript.
+pub(crate) fn overlay_opencode_liveness(
+    fallback: WorkerLivenessState,
+    verdict: cas_mux::OpenCodeLivenessVerdict,
+    pid_alive: bool,
+) -> WorkerLivenessState {
+    match verdict {
+        cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Busy) => {
+            if pid_alive {
+                WorkerLivenessState::Alive
+            } else {
+                WorkerLivenessState::Unverified
+            }
+        }
+        cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Idle) => {
+            if pid_alive {
+                WorkerLivenessState::Alive
+            } else {
+                WorkerLivenessState::Dead
+            }
+        }
+        cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Error) => {
+            if pid_alive {
+                WorkerLivenessState::Wedged
+            } else {
+                WorkerLivenessState::Dead
+            }
+        }
+        cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Deleted) => {
+            if pid_alive {
+                WorkerLivenessState::Unverified
+            } else {
+                WorkerLivenessState::Dead
+            }
+        }
+        cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Unknown)
+        | cas_mux::OpenCodeLivenessVerdict::NotObserved => fallback,
+        cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback => WorkerLivenessState::Alive,
+    }
+}
+
 /// Resolve `(pid, clone_path, session_id, transcript_path)` for a worker by
 /// name. Reads the active agent row from AgentStore. Returns an error if the
 /// worker is unknown or has no registered PID — the verbs treat that as a
@@ -825,6 +869,7 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
     // resolver as worker_status so the human and director stall surfaces
     // cannot disagree about which transcript is evidence.
     let cli = worker_cli_from_agent(&agent);
+    let account_dir = agent.metadata.get("worker_account_dir").cloned();
     let transcript_path = resolve_worker_transcript_path_for_account(
         clone_path.as_deref(),
         &session_id,
@@ -849,6 +894,7 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
         session_id,
         cli,
         transcript_path,
+        account_dir,
     })
 }
 
@@ -866,6 +912,7 @@ pub(crate) struct ResolvedWorker {
     /// layout and freshness/crash-signature semantics in `classify_worker`.
     pub cli: cas_mux::SupervisorCli,
     pub transcript_path: Option<PathBuf>,
+    pub account_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -887,9 +934,13 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
         // with codex binary preferred over cas-serve descendants).
         let resolved_pid = find_worker_pid(&RealProcessTable, &w.name);
         let pid = pick_kill_pid(w.pid, resolved_pid);
-        let (state, evidence) = classify_worker(
+        let (fallback, mut evidence) = classify_worker(
             pid,
-            w.transcript_path.as_deref(),
+            if w.cli == cas_mux::SupervisorCli::OpenCode {
+                None
+            } else {
+                w.transcript_path.as_deref()
+            },
             w.clone_path.as_deref().map(Path::new),
             &w.session_id,
             w.cli,
@@ -897,10 +948,49 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
             worktree_recent_edit_age,
             process_cpu_busy,
         );
+        let opencode_observation = if w.cli == cas_mux::SupervisorCli::OpenCode {
+            opencode_liveness::observe(
+                cas_root,
+                &w.session_id,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or_default(),
+                evidence.pid_alive,
+            )
+        } else {
+            None
+        };
+        let state = if let Some(observation) = opencode_observation.as_ref() {
+            evidence.in_flight_tool_call = opencode_liveness::active_tool(observation);
+            overlay_opencode_liveness(fallback, observation.verdict, evidence.pid_alive)
+        } else {
+            fallback
+        };
         if json {
-            println!("{}", format_state_json(&state, &evidence));
+            if let Some(observation) = opencode_observation.as_ref() {
+                println!(
+                    "{}",
+                    format_state_json_with_opencode(&state, &evidence, observation)
+                );
+            } else {
+                println!("{}", format_state_json(&state, &evidence));
+            }
         } else {
             println!("{}", format_state_human(&state, &evidence));
+            if let Some(observation) = opencode_observation.as_ref() {
+                println!(
+                    "OpenCode: {}",
+                    opencode_liveness::verdict_label(observation.verdict)
+                );
+                println!(
+                    "OpenCode session: {}",
+                    opencode_liveness::mapped_session_id(observation)
+                        .unwrap_or("<pending ses_* mapping>")
+                );
+            } else if w.cli == cas_mux::SupervisorCli::OpenCode {
+                println!("OpenCode session: <mapping unavailable/delayed>");
+            }
         }
         state.exit_code()
     };
@@ -912,6 +1002,40 @@ pub(crate) fn execute_debug(cas_root: Option<&Path>, worker: &str, tail: usize) 
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
     let w = resolve_worker(cas_root, worker)?;
+    if w.cli == cas_mux::SupervisorCli::OpenCode {
+        let process_alive = w.pid.is_some_and(crate::mcp::daemon::pid_alive);
+        let observation = opencode_liveness::observe(
+            cas_root,
+            &w.session_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default(),
+            process_alive,
+        )
+        .ok_or_else(|| {
+            anyhow!(
+                "OpenCode session mapping unavailable/delayed for CAS session {}; no Claude transcript fallback",
+                w.session_id
+            )
+        })?;
+        let session_id = opencode_liveness::mapped_session_id(&observation).ok_or_else(|| {
+            anyhow!(
+                "OpenCode session mapping unavailable/delayed for CAS session {}; no Claude transcript fallback",
+                w.session_id
+            )
+        })?;
+        let export = opencode_liveness::export_session(&observation, w.account_dir.as_deref())
+            .map_err(|error| anyhow!("bounded OpenCode export for {session_id} failed: {error}"))?;
+        println!("# OpenCode session export: {session_id}");
+        println!(
+            "# liveness: {}",
+            opencode_liveness::verdict_label(observation.verdict)
+        );
+        println!("# tail: bounded export ({} bytes)\n", export.len());
+        print!("{export}");
+        return Ok(());
+    }
     let Some(path) = w.transcript_path.as_deref() else {
         bail!(
             "no transcript found for worker `{worker}` (session {}). Try `cas factory status` \
@@ -1118,6 +1242,9 @@ pub(crate) fn environ_candidate_score(cmdline: Option<&[u8]>) -> i32 {
             return 100;
         }
         if base == "grok" || base.starts_with("grok") {
+            return 100;
+        }
+        if base == "opencode" || base.starts_with("opencode-") {
             return 100;
         }
     }
@@ -1780,10 +1907,80 @@ fn format_state_json(state: &WorkerLivenessState, ev: &WorkerEvidence) -> String
     body.to_string()
 }
 
+fn format_state_json_with_opencode(
+    state: &WorkerLivenessState,
+    ev: &WorkerEvidence,
+    observation: &opencode_liveness::OpenCodeObservation,
+) -> String {
+    let mut body: serde_json::Value =
+        serde_json::from_str(&format_state_json(state, ev)).expect("state JSON is valid");
+    if let serde_json::Value::Object(fields) = &mut body {
+        fields.insert(
+            "opencode_session_id".to_string(),
+            serde_json::Value::String(
+                opencode_liveness::mapped_session_id(observation)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+        );
+        fields.insert(
+            "opencode_liveness".to_string(),
+            serde_json::Value::String(
+                opencode_liveness::verdict_label(observation.verdict).to_string(),
+            ),
+        );
+    }
+    body.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn opencode_liveness_overlay_covers_busy_idle_crash_and_fallback() {
+        assert_eq!(
+            overlay_opencode_liveness(
+                WorkerLivenessState::Unverified,
+                cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Busy),
+                true,
+            ),
+            WorkerLivenessState::Alive
+        );
+        assert_eq!(
+            overlay_opencode_liveness(
+                WorkerLivenessState::Unverified,
+                cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Idle),
+                true,
+            ),
+            WorkerLivenessState::Alive
+        );
+        assert_eq!(
+            overlay_opencode_liveness(
+                WorkerLivenessState::Alive,
+                cas_mux::OpenCodeLivenessVerdict::Signal(cas_mux::OpenCodeLiveness::Error),
+                true,
+            ),
+            WorkerLivenessState::Wedged
+        );
+        assert_eq!(
+            overlay_opencode_liveness(
+                WorkerLivenessState::Unverified,
+                cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback,
+                true,
+            ),
+            WorkerLivenessState::Alive
+        );
+        assert_eq!(
+            overlay_opencode_liveness(
+                WorkerLivenessState::Unverified,
+                cas_mux::OpenCodeLivenessVerdict::NotObserved,
+                false,
+            ),
+            WorkerLivenessState::Unverified
+        );
+    }
 
     #[test]
     fn classify_dead_when_pid_gone_and_second_signal_corroborates() {

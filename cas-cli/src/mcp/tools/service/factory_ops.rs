@@ -241,12 +241,9 @@ fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort>
 
 fn parse_spawn_cli(cli: Option<&str>) -> Result<Option<cas_mux::SupervisorCli>, String> {
     cli.map(|s| {
-        s.parse::<cas_mux::SupervisorCli>()
-            .map_err(|_| {
-                format!(
-                    "invalid cli value {s:?}: expected 'claude', 'codex', 'grok', or 'opencode'"
-                )
-            })
+        s.parse::<cas_mux::SupervisorCli>().map_err(|_| {
+            format!("invalid cli value {s:?}: expected 'claude', 'codex', 'grok', or 'opencode'")
+        })
     })
     .transpose()
 }
@@ -2516,6 +2513,41 @@ impl CasService {
                 let git_info = worktree_status.git_info;
                 let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
                 let worker_cli = worker_cli_from_agent(agent);
+                let opencode_observation = (worker_cli == cas_mux::SupervisorCli::OpenCode)
+                    .then(|| {
+                        crate::mcp::tools::service::opencode_liveness::observe(
+                            &self.inner.cas_root,
+                            session_uuid,
+                            now.timestamp_millis().max(0) as u64,
+                            agent_process_is_alive(agent),
+                        )
+                    })
+                    .flatten();
+                let liveness_label = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    match opencode_observation
+                        .as_ref()
+                        .map(|observation| observation.verdict)
+                    {
+                        Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Busy,
+                        ))
+                        | Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Idle,
+                        ))
+                        | Some(cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback) => {
+                            " [alive — OpenCode mapped session]"
+                        }
+                        Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Error,
+                        )) => " [OpenCode error signal]",
+                        Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Deleted,
+                        )) => " [OpenCode session deleted]",
+                        _ => liveness_label,
+                    }
+                } else {
+                    liveness_label
+                };
                 // Scan-based harness resolution is a bounded-TTL lookup after
                 // the first poll for this worker. Keep the rich result so the
                 // same lookup feeds context/activity/in-flight evidence and
@@ -2552,12 +2584,21 @@ impl CasService {
                 // answer whether the harness actually started a turn. Render
                 // the harness's own artifact-backed turn observation
                 // separately; Claude's transcript is now authoritative too.
-                let harness_turn_info = format_harness_turn_observation(
-                    worker_cli,
-                    transcript_path_for_worker.as_deref(),
-                );
-                let turn_start_observable = harness_publishes_turn_start(worker_cli)
-                    && transcript_path_for_worker.is_some();
+                let harness_turn_info = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    String::new()
+                } else {
+                    format_harness_turn_observation(
+                        worker_cli,
+                        transcript_path_for_worker.as_deref(),
+                    )
+                };
+                let turn_start_observable = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    opencode_observation
+                        .as_ref()
+                        .is_some_and(|observation| observation.state.last_activity_at.is_some())
+                } else {
+                    harness_publishes_turn_start(worker_cli) && transcript_path_for_worker.is_some()
+                };
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -2577,7 +2618,40 @@ impl CasService {
                 // ever populated separately in the future we prefer it —
                 // but for now `id` is the right key and has been correct
                 // since cas-2749.
-                let transcript_info = if elapsed >= WORKER_DEAD_SECS {
+                let transcript_info = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    let mapped_live = opencode_observation.as_ref().is_some_and(|observation| {
+                        matches!(
+                            observation.verdict,
+                            cas_mux::OpenCodeLivenessVerdict::Signal(
+                                cas_mux::OpenCodeLiveness::Busy
+                            ) | cas_mux::OpenCodeLivenessVerdict::Signal(
+                                cas_mux::OpenCodeLiveness::Idle
+                            ) | cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback
+                        )
+                    });
+                    if elapsed < WORKER_DEAD_SECS || mapped_live {
+                        String::new()
+                    } else {
+                        opencode_observation.as_ref().map_or_else(
+                            || "\n    OpenCode export: mapping unavailable/delayed".to_string(),
+                            |observation| {
+                                crate::mcp::tools::service::opencode_liveness::export_session(
+                                    observation,
+                                    agent.metadata.get("worker_account_dir").map(String::as_str),
+                                )
+                                .map(|export| {
+                                    format!(
+                                        "\n    OpenCode export (bounded, mapped session):\n        {}",
+                                        export.replace('\n', "\n        ")
+                                    )
+                                })
+                                .unwrap_or_else(|error| {
+                                    format!("\n    OpenCode export: unavailable ({error})")
+                                })
+                            },
+                        )
+                    }
+                } else if elapsed >= WORKER_DEAD_SECS {
                     hard_dead_worker_transcript_block(
                         transcript_resolution_for_worker.as_ref(),
                         clone_path.as_deref(),
@@ -2683,13 +2757,26 @@ impl CasService {
                 // Reuses the same transcript path already resolved above for
                 // context_info/in_flight_tool_call, and the same
                 // wedged::transcript_mtime_age primitive `is-wedged` trusts.
-                let last_activity = last_worker_activity_secs_with_harness_turn(
+                let artifact_last_activity = last_worker_activity_secs_with_harness_turn(
                     &activity_events,
                     &agent.id,
                     worker_cli,
                     transcript_path_for_worker.as_deref(),
                     now,
                 );
+                let last_activity = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    opencode_observation
+                        .as_ref()
+                        .and_then(|observation| {
+                            crate::mcp::tools::service::opencode_liveness::last_activity_secs(
+                                observation,
+                                now.timestamp_millis().max(0) as u64,
+                            )
+                        })
+                        .or_else(|| last_worker_activity_secs(&activity_events, &agent.id))
+                } else {
+                    artifact_last_activity
+                };
                 let progress_timestamps = format_worker_progress_timestamps(
                     prompt_queue.as_ref().and_then(|queue| {
                         queue
@@ -2719,9 +2806,17 @@ impl CasService {
                 // `wedged::transcript_has_in_flight_tool_call` primitive
                 // against the same transcript path/cli resolution already
                 // computed for `context_info` above.
-                let in_flight_tool_call = transcript_path_for_worker.as_deref().is_some_and(|p| {
-                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(p, worker_cli)
-                });
+                let in_flight_tool_call = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    opencode_observation
+                        .as_ref()
+                        .is_some_and(crate::mcp::tools::service::opencode_liveness::active_tool)
+                } else {
+                    transcript_path_for_worker.as_deref().is_some_and(|p| {
+                        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                            p, worker_cli,
+                        )
+                    })
+                };
                 // cas-058e: a completed tool call may have left a real cargo
                 // build running under the worker pane. Resolve the harness PID
                 // exactly as `is-wedged` does; an unreadable process tree is
@@ -2734,10 +2829,14 @@ impl CasService {
                 .or(agent.pid)
                 .map(crate::cli::factory::wedged::background_processes_for)
                 .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
-                let has_active_work = crate::cli::factory::wedged::has_active_work(
+                let mut has_active_work = crate::cli::factory::wedged::has_active_work(
                     in_flight_tool_call,
                     &background_processes,
                 );
+                if let Some(observation) = opencode_observation.as_ref() {
+                    has_active_work |=
+                        crate::mcp::tools::service::opencode_liveness::has_active_work(observation);
+                }
                 let assigned_open_task = assigned_open_tasks.iter().find(|task| {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
@@ -2893,6 +2992,14 @@ impl CasService {
                     inbox_info,
                     session_uuid
                 ));
+                if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    let opencode_info =
+                        crate::mcp::tools::service::opencode_liveness::render_status(
+                            opencode_observation.as_ref(),
+                        );
+                    output.push_str(opencode_info.trim_start_matches('\n'));
+                    output.push('\n');
+                }
             }
         }
 
@@ -3067,6 +3174,43 @@ impl CasService {
             })
             .collect();
 
+        // OpenCode has no transcript path. Read the plugin projection by CAS
+        // session identity instead; event timestamps are the activity source,
+        // and a live process is only rendered as an explicit fallback.
+        let opencode_activity: Vec<_> = visible_workers
+            .iter()
+            .filter_map(|agent| {
+                (worker_cli_from_agent(agent) == cas_mux::SupervisorCli::OpenCode).then_some(agent)
+            })
+            .filter_map(|agent| {
+                let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+                let observation = crate::mcp::tools::service::opencode_liveness::observe(
+                    &self.inner.cas_root,
+                    session_id,
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    agent_process_is_alive(agent),
+                )?;
+                let label = crate::mcp::tools::service::opencode_liveness::verdict_label(
+                    observation.verdict,
+                );
+                let age = crate::mcp::tools::service::opencode_liveness::last_activity_secs(
+                    &observation,
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                )
+                .map(|(age, _)| age)
+                .or_else(|| {
+                    (observation.verdict == cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback)
+                        .then_some(0)
+                })?;
+                (age <= WORKER_ACTIVITY_WINDOW_SECS).then_some((
+                    agent.name.clone(),
+                    age,
+                    crate::mcp::tools::service::opencode_liveness::active_tool(&observation),
+                    label,
+                ))
+            })
+            .collect();
+
         // GH #255 round 2: hooks do not reliably observe Codex file edits, so
         // the event/transcript view above must never make a dirty worker look
         // idle. Snapshot each visible worktree at query time as a floor under
@@ -3084,7 +3228,8 @@ impl CasService {
             transcript_activity.len(),
             worktree_activity.len(),
             terminal_event_count,
-        ) {
+        ) && opencode_activity.is_empty()
+        {
             return Ok(Self::success(
                 "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness and a query-time dirty-worktree floor. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
@@ -3124,6 +3269,16 @@ impl CasService {
             };
             output.push_str(&format!(
                 "• {worker_name} - {activity} ({age_secs}s ago; transcript-backed)\n"
+            ));
+        }
+        for (worker_name, age_secs, in_flight, verdict) in opencode_activity {
+            let activity = if in_flight {
+                "OpenCode mapped session: in-flight tool call"
+            } else {
+                "OpenCode mapped session activity"
+            };
+            output.push_str(&format!(
+                "• {worker_name} - {activity} ({age_secs}s ago; {verdict}; no transcript path)\n"
             ));
         }
         for snapshot in &worktree_activity {
@@ -6641,9 +6796,7 @@ pub(crate) fn resolve_transcript(
             resolve_claude_transcript(base_dir, clone_path, session_id)
         }
         // cas-7296 owns CAS↔OpenCode transcript mapping; invent no real path.
-        cas_mux::SupervisorCli::OpenCode => {
-            TranscriptResolution::Synthesized(String::new())
-        }
+        cas_mux::SupervisorCli::OpenCode => TranscriptResolution::Synthesized(String::new()),
     }
 }
 

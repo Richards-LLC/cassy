@@ -28,20 +28,22 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Version status
 
-- **Cassy validated against:** Codex CLI **0.146.0**. The exact interactive `PtyConfig::codex`
-  matrix passed on 2026-07-30 after `cas-8c80` projected `mcp__cs` as a direct-only code-mode
-  namespace and pinned Codex's restricted MCP subprocess to the pane's `CAS_ROOT`. The typed
-  receipt is `crates/cas-pty/conformance/codex-cli-0.146.0-2026-07-30.json`.
+- **Cassy validated against:** Codex CLI **0.149.1**. The complete isolated interactive
+  `PtyConfig::codex` matrix passed on 2026-08-25 with `--yolo`, `xhigh` effort, direct-only
+  `mcp__cs` tools, initialized disposable `CAS_ROOT`, worktree discovery fixtures, and interrupt /
+  resume recovery. The typed receipt is
+  `crates/cas-pty/conformance/codex-cli-0.149.1-2026-08-25.json`.
 - **Locally installed:** **0.149.1** (`codex-cli 0.149.1`, checked 2026-08-25).
 - **Latest stable:** **0.149.1** (2026-08-24). 0.150.0-alpha.9 is the current prerelease and is
   skimmed but untracked under this diary's stable-only policy.
-- **Gap:** the validated pin remains 0.146.0 while the local installation and latest stable are
-  0.149.1. This review found no documented `--yolo`, `--no-alt-screen`, `--model`,
-  `model_reasoning_effort`, `developer_instructions`, or `AGENTS.md` launch-contract rename, but a
-  fresh `PtyConfig::codex` matrix remains required before calling 0.147.0–0.149.1 validated.
-  The older entries below are a *triage pass* against the touchpoints, not a per-item code audit —
-  upgrade-time re-verification is the trigger for promoting any 👀 to a task. (Contrast the Claude
-  Code diary's .166/.162 entries, which were deep-verified for specific user questions.) The
+- **Gap:** none between the validated pin, local installation, and latest stable. The fresh matrix
+  found no launch-contract regression across 0.147.0–0.149.1. The non-gating probe also found
+  `-c model_reasoning_effort=max` accepted by Codex 0.149.1; Cassy still maps only its existing
+  `Effort::XHigh` → `xhigh` vocabulary because no Effort implementation change is part of this
+  validation. The older entries below remain a *triage pass* against the touchpoints, not a
+  per-item code audit — future upgrade-time re-verification is the trigger for promoting any 👀 to
+  a task. (Contrast the Claude Code diary's .166/.162 entries, which were deep-verified for
+  specific user questions.) The
   **0.130–0.135 block is a backfill** (lighter fidelity, consolidated) added 2026-06-30 to extend
   coverage below the original 0.136 seed floor. The **0.143–0.144.4 block is a backfill**
   (2026-07-14) catching the diary up from the previous 0.142.5 ceiling; 0.145.0 is the first
@@ -77,10 +79,10 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 | Codex version | Headline | Cassy verdict | Pointer |
 |---------------|----------|-------------|---------|
 | 0.150.0-alpha.9 | Pre-release as of 2026-08-25 — untracked under stable-only policy | — | — |
-| 0.149.1 | Patch release with no release-note body | ✅ no action | this doc |
-| 0.149.0 | **`codex agents` dashboard · SDK config/`max`+`ultra` effort · rmcp 3.1.2 · MCP hooks** | 👀 upgrade validation | this doc |
-| 0.148.0 | **Async/MCP hooks** · MCP recovery and handler reuse · skills-loader churn · fail-closed sandbox | 👀 upgrade validation | this doc |
-| 0.147.0 | MCP 2026-07-28 discovery/non-blocking startup · Agent Plugins · trust/approval hardening | 👀 upgrade validation | this doc |
+| 0.149.1 | Patch release with no release-note body · full factory matrix passed | 🟢 validated | receipt |
+| 0.149.0 | **`codex agents` dashboard · SDK config/`max`+`ultra` effort · rmcp 3.1.2 · MCP hooks** | 🟢 validated | receipt |
+| 0.148.0 | **Async/MCP hooks** · MCP recovery and handler reuse · skills-loader churn · fail-closed sandbox | 🟢 validated | receipt |
+| 0.147.0 | MCP 2026-07-28 discovery/non-blocking startup · Agent Plugins · trust/approval hardening | 🟢 validated | receipt |
 | 0.146.1 | Safer cyber-model auto-review defaults | ✅ no action | this doc |
 | 0.146.0 | **Live MCP refresh/reconnect** · executor skills and Agent Plugins · approval-state preservation | 🔧 validated/fix shipped | receipt + cas-8c80 |
 | 0.145.0 | **Multi-agent V2 stable** · broader `/import` · MCP startup hardening · concurrent skill discovery · approval tightening | 👀 watch | this doc |
@@ -107,8 +109,17 @@ Reviewed 2026-08-25. The official release has no user-facing release-note body o
 [`rust-v0.149.1 release`](https://github.com/openai/codex/releases/tag/rust-v0.149.1)
 (published 2026-08-24).
 
-- **No release-note changes are documented.** → ✅ **no action.** There is no new Cassy touchpoint
-  signal to triage; the validated-pin gap remains unchanged at 0.146.0 → 0.149.1.
+- **No release-note changes are documented.** → ✅ **no action** for the patch itself. The full
+  0.149.1 factory matrix below passed, so this patch is now included in the validated 0.149.1 pin.
+- **Factory contract validation:** 🟢 **passed**. The isolated production run recorded
+  `--yolo` approval bypass, `xhigh` effort, `--config developer_instructions` delivery,
+  `mcp__cs__task` / `mcp__cs__coordination` root and follow-up calls, code-mode coexistence,
+  `AGENTS.md` + `.codex/skills` + `.codex/agents` discovery, inherited CAS identity/env, and
+  interrupt/resume liveness. Receipt:
+  `crates/cas-pty/conformance/codex-cli-0.149.1-2026-08-25.json`.
+- **Non-gating effort probe:** `-c model_reasoning_effort=max` was accepted by 0.149.1
+  (`codex -c model_reasoning_effort=max --version` exited 0). Cassy does not map `max` here; the
+  existing `Effort::XHigh` → `xhigh` implementation remains unchanged.
 
 ### 0.149.0 — agents dashboard, MCP 3.1.2, and SDK effort/config expansion
 
@@ -117,32 +128,34 @@ Reviewed 2026-08-25. Triage pass vs touchpoints. Source: official
 (published 2026-08-20).
 
 - **The interactive `codex agents` dashboard and tighter sub-agent routing/approval notifications**
-  add a native agent-management surface. → 👀 **touchpoints: `.codex/agents/`, `--model`,
+  add a native agent-management surface. → 🟢 **validated touchpoints: `.codex/agents/`, `--model`,
   `model_reasoning_effort`, and factory role behavior.** Cassy factory orchestration does not rely on
-  Codex-native sub-agents, so no integration change is required. On upgrade, keep native delegation
-  opt-in and verify the root worker still receives Cassy's `developer_instructions` and configured
-  model/effort overrides without a native agent default shadowing them.
+  Codex-native sub-agents, so no integration change is required. The 0.149.1 matrix kept native
+  delegation out of the contract and confirmed that the root worker receives Cassy's
+  `developer_instructions` and configured model/effort overrides without a native agent default
+  shadowing them.
 - **SDKs now accept exact CLI config overrides and `max`/`ultra` reasoning effort; the release also
-  restores permission profiles across resumed and forked threads.** → 👀 **touchpoints: `-c
+  restores permission profiles across resumed and forked threads.** → 🟢 **validated touchpoints: `-c
   model_reasoning_effort=<e>`, `--config developer_instructions="..."`, and `--yolo`.** Cassy
   currently maps `Effort::XHigh` to `xhigh` and launches workers with `--yolo`; these notes do not
-  document a CLI rename or changed `developer_instructions` key. Upgrade validation must confirm
-  `xhigh` remains accepted and a resumed/forked factory session keeps non-interactive bypass rather
-  than restoring an interactive profile.
+  document a CLI rename or changed `developer_instructions` key. The 0.149.1 matrix confirmed
+  `xhigh` remains accepted and the resumed factory session keeps non-interactive bypass rather than
+  restoring an interactive profile.
 - **Codex updates rmcp to 3.1.2, enables MCP tool hooks, routes hook MCP calls through current
-  connections, scopes MCP resources, and raises the MCP tool-name limit.** → 👀 **touchpoint: MCP
-  (`cs`) and `.codex/config.toml`.** This is a substantial MCP client/protocol churn point: smoke a
-  fresh local stdio `cs` server and invoke `mcp__cs__task` plus `mcp__cs__coordination` after upgrade,
-  checking that direct `mcp__cs__*` discovery, resource origin handling, and the no-OAuth local path
-  remain intact. Codex's MCP hook support does not replace Cassy's task/coordination lifecycle.
+  connections, scopes MCP resources, and raises the MCP tool-name limit.** → 🟢 **validated touchpoint: MCP
+  (`cs`) and `.codex/config.toml`.** This is a substantial MCP client/protocol churn point. The
+  0.149.1 matrix confirmed direct `mcp__cs__*` discovery, resource origin handling, and the no-OAuth
+  local path remain intact. Codex's MCP hook support does not replace Cassy's task/coordination
+  lifecycle.
 - **Environment-specific command/MCP policy, AGENTS.md filesystem checks and collaboration refreshes,
-  plugin and skill-selection changes, and sandbox hardening** are → 👀 **touchpoints: `AGENTS.md`,
-  `.codex/skills/`, `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, and `--yolo`.** Verify a worktree still loads
-  the Cassy instruction and skill mirrors, and a factory launch remains non-interactive. The TUI
+  plugin and skill-selection changes, and sandbox hardening** are → 🟢 **validated touchpoints: `AGENTS.md`,
+  `.codex/skills/`, `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, and `--yolo`.** The 0.149.1 matrix loaded
+  the Cassy instruction and skill mirrors from the isolated worktree, and the factory launch remained
+  non-interactive. The TUI
   dashboard, working-directory commands, queue command, Vim editing, doctor diagnostics, realtime
   transport, and Windows scrollback are ⏭ **n/a** to the Cassy PTY launch contract. **Source gaps:**
-  none for the stable release; no new Cassy task is required until upgrade validation produces a
-  concrete failure.
+  none for the stable release; the complete 0.149.1 matrix passed these touchpoints, so no new
+  Cassy task is required until a future upgrade validation produces a concrete failure.
 
 ### 0.148.0 — async MCP hooks, recovery, skills-loader churn, and fail-closed sandboxing
 
@@ -152,27 +165,28 @@ Reviewed 2026-08-25. Triage pass vs touchpoints. Source: official
 
 - **Hooks can run commands asynchronously and invoke MCP tools; MCP handlers are reused across
   sampling steps, cached servers can start lazily, and MCP servers recover after OAuth
-  reauthentication.** → 👀 **touchpoint: MCP (`cs`) and `.codex/config.toml`.** Cassy does not use a
+  reauthentication.** → 🟢 **validated touchpoint: MCP (`cs`) and `.codex/config.toml`.** Cassy does not use a
   Codex hook system for its worker contract, and its local stdio server needs no OAuth, but the
-  client/runtime changes are load-bearing. On upgrade, prove that `mcp__cs__task` and
+  client/runtime changes are load-bearing. The 0.149.1 matrix proved that `mcp__cs__task` and
   `mcp__cs__coordination` are discovered and callable before required lifecycle work, with no stale
   catalog, partial startup, or unintended hook-mediated call path.
 - **Plugin roots, shared host skill loading, executor-local config layers, skill-resource aliases,
-  skill budget/shadow-selection changes, and removal of the legacy skill loader** are → 👀
-  **touchpoints: `.codex/skills/` + `.codex/agents/` and `AGENTS.md`.** This is internal skills
-  plumbing churn rather than a Cassy integration change. Verify the `cas integrate`/`cas update`
-  mirror remains discoverable in a worktree, required worker guidance is not hidden by catalog
-  pressure, and imported/plugin skills cannot shadow Cassy's authority path.
+  skill budget/shadow-selection changes, and removal of the legacy skill loader** are → 🟢
+  **validated touchpoints: `.codex/skills/` + `.codex/agents/` and `AGENTS.md`.** This is internal skills
+  plumbing churn rather than a Cassy integration change. The 0.149.1 matrix confirmed the
+  `cas integrate`/`cas update` mirror remains discoverable in a worktree, required worker guidance
+  is not hidden by catalog pressure, and imported/plugin skills cannot shadow Cassy's authority path.
 - **Resumed sessions restore persisted cwd and approval policy; sandbox restrictions fail closed for
-  denied or unreadable paths on Linux and Windows.** → 👀 **touchpoints: `--yolo`,
+  denied or unreadable paths on Linux and Windows.** → 🟢 **validated touchpoints: `--yolo`,
   `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, and `AGENTS.md`.** The release notes do not rename `--yolo` or
-  narrow its documented factory use, but a fresh worker plus resume smoke must confirm the explicit
-  bypass remains non-interactive and the worktree instruction file is still readable.
+  narrow its documented factory use, and the 0.149.1 fresh worker plus resume matrix confirmed the
+  explicit bypass remains non-interactive and the worktree instruction file is still readable.
 - **Temporary provider recovery, TUI startup/rendering, `/export`, `codex exec fork`, Bedrock,
   usage display, and skill-creator documentation** are ⏭ **n/a** to the Cassy PTY launch contract.
   The notes report no `--no-alt-screen`, `--model`, `model_reasoning_effort`, or
   `developer_instructions` contract change. **Source gaps:** none for the stable release; no new
-  Cassy task is required until upgrade validation produces a concrete failure.
+  Cassy task is required until a future upgrade validation produces a concrete failure; the
+  0.149.1 initialized-root, skill-discovery, and resume checks passed.
 
 ### 0.147.0 — MCP 2026-07-28, portable plugins, and approval/trust boundaries
 
@@ -181,18 +195,20 @@ Reviewed 2026-08-13. Triage pass vs touchpoints. Source: official
 (published 2026-08-07).
 
 - **Codex supports the opt-in MCP 2026-07-28 protocol, paginated discovery, multi-round requests,
-  cached tools before optional server startup, and non-blocking startup.** → 👀 **touchpoint: MCP
-  (`cs`).** These are direct client-runtime changes. Upgrade validation must prove that the local
-  stdio `cs` server is discovered under `mcp__cs__*`, is ready before required lifecycle calls, and
-  never leaves a stale or partially paginated tool catalog.
+  cached tools before optional server startup, and non-blocking startup.** → 🟢 **validated touchpoint: MCP
+  (`cs`).** These are direct client-runtime changes. The 0.149.1 matrix proved that the local stdio
+  `cs` server is discovered under `mcp__cs__*`, is ready before required lifecycle calls, and never
+  leaves a stale or partially paginated tool catalog.
 - **Portable Agent Plugins and imported Cursor skills expand the plugin/skill sources, while host
-  skill budgets and isolation were hardened.** → 👀 **touchpoint: `.codex/skills/`,
-  `.codex/agents/`, and `AGENTS.md`.** Cassy does not use plugins as its authority path; confirm its
-  synced mirror remains discoverable and cannot be shadowed by an imported or plugin-provided skill.
+  skill budgets and isolation were hardened.** → 🟢 **validated touchpoint: `.codex/skills/`,
+  `.codex/agents/`, and `AGENTS.md`.** Cassy does not use plugins as its authority path; the 0.149.1
+  matrix confirmed its synced mirror remains discoverable and cannot be shadowed by an imported or
+  plugin-provided skill.
 - **`--approve-for-me`, explicit trust for unfamiliar projects, managed-auth enforcement, and
-  fail-closed network/plugin policy behavior change approval and sandbox boundaries.** → 👀
+  fail-closed network/plugin policy behavior change approval and sandbox boundaries.** → 🟢 **validated**
   **touchpoint: `--yolo`, `CAS_AGENT_ROLE`, and `CAS_FACTORY_MODE`.** No documented removal or
-  rename affects Cassy, but a factory resume and fresh-worktree smoke is required before promotion.
+  rename affects Cassy; the 0.149.1 fresh and resumed factory matrix passed the non-interactive
+  bypass and environment checks.
 - **Thread organization, rendering, remote compaction, and installer/package changes** are
   ⏭ **n/a** to the Cassy PTY launch contract. **Source gaps:** none for the stable release.
 

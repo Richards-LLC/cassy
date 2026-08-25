@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "receipt_id": "codex-cli-0.149.1-2026-08-25",
+  "harness": "codex-cli",
+  "harness_version": "0.149.1",
+  "validated_at": "2026-08-25",
+  "result": "pass",
+  "checklist": [
+    {
+      "id": "cli_version",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "codex --version reported codex-cli 0.149.1 immediately before the isolated run."
+    },
+    {
+      "id": "noninteractive_permission_bypass",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The real PtyConfig launch emitted --yolo; root, follow-up, and resumed rollout contexts recorded approval_policy=never and danger-full-access."
+    },
+    {
+      "id": "model_and_reasoning_effort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The real launch emitted --model gpt-5.6-terra and -c model_reasoning_effort=xhigh; all three recorded turn contexts retained that model and effort."
+    },
+    {
+      "id": "developer_role_priming",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "factory-parity"],
+      "detail": "Worker developer_instructions and startup workflow loaded; the startup turn called the expected coordination and task lifecycle tools."
+    },
+    {
+      "id": "inline_tui_and_cwd",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production argv emitted --no-alt-screen and every recorded turn context used the isolated repository cwd."
+    },
+    {
+      "id": "mcp_cs_root_turn",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "cas-root-initialization"],
+      "detail": "The initialized disposable CAS_ROOT served mcp__cs tools before the root lifecycle turn; the startup turn called coordination whoami and task mine."
+    },
+    {
+      "id": "mcp_cs_followup_turn",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "A later injected turn called coordination whoami and task mine again through the same production PTY and isolated CAS store."
+    },
+    {
+      "id": "code_mode_and_direct_cs_coexist",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The follow-up used Codex's code-mode exec tool in the same turn as directly exposed cs coordination/task tools; production argv retained code mode."
+    },
+    {
+      "id": "skills_agents_and_agents_md_discovery",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "factory-parity"],
+      "detail": "The isolated worker loaded unique AGENTS.md, .codex skill, and .codex agent markers; the deterministic launch parity gate covers the synced Codex catalogs."
+    },
+    {
+      "id": "factory_identity_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "factory-parity"],
+      "detail": "Production config assertions covered CAS role/factory/session/model/effort environment, CAS_ROOT, and Codex worker metadata; the real server used the disposable initialized root."
+    },
+    {
+      "id": "interruption_resume_approval_continuity",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The real production matrix completed Mux interrupt-and-inject recovery under --yolo and the redirected resumed turn completed with the expected marker."
+    },
+    {
+      "id": "no_low_rollout_token_budget_abort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "PtyConfig emitted no rollout budget override, and all three real Codex turns completed without a rollout-token-budget abort."
+    },
+    {
+      "id": "max_effort_probe",
+      "required": false,
+      "status": "pass",
+      "evidence_refs": ["max-effort-probe"],
+      "detail": "Non-gating probe accepted -c model_reasoning_effort=max: codex -c model_reasoning_effort=max --version exited 0 and reported codex-cli 0.149.1."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "live-production-run",
+      "kind": "live_test",
+      "reference": "task:cas-b9a4#2026-08-25-codex-0.149.1-production-run; rollout:/home/pippenz/.codex/sessions/2026/08/25/rollout-2026-08-25T10-37-00-01a0395a-6500-7163-a5de-fb943066517d.jsonl",
+      "summary": "Fresh real Codex 0.149.1 PtyConfig::codex run with target/debug/cas first on PATH, initialized disposable CAS_ROOT, and disposable project fixtures; the guarded live matrix passed with 1 test passed in 53.76s."
+    },
+    {
+      "id": "cas-root-initialization",
+      "kind": "test",
+      "reference": "crates/cas-mux/tests/codex_factory_contract_runtime.rs::cas_init",
+      "summary": "The live probe initializes the disposable project with the current target/debug/cas before Codex starts, so the restricted MCP subprocess has a current-schema CAS_ROOT."
+    },
+    {
+      "id": "max-effort-probe",
+      "kind": "diagnostic",
+      "reference": "command:codex -c model_reasoning_effort=max --version",
+      "summary": "Codex 0.149.1 accepted the max effort TOML override at CLI parse time and exited 0; this result is non-gating and does not alter Cassy's Effort vocabulary."
+    },
+    {
+      "id": "factory-parity",
+      "kind": "test",
+      "reference": "cas-cli/tests/factory_parity_test.rs",
+      "summary": "The guarded parity integration target passed both tests, covering Codex catalogs, role instructions, launch args, effective contract, and MCP prefix."
+    }
+  ]
+}

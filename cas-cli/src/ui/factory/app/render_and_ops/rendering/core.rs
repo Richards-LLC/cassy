@@ -13,6 +13,8 @@ pub(crate) fn backend_tag(cli: cas_mux::SupervisorCli) -> &'static str {
         cas_mux::SupervisorCli::Claude => "cc",
         cas_mux::SupervisorCli::Codex => "codex",
         cas_mux::SupervisorCli::Grok => "grok",
+        // cas-a5da owns the remaining OpenCode factory UI policy.
+        cas_mux::SupervisorCli::OpenCode => "opencode",
     }
 }
 

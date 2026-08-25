@@ -1488,6 +1488,10 @@ fn resolve_cli_choice(
             "{role} 'grok' is not installed. Install the xAI Grok Build CLI: \
              curl -fsSL https://x.ai/cli/install.sh | bash"
         ),
+        // cas-a5da owns OpenCode availability and local-provider preflight.
+        cas_mux::SupervisorCli::OpenCode => {
+            bail!("{role} 'opencode' is not supported until cas-a5da")
+        }
     }
 }
 

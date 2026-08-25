@@ -2598,9 +2598,9 @@ This is the body content."#;
             "model-selection.md",
             // cas-b342/cas-96ea: Codex-first tier table + exception/capacity lanes in the body.
             "Codex-first tiers",
-            "codex/gpt-5.6-terra/low",
+            "grok/grok-composer-2.5-fast/low",
             "codex/gpt-5.6-sol/high",
-            "codex/gpt-5.6-terra/high",
+            "codex/gpt-5.6-luna/xhigh",
             "Opus",
             "capacity route",
         ] {
@@ -5149,17 +5149,17 @@ This is the body content."#;
             "model-selection.md .claude and .grok copies must be identical apart from \
              the mcp__cas__/cas__ tool prefix",
         );
-        // The Codex-first tier table is the contract: Terra serves light,
-        // standard, and taste work, while Sol/high is heavy/frontier only.
+        // The Codex-first tier table is the contract: Grok Composer serves
+        // genuinely light work, Luna/xhigh is standard and taste, while
+        // Sol/high is heavy/frontier only and Terra is suspended.
         for required in [
             // Codex-first tier table (AC2)
             "Codex-first",
-            "cli=codex model=gpt-5.6-terra effort=low",
-            "cli=codex model=gpt-5.6-terra effort=high",
+            "cli=grok model=grok-composer-2.5-fast effort=low",
+            "cli=codex model=gpt-5.6-luna effort=xhigh",
             "cli=codex model=gpt-5.6-sol effort=high",
-            "cli=codex model=gpt-5.6-terra effort=high",
             "gpt-5.6-luna",
-            "gpt-5.4-mini to Luna",
+            "gpt-5.4-mini successor",
             "Sonnet is not a normal worker lane",
             "not Sonnet",
             // Claude Opus exceptional lane (AC3 revised)
@@ -5187,8 +5187,10 @@ This is the body content."#;
             "Cost",
             "Intelligence",
             "Taste",
-            "Taste-sensitive work routes to Codex GPT-5.6 Terra at high effort",
-            "effort=high` is the ceiling",
+            "Taste-sensitive work routes to Codex GPT-5.6 Luna at",
+            "effort=high",
+            "Terra is suspended",
+            "operator decision pending",
             "Escalate on judgment",
             "Cost is a tiebreaker only",
         ] {
@@ -5204,7 +5206,8 @@ This is the body content."#;
         let stripped = claude
             .content
             .replace("gpt-5.6-sol", "SOLSLUG")
-            .replace("gpt-5.6-terra", "TERRASLUG");
+            .replace("gpt-5.6-terra", "TERRASLUG")
+            .replace("gpt-5.6-luna", "LUNASLUG");
         assert!(
             !stripped.contains("model=gpt-5.6") && !stripped.contains("codex/gpt-5.6"),
             "model-selection.md must not use a bare gpt-5.6 spawn recipe"
@@ -5363,13 +5366,12 @@ This is the body content."#;
                     if line.contains("cli=codex") {
                         assert!(
                             [
-                                ("model=gpt-5.6-terra", "effort=low"),
-                                ("model=gpt-5.6-terra", "effort=high"),
+                                ("model=gpt-5.6-luna", "effort=xhigh"),
                                 ("model=gpt-5.6-sol", "effort=high")
                             ]
                             .iter()
                                 .any(|(model, effort)| line.contains(model) && line.contains(effort)),
-                            "{label}:{} Codex spawn must use the Terra/Sol tier matrix: {line:?}",
+                            "{label}:{} Codex spawn must use the Luna/Sol tier matrix: {line:?}",
                             index + 1
                         );
                     }
@@ -6036,9 +6038,9 @@ This is the body content."#;
             "frontier",
             // cas-b342/cas-96ea: Codex-first tier table + exception/capacity lanes in the body.
             "Codex-first tiers",
-            "codex/gpt-5.6-terra/low",
+            "grok/grok-composer-2.5-fast/low",
             "codex/gpt-5.6-sol/high",
-            "codex/gpt-5.6-terra/high",
+            "codex/gpt-5.6-luna/xhigh",
             "Opus",
             "capacity route",
         ] {

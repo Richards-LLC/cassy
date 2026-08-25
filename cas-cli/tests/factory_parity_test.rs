@@ -1,10 +1,10 @@
 //! CI-safe integration test for the launched-agent skill + instruction parity
 //! conformance gate (cas-bd9d). Runs the real `cas factory parity` command and
-//! asserts the machine-readable 3×2 report proves required skills/agents,
+//! asserts the machine-readable 4×2 report proves required skills/agents,
 //! effective role clauses, and tool prefix for every harness/role cell from the
 //! real launch configuration — with no live model process (the faithful,
 //! deterministic path). This is the Demo: "run one parity command and receive a
-//! 3×2 report".
+//! 4×2 report".
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -17,7 +17,7 @@ fn cas_cmd() -> Command {
 }
 
 #[test]
-fn factory_parity_command_reports_all_six_cells_passing() {
+fn factory_parity_command_reports_all_eight_cells_passing() {
     let out = cas_cmd()
         .args(["factory", "parity"])
         .assert()
@@ -29,7 +29,7 @@ fn factory_parity_command_reports_all_six_cells_passing() {
 
     assert_eq!(report["all_passed"], true, "every cell must pass: {report}");
     let cells = report["cells"].as_array().expect("cells array");
-    assert_eq!(cells.len(), 6, "matrix must be 3 harnesses × 2 roles");
+    assert_eq!(cells.len(), 8, "matrix must be 4 harnesses × 2 roles");
 
     // Every (harness, role) shape is present and passes all five named stages.
     let mut shapes: Vec<String> = Vec::new();
@@ -73,6 +73,8 @@ fn factory_parity_command_reports_all_six_cells_passing() {
             "codex/worker",
             "grok/supervisor",
             "grok/worker",
+            "opencode/supervisor",
+            "opencode/worker",
         ]
     );
 
@@ -100,6 +102,6 @@ fn factory_parity_writes_per_cell_jsonl() {
         .lines()
         .map(|l| serde_json::from_str(l).expect("each line is one cell JSON object"))
         .collect();
-    assert_eq!(lines.len(), 6, "one JSONL line per matrix cell");
+    assert_eq!(lines.len(), 8, "one JSONL line per matrix cell");
     assert!(lines.iter().all(|c| c["passed"] == true));
 }

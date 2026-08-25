@@ -14,6 +14,9 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
 - **GPT-5.6 Terra high is the taste/judgment overlay** — route routine taste, public-surface, and general-judgment work to `cli=codex model=gpt-5.6-terra effort=high`.
 - **Claude Opus is exceptional-only** — use it for architecture, safety, rescue, or independent challenge. Sonnet is not a normal worker lane.
 - **Grok is a capacity overlay** — route to it while its credits/auth/throughput are healthy; fall back to the same Codex tier when they are not.
+- **OpenCode is implementation-complete-pending-conformance** — its local Qwen lane is a
+  conformance candidate, not a production spawn path. Keep it behind T7's live receipt
+  and never infer provider auth or effort support from the selector alone.
 
 This default reflects the operator decision and published benchmarks: Terra is close on standard agentic work, while Sol's advantage is materially larger on frontier tasks. Change routing guidance only on independent, cross-vendor evidence (e.g. Artificial Analysis II/CAI leaderboards **plus** a live harness check) — never on a single failed spawn. A spawn failure from a mistyped slug tests the slug, not the model. Optional write-up: `docs/reports/2026-07-09-factory-model-matrix-recommendations.html` (rev 2).
 
@@ -51,6 +54,22 @@ Grok is an optional credit/capacity route, not a required rung. Use it while hea
 
 Health check before routing to Grok: credits/quota available, auth valid, throughput healthy (`grok models` responds). If any is red, take the same-tier Codex rung instead.
 
+### OpenCode lane (implementation-complete-pending-conformance)
+
+OpenCode projects a local OpenAI-compatible Qwen provider through generated
+primary agents and inline `cas` MCP config. Production factory spawning remains
+gated on T7's live conformance receipt.
+Do not persist keys in generated files or task receipts.
+
+- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — exact Qwen
+  variants from the assessment; provider auth, endpoint reachability, and model
+  loading remain operator preflight inputs.
+- `minimal` and `high` are rejected for this Qwen lane; do not silently map them
+  to `low` or `xhigh`.
+- The OpenCode MCP server name `cas` yields `cas_task`, `cas_coordination`, and
+  `cas_verification`; generated `cassy-worker`/`cassy-supervisor` prompts carry
+  the role contract and remain process-local.
+
 ### Model slug table
 
 | `cli=` | Accepted `model=` slugs | Notes |
@@ -58,6 +77,7 @@ Health check before routing to Grok: credits/quota available, auth valid, throug
 | `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy/frontier route; Terra is the light/standard default and taste/judgment route; Luna is the gpt-5.4-mini successor and valid but not assigned a tier yet. The gpt-5.5/gpt-5.4 family is superseded: gpt-5.4 upgrades to Terra and gpt-5.4-mini to Luna. |
 | `claude` | `opus` (full Anthropic ids also ok) | Supervisor docs only expose Opus for exceptional architecture/safety/rescue/challenge; Sonnet is not a normal worker lane. |
 | `grok` | `grok-4.5`, `grok-composer-2.5-fast` | From live `grok models`. Composer is a **model id on the Grok harness** — never invent `cli=cursor`. |
+| `opencode` | `alibaba/qwen3.8-max` | Implementation-complete-pending-conformance; T7 live receipt required. Provider auth and model availability are operator preflight inputs. |
 
 ### Effort vocabulary (Cassy-wide)
 
@@ -70,10 +90,11 @@ How each backend receives them:
 | Claude | `--effort <level>` |
 | Codex | `--config model_reasoning_effort=<level>` |
 | Grok | `--reasoning-effort <level>` |
+| OpenCode | generated primary-agent `variant` (local Qwen: `low`, `medium`, `xhigh`) |
 
 For multi-step workers, `effort=high` is the ceiling — do not reach for `xhigh`/`max` on long agent loops (overthink + cost). Codex tiers use Terra/low for light, Terra/high for standard and taste, and Sol/high for heavy/frontier.
 
-## Spawn cookbook (all three harnesses)
+## Spawn cookbook (all four harnesses)
 
 Copy-paste `spawn_workers` recipes. Examples below use this harness's coordination tool prefix. Worker `cli=`/`model=`/`effort=` are independent of which harness the supervisor runs on — `cli=codex` works from Claude, Codex, or Grok supervisors alike.
 
@@ -116,6 +137,15 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=grok model=
 # standard / heavy capacity
 mcp__cas__coordination action=spawn_workers count=2 isolate=true cli=grok model=grok-4.5 effort=medium
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=grok model=grok-4.5 effort=high worker_names="gh-ada"
+```
+
+### OpenCode workers (implementation-complete-pending-conformance)
+
+Do not use this recipe as a production support claim. It is the pinned shape for
+the T7 live-conformance receipt once local/provider preflight is available:
+
+```
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=alibaba/qwen3.8-max effort=medium worker_names="oc-ada"
 ```
 
 Parameter table and field names: [reference.md](reference.md#spawn_workers-parameters).

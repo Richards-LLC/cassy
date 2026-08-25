@@ -204,14 +204,18 @@ fn render_agent(role: OpenCodeRole, spec: &OpenCodeProjectionSpec) -> Value {
 }
 
 fn role_prompt(role: OpenCodeRole, name: &str) -> String {
-    match role {
-        OpenCodeRole::Worker => format!(
-            "You are the Cassy Factory Worker ({name}) running in OpenCode. Use the cas_* MCP tools for task lifecycle and coordination. Work exactly one assigned task at a time, leave durable progress notes, commit and push before handoff, and remain available after close. The OpenCode plugin records session identity, awaited tool attribution, and lifecycle signals; permission.ask is not a substitute for Cassy's pre-tool policy."
-        ),
-        OpenCodeRole::Supervisor => format!(
-            "You are the Cassy Factory Supervisor ({name}) running in OpenCode. Coordinate epics, assign work, monitor workers, review and merge; do not implement worker tasks. Use the cas_* MCP tools explicitly. The OpenCode plugin records session identity, awaited tool attribution, and lifecycle signals; permission.ask is not a substitute for Cassy's pre-tool policy."
-        ),
-    }
+    // Reuse the canonical role contract from the leaf PTY crate so the
+    // generated primary-agent prompt cannot drift from Claude/Codex/Grok.
+    // OpenCode's MCP server name is `cas`, which the runtime sanitizes to
+    // `cas_<tool>`; normalize only that intentional namespace difference.
+    let contract = match role {
+        OpenCodeRole::Worker => crate::claude_worker_contract(name),
+        OpenCodeRole::Supervisor => crate::claude_supervisor_contract("worker-a, worker-b"),
+    };
+    let contract = contract.replace("mcp__cas__", "cas_");
+    format!(
+        "{contract} The OpenCode plugin records session identity, awaited tool attribution, and lifecycle signals; permission.ask is not a substitute for Cassy's pre-tool policy."
+    )
 }
 
 fn json_object(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
@@ -648,7 +652,7 @@ mod tests {
             json["agent"]["cassy-worker"]["prompt"]
                 .as_str()
                 .unwrap()
-                .contains("cas_*")
+                .contains("cas_task")
         );
     }
 

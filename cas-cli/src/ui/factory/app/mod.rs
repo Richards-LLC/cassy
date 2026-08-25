@@ -2095,9 +2095,13 @@ pub(crate) fn queue_supervisor_intro_prompt(
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: cas__coordination action=whoami; cas__task action=list task_type=epic; cas__task action=ready"
         ),
-        // cas-a5da owns the final OpenCode supervisor startup policy.
+        // OpenCode's generated primary agent owns the durable role contract;
+        // this queued intro carries the launch-specific skill names and
+        // ambient-recall delivery that arrive before the agent config is
+        // inspected.
         cas_mux::SupervisorCli::OpenCode => format!(
             "OpenCode supervisor startup:\n\
+- Use skills: cas-supervisor, cas-supervisor-checklist\n\
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: cas_coordination action=whoami; cas_task action=list task_type=epic; cas_task action=ready"
         ),
@@ -2126,7 +2130,9 @@ pub(crate) fn queue_supervisor_intro_prompt(
     // identity because the parent env is not the supervisor's env yet.
     if matches!(
         supervisor_cli,
-        cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok
+        cas_mux::SupervisorCli::Codex
+            | cas_mux::SupervisorCli::Grok
+            | cas_mux::SupervisorCli::OpenCode
     ) {
         if let Some(bundle) = queued_supervisor_session_start_bundle(
             cas_dir,

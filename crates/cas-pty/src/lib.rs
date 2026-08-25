@@ -44,6 +44,7 @@
 
 pub mod codex_trust;
 pub mod conformance;
+pub mod opencode;
 mod error;
 mod pty;
 

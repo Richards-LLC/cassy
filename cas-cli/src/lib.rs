@@ -57,6 +57,7 @@ pub mod migration;
 pub mod notifications;
 pub mod orchestration;
 pub mod otel;
+pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub mod retrieval_parity;
 pub mod rules;

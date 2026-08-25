@@ -1287,6 +1287,7 @@ mod external_verification;
 pub(crate) mod factory_ops;
 mod factory_remind;
 pub(crate) mod harness_observation;
+pub(crate) mod opencode_liveness;
 pub(crate) mod orphan_recovery;
 mod panic_catch;
 #[cfg(test)]

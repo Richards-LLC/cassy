@@ -58,7 +58,8 @@ pub(crate) fn observations_after_delivery(
         cas_mux::SupervisorCli::Claude => scan_claude_message(artifact_path, delivered_at, prompt),
         cas_mux::SupervisorCli::Codex => scan_codex_message(artifact_path, delivered_at, prompt),
         cas_mux::SupervisorCli::Grok => scan_grok_completion(artifact_path, delivered_at),
-        // cas-7296 owns OpenCode artifact observations.
+        // OpenCode has no artifact transcript. Its mapped session observation
+        // is resolved by factory_ops/message.rs with the CAS projection.
         cas_mux::SupervisorCli::OpenCode => HarnessObservations::default(),
     }
 }
@@ -72,7 +73,8 @@ pub(crate) fn latest_turn_observations(
         cas_mux::SupervisorCli::Claude => scan_claude_turns(artifact_path, None, true),
         cas_mux::SupervisorCli::Codex => scan_codex_turns(artifact_path, None, true),
         cas_mux::SupervisorCli::Grok => scan_grok(artifact_path, None, true),
-        // cas-7296 owns OpenCode artifact observations.
+        // OpenCode has no artifact transcript. Its mapped session observation
+        // is resolved by factory_ops/message.rs with the CAS projection.
         cas_mux::SupervisorCli::OpenCode => HarnessObservations::default(),
     }
 }

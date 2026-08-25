@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "receipt_id": "grok-build-1.0.5-2026-08-25",
+  "harness": "grok-build",
+  "harness_version": "1.0.5",
+  "observed_default_harness_version": "1.0.5",
+  "validated_at": "2026-08-25",
+  "result": "pass",
+  "checklist": [
+    {
+      "id": "cli_version",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The exact selected binary reported grok 1.0.5 (5115b46bc9) [stable] immediately before the isolated run; the host default and validated versions matched."
+    },
+    {
+      "id": "noninteractive_permission_bypass",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production launch emitted --permission-mode bypassPermissions and the transcript recorded yolo_mode=true."
+    },
+    {
+      "id": "session_uuid",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "PtyConfig emitted a fresh bare UUID through both --session-id and CAS_SESSION_ID; the same ID named the live transcript."
+    },
+    {
+      "id": "model_and_reasoning_effort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production launch emitted grok-4.5 with medium reasoning effort and the assistant transcript recorded both."
+    },
+    {
+      "id": "cwd",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Both the process cwd and --cwd targeted the disposable repository; prompt_context.json recorded the same working directory."
+    },
+    {
+      "id": "worker_role_rules",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production --rules payload appeared in system_prompt.txt and drove the Cassy worker startup/lifecycle contract with the cas__ namespace."
+    },
+    {
+      "id": "persistent_mcp_discovery_and_namespace",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Persistent config discovered cas serve, connected at least 11 tools, and the worker invoked cas__coordination and cas__task rather than Claude/Codex aliases."
+    },
+    {
+      "id": "factory_identity_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Inherited CAS agent, role, factory, session, root, worker CLI, model, and effort environment bound cas serve to the disposable store and registered the expected Grok worker."
+    },
+    {
+      "id": "transcript_and_liveness",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The session was written under ~/.grok/sessions/*/<session-id>; its post-submit turn_ended event cleared Pane in-flight state through the production liveness resolver."
+    },
+    {
+      "id": "worker_task_edit_commit_lifecycle",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The worker called whoami, mine, show, start, and notes; wrote the exact probe marker; committed it with the versioned lifecycle subject; and left the disposable repository clean."
+    },
+    {
+      "id": "compatible_hooks_disabled",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Grok inspect reported every discovered Claude/Cursor-compatible hook disabled, the live run retained CAS role/identity through --rules plus env, and the SessionStart hook canary did not execute."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "live-production-run",
+      "kind": "live_test",
+      "reference": "task:cas-444a#2026-08-25-production-run",
+      "summary": "Fresh real Grok Build 1.0.5 PtyConfig::grok run with target/debug/cas first on PATH, a disposable repository/CAS_ROOT, compatible hooks disabled, and a bounded turn cap; all required assertions passed in 22.24 seconds. Session evidence: 2160cd03-06b2-45c6-ad09-5ed05e5f55d9 under /home/pippenz/.grok/sessions/%2Ftmp%2Fcas-9bd9-grok-contract-203397/."
+    },
+    {
+      "id": "scoped-test-proof",
+      "kind": "test",
+      "reference": "scripts/run-scoped-tests.sh -p cas-mux --test grok_factory_contract_runtime --run-ignored all -E test(grok_0105_factory_launch_contract_passes_live_matrix) --no-capture",
+      "summary": "Guarded nextest proof reported 1 test passed, 0 failed, and 1 filtered out; the wrapper exited 0."
+    }
+  ]
+}

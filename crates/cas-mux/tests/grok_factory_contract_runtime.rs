@@ -24,20 +24,23 @@ const EFFORT: &str = "medium";
 const PROBE_FILE: &str = "GROK_FACTORY_PROBE.md";
 const PROBE_MARKER: &str = "CAS-9BD9-GROK-FACTORY-PASS";
 
-fn is_grok_02114(binary: &Path) -> bool {
+fn is_grok_version(binary: &Path, version: &str) -> bool {
     Command::new(binary)
         .arg("--version")
         .output()
         .is_ok_and(|out| {
             out.status.success()
-                && String::from_utf8_lossy(&out.stdout)
-                    .contains("grok 0.2.114 (0c78503879) [stable]")
+                && String::from_utf8_lossy(&out.stdout).contains(&format!("grok {version} "))
         })
 }
 
-fn grok_02114_binary() -> Option<PathBuf> {
-    let path_binary = PathBuf::from("grok");
-    if is_grok_02114(&path_binary) {
+fn grok_binary(version: &str, download_prefix: &str) -> Option<PathBuf> {
+    if let Some(path_binary) = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .map(|directory| directory.join("grok"))
+        .find(|path| path.is_file() && is_grok_version(path, version))
+    {
         return Some(path_binary);
     }
 
@@ -49,9 +52,17 @@ fn grok_02114_binary() -> Option<PathBuf> {
         .find(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("grok-0.2.114-"))
-                && is_grok_02114(path)
+                .is_some_and(|name| name.starts_with(download_prefix))
+                && is_grok_version(path, version)
         })
+}
+
+fn grok_02114_binary() -> Option<PathBuf> {
+    grok_binary("0.2.114", "grok-0.2.114-")
+}
+
+fn grok_0105_binary() -> Option<PathBuf> {
+    grok_binary("1.0.5", "grok-1.0.5-")
 }
 
 fn run(mut command: Command, purpose: &str) -> std::process::Output {
@@ -74,12 +85,9 @@ fn git(root: &Path, args: &[&str]) -> std::process::Output {
     run(command, &format!("git {}", args.join(" ")))
 }
 
-fn initialize_probe(root: &Path, cas_root: &Path) {
+fn initialize_probe(root: &Path, cas_root: &Path, branch: &str) {
     std::fs::create_dir_all(root).expect("create isolated probe repository");
-    git(
-        root,
-        &["init", "-q", "-b", "factory/cas-9bd9-grok-contract"],
-    );
+    git(root, &["init", "-q", "-b", branch]);
     git(
         root,
         &["config", "user.email", "grok-contract@example.invalid"],
@@ -248,13 +256,13 @@ fn extract_task_id(text: &str) -> String {
         .to_string()
 }
 
-fn seed_assigned_task(root: &Path, cas_root: &Path) -> String {
+fn seed_assigned_task(root: &Path, cas_root: &Path, title: &str) -> String {
     let mut client = McpClient::spawn(root, cas_root, "cas-9bd9-live-supervisor", "supervisor");
     let response = client.tool(
         "task",
         json!({
             "action": "create",
-            "title": "Grok 0.2.114 isolated worker lifecycle probe",
+            "title": title,
             "description": "Create and commit the requested probe file, then leave a progress note.",
             "acceptance_criteria": "Task is started; probe file is committed; progress note is recorded.",
             "priority": 2,
@@ -339,20 +347,42 @@ fn grok_02114_factory_launch_contract_passes_live_matrix() {
     let grok_binary = grok_02114_binary()
         .expect("this receipt is valid only when an exact Grok Build 0.2.114 binary is installed");
 
+    run_grok_factory_contract(grok_binary, "0.2.114");
+}
+
+#[test]
+#[ignore = "requires real Grok Build 1.0.5, authentication, and model traffic"]
+fn grok_0105_factory_launch_contract_passes_live_matrix() {
+    let _serial = real_pty_serial::lock();
+    let grok_binary = grok_0105_binary()
+        .expect("this receipt is valid only when an exact Grok Build 1.0.5 binary is installed");
+
+    run_grok_factory_contract(grok_binary, "1.0.5");
+}
+
+fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
     let scratch =
         std::env::temp_dir().join(format!("cas-9bd9-grok-contract-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let cas_root = scratch.join(".cas");
     let grok_home = PathBuf::from(std::env::var("HOME").expect("HOME")).join(".grok");
-    initialize_probe(&scratch, &cas_root);
-    let task_id = seed_assigned_task(&scratch, &cas_root);
+    initialize_probe(
+        &scratch,
+        &cas_root,
+        &format!("factory/cas-grok-{version}-contract"),
+    );
+    let task_id = seed_assigned_task(
+        &scratch,
+        &cas_root,
+        &format!("Grok {version} isolated worker lifecycle probe"),
+    );
     let probe_bin = scratch.join(".git/cas-probe-bin");
     std::fs::create_dir_all(&probe_bin).expect("create test-local binary directory");
     std::os::unix::fs::symlink(
         std::fs::canonicalize(&grok_binary).expect("canonical retained Grok binary"),
         probe_bin.join("grok"),
     )
-    .expect("link exact Grok 0.2.114 into test-local PATH");
+    .expect("link exact Grok binary into test-local PATH");
 
     let mut inspect = Command::new(&grok_binary);
     inspect
@@ -459,7 +489,7 @@ fn grok_02114_factory_launch_contract_passes_live_matrix() {
         .find(|args| args[0] == "--rules")
         .map(|args| &args[1])
         .expect("production config exports worker rules");
-    assert!(rules.contains("CAS Factory Worker"));
+    assert!(rules.contains("Cassy Factory Worker"));
     assert!(rules.contains("cas__task") && rules.contains("cas__coordination"));
     for (key, expected) in [
         ("CAS_AGENT_NAME", PANE),
@@ -524,7 +554,7 @@ fn grok_02114_factory_launch_contract_passes_live_matrix() {
                  exactly as your worker rules require: coordination whoami, task mine, task \
                  show, task start, then add a progress note. Create {PROBE_FILE} containing \
                  exactly `{PROBE_MARKER}` followed by a newline; git add and commit it with \
-                 message `test: grok 0.2.114 worker lifecycle`. Do not push or close the task. \
+                 message `test: grok {version} worker lifecycle`. Do not push or close the task. \
                  Finish with the marker {PROBE_MARKER}."
             ),
         ))
@@ -579,7 +609,7 @@ fn grok_02114_factory_launch_contract_passes_live_matrix() {
     );
     let system_prompt = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
         .expect("read Grok system prompt");
-    assert!(system_prompt.contains("CAS Factory Worker"));
+    assert!(system_prompt.contains("Cassy Factory Worker"));
     assert!(system_prompt.contains("cas__task") && system_prompt.contains("cas__coordination"));
 
     let chat = std::fs::read_to_string(session_dir.join("chat_history.jsonl"))
@@ -608,7 +638,7 @@ fn grok_02114_factory_launch_contract_passes_live_matrix() {
         format!("{PROBE_MARKER}\n")
     );
     let log = String::from_utf8(git(&scratch, &["log", "-1", "--pretty=%s"]).stdout).unwrap();
-    assert_eq!(log.trim(), "test: grok 0.2.114 worker lifecycle");
+    assert_eq!(log.trim(), format!("test: grok {version} worker lifecycle"));
     assert!(
         String::from_utf8(git(&scratch, &["status", "--porcelain"]).stdout)
             .unwrap()
@@ -630,14 +660,14 @@ fn grok_02114_factory_launch_contract_passes_live_matrix() {
     let task = result_text(&observer.tool("task", json!({"action": "show", "id": task_id})));
     assert!(task.contains("Status: InProgress"));
     assert!(
-        task.contains("live isolated Grok 0.2.114")
+        task.contains(&format!("Grok {version} isolated worker lifecycle"))
             || task.contains("isolated validation")
             || task.contains("progress"),
         "worker must persist a progress note through cas__task: {task}"
     );
 
     eprintln!(
-        "PASS Grok Build 0.2.114 factory contract; task={task_id}; session={session_id}; \
+        "PASS Grok Build {version} factory contract; task={task_id}; session={session_id}; \
          isolated transcript={}",
         session_dir.display()
     );

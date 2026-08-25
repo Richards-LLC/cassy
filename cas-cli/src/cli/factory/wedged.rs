@@ -352,6 +352,8 @@ pub(crate) fn activity_fresh_window(cli: cas_mux::SupervisorCli) -> Duration {
         cas_mux::SupervisorCli::Codex => CODEX_TRANSCRIPT_FRESH_WINDOW,
         cas_mux::SupervisorCli::Claude => TRANSCRIPT_FRESH_WINDOW,
         cas_mux::SupervisorCli::Grok => GROK_TRANSCRIPT_FRESH_WINDOW,
+        // cas-7296 owns OpenCode liveness; zero never invents freshness.
+        cas_mux::SupervisorCli::OpenCode => Duration::ZERO,
     }
 }
 
@@ -531,6 +533,8 @@ pub(crate) fn has_in_flight_tool_call<R: Read>(
         cas_mux::SupervisorCli::Grok => false,
         cas_mux::SupervisorCli::Claude => claude_has_pending_tool_call(&lines),
         cas_mux::SupervisorCli::Codex => codex_has_pending_tool_call(&lines),
+        // cas-7296 owns OpenCode tool-activity evidence.
+        cas_mux::SupervisorCli::OpenCode => false,
     }
 }
 
@@ -666,6 +670,8 @@ pub(crate) fn effective_transcript_age(
         cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex => {
             transcript_mtime_age(path)
         }
+        // cas-7296 owns OpenCode session activity; shared DB mtime is invalid.
+        cas_mux::SupervisorCli::OpenCode => None,
     }
 }
 
@@ -680,6 +686,8 @@ pub(crate) fn effective_transcript_age(
 fn effective_crash_signature(path: &Path, cli: cas_mux::SupervisorCli) -> bool {
     match cli {
         cas_mux::SupervisorCli::Grok | cas_mux::SupervisorCli::Codex => false,
+        // cas-7296 owns OpenCode crash evidence.
+        cas_mux::SupervisorCli::OpenCode => false,
         cas_mux::SupervisorCli::Claude => {
             transcript_has_crash_signature(path, CRASH_SIGNATURE_TAIL_LINES)
         }

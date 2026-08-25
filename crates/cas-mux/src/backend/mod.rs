@@ -3,6 +3,7 @@
 mod claude;
 mod codex;
 mod grok;
+mod opencode;
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,7 @@ use crate::{Effort, Result};
 pub(crate) use claude::CLAUDE;
 pub(crate) use codex::CODEX;
 pub(crate) use grok::GROK;
+pub(crate) use opencode::OPENCODE;
 
 /// Inputs needed to build one worker CLI process.
 pub struct WorkerLaunchConfig<'a> {
@@ -87,6 +89,7 @@ impl SupervisorCli {
             Self::Claude => &CLAUDE,
             Self::Codex => &CODEX,
             Self::Grok => &GROK,
+            Self::OpenCode => &OPENCODE,
         }
     }
 }

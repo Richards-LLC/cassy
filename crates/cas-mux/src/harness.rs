@@ -16,6 +16,11 @@ pub enum SupervisorCli {
     /// agent-teams --team-name/--agent-id; MCP + prompt injection only).
     /// See EPIC cas-8888.
     Grok,
+    /// OpenCode TUI. MCP tools are projected as `<server>_<tool>` (for the
+    /// injected `cas` server: `cas_task`, `cas_coordination`). Interactive
+    /// injection and lifecycle capabilities remain disabled until retained
+    /// live conformance measures the terminal protocol.
+    OpenCode,
 }
 
 impl FromStr for SupervisorCli {
@@ -26,6 +31,7 @@ impl FromStr for SupervisorCli {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "grok" => Ok(Self::Grok),
+            "opencode" => Ok(Self::OpenCode),
             _ => Err(format!("unsupported harness: {s}")),
         }
     }
@@ -147,6 +153,44 @@ mod tests {
         assert_eq!(json, "\"grok\"");
         let back: SupervisorCli = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SupervisorCli::Grok);
+    }
+
+    #[test]
+    fn opencode_selector_round_trips_with_its_native_tool_prefix() {
+        assert_eq!(SupervisorCli::OpenCode.backend().name(), "opencode");
+        assert_eq!(
+            SupervisorCli::from_str("opencode"),
+            Ok(SupervisorCli::OpenCode)
+        );
+        assert_eq!(
+            SupervisorCli::from_str(" OpenCode "),
+            Ok(SupervisorCli::OpenCode)
+        );
+        assert_eq!(
+            serde_json::to_string(&SupervisorCli::OpenCode).unwrap(),
+            "\"opencode\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SupervisorCli>("\"opencode\"").unwrap(),
+            SupervisorCli::OpenCode
+        );
+        assert_eq!(
+            SupervisorCli::OpenCode.backend().capabilities().tool_prefix,
+            "cas_"
+        );
+    }
+
+    #[test]
+    fn opencode_capabilities_do_not_claim_unmeasured_terminal_features() {
+        let caps = SupervisorCli::OpenCode.backend().capabilities();
+        assert!(!caps.supports_hooks);
+        assert!(!caps.supports_subagents);
+        assert!(!caps.supports_textbox_submit);
+        assert!(!caps.requires_bracketed_paste_injection);
+        assert_eq!(
+            SupervisorCli::OpenCode.backend().turn_cancel_bytes(),
+            &[] as &[u8]
+        );
     }
 
     #[test]

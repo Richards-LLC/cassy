@@ -43,6 +43,8 @@ fn harness_name(h: SupervisorCli) -> &'static str {
         SupervisorCli::Claude => "claude",
         SupervisorCli::Codex => "codex",
         SupervisorCli::Grok => "grok",
+        // cas-d139 owns OpenCode parity registration.
+        SupervisorCli::OpenCode => "opencode",
     }
 }
 
@@ -166,6 +168,10 @@ fn launch_instruction_text(harness: SupervisorCli, role: ContractRole) -> Result
                 ContractRole::Worker => cas_mux::claude_worker_contract("probe-worker"),
             })
         }
+        // cas-d139 owns the retained OpenCode instruction-parity proof.
+        SupervisorCli::OpenCode => {
+            Err("opencode instruction parity is not supported until cas-d139".to_string())
+        }
     }
 }
 
@@ -182,6 +188,15 @@ fn foreign_call_forms(harness: SupervisorCli) -> &'static [&'static str] {
             "mcp__cs__task",
             "mcp__cs__coordination",
         ],
+        // cas-d139 owns OpenCode parity; reject every existing foreign prefix.
+        SupervisorCli::OpenCode => &[
+            "mcp__cas__task",
+            "mcp__cas__coordination",
+            "mcp__cs__task",
+            "mcp__cs__coordination",
+            "cas__task",
+            "cas__coordination",
+        ],
     }
 }
 
@@ -190,6 +205,8 @@ fn own_call_forms(harness: SupervisorCli) -> [&'static str; 2] {
         SupervisorCli::Claude => ["mcp__cas__task", "mcp__cas__coordination"],
         SupervisorCli::Codex => ["mcp__cs__task", "mcp__cs__coordination"],
         SupervisorCli::Grok => ["cas__task", "cas__coordination"],
+        // cas-d139 owns the full parity catalog; the namespace itself is fixed.
+        SupervisorCli::OpenCode => ["cas_task", "cas_coordination"],
     }
 }
 
@@ -243,6 +260,8 @@ pub fn evaluate_cell(harness: SupervisorCli, role: ContractRole) -> ParityCell {
         SupervisorCli::Codex => "--config developer_instructions",
         SupervisorCli::Grok => "--rules",
         SupervisorCli::Claude => "queued launch intro prompt",
+        // cas-d139 owns the retained OpenCode parity proof.
+        SupervisorCli::OpenCode => "OPENCODE_CONFIG_CONTENT agent.prompt",
     };
     stages.push(match &launch {
         Ok(_) => StageResult::pass(
@@ -440,6 +459,14 @@ mod tests {
                 supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
                 ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
             },
+            // cas-d139 owns OpenCode skills and ambient-recall parity.
+            SupervisorCli::OpenCode => SupervisorHarnessRequirement {
+                supervisor_skills: [
+                    "opencode-not-supported-until-cas-d139",
+                    "opencode-not-supported-until-cas-d139",
+                ],
+                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
+            },
         }
     }
 
@@ -450,7 +477,11 @@ mod tests {
     /// covered by a generic fallback.
     fn supervisor_skill_payload(cas_dir: &std::path::Path, harness: SupervisorCli) -> String {
         match harness {
-            SupervisorCli::Claude | SupervisorCli::Codex | SupervisorCli::Grok => {
+            SupervisorCli::Claude
+            | SupervisorCli::Codex
+            | SupervisorCli::Grok
+            // cas-d139 owns the final OpenCode parity payload assertions.
+            | SupervisorCli::OpenCode => {
                 use crate::store::detect::open_prompt_queue_store;
                 use crate::ui::factory::queue_supervisor_intro_prompt;
 

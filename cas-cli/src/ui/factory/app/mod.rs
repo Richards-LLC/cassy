@@ -2095,6 +2095,12 @@ pub(crate) fn queue_supervisor_intro_prompt(
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: cas__coordination action=whoami; cas__task action=list task_type=epic; cas__task action=ready"
         ),
+        // cas-a5da owns the final OpenCode supervisor startup policy.
+        cas_mux::SupervisorCli::OpenCode => format!(
+            "OpenCode supervisor startup:\n\
+- Canonical current workers for this session: {worker_list}\n\
+- First steps: cas_coordination action=whoami; cas_task action=list task_type=epic; cas_task action=ready"
+        ),
     };
 
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for
@@ -2266,6 +2272,8 @@ pub(crate) fn queue_codex_worker_intro_prompt(
                 let _ = queue.enqueue("cas", worker_name, &prompt);
             }
         }
+        // cas-a5da owns OpenCode spawn policy; PtyConfig already supplies --prompt.
+        cas_mux::SupervisorCli::OpenCode => {}
     }
 }
 

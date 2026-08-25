@@ -83,6 +83,8 @@ pub fn context_reset_command(cli: SupervisorCli) -> Option<&'static str> {
         // but neither has been measured here, and an unverified guess typed
         // into a pane is exactly the silent-failure mode this task removes.
         SupervisorCli::Codex | SupervisorCli::Grok => None,
+        // cas-a5da owns initial OpenCode factory policy; no reset is measured.
+        SupervisorCli::OpenCode => None,
     }
 }
 

@@ -1597,6 +1597,8 @@ pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFil
         SupervisorCli::Claude => BUILTIN_SKILLS,
         SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+        // cas-d139 owns the OpenCode builtin projection.
+        SupervisorCli::OpenCode => &[],
     }
 }
 
@@ -1606,6 +1608,8 @@ pub fn agent_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFil
         SupervisorCli::Claude => BUILTIN_AGENTS,
         SupervisorCli::Codex => CODEX_BUILTIN_AGENTS,
         SupervisorCli::Grok => GROK_BUILTIN_AGENTS,
+        // cas-d139 owns the OpenCode builtin projection.
+        SupervisorCli::OpenCode => &[],
     }
 }
 
@@ -1616,6 +1620,8 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
         SupervisorCli::Claude => cap.claude,
         SupervisorCli::Codex => cap.codex,
         SupervisorCli::Grok => cap.grok,
+        // cas-d139 owns the OpenCode capability mapping.
+        SupervisorCli::OpenCode => None,
     }
 }
 
@@ -1854,6 +1860,8 @@ pub fn mark_missing_owned_references_for_replacement(
         SupervisorCli::Claude => BUILTIN_SKILLS,
         SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+        // cas-d139 owns the OpenCode builtin projection.
+        SupervisorCli::OpenCode => &[],
     };
     let mut state = BuiltinReferenceState::load(target_dir)?;
     let mut marked = 0;
@@ -2169,6 +2177,8 @@ pub fn sync_all_builtins_for_harness(
         // EPIC cas-8888 (cas-6f46, Phase 5): dedicated GROK_BUILTIN_AGENTS/
         // GROK_BUILTIN_SKILLS set, cas__-prefixed (no mcp__ wrapper).
         SupervisorCli::Grok => sync_all_grok_builtins(target_dir),
+        // cas-d139 owns the OpenCode builtin projection; write nothing yet.
+        SupervisorCli::OpenCode => Ok(SyncResult::default()),
     }
 }
 
@@ -2264,6 +2274,8 @@ pub fn prune_stale_user_skills_for_harness(
         SupervisorCli::Claude => BUILTIN_SKILLS,
         SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+        // cas-d139 owns the OpenCode builtin projection.
+        SupervisorCli::OpenCode => &[],
     };
     let keep = builtin_skill_dir_names(builtins);
     prune_stale_cas_skill_dirs(&harness_dir.join("skills"), &keep)
@@ -2386,6 +2398,8 @@ pub fn preview_all_builtins_for_harness(
         SupervisorCli::Claude => preview_all_builtins(target_dir),
         SupervisorCli::Codex => preview_all_codex_builtins(target_dir),
         SupervisorCli::Grok => preview_all_grok_builtins(target_dir),
+        // cas-d139 owns the OpenCode builtin projection; preview nothing yet.
+        SupervisorCli::OpenCode => Ok(Vec::new()),
     }
 }
 

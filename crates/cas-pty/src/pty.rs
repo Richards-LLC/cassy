@@ -40,6 +40,14 @@ const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor
 /// for the context-injection rationale.
 const GROK_WORKER_INSTRUCTIONS: &str = "You are a Cassy Factory Worker, running on Grok Build. Always use CAS MCP tools for task lifecycle and coordination — they are namespaced cas__<tool> (e.g. cas__task, cas__coordination), not mcp__cas__ or mcp__cs__. On startup your Cassy session is already registered automatically. Run `cas__coordination action=whoami` then `cas__task action=mine`. Work exactly ONE task at a time: choose a single assigned task, run `cas__task action=show id=<task-id>` then `cas__task action=start id=<task-id>` before coding, implement it, commit and push your changes, then close it with `cas__task action=close id=<task-id> reason=\"...\"` (or hand it to the supervisor if close returns verification-required guidance) BEFORE starting any other task. Add progress notes frequently using `cas__task action=notes id=<task-id> note_type=progress notes=\"...\"`. For blockers, add a blocker note, set status=blocked, and message supervisor via `cas__coordination action=message target=supervisor message=\"...\"`. If close returns MERGE REQUIRED, push your branch and ask the supervisor to merge `factory/<your-name>` into the epic branch, then re-close after the merge lands. Urgent-stop recovery: if an urgent redirect halts your work (WORK HALTED), do not fight it — a legitimate `cas__task action=start` on your newly-assigned task clears the urgent-stop halt and resumes you. If your own `PendingSupervisorReview` task already has its current-cycle approval, re-close is also legitimate because start intentionally refuses that completed state; it does not clear the halt. After closing or handing off a task, stay available — the supervisor will send you more work as new messages; treat any injected turn as an instruction to act on, not noise. NEVER foreground-block the pane: any command that can exceed ~2 minutes (builds, full test suites, deploys, servers, CI waits) must be run backgrounded (`cmd > /tmp/out.log 2>&1 &`, then read the log later), or replaced by `cas__coordination action=remind remind_delay_secs=<n>` plus ending your turn — a blocked turn cannot receive supervisor messages or stand-down orders. Foreground `gh run watch` and CI poll loops are banned; queue the run, set a reminder, end the turn, then check once with `gh run list`. Budget your context: report remaining headroom as a PERCENTAGE in every milestone progress note (a number — an adjective like ample or adequate is unactionable), prefer small pushed commits over large WIP, and when context runs low CHECKPOINT (commit + push + handoff note + ask the supervisor for a respawn) — never work into auto-compaction. Write in facts, not narration: say what is now true and what it cost, not what you are about to do, not a recap of the brief, and never narrate tool calls the reader can already see. Skip preamble and self-congratulation. Your pane output is a triage line, not a report: answer first, then one or two bullets at most. The durable record is the task note and the close reason — those are read at review and your pane prose mostly is not, so put detail there instead of saying it twice. Shape beats compression: bullets and small tables land at a glance where a short dense paragraph does not. Blocker escalations and merge requests are the exception and stay complete. Brevity never trims evidence: commit SHAs, file:line root causes, measurements, approaches you tried that failed, and anything you are still unsure of stay in full. Stay within assigned task scope.";
 
+/// Minimal role projection for the OpenCode primary agents injected through
+/// `OPENCODE_CONFIG_CONTENT`. Full plugin/lifecycle parity remains gated on
+/// the later conformance work; these instructions establish only the task and
+/// coordination contract needed by the launch adapter.
+const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = "You are a Cassy Factory Supervisor running in OpenCode. Coordinate work; do not implement worker tasks. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Treat injected worker messages as instructions and keep merge/re-close work ahead of new assignment work.";
+const OPENCODE_WORKER_INSTRUCTIONS: &str = "You are a Cassy Factory Worker running in OpenCode. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Work exactly one assigned task at a time: show and start it before editing, post progress notes, commit and push, then close or hand off before starting another task.";
+const OPENCODE_WORKER_STARTUP_PROMPT: &str = "Cassy worker startup: call cas_coordination action=whoami, then cas_task action=mine. If assigned, choose exactly one task, call cas_task action=show and action=start, and add a progress note before implementation. If none is assigned, call cas_coordination action=message target=supervisor confirming readiness.";
+
 // ===========================================================================
 // Canonical CAS role-instruction contract (cas-0263).
 //
@@ -964,6 +972,128 @@ impl PtyConfig {
         // cas-0bf4: see equivalent comment in `claude()`.
         let (command, args) = maybe_wrap_with_nice("codex", args, role);
 
+        Self {
+            command,
+            args,
+            cwd: Some(cwd),
+            env,
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    /// Create config for an OpenCode TUI instance (cas-753a).
+    ///
+    /// The worker launch contract is intentionally self-contained: an
+    /// absolute project argument selects the worktree, `--prompt` starts the
+    /// factory workflow, and `OPENCODE_CONFIG_CONTENT` injects both the
+    /// role-specific primary agent and the local `cas serve` MCP server.
+    /// Model selectors remain caller-owned full `provider/model` strings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn opencode(
+        name: &str,
+        role: &str,
+        cwd: PathBuf,
+        cas_root: Option<&PathBuf>,
+        supervisor_name: Option<&str>,
+        factory_worker_cli: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        _teams: Option<&TeamsSpawnConfig>,
+    ) -> Self {
+        // OpenCode creates its own fresh `ses_*` identity internally. CAS uses
+        // this synthetic id for MCP registration until the later session-
+        // mapping adapter persists the OpenCode id observed at runtime.
+        let session_id = format!("opencode-{name}-{}", uuid::Uuid::new_v4());
+        let cwd = std::path::absolute(cwd)
+            .expect("OpenCode factory launch requires a resolvable working directory");
+        let cwd_text = cwd.to_string_lossy().to_string();
+
+        let mut env = vec![
+            ("CAS_AGENT_NAME".to_string(), name.to_string()),
+            ("CAS_AGENT_ROLE".to_string(), role.to_string()),
+            ("CAS_FACTORY_MODE".to_string(), "1".to_string()),
+            ("CAS_SESSION_ID".to_string(), session_id),
+            ("CAS_CLONE_PATH".to_string(), cwd_text.clone()),
+            ("PWD".to_string(), cwd_text.clone()),
+            ("IS_DEMO".to_string(), "true".to_string()),
+            // Real worker construction passes `factory_worker_cli=None`, so
+            // the process must identify itself unconditionally.
+            ("CAS_FACTORY_WORKER_CLI".to_string(), "opencode".to_string()),
+        ];
+        if let Some(root) = cas_root {
+            env.push(("CAS_ROOT".to_string(), root.to_string_lossy().to_string()));
+        }
+        if let Some(supervisor) = supervisor_name {
+            env.push(("CAS_SUPERVISOR_NAME".to_string(), supervisor.to_string()));
+        }
+        push_factory_worker_metadata_env(&mut env, role, factory_worker_cli, model, effort);
+        push_worker_cargo_env(&mut env, role);
+        push_worker_build_cache_env(&mut env, role);
+        push_worker_zig_env(&mut env, role, cas_root);
+
+        let (agent_name, instructions) = if role == "supervisor" {
+            ("cassy-supervisor", OPENCODE_SUPERVISOR_INSTRUCTIONS)
+        } else {
+            ("cassy-worker", OPENCODE_WORKER_INSTRUCTIONS)
+        };
+        let mut agent = serde_json::Map::new();
+        agent.insert(
+            "description".to_string(),
+            serde_json::Value::String(format!("Cassy factory {role}")),
+        );
+        agent.insert(
+            "mode".to_string(),
+            serde_json::Value::String("primary".to_string()),
+        );
+        agent.insert(
+            "prompt".to_string(),
+            serde_json::Value::String(instructions.to_string()),
+        );
+        if let Some(model) = model {
+            agent.insert(
+                "model".to_string(),
+                serde_json::Value::String(model.to_string()),
+            );
+        }
+        if let Some(effort) = effort {
+            agent.insert(
+                "variant".to_string(),
+                serde_json::Value::String(effort.to_string()),
+            );
+        }
+        let mut agents = serde_json::Map::new();
+        agents.insert(agent_name.to_string(), serde_json::Value::Object(agent));
+        let inline_config = serde_json::json!({
+            "agent": serde_json::Value::Object(agents),
+            "mcp": {
+                "cas": {
+                    "type": "local",
+                    "command": ["cas", "serve"],
+                    "enabled": true
+                }
+            }
+        });
+        env.push((
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            serde_json::to_string(&inline_config)
+                .expect("OpenCode inline config contains only serializable values"),
+        ));
+
+        let mut args = vec![cwd_text];
+        if let Some(model) = model {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        args.push("--agent".to_string());
+        args.push(agent_name.to_string());
+        if role == "worker" {
+            args.push("--prompt".to_string());
+            args.push(OPENCODE_WORKER_STARTUP_PROMPT.to_string());
+        }
+        args.push("--auto".to_string());
+
+        let (command, args) = maybe_wrap_with_nice("opencode", args, role);
         Self {
             command,
             args,
@@ -4237,6 +4367,137 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // cas-753a: PtyConfig::opencode
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn opencode_worker_launch_is_self_contained_and_model_driven() {
+        let _e = ScopedEnv::new();
+        let cwd = std::env::temp_dir().join("cas-opencode-worker");
+        let config = PtyConfig::opencode(
+            "open-worker",
+            "worker",
+            cwd.clone(),
+            None,
+            Some("factory-lead"),
+            None,
+            Some("local/qwen3.8"),
+            Some("medium"),
+            None,
+        );
+
+        assert_eq!(config.command, "opencode");
+        assert_eq!(config.cwd, Some(cwd.clone()));
+        assert_eq!(config.args[0], cwd.to_string_lossy());
+        assert_eq!(
+            &config.args[1..5],
+            ["--model", "local/qwen3.8", "--agent", "cassy-worker"]
+        );
+        let prompt = config
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--prompt")
+            .map(|pair| pair[1].as_str())
+            .expect("worker launch must submit the startup workflow");
+        assert!(prompt.contains("cas_coordination") && prompt.contains("cas_task"));
+        assert_eq!(config.args.last().map(String::as_str), Some("--auto"));
+
+        let env_value = |key: &str| {
+            config
+                .env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(env_value("PWD"), Some(cwd.to_string_lossy().as_ref()));
+        assert_eq!(env_value("CAS_FACTORY_WORKER_CLI"), Some("opencode"));
+        assert_eq!(env_value("CAS_SUPERVISOR_NAME"), Some("factory-lead"));
+        assert_eq!(env_value("CAS_FACTORY_WORKER_MODEL"), Some("local/qwen3.8"));
+        assert_eq!(env_value("CAS_FACTORY_WORKER_EFFORT"), Some("medium"));
+
+        let inline: serde_json::Value = serde_json::from_str(
+            env_value("OPENCODE_CONFIG_CONTENT").expect("inline OpenCode config must exist"),
+        )
+        .unwrap();
+        assert!(
+            inline["agent"]["cassy-worker"]["prompt"]
+                .as_str()
+                .is_some_and(|text| text.contains("cas_task"))
+        );
+        assert_eq!(inline["agent"]["cassy-worker"]["variant"], "medium");
+        assert_eq!(inline["mcp"]["cas"]["type"], "local");
+        assert_eq!(
+            inline["mcp"]["cas"]["command"],
+            serde_json::json!(["cas", "serve"])
+        );
+        assert_eq!(inline["mcp"]["cas"]["enabled"], true);
+    }
+
+    #[test]
+    fn opencode_omits_unrequested_model_and_effort_without_a_default() {
+        let _e = ScopedEnv::new();
+        let config = PtyConfig::opencode(
+            "open-worker",
+            "worker",
+            std::env::temp_dir().join("cas-opencode-no-default"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(!config.args.iter().any(|arg| arg == "--model"));
+        let inline = config
+            .env
+            .iter()
+            .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value).unwrap())
+            .unwrap();
+        assert!(inline["agent"]["cassy-worker"].get("model").is_none());
+        assert!(inline["agent"]["cassy-worker"].get("variant").is_none());
+    }
+
+    #[test]
+    fn opencode_resolves_relative_worktree_and_selects_supervisor_agent() {
+        let _e = ScopedEnv::new();
+        let config = PtyConfig::opencode(
+            "open-lead",
+            "supervisor",
+            PathBuf::from("relative-opencode-worktree"),
+            None,
+            None,
+            Some("opencode"),
+            Some("local/qwen3.8"),
+            None,
+            None,
+        );
+
+        let worktree = PathBuf::from(&config.args[0]);
+        assert!(worktree.is_absolute());
+        assert_eq!(config.cwd.as_ref(), Some(&worktree));
+        assert!(
+            config
+                .args
+                .windows(2)
+                .any(|pair| { pair[0] == "--agent" && pair[1] == "cassy-supervisor" })
+        );
+        assert!(!config.args.iter().any(|arg| arg == "--prompt"));
+        let inline = config
+            .env
+            .iter()
+            .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value).unwrap())
+            .unwrap();
+        assert!(
+            inline["agent"]["cassy-supervisor"]["prompt"]
+                .as_str()
+                .is_some_and(|text| text.contains("cas_coordination"))
+        );
+    }
+
     // cas-6569 (EPIC cas-8888, Phase 2): PtyConfig::grok
     // -------------------------------------------------------------------
 

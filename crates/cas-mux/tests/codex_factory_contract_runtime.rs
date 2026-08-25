@@ -14,30 +14,45 @@ mod real_pty_serial;
 use cas_mux::{Mux, Pane, PaneKind, Pty, PtyConfig, SupervisorCli};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const PANE: &str = "cas-1c66-codex-contract";
 const MODEL: &str = "gpt-5.6-terra";
-const EFFORT: &str = "medium";
+const EFFORT: &str = "xhigh";
 
-fn codex_0146_available() -> bool {
+fn codex_0149_available() -> bool {
     std::process::Command::new("codex")
         .arg("--version")
         .output()
         .map(|out| {
             out.status.success()
-                && String::from_utf8_lossy(&out.stdout).contains("codex-cli 0.146.0")
+                && String::from_utf8_lossy(&out.stdout).contains("codex-cli 0.149.1")
         })
         .unwrap_or(false)
 }
 
 fn git_init(path: &Path) {
-    let status = std::process::Command::new("git")
+    let status = Command::new("git")
         .args(["init", "-q"])
         .current_dir(path)
         .status()
         .expect("run git init");
     assert!(status.success(), "initialize isolated probe repository");
+}
+
+fn cas_init(root: &Path) {
+    let output = Command::new("cas")
+        .args(["init", "--yes", "--no-integrations", "--allow-non-project"])
+        .current_dir(root)
+        .output()
+        .expect("run cas init");
+    assert!(
+        output.status.success(),
+        "initialize isolated CAS root: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn write_discovery_fixtures(root: &Path) {
@@ -234,12 +249,12 @@ fn wait_for_completions(mux: &mut Mux, rollout: &Path, wanted: usize, timeout: D
 }
 
 #[test]
-#[ignore = "requires real Codex 0.146.0, authentication, and model traffic"]
-fn codex_0146_factory_launch_contract_passes_live_matrix() {
+#[ignore = "requires real Codex 0.149.1, authentication, and model traffic"]
+fn codex_0149_factory_launch_contract_passes_live_matrix() {
     let _serial = real_pty_serial::lock();
     assert!(
-        codex_0146_available(),
-        "this receipt is valid only when run against codex-cli 0.146.0"
+        codex_0149_available(),
+        "this receipt is valid only when run against codex-cli 0.149.1"
     );
 
     let scratch =
@@ -247,9 +262,9 @@ fn codex_0146_factory_launch_contract_passes_live_matrix() {
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).expect("create isolated probe repository");
     git_init(&scratch);
+    cas_init(&scratch);
     write_discovery_fixtures(&scratch);
-    let cas_root = scratch.join(".cas-live-isolated");
-    std::fs::create_dir_all(&cas_root).expect("create isolated CAS root");
+    let cas_root = scratch.join(".cas");
 
     let config = PtyConfig::codex(
         PANE,
@@ -274,12 +289,14 @@ fn codex_0146_factory_launch_contract_passes_live_matrix() {
         config
             .args
             .windows(2)
-            .any(|pair| pair == ["-c", "model_reasoning_effort=medium"])
+            .any(|pair| pair == ["-c", "model_reasoning_effort=xhigh"])
     );
     assert!(
-        config.args.iter().any(
-            |arg| arg.contains("developer_instructions=") && arg.contains("CAS Factory Worker")
-        )
+        config
+            .args
+            .iter()
+            .any(|arg| arg.contains("developer_instructions=")
+                && arg.contains("Cassy Factory Worker"))
     );
     for (key, expected) in [
         ("CAS_AGENT_NAME", PANE),
@@ -417,7 +434,7 @@ fn codex_0146_factory_launch_contract_passes_live_matrix() {
     assert_turn_context(&final_body, &scratch);
 
     eprintln!(
-        "PASS codex-cli 0.146.0 factory contract; isolated_root={}; rollout={}",
+        "PASS codex-cli 0.149.1 factory contract; isolated_root={}; rollout={}",
         cas_root.display(),
         rollout.display()
     );

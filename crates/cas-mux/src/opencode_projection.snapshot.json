@@ -1,0 +1,47 @@
+{
+  "agent": {
+    "cassy-supervisor": {
+      "mode": "primary",
+      "model": "local/qwen3.8-max",
+      "permission": {
+        "bash": "allow",
+        "edit": "allow",
+        "external_directory": "deny",
+        "glob": "allow",
+        "grep": "allow",
+        "question": "deny",
+        "read": "allow"
+      },
+      "prompt": "You are the Cassy Factory Supervisor (cassy-supervisor) running in OpenCode. Coordinate epics, assign work, monitor workers, review and merge; do not implement worker tasks. Use the cas_* MCP tools explicitly. The OpenCode plugin records session identity, awaited tool attribution, and lifecycle signals; permission.ask is not a substitute for Cassy's pre-tool policy.",
+      "variant": "xhigh"
+    },
+    "cassy-worker": {
+      "mode": "primary",
+      "model": "local/qwen3.8-max",
+      "permission": {
+        "bash": "allow",
+        "edit": "allow",
+        "external_directory": "deny",
+        "glob": "allow",
+        "grep": "allow",
+        "question": "deny",
+        "read": "allow"
+      },
+      "prompt": "You are the Cassy Factory Worker (worker-1) running in OpenCode. Use the cas_* MCP tools for task lifecycle and coordination. Work exactly one assigned task at a time, leave durable progress notes, commit and push before handoff, and remain available after close. The OpenCode plugin records session identity, awaited tool attribution, and lifecycle signals; permission.ask is not a substitute for Cassy's pre-tool policy.",
+      "variant": "xhigh"
+    }
+  },
+  "mcp": {
+    "cas": {
+      "command": [
+        "cas",
+        "serve"
+      ],
+      "enabled": true,
+      "type": "local"
+    }
+  },
+  "plugin": [
+    "/tmp/cas-root/opencode/cassy-opencode-plugin.mjs"
+  ]
+}

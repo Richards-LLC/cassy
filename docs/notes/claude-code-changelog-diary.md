@@ -44,6 +44,20 @@ When a new Claude Code version ships:
 
 | CC version | Headline | Cassy verdict | Pointer |
 |------------|----------|-------------|---------|
+| 2.1.245 | Linux glibc 2.44 startup crash | ✅ no action | this doc |
+| 2.1.244 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.243 | MCP reconnect · hook matcher · background/session diagnostics | 🟢 / ✅ | this doc |
+| 2.1.242 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.241 | Generic bug-fix and reliability rollup | ⏭ source-limited | this doc |
+| 2.1.240 | Generic bug-fix and reliability rollup | ⏭ source-limited | this doc |
+| 2.1.239 | MCP, worktree, hook, and session reliability | 🟢 / ✅ / 👀 | this doc |
+| 2.1.238 | MCP initialization/trust · runner lifecycle · delivery correctness | 🟢 / ✅ | this doc |
+| 2.1.237 | Deleted-cwd recovery · skill reload · auto-mode/delivery safety | 🟢 / ✅ / 👀 | this doc |
+| 2.1.236 | Hook/auto-mode safety · deleted-cwd and runner lifecycle | 🟢 / ✅ | this doc |
+| 2.1.235 | Agent availability · permission and message-delivery correctness | 🟢 / ✅ | this doc |
+| 2.1.234 | NT-path/MCP redaction · permission and session correctness | 🟢 / ✅ | this doc |
+| 2.1.233 | MCP v2/hooks/skills · native task-tool removal | 🟢 / ✅ / 👀 | this doc |
+| 2.1.232 | Fork/background defaults · cross-session/MCP/path hardening | 🟢 / ✅ | this doc |
 | 2.1.231 | MCP OAuth redirect-URI repair | ✅ no action | this doc |
 | 2.1.230 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
 | 2.1.229 | Self-hosted hook/MCP startup fixes · workflow fan-out · sandbox hardening | 👀 / 🟢 | this doc |
@@ -106,6 +120,216 @@ When a new Claude Code version ships:
 ---
 
 ## Entries
+
+### 2.1.245 — Linux glibc 2.44 startup crash
+
+Reviewed 2026-08-25. Host on **2.1.245** (installed `claude --version`: **2.1.245**). Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21245).
+
+- **Startup no longer crashes on Linux distributions shipping glibc 2.44.** → ✅ **no action.**
+  This is a Claude binary startup/packaging fix; Cassy's factory PTY still launches the host and
+  passes the Cassy environment (`crates/cas-pty/src/pty.rs`) without depending on the affected libc
+  behavior. No Cassy code or configuration change is indicated.
+
+### 2.1.244 — official changelog source gap
+
+Reviewed 2026-08-25. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official raw changelog has no **2.1.244** section between 2.1.245 and 2.1.243. → ⏭ **source
+  gap.** No release item or Cassy verdict is invented.
+
+### 2.1.243 — MCP reconnect · hook matcher · background/session diagnostics
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21243).
+
+- **Remote MCP servers in print/SDK sessions reconnect after dropped connections, MCP sign-in
+  handles client-ID metadata redirects, and `/status` reports invalid MCP settings more clearly.**
+  → 🟢 **already covered / ✅ no action.** Cassy's local `cs` server is stdio-owned and has no OAuth
+  redirect flow; its server/runtime health and factory registration remain Cassy-owned
+  (`cas-cli/src/mcp/server/runtime.rs`, `cas-cli/src/mcp/daemon.rs`). These host diagnostics and
+  reconnects improve adjacent remote-server behavior without changing Cassy's protocol.
+- **Cross-session delivery survives user namespaces/rootless containers, background subagents wake
+  after Bash completion, and the messaging socket closes incomplete-line clients after 30 seconds.**
+  → 🟢 **lifecycle win.** Cassy's durable coordination queues, leases, and daemon heartbeats remain
+  authoritative; the host fixes reduce false stalls and malformed delivery around Claude sessions.
+  No Cassy change follows.
+- **Hook `if` matching no longer fires on unrelated command substitutions; plugin reload removes
+  stale LSP tools; invalid `--agents` definitions now fail clearly.** → 🟢 / ✅ **already covered / no
+  action.** Cassy's checked-in hook routing (`.claude/settings.json`) and task-verifier dispatch
+  (`cas-cli/src/code_review_dispatch.rs`) do not depend on the old matcher bug or silent native-agent
+  parsing. The remaining UI, model-picker, and memory/startup improvements have no Cassy angle.
+
+### 2.1.242 — official changelog source gap
+
+Reviewed 2026-08-25. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official raw changelog has no **2.1.242** section between 2.1.243 and 2.1.241. → ⏭ **source
+  gap.** No release item or Cassy verdict is invented.
+
+### 2.1.241 — generic bug-fix and reliability rollup
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21241).
+
+- Anthropic publishes only **“Bug fixes and reliability improvements”**, with no affected component
+  or behavior named. → ⏭ **source-limited.** There is no evidence to attribute a change to Cassy's
+  hooks, MCP server, factory, or verifier surfaces.
+
+### 2.1.240 — generic bug-fix and reliability rollup
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21240).
+
+- Anthropic publishes only **“Bug fixes and reliability improvements”**, with no affected component
+  or behavior named. → ⏭ **source-limited.** There is no evidence to attribute a change to Cassy's
+  hooks, MCP server, factory, or verifier surfaces.
+
+### 2.1.239 — MCP, worktree, hook, and session reliability
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21239).
+
+- **Remote MCP reconnects recover from transient failures; MCP elicitation fits small terminals; and
+  deferred tool executions retain their original OpenTelemetry trace.** → 🟢 **already covered.**
+  Cassy's local stdio MCP server and tracing/verification records remain on Cassy's side; host-side
+  reconnect, rendering, and trace continuity improve evidence around them without changing the
+  `mcp__cas__*` contract.
+- **Deleted-worktree hooks fall back instead of failing with `posix_spawn ENOENT`; sandboxed git can
+  read a missing `.git/config.worktree`; `.worktreeinclude` and symlinked rules are handled correctly;
+  and long `SessionStart`/`Setup` hooks keep remote sessions alive.** → 🟢 **direct host isolation and
+  liveness wins.** Cassy independently stamps factory workers with `CAS_CLONE_PATH` in
+  `crates/cas-pty/src/pty.rs`, manages `.cas/worktrees`, and keeps its own PreToolUse path guard in
+  `cas-cli/src/factory_isolation.rs`. No runtime change is required.
+- **Skills/commands with a UTF-8 BOM are no longer ignored, and session/teammate delivery reports
+  unreachable or oversized destinations instead of silently losing messages.** → 👀 / 🟢 **watch /
+  already covered.** Cassy-generated skill and agent mirrors are plain tracked Markdown, while Cassy
+  coordination has its own durable queue and acknowledgment semantics. Continue checking mirror
+  generation on upgrades; no task is warranted from this release.
+
+### 2.1.238 — MCP initialization/trust · runner lifecycle · delivery correctness
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21238).
+
+- **Stdio MCP servers no longer receive `server/discover` before `initialize`; project MCP helpers
+  require trust and run without inherited credential variables; disabled servers are shown without a
+  health-check connection.** → 🟢 **direct host/MCP win.** Cassy's `cas serve` follows the MCP
+  initialization contract and uses committed project configuration; no OAuth/helper behavior is
+  embedded in Cassy's server. Host ordering and trust checks remove startup ambiguity around the
+  adjacent surface.
+- **Self-hosted runners can defer shutdown and refresh proxy authorization, and healthy runners are
+  less likely to be removed after a slow poll.** → ✅ **n/a / no action.** Cassy factory workers use
+  its PTY/worktree manager rather than Claude's self-hosted-runner service; the lifecycle authority
+  stays in Cassy's coordination and worktree records.
+- **Cross-session messaging reports refused/full queues instead of silent success; worktree-isolation
+  refusals and MCP elicitation diagnostics are clearer.** → 🟢 **delivery and isolation win.** These
+  host-side signals complement Cassy's own queue acknowledgments and factory isolation guards; no
+  Cassy protocol or policy change follows.
+
+### 2.1.237 — deleted-cwd recovery · skill reload · auto-mode/delivery safety
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21237).
+
+- **Sessions whose working directory is deleted no longer break local MCP logs, background
+  housekeeping, or session work; skills hot-reload cleanly in SDK/VS Code sessions; and self-hosted
+  runner hooks finish before a released session resumes elsewhere.** → 🟢 **lifecycle win / 👀 watch.**
+  Cassy's daemon and PTY paths already record the worktree/session root and `CAS_CLONE_PATH`; its
+  skill sync owns the generated mirror. The host fixes reduce stale-session and stale-skill symptoms,
+  but do not change Cassy's persistence or sync contract.
+- **Auto mode no longer treats `Monitor` rules as trusted, and git status is not fooled by
+  `status.showUntrackedFiles=no`.** → 🟢 **already covered.** Cassy's PreToolUse policy and factory
+  commit/path guards remain separate defense-in-depth checks; the host classifier does not replace
+  them.
+- **`SendMessage` refuses bursts that exceed the recipient inbox instead of claiming delivery.** → 🟢
+  **evidence win.** Cassy coordination uses its own durable queue/ack path, so the host's truthful
+  delivery result is useful but does not require a Cassy change.
+
+### 2.1.236 — hook/auto-mode safety · deleted-cwd and runner lifecycle
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21236).
+
+- **Deleted working directories no longer break background sessions or local MCP logs; skills
+  hot-reload after the directory is removed; and self-hosted runner post-session hooks complete
+  before reassignment.** → 🟢 **lifecycle win.** Cassy independently resolves its project root and
+  stamps factory PTYs with `CAS_CLONE_PATH`; no host fallback is assumed by the daemon or task store.
+- **Auto mode uses severity-scored classification consistently and does not trust `Monitor` rules;
+  SIGTERM in print/SDK mode no longer records synthetic tool denials.** → 🟢 **safety/evidence win.**
+  Cassy's `cas hook PreToolUse` policy and verifier evidence are independent of Claude's classifier;
+  cleaner host transcripts reduce ambiguity without changing the Cassy hook schema.
+- **`ANTHROPIC_DEFAULT_MODEL`, `notify_when_idle`, and other model/session UI additions** → ✅ **no
+  action.** Cassy chooses worker model/effort at PTY launch and uses coordination reminders/queues
+  for durable notification semantics rather than native cross-session options.
+
+### 2.1.235 — Agent availability · permission and message-delivery correctness
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21235).
+
+- **The Agent tool now errors clearly when an omitted `subagent_type` is unavailable; permission
+  previews match the actual grant; and oversized `SendMessage` bodies are refused before delivery.**
+  → 🟢 **already covered / ✅ no action.** Cassy's verifier dispatch names `task-verifier` explicitly
+  and checks its distinct caller (`cas-cli/src/code_review_dispatch.rs`); factory hooks and worker
+  close gates do not rely on native Agent fallback or message-size behavior.
+- **Prompt-cache, renderer, cloud-session, and VS Code fixes have no Cassy-specific touchpoint.** → ✅
+  **no action.** No Cassy task is filed.
+
+### 2.1.234 — NT-path/MCP redaction · permission and session correctness
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21234).
+
+- **Pre-approval file access rejects Windows NT namespace paths; MCP diagnostics stop printing
+  resolved secrets; strict marketplace validation handles SCP-style hosts; and permission previews
+  honor inbound trust/capability boundaries.** → 🟢 **direct host safety win.** Cassy's factory
+  isolation and PreToolUse guards remain defense in depth, with worktree scope enforced by
+  `cas-cli/src/factory_isolation.rs`; the host hardening does not require a Cassy change.
+- **Background-subagent permission answers and cross-session messages no longer disappear or leave a
+  sender waiting indefinitely; `SendMessage`/`ListAgents` report incomplete session lists.** → 🟢
+  **already covered.** Cassy task ownership, coordination, and verification use Cassy's own durable
+  state and acknowledgments rather than Claude's native message transport.
+- **`CLAUDE_CODE_PROJECT_DIR_NAME`, automatic usage-limit continuation, and transcript/UI improvements**
+  → ✅ **no action.** Cassy uses its own clone/worktree identity and does not infer task state from
+  Claude's transcript-directory naming.
+
+### 2.1.233 — MCP v2/hooks/skills · native task-tool removal
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21233).
+
+- **MCP v2 subscriptions recover when servers close long-lived streams; notification hooks fire in
+  Desktop/VS Code; deleted directories no longer strand self-hosted sessions; and runner startup
+  avoids rewriting the working tree.** → 🟢 **host reliability and isolation wins.** Cassy's local MCP
+  server, hook registration, and worktree manager remain the authority for Cassy state; no protocol
+  or factory change is indicated.
+- **Skill aliases survive user/project shadowing, argument substitution no longer re-expands markers,
+  and `claude plugin validate` checks bare `.claude/skills`.** → 👀 / 🟢 **watch / already covered.**
+  Cassy syncs built-in skill and agent mirrors and retains explicit worker guidance; verify mirror
+  precedence on upgrades, but the release exposes no required Cassy edit.
+- **Todo/task-tracking tools are disabled on newer models unless explicitly re-enabled.** → ✅ **no
+  action.** Cassy task state is durable through `mcp__cas__task`; its worker guidance already forbids
+  ephemeral `TodoWrite`, so the host change does not remove a Cassy dependency.
+
+### 2.1.232 — fork/background defaults · cross-session/MCP/path hardening
+
+Reviewed 2026-08-25. Source:
+[Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21232).
+
+- **Forked subagents inherit conversation/prompt cache, non-teammate interactive agents run in the
+  background by default, and `/code-review` backgrounds at high effort.** → 🟢 **already covered.**
+  Cassy factory workers are launched with explicit roles, model/effort, PTY, and worktree settings
+  (`crates/cas-pty/src/pty.rs`); verifier/review ownership is enforced by Cassy's own dispatch and
+  close gates, not native background defaults.
+- **Cross-session names, inbound controls, and the shared `/tmp` messaging socket are hardened; MCP
+  connection failures now time out clearly; and input redirections/sandbox paths receive stricter
+  permission checks.** → 🟢 **host safety/lifecycle win.** Cassy's daemon/coordination socket,
+  acknowledgment path, and factory PreToolUse isolation remain separate authorities, so the host
+  fixes reduce adjacent false success and escape risk without changing Cassy's API.
+- **Marketplace policy aliases, managed gateway validation, Remote Control recovery, and UI/voice
+  fixes** → ✅ **no action.** No Cassy task or configuration change is supported by the official
+  evidence.
 
 ### 2.1.231–2.1.221 — MCP, worktree, hook, and lifecycle reliability sweep
 

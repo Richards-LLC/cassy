@@ -261,21 +261,156 @@ fn parse_spawn_effort(effort: Option<&str>) -> Result<Option<cas_mux::Effort>, S
     }
 }
 
-fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> &'static str {
+fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> Option<&'static str> {
     match cli {
-        cas_mux::SupervisorCli::Claude => "opus",
-        cas_mux::SupervisorCli::Codex => crate::config::STOCK_WORKER_MODEL,
+        cas_mux::SupervisorCli::Claude => Some("opus"),
+        cas_mux::SupervisorCli::Codex => Some(crate::config::STOCK_WORKER_MODEL),
         // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
-        cas_mux::SupervisorCli::Grok => "grok-4.5",
-        // cas-a5da owns config-driven OpenCode model resolution; no fake default.
-        cas_mux::SupervisorCli::OpenCode => "opencode-model-required-until-cas-a5da",
+        cas_mux::SupervisorCli::Grok => Some("grok-4.5"),
+        // OpenCode is multi-provider. The provider/model selector is
+        // operator configuration, never a Cassy hard-coded default.
+        cas_mux::SupervisorCli::OpenCode => None,
     }
 }
 
-fn default_worker_effort_for_cli(_cli: cas_mux::SupervisorCli) -> cas_mux::Effort {
-    crate::config::STOCK_WORKER_REASONING_EFFORT
-        .parse::<cas_mux::Effort>()
-        .unwrap_or(cas_mux::Effort::Medium)
+fn default_worker_effort_for_cli(cli: cas_mux::SupervisorCli) -> Option<cas_mux::Effort> {
+    match cli {
+        cas_mux::SupervisorCli::OpenCode => None,
+        _ => Some(
+            crate::config::STOCK_WORKER_REASONING_EFFORT
+                .parse::<cas_mux::Effort>()
+                .unwrap_or(cas_mux::Effort::Medium),
+        ),
+    }
+}
+
+const OPENCODE_ACCEPTED_EFFORTS_ENV: &str = "CAS_OPENCODE_ACCEPTED_EFFORTS";
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeFactoryDefaultsToml {
+    /// Preferred spelling for the endpoint's accepted shared effort values.
+    opencode_accepted_efforts: Option<Vec<String>>,
+    /// Short alias retained for ergonomic project-local configuration.
+    opencode_efforts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeFactoryToml {
+    defaults: Option<OpenCodeFactoryDefaultsToml>,
+    opencode: Option<OpenCodeEndpointToml>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeEndpointToml {
+    accepted_efforts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeConfigToml {
+    factory: Option<OpenCodeFactoryToml>,
+}
+
+fn parse_opencode_effort_set(raw: &str, source: &str) -> Result<Vec<cas_mux::Effort>, String> {
+    let mut efforts = Vec::new();
+    for value in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        let effort = value.parse::<cas_mux::Effort>().map_err(|error| {
+            format!(
+                "invalid OpenCode accepted effort {value:?} from {source}: {error}; use Cassy's effort values"
+            )
+        })?;
+        if !efforts.contains(&effort) {
+            efforts.push(effort);
+        }
+    }
+    if efforts.is_empty() {
+        return Err(format!(
+            "OpenCode accepted effort set from {source} is empty; configure/probe at least one endpoint value"
+        ));
+    }
+    Ok(efforts)
+}
+
+/// Read the endpoint's model-aware effort contract without inventing a
+/// DashScope/Qwen default. A local serving stack may support any subset of
+/// Cassy's shared effort vocabulary; preflight or operator configuration
+/// supplies the exact set. The environment override is useful for a live
+/// probe, while project/user TOML keeps the result durable for later spawns.
+fn configured_opencode_efforts(
+    project_config: Option<&std::path::Path>,
+) -> Result<Option<Vec<cas_mux::Effort>>, String> {
+    if let Ok(raw) = std::env::var(OPENCODE_ACCEPTED_EFFORTS_ENV) {
+        return parse_opencode_effort_set(&raw, OPENCODE_ACCEPTED_EFFORTS_ENV).map(Some);
+    }
+
+    let user_config = dirs::home_dir().map(|home| home.join(".cas").join("config.toml"));
+    let mut configured = None;
+    for (source, path) in [
+        ("user OpenCode config", user_config.as_deref()),
+        ("project OpenCode config", project_config),
+    ] {
+        let Some(path) = path else {
+            continue;
+        };
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(path).map_err(|error| {
+            format!("could not read {source} {}: {error}", path.display())
+        })?;
+        let config = toml::from_str::<OpenCodeConfigToml>(&raw).map_err(|error| {
+            format!("could not parse {source} {}: {error}", path.display())
+        })?;
+        let values = config.factory.and_then(|factory| {
+            factory
+                .opencode
+                .and_then(|endpoint| endpoint.accepted_efforts)
+                .or_else(|| {
+                    factory.defaults.and_then(|defaults| {
+                        defaults
+                            .opencode_accepted_efforts
+                            .or(defaults.opencode_efforts)
+                    })
+                })
+        });
+        if let Some(values) = values {
+            let raw_values = values.join(",");
+            configured = Some(parse_opencode_effort_set(
+                &raw_values,
+                &format!("{source} {}", path.display()),
+            )?);
+        }
+    }
+    Ok(configured)
+}
+
+fn format_opencode_efforts(efforts: &[cas_mux::Effort]) -> String {
+    efforts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn validate_opencode_effort(
+    model: &str,
+    effort: Option<cas_mux::Effort>,
+    accepted_efforts: Option<&[cas_mux::Effort]>,
+) -> Result<(), String> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    let Some(accepted_efforts) = accepted_efforts else {
+        return Err(format!(
+            "OpenCode model {model:?} requested effort {effort}, but the endpoint accepted-effort set is unavailable; configure/probe {OPENCODE_ACCEPTED_EFFORTS_ENV}=<comma-separated values> or [factory.defaults].opencode_accepted_efforts. No effort remapping is performed."
+        ));
+    };
+    if accepted_efforts.contains(&effort) {
+        return Ok(());
+    }
+    Err(format!(
+        "OpenCode model {model:?} rejects effort {effort}; endpoint accepted efforts: [{}]. No effort remapping is performed.",
+        format_opencode_efforts(accepted_efforts)
+    ))
 }
 
 /// Request-time shutdown state carried into the supervisor receipt.
@@ -414,6 +549,14 @@ fn cli_for_model_slug(model: &str) -> Option<cas_mux::SupervisorCli> {
     if model.starts_with("gpt") || model.starts_with("codex") || model.starts_with("o3") {
         return Some(cas_mux::SupervisorCli::Codex);
     }
+    // OpenCode preserves provider/model selectors such as
+    // `local/qwen3.8` and `alibaba-cn/qwen3.8-max` verbatim. A slash is the
+    // selector boundary used by OpenCode's multi-provider catalog; recognize
+    // it only for harness inference, while explicit cli=opencode remains the
+    // authoritative path for arbitrary provider strings.
+    if model.contains('/') {
+        return Some(cas_mux::SupervisorCli::OpenCode);
+    }
     None
 }
 
@@ -429,7 +572,7 @@ fn validate_model_matches_cli(cli: cas_mux::SupervisorCli, model: &str) -> Resul
             cli.backend().name(),
             model_cli.backend().name(),
             cli.backend().name(),
-            default_worker_model_for_cli(cli),
+            default_worker_model_for_cli(cli).unwrap_or("a configured provider/model selector"),
         )),
         _ => Ok(()),
     }
@@ -498,7 +641,7 @@ fn build_spawn_specs_with_project_config(
     }
 
     let sources = cas_factory::ConfigSources {
-        project_config,
+        project_config: project_config.clone(),
         cli_flag: parsed_cli,
         model_flag: model.map(String::from),
         effort_flag: parsed_effort,
@@ -518,6 +661,7 @@ fn build_spawn_specs_with_project_config(
         .collect::<Result<_, String>>()?;
     let mut specs = cas_factory::resolve_specs(slots, sources)
         .map_err(|e| format!("failed to resolve worker spec: {e}"))?;
+    let opencode_accepted_efforts = configured_opencode_efforts(project_config.as_deref())?;
 
     // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited, left AS-IS
     // per the task's own guidance: this default-cli auto-upgrade only ever
@@ -564,11 +708,35 @@ fn build_spawn_specs_with_project_config(
                 }
             }
         }
-        if !model_explicit && spec.model.is_none() {
-            spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
+        if !model_explicit
+            && spec.model.is_none()
+            && let Some(default_model) = default_worker_model_for_cli(spec.cli)
+        {
+            spec.model = Some(default_model.to_string());
         }
-        if !effort_explicit && !configured_effort && spec.effort == Some(cas_mux::Effort::High) {
-            spec.effort = Some(default_worker_effort_for_cli(spec.cli));
+        if !effort_explicit && !configured_effort && spec.cli == cas_mux::SupervisorCli::OpenCode {
+            // The shared resolver's High placeholder is not an OpenCode
+            // endpoint contract. Omitted effort means let the configured
+            // local provider choose its own default; only explicit/configured
+            // effort values go through model-aware validation below.
+            spec.effort = None;
+        } else if !effort_explicit
+            && !configured_effort
+            && spec.effort == Some(cas_mux::Effort::High)
+            && let Some(default_effort) = default_worker_effort_for_cli(spec.cli)
+        {
+            spec.effort = Some(default_effort);
+        }
+        if spec.cli == cas_mux::SupervisorCli::OpenCode {
+            let model = spec.model.as_deref().ok_or_else(|| {
+                "cli=opencode requires a configured provider/model selector; no OpenCode model default is hard-coded"
+                    .to_string()
+            })?;
+            validate_opencode_effort(
+                model,
+                spec.effort,
+                opencode_accepted_efforts.as_deref(),
+            )?;
         }
         if let Some(model) = spec.model.as_deref() {
             validate_model_matches_cli(spec.cli, model)?;
@@ -653,9 +821,12 @@ fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &s
         match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
             Ok(spec) => {
                 let model_uses_policy = model_explicit
-                    || spec.model.as_deref() == Some(default_worker_model_for_cli(spec.cli));
+                    || default_worker_model_for_cli(spec.cli)
+                        .is_some_and(|default| spec.model.as_deref() == Some(default));
                 let effort_uses_policy = effort_explicit
-                    || spec.effort == Some(default_worker_effort_for_cli(spec.cli));
+                    || default_worker_effort_for_cli(spec.cli).is_some_and(|default| {
+                        spec.effort == Some(default)
+                    });
                 let fallback = if model_uses_policy && effort_uses_policy {
                     "policy default"
                 } else {
@@ -1441,7 +1612,7 @@ impl CasService {
         let notices = cas_factory::apply_codex_fallback(
             &mut specs,
             strict_cli,
-            Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
+            default_worker_model_for_cli(cas_mux::SupervisorCli::Claude),
         )
         .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
         let mut config_dir_warnings = Vec::new();
@@ -9085,6 +9256,143 @@ mod tests {
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Grok);
     }
 
+    #[test]
+    fn opencode_spawn_preserves_full_provider_model_selector_and_omits_effort() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            None,
+        )]);
+        let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), None)
+            .expect("OpenCode selector should resolve without a hard-coded model default");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, None);
+    }
+
+    #[test]
+    fn opencode_model_selector_infers_opencode_when_cli_is_omitted() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            None,
+        )]);
+        let json = build_spawn_spec_json(None, Some("local/qwen3.8"), None)
+            .expect("provider/model selector should identify OpenCode");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, None);
+    }
+
+    #[test]
+    fn opencode_requires_a_configured_provider_model_selector() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            None,
+        )]);
+        let err = build_spawn_spec_json(Some("opencode"), None, None)
+            .expect_err("OpenCode must not invent a provider/model default");
+
+        assert!(err.contains("cli=opencode"), "{err}");
+        assert!(err.contains("configured provider/model selector"), "{err}");
+        assert!(err.contains("no OpenCode model default is hard-coded"), "{err}");
+    }
+
+    #[test]
+    fn opencode_rejects_effort_outside_endpoint_accepted_set_without_remapping() {
+        let _env = TestEnvGuard::with_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            "low,medium,xhigh",
+        )]);
+        let err = build_spawn_spec_json(
+            Some("opencode"),
+            Some("local/qwen3.8"),
+            Some("high"),
+        )
+        .expect_err("unsupported local endpoint effort must fail before spawn");
+
+        assert!(err.contains("local/qwen3.8"), "{err}");
+        assert!(err.contains("effort high"), "{err}");
+        assert!(err.contains("endpoint accepted efforts: [low, medium, xhigh]"), "{err}");
+        assert!(err.contains("No effort remapping is performed"), "{err}");
+    }
+
+    #[test]
+    fn opencode_accepts_operator_configured_effort_set() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        let json = build_spawn_spec_json(
+            Some("opencode"),
+            Some("local/qwen3.8"),
+            Some("high"),
+        )
+        .expect("local endpoint effort set should be configurable");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn opencode_accepts_project_configured_effort_set() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            None,
+        )]);
+        let tmp = tempfile::tempdir().expect("temp project config");
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+[factory.defaults]
+opencode_accepted_efforts = ["minimal", "high"]
+"#,
+        )
+        .unwrap();
+
+        let json = build_spawn_spec_json_with_project_config(
+            Some("opencode"),
+            Some("local/qwen3.8"),
+            Some("high"),
+            Some(config),
+        )
+        .expect("project endpoint effort set should be configurable");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn opencode_factory_default_model_is_config_driven() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            None,
+        )]);
+        let tmp = tempfile::tempdir().expect("temp project config");
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+[factory.defaults]
+cli = "opencode"
+model = "local/qwen3.8"
+"#,
+        )
+        .unwrap();
+
+        let json = build_spawn_spec_json_with_project_config(None, None, None, Some(config))
+            .expect("OpenCode defaults should come from factory config");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, None);
+    }
+
     /// Matching pairs and unrecognized slugs must stay untouched — validation
     /// rejects known-bad combinations, it does not police the model catalog.
     #[test]
@@ -9120,6 +9428,10 @@ mod tests {
         assert_eq!(
             cli_for_model_slug("gpt-5.6-terra"),
             Some(SupervisorCli::Codex)
+        );
+        assert_eq!(
+            cli_for_model_slug("local/qwen3.8"),
+            Some(SupervisorCli::OpenCode)
         );
         assert_eq!(cli_for_model_slug("grok-4.5"), Some(SupervisorCli::Grok));
         assert_eq!(
@@ -9346,7 +9658,7 @@ effort = "high"
             let notices = cas_factory::apply_codex_fallback(
                 std::slice::from_mut(&mut spec),
                 false,
-                Some(claude_default_model),
+                claude_default_model,
             )
             .unwrap();
 
@@ -9355,7 +9667,7 @@ effort = "high"
                 cas_mux::SupervisorCli::Claude,
                 "controlled missing binary must fall back with auth_present={auth_present}"
             );
-            assert_eq!(spec.model.as_deref(), Some(claude_default_model));
+            assert_eq!(spec.model.as_deref(), claude_default_model);
             assert_eq!(notices.len(), 1);
             assert!(
                 notices[0].starts_with(

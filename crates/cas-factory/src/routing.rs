@@ -496,6 +496,7 @@ fn cli_key(cli: SupervisorCli) -> &'static str {
         SupervisorCli::Claude => "claude",
         SupervisorCli::Codex => "codex",
         SupervisorCli::Grok => "grok",
+        SupervisorCli::OpenCode => "opencode",
     }
 }
 
@@ -608,6 +609,10 @@ pub fn recipe_route_identity(recipe: &RouteRecipe, account_profile: &str) -> Rou
         SupervisorCli::Claude => ("claude", "https://api.anthropic.com"),
         SupervisorCli::Codex => ("codex", "https://api.openai.com"),
         SupervisorCli::Grok => ("grok", "https://api.x.ai"),
+        SupervisorCli::OpenCode => (
+            "opencode",
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        ),
     };
     RouteIdentity::new(
         harness,
@@ -711,10 +716,15 @@ fn routing_decision(
     recipe: &RouteRecipe,
     warnings: Vec<String>,
 ) -> RoutingDecision {
+    let model = if recipe.harness == SupervisorCli::OpenCode && !recipe.model.contains('/') {
+        format!("{}/{}", recipe.provider, recipe.model)
+    } else {
+        recipe.model.clone()
+    };
     let spec = WorkerSpec {
         name: None,
         cli: recipe.harness,
-        model: Some(recipe.model.clone()),
+        model: Some(model),
         effort: Some(recipe.default_effort),
         config_dir: None,
         requester_config_dir: None,
@@ -760,6 +770,41 @@ pub fn validate_explicit(
                 "allowed effort",
                 None,
             )));
+        }
+        if let Some((recipe_id, recipe)) = registry.recipes.iter().find(|(_, recipe)| {
+            recipe.harness == spec.cli
+                && (recipe.model.eq_ignore_ascii_case(model)
+                    || format!("{}/{}", recipe.provider, recipe.model).eq_ignore_ascii_case(model))
+        }) {
+            if recipe.status != RecipeStatus::Active {
+                return Err(RoutingError::Policy(policy_violation_with_alternatives(
+                    registry,
+                    format!(
+                        "explicit recipe {recipe_id:?} is suspended ({})",
+                        recipe.reason.as_deref().unwrap_or("no reason recorded")
+                    ),
+                    "recipe status",
+                    Some(model),
+                )));
+            }
+            if let Some(effort) = spec.effort
+                && !recipe.allowed_efforts.contains(&effort)
+            {
+                let allowed = recipe
+                    .allowed_efforts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("|");
+                return Err(RoutingError::Policy(policy_violation_with_alternatives(
+                    registry,
+                    format!(
+                        "explicit recipe {recipe_id:?} rejects effort {effort}; allowed efforts are {allowed}"
+                    ),
+                    "recipe allowed efforts",
+                    None,
+                )));
+            }
         }
     }
     Ok(())
@@ -834,6 +879,7 @@ pub fn default_worker_model_for_cli(cli: SupervisorCli) -> &'static str {
                 SupervisorCli::Claude => "opus",
                 SupervisorCli::Codex => "gpt-5.6-luna",
                 SupervisorCli::Grok => "grok-4.5",
+                SupervisorCli::OpenCode => "qwencloud/qwen3.8-max",
             },
             |defaults| defaults.model.as_str(),
         )
@@ -849,6 +895,7 @@ pub fn default_worker_effort_for_cli(cli: SupervisorCli) -> Effort {
             || match cli {
                 SupervisorCli::Codex => Effort::XHigh,
                 SupervisorCli::Claude | SupervisorCli::Grok => Effort::High,
+                SupervisorCli::OpenCode => Effort::Medium,
             },
             |defaults| defaults.effort,
         )
@@ -870,14 +917,19 @@ pub fn render_route_table() -> Result<String, RoutingError> {
     let registry = registry()?;
     let mut output = String::from(GENERATED_ROUTE_TABLE_START);
     output.push_str(
-        "\n| Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback |\n|---|---|---|---|---|---|---|---|\n",
+        "\n| Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |\n|---|---|---|---|---|---|---|---|---|\n",
     );
+
+    let mut assigned_recipes = BTreeSet::new();
 
     for lane_name in ordered_lane_names(registry) {
         let decision = resolve_lane(lane_name, &CapabilitySnapshot::default())?;
+        let mut lane_recipes = Vec::new();
+        flattened_candidates(registry, lane_name, &mut lane_recipes);
+        assigned_recipes.extend(lane_recipes);
         let recipe = &registry.recipes[&decision.recipe_id];
         output.push_str(&format!(
-            "| `{lane_name}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+            "| `{lane_name}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |  |\n",
             decision.recipe_id,
             recipe.provider,
             recipe.harness.backend().name(),
@@ -892,8 +944,23 @@ pub fn render_route_table() -> Result<String, RoutingError> {
         ));
     }
 
+    for (recipe_id, recipe) in &registry.recipes {
+        if assigned_recipes.contains(recipe_id) {
+            continue;
+        }
+        output.push_str(&format!(
+            "| `— (explicit only)` | `{recipe_id}` | `{}` | `{}` | `{}` | `{}` | `{}` | `not lane-routed` | {} |\n",
+            recipe.provider,
+            recipe.harness.backend().name(),
+            recipe.model,
+            recipe.default_effort,
+            recipe_status_name(recipe.status),
+            recipe.reason.as_deref().unwrap_or(""),
+        ));
+    }
+
     output.push_str(
-        "\nLane request mode: `coordination action=spawn_workers lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
+        "\nLane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
     );
 
     output.push_str(GENERATED_ROUTE_TABLE_END);
@@ -1003,6 +1070,46 @@ candidates = ["codex_luna"]
             registry.recipes["codex_terra"].reason.as_deref(),
             Some("Standing operator suspension (2026-08-27)")
         );
+        let qwen = &registry.recipes["qwencloud_qwen"];
+        assert_eq!(qwen.harness, SupervisorCli::OpenCode);
+        assert_eq!(qwen.provider, "qwencloud");
+        assert_eq!(qwen.model, "qwen3.8-max");
+        assert_eq!(qwen.default_effort, Effort::Medium);
+        assert_eq!(
+            qwen.allowed_efforts,
+            [Effort::Low, Effort::Medium, Effort::XHigh]
+        );
+        assert_eq!(
+            qwen.required_capability.as_deref(),
+            Some("qwencloud-token-plan-key")
+        );
+        assert!(registry.lanes.values().all(|lane| {
+            !lane_references(lane)
+                .iter()
+                .any(|candidate| candidate == "qwencloud_qwen")
+        }));
+    }
+
+    #[test]
+    fn explicit_opencode_recipe_is_registry_validated_without_becoming_a_lane() {
+        let valid = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::OpenCode,
+            model: Some("qwencloud/qwen3.8-max".to_string()),
+            effort: Some(Effort::XHigh),
+            config_dir: None,
+            requester_config_dir: None,
+        };
+        validate_explicit(&valid, &CapabilitySnapshot::default())
+            .expect("receipted recipe accepts every registry-declared effort");
+
+        let mut invalid = valid;
+        invalid.effort = Some(Effort::High);
+        let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
+            .expect_err("undeclared OpenCode effort must fail registry policy")
+            .to_string();
+        assert!(error.contains("qwencloud_qwen"), "{error}");
+        assert!(error.contains("low|medium|xhigh"), "{error}");
     }
 
     #[test]
@@ -1039,7 +1146,8 @@ candidates = ["codex_luna"]
             vec![
                 SupervisorCli::Claude,
                 SupervisorCli::Codex,
-                SupervisorCli::Grok
+                SupervisorCli::Grok,
+                SupervisorCli::OpenCode,
             ]
         );
     }
@@ -1349,5 +1457,8 @@ no_fallback = true
         assert!(table.contains("Lane request mode"));
         assert!(table.contains("Fallback"));
         assert!(table.contains("disabled"));
+        assert!(table.contains("`qwencloud_qwen`"));
+        assert!(table.contains("Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27"));
+        assert!(!recipes.contains("qwencloud_qwen"));
     }
 }

@@ -90,6 +90,8 @@ pub(crate) enum DeliveryChannel {
 pub(crate) fn choose_channel(harness: SupervisorCli, teams_active: bool) -> DeliveryChannel {
     match harness {
         SupervisorCli::Codex | SupervisorCli::Grok => DeliveryChannel::Pty,
+        // cas-a5da owns OpenCode factory delivery; it has no Teams transport.
+        SupervisorCli::OpenCode => DeliveryChannel::Pty,
         SupervisorCli::Claude => {
             if teams_active {
                 DeliveryChannel::TeamsInbox

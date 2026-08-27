@@ -1953,6 +1953,53 @@ fn enrich_report_from_harness_artifact(
         return;
     };
     let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+    if cli == cas_mux::SupervisorCli::OpenCode {
+        let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let Some(observation) = crate::mcp::tools::service::opencode_liveness::observe(
+            cas_root,
+            session_id,
+            now_ms,
+            crate::mcp::tools::service::agent_liveness::agent_process_is_alive(&agent),
+        ) else {
+            return;
+        };
+        let Some(mapped_session) =
+            crate::mcp::tools::service::opencode_liveness::mapped_session_id(&observation)
+        else {
+            return;
+        };
+        let evidence_prefix = format!("OpenCode mapped session {mapped_session}");
+        if let Some(at) = observation
+            .state
+            .last_activity_at
+            .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+            .filter(|at| *at >= delivered_at)
+        {
+            report.wake = ObservationStatus::Observed;
+            report.wake_observed_at = Some(at);
+            report.wake_evidence = Some(format!(
+                "{evidence_prefix} plugin activity signal at {}",
+                at.to_rfc3339()
+            ));
+        }
+        if let Some(at) = observation
+            .state
+            .last_tool
+            .as_ref()
+            .and_then(|tool| tool.completed_at)
+            .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+            .filter(|at| *at >= delivered_at)
+        {
+            report.reaction = ObservationStatus::Observed;
+            report.reaction_observed_at = Some(at);
+            report.reaction_evidence = Some(format!(
+                "{evidence_prefix} completed tool attribution at {}",
+                at.to_rfc3339()
+            ));
+        }
+        return;
+    }
     let Some(path) =
         crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(cas_root, &agent)
     else {
@@ -2189,6 +2236,90 @@ mod inbox_poll_identity_tests {
         assert!(report.wake_evidence.as_deref().is_some_and(|evidence| {
             evidence.contains("task_started") && evidence.contains("rollout-live-worker")
         }));
+    }
+
+    #[test]
+    fn message_report_uses_opencode_mapping_for_wake_and_reaction() {
+        use cas_mux::{
+            OpenCodeSessionEvent, OpenCodeSessionEventKind, OpenCodeSessionState,
+            persist_opencode_session_state,
+        };
+        use cas_store::ObservationStatus;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join("project");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let clone_path = cas_root.join("worktrees/opencode-worker");
+        std::fs::create_dir_all(&clone_path).unwrap();
+        let session_id = "opencode-opencode-worker";
+        let event_at = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let mut state = OpenCodeSessionState::new(session_id, clone_path.display().to_string());
+        state.apply(OpenCodeSessionEvent {
+            at: event_at,
+            kind: OpenCodeSessionEventKind::RootCreated {
+                session_id: "ses_mapped-worker".to_string(),
+                directory: clone_path.display().to_string(),
+            },
+        });
+        state.apply(OpenCodeSessionEvent {
+            at: event_at + 1,
+            kind: OpenCodeSessionEventKind::ToolBefore {
+                session_id: "ses_mapped-worker".to_string(),
+                name: "bash".to_string(),
+                call_id: Some("call-1".to_string()),
+            },
+        });
+        state.apply(OpenCodeSessionEvent {
+            at: event_at + 2,
+            kind: OpenCodeSessionEventKind::ToolAfter {
+                session_id: "ses_mapped-worker".to_string(),
+                call_id: Some("call-1".to_string()),
+                success: true,
+            },
+        });
+        persist_opencode_session_state(
+            &cas_mux::opencode_session_state_path(&cas_root, session_id),
+            &state,
+        )
+        .unwrap();
+
+        let agent_store = crate::store::open_agent_store(&cas_root).unwrap();
+        let mut agent =
+            cas_types::Agent::new(session_id.to_string(), "opencode-worker".to_string());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.factory_session = Some("factory-1".to_string());
+        agent
+            .metadata
+            .insert("worker_cli".to_string(), "opencode".to_string());
+        agent_store.register(&agent).unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        let message_id = queue
+            .enqueue_with_session("supervisor", "opencode-worker", "act", "factory-1")
+            .unwrap();
+        queue.mark_transport_delivered(message_id).unwrap();
+        let mut report = queue.message_delivery_report(message_id).unwrap().unwrap();
+        report.delivered_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            event_at.saturating_sub(1_000) as i64,
+        );
+
+        enrich_report_from_harness_artifact(&cas_root, &mut report);
+
+        assert_eq!(report.wake, ObservationStatus::Observed);
+        assert_eq!(report.reaction, ObservationStatus::Observed);
+        assert!(
+            report
+                .wake_evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains("ses_mapped-worker"))
+        );
+        assert!(
+            report
+                .reaction_evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains("completed tool attribution"))
+        );
+        assert_eq!(report.wake_observed_at, report.reaction_observed_at);
     }
 }
 

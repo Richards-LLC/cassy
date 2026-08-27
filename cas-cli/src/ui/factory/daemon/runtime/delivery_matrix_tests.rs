@@ -150,6 +150,8 @@ fn expected(recipient: SupervisorCli, teams_active: bool) -> (DeliveryChannel, b
     match recipient {
         Codex => (DeliveryChannel::Pty, true, true),
         Grok => (DeliveryChannel::Pty, true, false),
+        // cas-a5da owns OpenCode delivery; framing remains unmeasured.
+        SupervisorCli::OpenCode => (DeliveryChannel::Pty, true, false),
         Claude if teams_active => (DeliveryChannel::TeamsInbox, false, false),
         Claude => (DeliveryChannel::Pty, true, false),
     }

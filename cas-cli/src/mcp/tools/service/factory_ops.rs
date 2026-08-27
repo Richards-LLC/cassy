@@ -1,9 +1,46 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
+use crate::opencode_preflight::{
+    OpenCodeRoute, hosted_lane_for_selector, hosted_serving_identity, opencode_route_for_selector,
+    preflight_hosted_from_env, require_supported_selector, validate_hosted_effort_for_lane,
+};
 use cas_factory::routing::{
     default_worker_effort_for_cli, default_worker_model_for_cli, resolve_lane_specs,
     validate_lane_request,
 };
+
+const HOSTED_PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Validate every distinct hosted selector before it reaches the spawn queue.
+/// Local selectors never enter this function, so a missing or invalid hosted
+/// key cannot block the independently usable local route.
+fn preflight_hosted_opencode_specs(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
+    let mut selectors = std::collections::BTreeSet::new();
+    for spec in specs {
+        if spec.cli != cas_mux::SupervisorCli::OpenCode {
+            continue;
+        }
+        let Some(model) = spec.model.as_deref() else {
+            continue;
+        };
+        require_supported_selector(model)?;
+        match opencode_route_for_selector(model)? {
+            OpenCodeRoute::HostedTokenPlan | OpenCodeRoute::HostedPayg => {
+                selectors.insert(model.to_string());
+            }
+            OpenCodeRoute::Local => {}
+            OpenCodeRoute::Hosted => {
+                return Err(
+                    "legacy OpenCode hosted route cannot pass the support-claim gate".to_string(),
+                );
+            }
+        }
+    }
+    for selector in selectors {
+        preflight_hosted_from_env(&selector, HOSTED_PREFLIGHT_TIMEOUT)?;
+    }
+    Ok(())
+}
 
 /// Whether this harness has account-directory plumbing at all.
 ///
@@ -245,8 +282,9 @@ fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort>
 
 fn parse_spawn_cli(cli: Option<&str>) -> Result<Option<cas_mux::SupervisorCli>, String> {
     cli.map(|s| {
-        s.parse::<cas_mux::SupervisorCli>()
-            .map_err(|_| format!("invalid cli value {s:?}: expected 'claude', 'codex', or 'grok'"))
+        s.parse::<cas_mux::SupervisorCli>().map_err(|_| {
+            format!("invalid cli value {s:?}: expected 'claude', 'codex', 'grok', or 'opencode'")
+        })
     })
     .transpose()
 }
@@ -259,6 +297,137 @@ fn parse_spawn_effort(effort: Option<&str>) -> Result<Option<cas_mux::Effort>, S
         )),
         None => Ok(None),
     }
+}
+
+const OPENCODE_ACCEPTED_EFFORTS_ENV: &str = "CAS_OPENCODE_ACCEPTED_EFFORTS";
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeFactoryDefaultsToml {
+    /// Preferred spelling for the endpoint's accepted shared effort values.
+    opencode_accepted_efforts: Option<Vec<String>>,
+    /// Short alias retained for ergonomic project-local configuration.
+    opencode_efforts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeFactoryToml {
+    defaults: Option<OpenCodeFactoryDefaultsToml>,
+    opencode: Option<OpenCodeEndpointToml>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeEndpointToml {
+    accepted_efforts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct OpenCodeConfigToml {
+    factory: Option<OpenCodeFactoryToml>,
+}
+
+fn parse_opencode_effort_set(raw: &str, source: &str) -> Result<Vec<cas_mux::Effort>, String> {
+    let mut efforts = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let effort = value.parse::<cas_mux::Effort>().map_err(|error| {
+            format!(
+                "invalid OpenCode accepted effort {value:?} from {source}: {error}; use Cassy's effort values"
+            )
+        })?;
+        if !efforts.contains(&effort) {
+            efforts.push(effort);
+        }
+    }
+    if efforts.is_empty() {
+        return Err(format!(
+            "OpenCode accepted effort set from {source} is empty; configure/probe at least one endpoint value"
+        ));
+    }
+    Ok(efforts)
+}
+
+/// Read the endpoint's model-aware effort contract without inventing a
+/// DashScope/Qwen default. A local serving stack may support any subset of
+/// Cassy's shared effort vocabulary; preflight or operator configuration
+/// supplies the exact set. The environment override is useful for a live
+/// probe, while project/user TOML keeps the result durable for later spawns.
+fn configured_opencode_efforts(
+    project_config: Option<&std::path::Path>,
+) -> Result<Option<Vec<cas_mux::Effort>>, String> {
+    if let Ok(raw) = std::env::var(OPENCODE_ACCEPTED_EFFORTS_ENV) {
+        return parse_opencode_effort_set(&raw, OPENCODE_ACCEPTED_EFFORTS_ENV).map(Some);
+    }
+
+    let user_config = dirs::home_dir().map(|home| home.join(".cas").join("config.toml"));
+    let mut configured = None;
+    for (source, path) in [
+        ("user OpenCode config", user_config.as_deref()),
+        ("project OpenCode config", project_config),
+    ] {
+        let Some(path) = path else {
+            continue;
+        };
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|error| format!("could not read {source} {}: {error}", path.display()))?;
+        let config = toml::from_str::<OpenCodeConfigToml>(&raw)
+            .map_err(|error| format!("could not parse {source} {}: {error}", path.display()))?;
+        let values = config.factory.and_then(|factory| {
+            factory
+                .opencode
+                .and_then(|endpoint| endpoint.accepted_efforts)
+                .or_else(|| {
+                    factory.defaults.and_then(|defaults| {
+                        defaults
+                            .opencode_accepted_efforts
+                            .or(defaults.opencode_efforts)
+                    })
+                })
+        });
+        if let Some(values) = values {
+            let raw_values = values.join(",");
+            configured = Some(parse_opencode_effort_set(
+                &raw_values,
+                &format!("{source} {}", path.display()),
+            )?);
+        }
+    }
+    Ok(configured)
+}
+
+fn format_opencode_efforts(efforts: &[cas_mux::Effort]) -> String {
+    efforts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn validate_opencode_effort(
+    model: &str,
+    effort: Option<cas_mux::Effort>,
+    accepted_efforts: Option<&[cas_mux::Effort]>,
+) -> Result<(), String> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    let Some(accepted_efforts) = accepted_efforts else {
+        return Err(format!(
+            "OpenCode model {model:?} requested effort {effort}, but the endpoint accepted-effort set is unavailable; configure/probe {OPENCODE_ACCEPTED_EFFORTS_ENV}=<comma-separated values> or [factory.defaults].opencode_accepted_efforts. No effort remapping is performed."
+        ));
+    };
+    if accepted_efforts.contains(&effort) {
+        return Ok(());
+    }
+    Err(format!(
+        "OpenCode model {model:?} rejects effort {effort}; endpoint accepted efforts: [{}]. No effort remapping is performed.",
+        format_opencode_efforts(accepted_efforts)
+    ))
 }
 
 /// Request-time shutdown state carried into the supervisor receipt.
@@ -396,6 +565,14 @@ fn cli_for_model_slug(model: &str) -> Option<cas_mux::SupervisorCli> {
     }
     if model.starts_with("gpt") || model.starts_with("codex") || model.starts_with("o3") {
         return Some(cas_mux::SupervisorCli::Codex);
+    }
+    // OpenCode preserves provider/model selectors such as
+    // `local/qwen3.8` and `alibaba-cn/qwen3.8-max` verbatim. A slash is the
+    // selector boundary used by OpenCode's multi-provider catalog; recognize
+    // it only for harness inference, while explicit cli=opencode remains the
+    // authoritative path for arbitrary provider strings.
+    if model.contains('/') {
+        return Some(cas_mux::SupervisorCli::OpenCode);
     }
     None
 }
@@ -561,7 +738,7 @@ fn build_spawn_specs_with_project_config(
     }
 
     let sources = cas_factory::ConfigSources {
-        project_config,
+        project_config: project_config.clone(),
         cli_flag: parsed_cli,
         model_flag: model.map(String::from),
         effort_flag: parsed_effort,
@@ -581,6 +758,7 @@ fn build_spawn_specs_with_project_config(
         .collect::<Result<_, String>>()?;
     let mut specs = cas_factory::resolve_specs(slots, sources)
         .map_err(|e| format!("failed to resolve worker spec: {e}"))?;
+    let opencode_accepted_efforts = configured_opencode_efforts(project_config.as_deref())?;
 
     // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited, left AS-IS
     // per the task's own guidance: this default-cli auto-upgrade only ever
@@ -630,11 +808,51 @@ fn build_spawn_specs_with_project_config(
         if !model_explicit && spec.model.is_none() {
             spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
         }
-        if !effort_explicit && !configured_effort && spec.effort == Some(cas_mux::Effort::High) {
+        if !effort_explicit && !configured_effort && spec.cli == cas_mux::SupervisorCli::OpenCode {
+            // The shared resolver's High placeholder is not an OpenCode
+            // endpoint contract. Omitted effort means let the configured
+            // local provider choose its own default; only explicit/configured
+            // effort values go through model-aware validation below.
+            spec.effort = None;
+        } else if !effort_explicit
+            && !configured_effort
+            && spec.effort == Some(cas_mux::Effort::High)
+            && spec.cli != cas_mux::SupervisorCli::OpenCode
+        {
             spec.effort = Some(default_worker_effort_for_cli(spec.cli));
         }
+
+        // Static registry policy is authoritative and always runs before the
+        // route-specific OpenCode support/receipt checks below. This makes a
+        // malformed recipe fail with one stable policy reason while keeping
+        // the hosted pre-queue gate authoritative for otherwise valid routes.
         cas_factory::validate_explicit(spec, &cas_factory::CapabilitySnapshot::default())
             .map_err(|error| error.to_string())?;
+        if spec.cli == cas_mux::SupervisorCli::OpenCode {
+            let model = spec.model.as_deref().ok_or_else(|| {
+                "cli=opencode requires a configured provider/model selector".to_string()
+            })?;
+            match opencode_route_for_selector(model)? {
+                OpenCodeRoute::Local => validate_opencode_effort(
+                    model,
+                    spec.effort,
+                    opencode_accepted_efforts.as_deref(),
+                )?,
+                OpenCodeRoute::HostedTokenPlan | OpenCodeRoute::HostedPayg => {
+                    let lane = hosted_lane_for_selector(model)?;
+                    hosted_serving_identity(model)?;
+                    validate_hosted_effort_for_lane(lane, spec.effort)?;
+                }
+                // `hosted` is a T8-only receipt spelling and cannot be
+                // selected for a new spawn because it does not pin billing.
+                OpenCodeRoute::Hosted => {
+                    return Err(
+                        "OpenCode hosted selector uses a legacy route identity; choose explicit qwencloud/qwen3.8-max or alibaba/qwen3.8-max"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         if let Some(model) = spec.model.as_deref() {
             validate_model_matches_cli(spec.cli, model)?;
         }
@@ -720,6 +938,7 @@ fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &s
                 let model_uses_policy = model_explicit
                     || spec.model.as_deref() == Some(default_worker_model_for_cli(spec.cli));
                 let effort_uses_policy = effort_explicit
+                    || (spec.cli == cas_mux::SupervisorCli::OpenCode && spec.effort.is_none())
                     || spec.effort == Some(default_worker_effort_for_cli(spec.cli));
                 let fallback = if model_uses_policy && effort_uses_policy {
                     "policy default"
@@ -1507,6 +1726,13 @@ impl CasService {
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
             (specs, String::new(), Vec::new())
         };
+
+        // Hosted DashScope is an explicit route with its own auth/model
+        // preflight.  This is intentionally after spec resolution and before
+        // queue insertion: an invalid hosted key cannot leave an apparently
+        // runnable queue row, while local OpenCode rows remain unaffected.
+        preflight_hosted_opencode_specs(&specs)
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
 
         // `workers[].name` is optional, but when every slot names itself it
         // is equivalent to worker_names= and must become the actual visible
@@ -2629,6 +2855,41 @@ impl CasService {
                 let git_info = worktree_status.git_info;
                 let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
                 let worker_cli = worker_cli_from_agent(agent);
+                let opencode_observation = (worker_cli == cas_mux::SupervisorCli::OpenCode)
+                    .then(|| {
+                        crate::mcp::tools::service::opencode_liveness::observe(
+                            &self.inner.cas_root,
+                            session_uuid,
+                            now.timestamp_millis().max(0) as u64,
+                            agent_process_is_alive(agent),
+                        )
+                    })
+                    .flatten();
+                let liveness_label = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    match opencode_observation
+                        .as_ref()
+                        .map(|observation| observation.verdict)
+                    {
+                        Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Busy,
+                        ))
+                        | Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Idle,
+                        ))
+                        | Some(cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback) => {
+                            " [alive — OpenCode mapped session]"
+                        }
+                        Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Error,
+                        )) => " [OpenCode error signal]",
+                        Some(cas_mux::OpenCodeLivenessVerdict::Signal(
+                            cas_mux::OpenCodeLiveness::Deleted,
+                        )) => " [OpenCode session deleted]",
+                        _ => liveness_label,
+                    }
+                } else {
+                    liveness_label
+                };
                 // Scan-based harness resolution is a bounded-TTL lookup after
                 // the first poll for this worker. Keep the rich result so the
                 // same lookup feeds context/activity/in-flight evidence and
@@ -2665,12 +2926,21 @@ impl CasService {
                 // answer whether the harness actually started a turn. Render
                 // the harness's own artifact-backed turn observation
                 // separately; Claude's transcript is now authoritative too.
-                let harness_turn_info = format_harness_turn_observation(
-                    worker_cli,
-                    transcript_path_for_worker.as_deref(),
-                );
-                let turn_start_observable = harness_publishes_turn_start(worker_cli)
-                    && transcript_path_for_worker.is_some();
+                let harness_turn_info = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    String::new()
+                } else {
+                    format_harness_turn_observation(
+                        worker_cli,
+                        transcript_path_for_worker.as_deref(),
+                    )
+                };
+                let turn_start_observable = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    opencode_observation
+                        .as_ref()
+                        .is_some_and(|observation| observation.state.last_activity_at.is_some())
+                } else {
+                    harness_publishes_turn_start(worker_cli) && transcript_path_for_worker.is_some()
+                };
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -2690,7 +2960,40 @@ impl CasService {
                 // ever populated separately in the future we prefer it —
                 // but for now `id` is the right key and has been correct
                 // since cas-2749.
-                let transcript_info = if elapsed >= WORKER_DEAD_SECS {
+                let transcript_info = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    let mapped_live = opencode_observation.as_ref().is_some_and(|observation| {
+                        matches!(
+                            observation.verdict,
+                            cas_mux::OpenCodeLivenessVerdict::Signal(
+                                cas_mux::OpenCodeLiveness::Busy
+                            ) | cas_mux::OpenCodeLivenessVerdict::Signal(
+                                cas_mux::OpenCodeLiveness::Idle
+                            ) | cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback
+                        )
+                    });
+                    if elapsed < WORKER_DEAD_SECS || mapped_live {
+                        String::new()
+                    } else {
+                        opencode_observation.as_ref().map_or_else(
+                            || "\n    OpenCode export: mapping unavailable/delayed".to_string(),
+                            |observation| {
+                                crate::mcp::tools::service::opencode_liveness::export_session(
+                                    observation,
+                                    agent.metadata.get("worker_account_dir").map(String::as_str),
+                                )
+                                .map(|export| {
+                                    format!(
+                                        "\n    OpenCode export (bounded, mapped session):\n        {}",
+                                        export.replace('\n', "\n        ")
+                                    )
+                                })
+                                .unwrap_or_else(|error| {
+                                    format!("\n    OpenCode export: unavailable ({error})")
+                                })
+                            },
+                        )
+                    }
+                } else if elapsed >= WORKER_DEAD_SECS {
                     hard_dead_worker_transcript_block(
                         transcript_resolution_for_worker.as_ref(),
                         clone_path.as_deref(),
@@ -2796,13 +3099,26 @@ impl CasService {
                 // Reuses the same transcript path already resolved above for
                 // context_info/in_flight_tool_call, and the same
                 // wedged::transcript_mtime_age primitive `is-wedged` trusts.
-                let last_activity = last_worker_activity_secs_with_harness_turn(
+                let artifact_last_activity = last_worker_activity_secs_with_harness_turn(
                     &activity_events,
                     &agent.id,
                     worker_cli,
                     transcript_path_for_worker.as_deref(),
                     now,
                 );
+                let last_activity = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    opencode_observation
+                        .as_ref()
+                        .and_then(|observation| {
+                            crate::mcp::tools::service::opencode_liveness::last_activity_secs(
+                                observation,
+                                now.timestamp_millis().max(0) as u64,
+                            )
+                        })
+                        .or_else(|| last_worker_activity_secs(&activity_events, &agent.id))
+                } else {
+                    artifact_last_activity
+                };
                 let progress_timestamps = format_worker_progress_timestamps(
                     prompt_queue.as_ref().and_then(|queue| {
                         queue
@@ -2832,9 +3148,17 @@ impl CasService {
                 // `wedged::transcript_has_in_flight_tool_call` primitive
                 // against the same transcript path/cli resolution already
                 // computed for `context_info` above.
-                let in_flight_tool_call = transcript_path_for_worker.as_deref().is_some_and(|p| {
-                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(p, worker_cli)
-                });
+                let in_flight_tool_call = if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    opencode_observation
+                        .as_ref()
+                        .is_some_and(crate::mcp::tools::service::opencode_liveness::active_tool)
+                } else {
+                    transcript_path_for_worker.as_deref().is_some_and(|p| {
+                        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                            p, worker_cli,
+                        )
+                    })
+                };
                 // cas-058e: a completed tool call may have left a real cargo
                 // build running under the worker pane. Resolve the harness PID
                 // exactly as `is-wedged` does; an unreadable process tree is
@@ -2847,10 +3171,14 @@ impl CasService {
                 .or(agent.pid)
                 .map(crate::cli::factory::wedged::background_processes_for)
                 .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
-                let has_active_work = crate::cli::factory::wedged::has_active_work(
+                let mut has_active_work = crate::cli::factory::wedged::has_active_work(
                     in_flight_tool_call,
                     &background_processes,
                 );
+                if let Some(observation) = opencode_observation.as_ref() {
+                    has_active_work |=
+                        crate::mcp::tools::service::opencode_liveness::has_active_work(observation);
+                }
                 let assigned_open_task = assigned_open_tasks.iter().find(|task| {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
@@ -3006,6 +3334,14 @@ impl CasService {
                     inbox_info,
                     session_uuid
                 ));
+                if worker_cli == cas_mux::SupervisorCli::OpenCode {
+                    let opencode_info =
+                        crate::mcp::tools::service::opencode_liveness::render_status(
+                            opencode_observation.as_ref(),
+                        );
+                    output.push_str(opencode_info.trim_start_matches('\n'));
+                    output.push('\n');
+                }
             }
         }
 
@@ -3180,6 +3516,43 @@ impl CasService {
             })
             .collect();
 
+        // OpenCode has no transcript path. Read the plugin projection by CAS
+        // session identity instead; event timestamps are the activity source,
+        // and a live process is only rendered as an explicit fallback.
+        let opencode_activity: Vec<_> = visible_workers
+            .iter()
+            .filter_map(|agent| {
+                (worker_cli_from_agent(agent) == cas_mux::SupervisorCli::OpenCode).then_some(agent)
+            })
+            .filter_map(|agent| {
+                let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+                let observation = crate::mcp::tools::service::opencode_liveness::observe(
+                    &self.inner.cas_root,
+                    session_id,
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    agent_process_is_alive(agent),
+                )?;
+                let label = crate::mcp::tools::service::opencode_liveness::verdict_label(
+                    observation.verdict,
+                );
+                let age = crate::mcp::tools::service::opencode_liveness::last_activity_secs(
+                    &observation,
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                )
+                .map(|(age, _)| age)
+                .or_else(|| {
+                    (observation.verdict == cas_mux::OpenCodeLivenessVerdict::ProcessAliveFallback)
+                        .then_some(0)
+                })?;
+                (age <= WORKER_ACTIVITY_WINDOW_SECS).then_some((
+                    agent.name.clone(),
+                    age,
+                    crate::mcp::tools::service::opencode_liveness::active_tool(&observation),
+                    label,
+                ))
+            })
+            .collect();
+
         // GH #255 round 2: hooks do not reliably observe Codex file edits, so
         // the event/transcript view above must never make a dirty worker look
         // idle. Snapshot each visible worktree at query time as a floor under
@@ -3197,7 +3570,8 @@ impl CasService {
             transcript_activity.len(),
             worktree_activity.len(),
             terminal_event_count,
-        ) {
+        ) && opencode_activity.is_empty()
+        {
             return Ok(Self::success(
                 "No recent worker activity.\n\nworker_activity uses the same 10-minute event window as worker_status, plus resolved worker transcript/rollout freshness and a query-time dirty-worktree floor. Transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
@@ -3237,6 +3611,16 @@ impl CasService {
             };
             output.push_str(&format!(
                 "• {worker_name} - {activity} ({age_secs}s ago; transcript-backed)\n"
+            ));
+        }
+        for (worker_name, age_secs, in_flight, verdict) in opencode_activity {
+            let activity = if in_flight {
+                "OpenCode mapped session: in-flight tool call"
+            } else {
+                "OpenCode mapped session activity"
+            };
+            output.push_str(&format!(
+                "• {worker_name} - {activity} ({age_secs}s ago; {verdict}; no transcript path)\n"
             ));
         }
         for snapshot in &worktree_activity {
@@ -6753,6 +7137,8 @@ pub(crate) fn resolve_transcript(
         cas_mux::SupervisorCli::Claude => {
             resolve_claude_transcript(base_dir, clone_path, session_id)
         }
+        // cas-7296 owns CAS↔OpenCode transcript mapping; invent no real path.
+        cas_mux::SupervisorCli::OpenCode => TranscriptResolution::Synthesized(String::new()),
     }
 }
 
@@ -6860,6 +7246,8 @@ fn default_transcript_roots(cli: cas_mux::SupervisorCli) -> Vec<std::path::PathB
         cas_mux::SupervisorCli::Grok => default_grok_sessions_dir().into_iter().collect(),
         cas_mux::SupervisorCli::Codex => default_codex_sessions_dir().into_iter().collect(),
         cas_mux::SupervisorCli::Claude => default_claude_projects_dirs(),
+        // cas-7296 owns OpenCode transcript roots; shared SQLite is not a transcript.
+        cas_mux::SupervisorCli::OpenCode => Vec::new(),
     }
 }
 
@@ -7486,6 +7874,8 @@ fn worker_status_transcript_path_for_account(
             worker_status_path_from_resolution(cached.resolution, cli)
         }
         cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
+        // cas-7296 owns OpenCode worker-status session mapping.
+        cas_mux::SupervisorCli::OpenCode => None,
     }
 }
 
@@ -7548,6 +7938,8 @@ fn worker_status_path_from_resolution(
         // Keep Grok aligned with is-wedged's historical ambiguity selection.
         cas_mux::SupervisorCli::Grok => transcript_path_from_resolution(resolution),
         cas_mux::SupervisorCli::Claude => transcript_path_from_resolution(resolution),
+        // cas-7296 owns OpenCode transcript evidence.
+        cas_mux::SupervisorCli::OpenCode => None,
     }
 }
 
@@ -9261,6 +9653,227 @@ mod tests {
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Grok);
     }
 
+    #[test]
+    fn opencode_spawn_preserves_full_provider_model_selector_and_omits_effort() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), None)
+            .expect("OpenCode selector should resolve without a hard-coded model default");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, None);
+    }
+
+    #[test]
+    fn opencode_model_selector_infers_opencode_when_cli_is_omitted() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let json = build_spawn_spec_json(None, Some("local/qwen3.8"), None)
+            .expect("provider/model selector should identify OpenCode");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, None);
+    }
+
+    #[test]
+    fn opencode_defaults_to_the_operator_token_plan_lane() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let json = build_spawn_spec_json(Some("opencode"), None, None)
+            .expect("OpenCode should use the operator's explicit Token Plan default");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("qwencloud/qwen3.8-max"));
+        assert_eq!(spec.effort, None);
+    }
+
+    #[test]
+    fn opencode_rejects_effort_outside_endpoint_accepted_set_without_remapping() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "low,medium,xhigh")]);
+        let err = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), Some("high"))
+            .expect_err("unsupported local endpoint effort must fail before spawn");
+
+        assert!(err.contains("local/qwen3.8"), "{err}");
+        assert!(err.contains("effort high"), "{err}");
+        assert!(
+            err.contains("endpoint accepted efforts: [low, medium, xhigh]"),
+            "{err}"
+        );
+        assert!(err.contains("No effort remapping is performed"), "{err}");
+    }
+
+    #[test]
+    fn opencode_hosted_route_preserves_selector_and_uses_hosted_efforts() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        for effort in [None, Some("low"), Some("medium"), Some("xhigh")] {
+            let json = build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), effort)
+                .unwrap_or_else(|error| panic!("hosted effort {effort:?} should resolve: {error}"));
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+            assert_eq!(spec.model.as_deref(), Some("alibaba/qwen3.8-max"));
+            assert_eq!(
+                spec.effort.map(|value| value.to_string()),
+                effort.map(str::to_string)
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_token_plan_route_is_explicit_and_separate_from_payg() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        for selector in ["qwencloud/qwen3.8-max", "hosted-token-plan/qwen3.8-max"] {
+            let json = build_spawn_spec_json(Some("opencode"), Some(selector), Some("medium"))
+                .unwrap_or_else(|error| panic!("Token Plan selector should resolve: {error}"));
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.model.as_deref(), Some(selector));
+            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+        }
+        let json = build_spawn_spec_json(
+            Some("opencode"),
+            Some("alibaba/qwen3.8-max"),
+            Some("medium"),
+        )
+        .expect("pay-as-you-go selector should remain available");
+        assert_eq!(
+            decoded_spawn_spec(&json).model.as_deref(),
+            Some("alibaba/qwen3.8-max")
+        );
+    }
+
+    #[test]
+    fn opencode_registered_recipe_runs_registry_policy_before_route_preflight() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let error = build_spawn_spec_json(
+            Some("opencode"),
+            Some("qwencloud/qwen3.8-max"),
+            Some("high"),
+        )
+        .expect_err("the registered Token Plan recipe must reject high before route preflight");
+
+        assert!(
+            error.contains("recipe \"qwencloud_qwen\" rejects effort high"),
+            "{error}"
+        );
+        assert!(
+            error.contains("routing rule 'recipe allowed efforts'"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("accepted hosted efforts"),
+            "route-specific validation ran before registry policy: {error}"
+        );
+    }
+
+    #[test]
+    fn opencode_support_claim_gate_refuses_unreceipted_routes_before_queueing() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            (OPENCODE_ACCEPTED_EFFORTS_ENV, None),
+            (crate::opencode_preflight::DASHSCOPE_API_KEY_ENV, None),
+        ]);
+        for selector in ["local/qwen3.8", "alibaba/qwen3.8-max"] {
+            let json = build_spawn_spec_json(Some("opencode"), Some(selector), None)
+                .expect("selector remains syntactically valid");
+            let spec = decoded_spawn_spec(&json);
+            let error = preflight_hosted_opencode_specs(&[spec])
+                .expect_err("unreceipted route must fail before queue insertion");
+            assert!(error.contains("pending-conformance"), "{error}");
+            assert!(error.contains("was not queued"), "{error}");
+        }
+    }
+
+    #[test]
+    fn opencode_hosted_route_rejects_openai_effort_remaps() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        for effort in ["minimal", "high"] {
+            let error =
+                build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), Some(effort))
+                    .expect_err("hosted Qwen must reject OpenAI compatibility remaps");
+            assert!(error.contains("accepted hosted efforts: [low, medium, xhigh]"));
+            assert!(error.contains("No effort remapping"));
+        }
+    }
+
+    #[test]
+    fn opencode_hosted_route_requires_supported_explicit_provider() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        for selector in ["qwen3.8-max", "cloud/qwen3.8-max", "alibaba/other-model"] {
+            let error = build_spawn_spec_json(Some("opencode"), Some(selector), None)
+                .expect_err("unsupported OpenCode route must fail before spawn");
+            assert!(
+                error.contains("provider/model")
+                    || error.contains("supported route")
+                    || error.contains("currently supports model"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_accepts_operator_configured_effort_set() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), Some("high"))
+            .expect("local endpoint effort set should be configurable");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn opencode_accepts_project_configured_effort_set() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let tmp = tempfile::tempdir().expect("temp project config");
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+[factory.defaults]
+opencode_accepted_efforts = ["minimal", "high"]
+"#,
+        )
+        .unwrap();
+
+        let json = build_spawn_spec_json_with_project_config(
+            Some("opencode"),
+            Some("local/qwen3.8"),
+            Some("high"),
+            Some(config),
+        )
+        .expect("project endpoint effort set should be configurable");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn opencode_factory_default_model_is_config_driven() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let tmp = tempfile::tempdir().expect("temp project config");
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+[factory.defaults]
+cli = "opencode"
+model = "local/qwen3.8"
+"#,
+        )
+        .unwrap();
+
+        let json = build_spawn_spec_json_with_project_config(None, None, None, Some(config))
+            .expect("OpenCode defaults should come from factory config");
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(spec.effort, None);
+    }
+
     /// Matching pairs and unrecognized slugs must stay untouched — validation
     /// rejects known-bad combinations, it does not police the model catalog.
     #[test]
@@ -9296,6 +9909,10 @@ mod tests {
         assert_eq!(
             cli_for_model_slug("gpt-5.6-terra"),
             Some(SupervisorCli::Codex)
+        );
+        assert_eq!(
+            cli_for_model_slug("local/qwen3.8"),
+            Some(SupervisorCli::OpenCode)
         );
         assert_eq!(cli_for_model_slug("grok-4.5"), Some(SupervisorCli::Grok));
         assert_eq!(

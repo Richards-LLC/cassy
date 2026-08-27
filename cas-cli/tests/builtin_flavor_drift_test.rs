@@ -1,11 +1,12 @@
 //! Flavor drift guard (cas-703a).
 //!
-//! The builtin skills/agents ship in three harness flavors that are meant to be
+//! The builtin skills/agents ship in four harness flavors that are meant to be
 //! the SAME document under a small set of mechanical per-harness spellings:
 //!
 //!   claude  cas-cli/src/builtins/<path>          tools `mcp__cas__*`
 //!   codex   cas-cli/src/builtins/codex/<path>    tools `mcp__cs__*`
 //!   grok    cas-cli/src/builtins/grok/<path>     tools `cas__*`
+//!   opencode process-local projection            tools `cas_*`
 //!
 //! Before this guard, coverage was spot checks only (keyword bans, marker
 //! presence, catalog-presence parity). That let real contradictions live for
@@ -45,6 +46,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use cas::builtins::{
+    agent_catalog_for_harness, skill_catalog_for_harness, BUILTIN_AGENTS, BUILTIN_SKILLS,
+};
+use cas_mux::SupervisorCli;
 
 // ---------------------------------------------------------------------------
 // Flavors
@@ -175,6 +181,13 @@ fn canonicalize(content: &str) -> String {
         .join("\n");
 
     out
+}
+
+/// OpenCode receives a process-local projection rather than a filesystem
+/// mirror. Normalize its server-sanitized `cas_<tool>` calls to the same token
+/// used by the three source trees before comparing content.
+fn canonicalize_opencode(content: &str) -> String {
+    canonicalize(content).replace("cas_", CANON_TOOL)
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +394,8 @@ fn section_is_allowed(rel: &str, flavor: &str, heading: &str) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// The guard: normalized three-way content comparison across all flavor triples.
+/// The guard: normalized three-way content comparison across all filesystem
+/// flavor triples. OpenCode's process-local catalog is checked below.
 #[test]
 fn builtin_flavors_stay_content_identical_after_normalization() {
     let root = builtins_root();
@@ -490,6 +504,78 @@ fn builtin_flavors_stay_content_identical_after_normalization() {
         failures.len(),
         compared,
         failures.join("\n\n")
+    );
+}
+
+/// Resolve a catalog path to its Claude source file. Five historical skill
+/// bodies use a flat `skills/cas-foo.md` source while their managed catalog
+/// path is the conventional `skills/cas-foo/SKILL.md` destination.
+fn claude_source_path(catalog_path: &str) -> PathBuf {
+    let direct = flavor_path(catalog_path, &CLAUDE);
+    if direct.exists() {
+        return direct;
+    }
+    catalog_path
+        .strip_suffix("/SKILL.md")
+        .map(|stem| builtins_root().join(format!("{stem}.md")))
+        .filter(|flat| flat.exists())
+        .unwrap_or(direct)
+}
+
+/// The fourth flavor is generated in-process, not written under a user-level
+/// `.opencode` tree. Compare every projected catalog entry to the Claude
+/// source after normalizing OpenCode's `cas_<tool>` sanitizer spelling.
+#[test]
+fn opencode_projection_stays_content_identical_after_normalization() {
+    let skills = skill_catalog_for_harness(SupervisorCli::OpenCode);
+    let agents = agent_catalog_for_harness(SupervisorCli::OpenCode);
+    let mut compared = 0usize;
+    let mut failures = Vec::new();
+
+    for (kind, catalog) in [("skill", BUILTIN_SKILLS), ("agent", BUILTIN_AGENTS)] {
+        for builtin in catalog {
+            let rel = builtin.path;
+            let source = fs::read_to_string(claude_source_path(rel))
+                .unwrap_or_else(|e| panic!("failed to read claude source for {rel}: {e}"));
+            let projection = if kind == "skill" {
+                skills.iter().find(|candidate| candidate.path == rel)
+            } else {
+                agents.iter().find(|candidate| candidate.path == rel)
+            };
+            let Some(projection) = projection else {
+                failures.push(format!("MISSING OPENCODE {kind} PROJECTION: {rel}"));
+                continue;
+            };
+            compared += 1;
+            let source_sections = split_sections(&canonicalize_opencode(&source));
+            let projection_sections = split_sections(&canonicalize_opencode(projection.content));
+            if source_sections.len() != projection_sections.len() {
+                failures.push(format!(
+                    "SECTION SET DIFFERS: {rel} (claude vs opencode)"
+                ));
+                continue;
+            }
+            for (source_section, projection_section) in
+                source_sections.iter().zip(projection_sections.iter())
+            {
+                if source_section.heading != projection_section.heading
+                    || reflow(&source_section.body) != reflow(&projection_section.body)
+                {
+                    failures.push(format!(
+                        "CONTENT DRIFT: {rel} (claude vs opencode) in section {:?}",
+                        source_section.heading
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(compared > 80, "expected over 80 OpenCode projections, got {compared}");
+    assert!(
+        failures.is_empty(),
+        "OpenCode builtin projection drifted ({} issue(s)):\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 

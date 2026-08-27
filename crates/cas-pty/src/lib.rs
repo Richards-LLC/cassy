@@ -56,7 +56,8 @@ pub use codex_trust::{
 
 pub use conformance::{
     ConformanceCheck, ConformanceEvidence, ConformanceStatus, Harness, HarnessConformanceReceipt,
-    codex_0146_conformance_receipt, grok_02114_conformance_receipt, harness_conformance_receipts,
+    codex_0149_conformance_receipt, grok_0105_conformance_receipt, grok_02114_conformance_receipt,
+    harness_conformance_receipts,
 };
 pub use error::{Error, Result};
 pub use pty::{

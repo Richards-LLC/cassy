@@ -46,7 +46,7 @@ spawn straight onto it:
 
 ```
 mcp__cs__task action=create title="..." description="..."
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-terra effort=high task_id=<task-id>
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh task_id=<task-id>
 ```
 
 A concrete open, unassigned `task_id` authorizes the spawn on its own. It authorizes exactly
@@ -59,26 +59,26 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
 
 1. Spawn workers:
    ```
-   mcp__cs__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-terra effort=high
+   mcp__cs__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
    ```
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
    `model=`, and `effort=`. Codex is the default matrix
-   (`cli=codex model=gpt-5.6-terra` for light/standard); taste/judgment uses
-   `cli=codex model=gpt-5.6-terra effort=high`, while Sol/high is heavy/frontier only; Opus is exceptional, and Grok
+   (`cli=codex model=gpt-5.6-luna effort=xhigh` for standard); genuinely light work uses Grok Composer/low; taste/judgment uses
+   `cli=codex model=gpt-5.6-luna effort=xhigh`, while Sol/high is heavy/frontier only; Opus is exceptional, and Grok
    is the health-gated capacity route.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
    selection intentional and visible.
 
-   **Tiered mix example** — Codex-first standard floor + light + heavy:
+   **Tiered mix example** — Luna default + non-Terra light alternative + heavy:
    ```
-   # Standard floor (Codex gpt-5.6-terra high)
-   mcp__cs__coordination action=spawn_workers count=2 cli=codex model=gpt-5.6-terra effort=high isolate=true
+   # Standard floor (Codex gpt-5.6-luna xhigh; Luna maximum only)
+   mcp__cs__coordination action=spawn_workers count=2 cli=codex model=gpt-5.6-luna effort=xhigh isolate=true
 
-   # Light / bulk (Codex gpt-5.6-terra low)
-   mcp__cs__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-terra effort=low worker_names="lt-ada" isolate=true
+   # Light / bulk (Grok Composer non-Terra alternative)
+   mcp__cs__coordination action=spawn_workers count=1 cli=grok model=grok-composer-2.5-fast effort=low worker_names="lt-ada" isolate=true
 
    # Heavy (Codex gpt-5.6-sol high); frontier is model=gpt-5.6-sol
    mcp__cs__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-sol effort=high worker_names="hv-ada" isolate=true

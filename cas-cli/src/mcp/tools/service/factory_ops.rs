@@ -272,12 +272,16 @@ fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> Option<&'static 
 
 fn default_worker_effort_for_cli(cli: cas_mux::SupervisorCli) -> Option<cas_mux::Effort> {
     match cli {
+        // Luna is the standard worker and is only valid at Cassy's current
+        // maximum effort. Claude's exceptional Opus lane retains its high
+        // ceiling; a stock Codex setting must not leak xhigh onto Claude.
+        cas_mux::SupervisorCli::Codex => Some(cas_mux::Effort::XHigh),
+        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
+            Some(cas_mux::Effort::High)
+        }
+        // OpenCode effort comes from the endpoint's probed/configured
+        // accepted set, never a Cassy hard-coded default.
         cas_mux::SupervisorCli::OpenCode => None,
-        _ => Some(
-            crate::config::STOCK_WORKER_REASONING_EFFORT
-                .parse::<cas_mux::Effort>()
-                .unwrap_or(cas_mux::Effort::Medium),
-        ),
     }
 }
 
@@ -408,6 +412,28 @@ fn validate_opencode_effort(
         "OpenCode model {model:?} rejects effort {effort}; endpoint accepted efforts: [{}]. No effort remapping is performed.",
         format_opencode_efforts(accepted_efforts)
     ))
+}
+
+fn validate_model_is_active(model: &str) -> Result<(), String> {
+    if model.trim().eq_ignore_ascii_case("gpt-5.6-terra") {
+        return Err(
+            "invalid spawn_workers model \"gpt-5.6-terra\": Terra is suspended as a routing target (2026-08-25; operator decision pending); use gpt-5.6-luna with effort=xhigh or another active tier".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_model_effort_policy(
+    model: &str,
+    effort: Option<cas_mux::Effort>,
+) -> Result<(), String> {
+    if model.trim().eq_ignore_ascii_case("gpt-5.6-luna") && effort != Some(cas_mux::Effort::XHigh)
+    {
+        return Err(
+            "invalid spawn_workers effort for gpt-5.6-luna: Luna is only permitted at its current maximum, effort=xhigh".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Request-time shutdown state carried into the supervisor receipt.
@@ -634,6 +660,7 @@ fn build_spawn_specs_with_project_config(
     // harnesses is rejected here — before anything is queued — instead of
     // surfacing as workers that boot on the wrong CLI.
     if let (Some(requested_cli), Some(model)) = (parsed_cli, model) {
+        validate_model_is_active(model)?;
         validate_model_matches_cli(requested_cli, model)?;
     }
 
@@ -736,6 +763,8 @@ fn build_spawn_specs_with_project_config(
             )?;
         }
         if let Some(model) = spec.model.as_deref() {
+            validate_model_is_active(model)?;
+            validate_model_effort_policy(model, spec.effort)?;
             validate_model_matches_cli(spec.cli, model)?;
         }
     }
@@ -9378,11 +9407,33 @@ mod tests {
     #[test]
     fn spawn_spec_rejects_codex_model_on_explicit_claude_cli() {
         let _home = TestEnvGuard::temp_home();
-        let err = build_spawn_spec_json(Some("claude"), Some("gpt-5.6-terra"), None)
+        let err = build_spawn_spec_json(Some("claude"), Some("gpt-5.6-luna"), None)
             .expect_err("claude + codex slug must be rejected at enqueue");
 
-        assert!(err.contains("gpt-5.6-terra"), "{err}");
+        assert!(err.contains("gpt-5.6-luna"), "{err}");
         assert!(err.contains("cli=codex"), "{err}");
+    }
+
+    #[test]
+    fn spawn_spec_rejects_suspended_terra_model() {
+        let _home = TestEnvGuard::temp_home();
+        let err = build_spawn_spec_json(Some("codex"), Some("gpt-5.6-terra"), None)
+            .expect_err("suspended Terra must not reach the spawn queue");
+
+        assert!(err.contains("gpt-5.6-terra"), "{err}");
+        assert!(err.contains("suspended"), "{err}");
+        assert!(err.contains("operator decision pending"), "{err}");
+        assert!(err.contains("gpt-5.6-luna"), "{err}");
+    }
+
+    #[test]
+    fn spawn_spec_rejects_luna_below_maximum_effort() {
+        let _home = TestEnvGuard::temp_home();
+        let err = build_spawn_spec_json(Some("codex"), Some("gpt-5.6-luna"), Some("high"))
+            .expect_err("Luna must not be spawned below xhigh");
+
+        assert!(err.contains("gpt-5.6-luna"), "{err}");
+        assert!(err.contains("effort=xhigh"), "{err}");
     }
 
     /// The live #71 case: no `cli=` at all. The model slug is unambiguous, so
@@ -9554,7 +9605,7 @@ model = "local/qwen3.8"
         for (cli, model) in [
             ("claude", "claude-opus-5"),
             ("claude", "opus"),
-            ("codex", "gpt-5.6-terra"),
+            ("codex", "gpt-5.6-luna"),
             ("grok", "grok-4.5"),
             ("codex", "some-unreleased-slug"),
         ] {
@@ -9652,7 +9703,7 @@ model = "local/qwen3.8"
         let warning = spawn_spec_warning(false, false, &json);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-terra/high"),
+            warning.contains("policy default codex/gpt-5.6-luna/xhigh"),
             "{warning}"
         );
         assert!(
@@ -9672,7 +9723,7 @@ model = "local/qwen3.8"
         let warning = spawn_specs_warning(false, false, &specs);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-terra/high"),
+            warning.contains("policy default codex/gpt-5.6-luna/xhigh"),
             "{warning}"
         );
         assert!(

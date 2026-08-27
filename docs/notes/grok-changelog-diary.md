@@ -34,20 +34,25 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Version status
 
-- **Cassy validated against:** retained Grok Build **0.2.114**
-  (`grok 0.2.114 (0c78503879) [stable]`), verified live 2026-07-30 through the
+- **Cassy validated against:** Grok Build **1.0.5**
+  (`grok 1.0.5 (5115b46bc9) [stable]`), verified live 2026-08-25 through the
   complete isolated `PtyConfig::grok` worker matrix and recorded in the typed
-  `grok-build-0.2.114-2026-07-30` conformance receipt.
-- **Locally installed and latest stable:** **1.0.3** (`grok 1.0.3 (1a29d5bc12)
-  [stable]`, checked 2026-08-13). The former 0.2.117 default has been superseded.
+  `grok-build-1.0.5-2026-08-25` conformance receipt. The prior
+  `grok-build-0.2.114-2026-07-30` receipt remains historical evidence.
+- **Locally installed and latest stable:** **1.0.5** (`grok 1.0.5 (5115b46bc9)
+  [stable]`, checked 2026-08-25). The former 1.0.3 install has been superseded.
 - **Latest release-note evidence:** xAI's official [Grok Build
-  changelog](https://x.ai/build/changelog) covers **0.2.115–0.2.119** and
-  **1.0.0–1.0.3**. The local `~/.grok/CHANGELOG.md` retains the 0.2.115–0.2.117
-  sections; the official page supplies the later release attribution.
-- **Gap:** the validated pin remains 0.2.114 while the current release is 1.0.3.
-  The new notes expose permission, subagent, MCP, worktree, hook, and transcript
-  surfaces, so a fresh complete `PtyConfig::grok` matrix is required before
-  treating 1.0.3 as validated. There are no source gaps in 0.2.115–1.0.3.
+  changelog](https://x.ai/build/changelog) covers **0.2.115–0.2.120** and
+  **1.0.0–1.0.5**. The local `~/.grok/CHANGELOG.md` snapshot retains the
+  0.2.115–0.2.117 and 1.0.0–1.0.3 sections; the flat
+  `~/.grok/CHANGELOG.json` supplies no independent version attribution. The
+  official page supplies the 0.2.118–0.2.120 and 1.0.4–1.0.5 attribution.
+- **Gap:** the validated pin now matches the current installed/latest release at
+  1.0.5 after the complete live matrix and typed receipt. The 1.0.4–1.0.5 notes
+  expose permission, subagent, MCP, worktree, hook, environment, and transcript
+  surfaces; those checks passed for the 1.0.5 production path. There are no
+  source gaps for 1.0.4–1.0.5; the earlier 0.2.102–0.2.103 and 0.2.107–0.2.111
+  gaps remain documented below.
 
 ## Cassy ↔ Grok touchpoints (what a release can break)
 
@@ -119,6 +124,8 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | Cassy verdict | Pointer |
 |--------------|----------|-------------|---------|
+| 1.0.5 | Config overrides · safe worktree reclaim · hook/session/tool robustness | ✅ | this doc |
+| 1.0.4 | `GROK_SESSION_ID` · permission grants · hook/subagent/worktree/session recovery | 👀 / 🟢 | this doc |
 | 1.0.3 | Faster subagent spawning · session-info and high-refresh TUI polish | 🟢 / ⏭ | this doc |
 | 1.0.2 | Startup diagnostics · worktree fetch safety · hook/tool presentation | 🟢 / 👀 | this doc |
 | 1.0.1 | Bounded subagents · read-only tool metadata · MCP/headless lifecycle | 👀 / 🟢 | this doc |
@@ -148,6 +155,82 @@ At minimum, `PtyConfig::grok` sets:
 ---
 
 ## Entries
+
+### 1.0.5 — config overrides · safe worktree reclaim · hook/session/tool robustness
+
+Reviewed 2026-08-25. Host on **1.0.5**. Source: xAI's official [Grok Build
+changelog](https://x.ai/build/changelog) (2026-08-15). The local
+`~/.grok/CHANGELOG.md` snapshot ends at 1.0.3, and the flat
+`~/.grok/CHANGELOG.json` supplies no release attribution for this entry.
+
+- **`GROK_CONFIG` and `GROK_CONFIG_PATH` can override selected config settings.**
+  → 👀 **watch — process configuration boundary.** Cassy still depends on
+  persistent `cas__*` discovery plus explicit `--rules` and inherited identity;
+  a launcher override must not suppress the configured server, replace the
+  worker rules, or hide `CAS_SESSION_ID` / `CAS_FACTORY_WORKER_CLI=grok`. The
+  complete production matrix passed and is recorded in
+  `grok-build-1.0.5-2026-08-25`.
+- **Worktrees under `~/.grok/worktrees` are reclaimed automatically when safe,
+  with protection for the last remaining copy.** → 👀 **watch — worktree
+  containment.** This is a Grok-owned cleanup surface and does not authorize
+  deleting a Cassy-managed checkout or branch; verify active factory worktrees
+  remain outside Grok's reclaim set.
+- **Hook policy blocks now identify a hook block instead of a user cancellation.**
+  → 👀 **watch — hook posture.** Grok's SessionStart stdout remains ignored by
+  Cassy; `--rules` plus inherited env remain the load-bearing role and identity
+  path. Better diagnostics do not change that contract.
+- **Session titles refresh earlier and `/resume` shows a recap/last-turn summary.**
+  → 👀 **watch — session/transcript evidence.** Factory workers still use a
+  fresh injected `--session-id`, and Cassy resolves liveness under
+  `~/.grok/sessions/*` rather than by title or recap text.
+- **Tool calls recover after `/dev/null` removal; MCP calls show clearer spinner
+  text; Windows skill-home resolution and minimal-mode streaming improve.** →
+  ✅ / ⏭ **operational win / n/a.** These do not change Cassy's MCP namespace,
+  launch flags, or transcript contract.
+- **Source gap:** 1.0.5 is absent from the retained local changelog and the
+  companion JSON is unversioned; the official page is the attributable source.
+  No release-attribution gap remains for this version.
+
+### 1.0.4 — session env · permission grants · hook/subagent/worktree recovery
+
+Reviewed 2026-08-25. Host on **1.0.5**. Source: xAI's official [Grok Build
+changelog](https://x.ai/build/changelog) (2026-08-13). The local
+`~/.grok/CHANGELOG.md` snapshot ends at 1.0.3, and the flat
+`~/.grok/CHANGELOG.json` supplies no release attribution for this entry.
+
+- **Tool commands and MCP servers now receive `GROK_SESSION_ID`.** → 👀 **watch
+  — session identity and env inheritance.** Cassy's load-bearing identity is
+  still `CAS_SESSION_ID` matching the fresh `--session-id`; the new Grok-owned
+  variable must not replace or diverge from that value when resolving
+  `~/.grok/sessions/*` or child-process identity.
+- **Auto permission mode honors explicit always-allow grants and narrow allow
+  rules.** → 👀 **watch — permission semantics.** Cassy explicitly passes
+  `--permission-mode bypassPermissions`; verify that mode still bypasses the
+  interactive gate and that Grok's narrower grants do not weaken Cassy's task,
+  edit, or tool scope.
+- **Headless sessions wait for MCP, non-interactive sessions handle prompts,
+  mid-turn steering is reported correctly, and subagent lifecycle events remain
+  correct out of order.** → 🟢 / 👀 **lifecycle wins / watch.** These improve
+  unattended operation, but Cassy remains authoritative for `cas__*` discovery,
+  worker leases, and coordination state; Grok-owned subagents are not Cassy
+  workers.
+- **Session search can be disabled, finished subagent transcripts are rebuilt
+  from disk, session/image recovery improves, and queued prompts no longer
+  auto-submit while being edited.** → 👀 **watch — transcript and delivery
+  surfaces.** Cassy uses the Grok session tree plus its injected UUID and
+  supervisor coordination truth; verify those remain available with the
+  default search/config posture.
+- **Hook failures show their first stderr line; permission-mode changes on the
+  welcome screen apply to the newly created session; worktree commands work on
+  Windows when only `USERPROFILE` is set.** → 👀 / ⏭ **watch hook/permission
+  posture; Windows-only worktree support is n/a here.** Re-check hook-disabled
+  posture, bypass semantics, and child-process cleanup during the next full
+  matrix; no Cassy code change is indicated by the notes alone.
+- **The remaining `/loop`, web-search domain, UI, keyboard, and media changes**
+  → ⏭ **n/a** (Grok-owned UX or tools outside Cassy's launch contract).
+- **Source gap:** 1.0.4 is absent from the retained local changelog and the
+  companion JSON is unversioned; the official page is the attributable source.
+  No release-attribution gap remains for this version.
 
 ### 1.0.3–0.2.115 — current release sweep: factory lifecycle and integration boundaries
 
@@ -463,9 +546,10 @@ changelog; no pre-0.2.100 entries inventable from this host.
 
 ## Backlog of opportunities (not required, tracked)
 
-- **1.0.3 validation:** the installed/latest release is materially newer than the
-  retained, validated 0.2.114 binary. Re-run the complete live checklist before
-  advancing the typed receipt or validated pin.
+- **1.0.5 validation:** ✅ complete. The installed/latest release is validated
+  through the complete live checklist and typed
+  `grok-build-1.0.5-2026-08-25` receipt; the prior 0.2.114 receipt remains the
+  historical baseline.
 - **Changelog history depth:** find an authoritative release surface for the missing
   0.2.102–0.2.103 and 0.2.107–0.2.111 notes, plus any pre-0.2.100 history,
   before backfilling them. The companion JSON remains unversioned; keep every gap

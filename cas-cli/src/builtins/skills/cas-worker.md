@@ -28,6 +28,22 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
    - **MERGE REQUIRED:** run the [close-gate freshness handshake](cas-worker/references/close-gate.md), including `inbox_poll` for unread supervisor messages, before any corrective commit; if a merge is still needed, send the current factory-branch tip SHA. Never bypass with `status=closed`.
    - **task-scoped verification:** forward the exact guidance once and trust the DB.
 
+## Release-note transport handoff
+
+When the project has a release-notes rubric and your assigned work reaches a
+staging or main merge:
+
+- Check whether this worker session exposes a sanctioned Slack transport. If it
+  does not, do not spend a turn searching for one.
+- Save the exact release-note draft and hand the supervisor its path, target
+  channel, deploy target, and request for returned timestamps/permalinks.
+- Treat supervisor-owned posting as the designed path for workers without
+  Slack, not as a failed fallback. Do not claim `POSTED` or invent receipts.
+- Add the returned receipt to the saved draft before closing the release task.
+
+If no approved transport passes preflight, leave the draft saved and report the
+duty blocked with the measured error.
+
 ## Task Types
 
 - **Spike** — record its decision with `note_type=decision`; its criteria are question-based.

@@ -15,6 +15,20 @@ Check for `docs/release-notes/RUBRIC.md`.
 - **Missing:** copy the canonical template from this skill's `references/RUBRIC-template.md` to `docs/release-notes/RUBRIC.md`, then fill the placeholders: the project's Slack **channel name + channel ID**, and the branch → deploy-target mapping (which branch means `Staging`, which means `Live on production`). Leave the rules verbatim — they are the framework-level contract, not per-project taste.
 - **Present:** read it. A project-local rubric may add rules (extra threads, a diary workflow, a different channel); it must never relax the hard rules below.
 
+## Step 1a — preflight and worker ownership
+
+Run the transport preflight in `docs/SLACK_POSTING_RUNBOOK.md` before attempting
+to post. For cas-src, the canonical route is the supervisor-owned
+`claude.ai Slack` MCP on the approved `pippenz@gmail.com` profile. A connected
+server listing is not a posting receipt; the read-only preflight must succeed.
+
+Default Codex workers do not have a Slack transport. When the worker reaches
+this duty, it saves the exact draft and hands the supervisor the draft path,
+target channel, deploy target, and receipt request. The supervisor posts through
+the canonical route and returns timestamps/permalinks for the worker to record.
+This is a designed handoff, not a failed fallback. If preflight fails, stop
+after saving the draft and report the measured error; do not claim `POSTED`.
+
 ## Step 2 — gather the merge
 
 ```bash

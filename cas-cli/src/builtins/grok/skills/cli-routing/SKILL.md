@@ -36,9 +36,9 @@ Every merge to `main` or `staging` needs the existing
 project-local. For the actual Slack transport, follow
 [`docs/SLACK_POSTING_RUNBOOK.md`](../../../../../docs/SLACK_POSTING_RUNBOOK.md):
 write exact bodies to a separator-delimited file, read the channel to dedupe,
-then post and retain returned timestamps as receipts. That flow uses this
-skill's Codex-first router; Claude Slack MCP is allowed only on the eligible
-current profile.
+then post and retain returned timestamps as receipts. For cas-src, use the
+approved Claude Slack MCP route after its account/server preflight; use the
+Codex Slack plugin only when the current session's resource probe is positive.
 
 ## Do not trigger
 

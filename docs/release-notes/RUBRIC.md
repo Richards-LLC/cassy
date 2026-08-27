@@ -16,6 +16,20 @@
 For **how** to post when the session has no Slack connection of its own, see
 [docs/SLACK_POSTING_RUNBOOK.md](../SLACK_POSTING_RUNBOOK.md).
 
+## Transport ownership
+
+Run the runbook's transport preflight before posting. The canonical cas-src
+route is the supervisor-owned `claude.ai Slack` MCP on the approved
+`pippenz@gmail.com` profile. Default Codex workers have no Slack transport, so
+their designed path is to save the exact draft and hand its path, target
+channel, deploy target, and receipt request to the supervisor. The supervisor
+posts through the canonical route and returns timestamps/permalinks for the
+worker to record.
+
+If preflight fails, leave the draft saved and report the duty blocked with the
+measured error. Never claim `POSTED` without returned timestamps and
+permalinks.
+
 ## When to post
 
 **Every PR merged to `staging` or `main`.** No exceptions: a revert, a hotfix, and

@@ -976,7 +976,7 @@ candidates = ["codex_luna"]
         assert_eq!(registry.schema_version, 1);
         assert_eq!(
             registry.lanes["light"].candidates,
-            ["claude_haiku", "claude_opus"]
+            ["claude_haiku", "codex_luna"]
         );
         assert_eq!(
             registry.lanes["standard"].candidates,

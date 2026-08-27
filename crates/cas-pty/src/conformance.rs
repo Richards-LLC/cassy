@@ -24,14 +24,21 @@ pub enum ConformanceStatus {
 /// Serving route covered by a harness conformance/support claim.
 ///
 /// OpenCode can reach the same model through the local OpenAI-compatible
-/// server or through the hosted DashScope provider.  Keeping the route typed
-/// prevents a receipt for one route from being read as evidence for the
-/// other.  Existing Claude/Codex/Grok receipts omit this field for backwards
-/// compatibility; OpenCode receipts must set it.
+/// server or through distinct hosted billing lanes. Keeping the lane typed
+/// prevents a receipt for one route from being read as evidence for another.
+/// Existing Claude/Codex/Grok receipts omit this field for backwards
+/// compatibility; OpenCode receipts must set it. `Hosted` is retained only
+/// as a deserialization/fixture compatibility value from T8; new receipts
+/// must use one of the two named hosted lanes.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ServingRoute {
     Local,
+    #[serde(rename = "hosted-token-plan")]
+    HostedTokenPlan,
+    #[serde(rename = "hosted-payg")]
+    HostedPayg,
+    #[serde(rename = "hosted")]
     Hosted,
 }
 
@@ -297,7 +304,7 @@ mod tests {
         receipt.harness = Harness::OpenCode;
         assert!(!receipt.validates_pin());
 
-        receipt.route = Some(ServingRoute::Hosted);
+        receipt.route = Some(ServingRoute::HostedPayg);
         receipt.serving_identity = Some(ServingIdentity {
             provider: "alibaba".to_string(),
             model: "qwen3.8-max".to_string(),
@@ -307,11 +314,27 @@ mod tests {
         assert!(receipt.validates_pin());
 
         let encoded = serde_json::to_string(&receipt).unwrap();
-        assert!(encoded.contains("\"route\":\"hosted\""));
+        assert!(encoded.contains("\"route\":\"hosted-payg\""));
         assert!(encoded.contains("\"serving_identity\""));
         assert!(!encoded.contains("DASHSCOPE_API_KEY"));
         let decoded: HarnessConformanceReceipt = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded.route, Some(ServingRoute::Hosted));
+        assert_eq!(decoded.route, Some(ServingRoute::HostedPayg));
         assert_eq!(decoded.serving_identity, receipt.serving_identity);
+    }
+
+    #[test]
+    fn legacy_hosted_route_receipts_remain_readable() {
+        let mut receipt = codex_0149_conformance_receipt().unwrap();
+        receipt.harness = Harness::OpenCode;
+        receipt.route = Some(ServingRoute::Hosted);
+        receipt.serving_identity = Some(ServingIdentity {
+            provider: "alibaba".to_string(),
+            model: "qwen3.8-max".to_string(),
+            endpoint: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string(),
+        });
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        assert!(encoded.contains("\"route\":\"hosted\""));
+        let decoded: HarnessConformanceReceipt = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.route, Some(ServingRoute::Hosted));
     }
 }

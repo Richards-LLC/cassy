@@ -361,6 +361,67 @@ fn push_factory_worker_metadata_env(
     }
 }
 
+// Hosted OpenCode providers are declared inline so the provider/model
+// selector cannot silently resolve through a different billing endpoint. The
+// API key remains an environment substitution; this module never reads or
+// persists its value.
+const OPENCODE_TOKEN_PLAN_ENDPOINT: &str =
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+const OPENCODE_TOKEN_PLAN_KEY_ENV: &str = "QWENCLOUD_TOKEN_PLAN_API_KEY";
+const OPENCODE_PAYG_ENDPOINT: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+const OPENCODE_PAYG_CN_ENDPOINT: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+const OPENCODE_PAYG_KEY_ENV: &str = "DASHSCOPE_API_KEY";
+
+fn opencode_hosted_provider_config(model: &str) -> Option<serde_json::Value> {
+    let (provider, model_id) = model.split_once('/')?;
+    if model_id.trim() != "qwen3.8-max" {
+        return None;
+    }
+    let provider = provider.trim();
+    let (endpoint, key_env, display_name, token_plan) = match provider {
+        "qwencloud" | "hosted-token-plan" => (
+            OPENCODE_TOKEN_PLAN_ENDPOINT,
+            OPENCODE_TOKEN_PLAN_KEY_ENV,
+            "QwenCloud Token Plan",
+            true,
+        ),
+        "alibaba" | "hosted-payg" => (
+            OPENCODE_PAYG_ENDPOINT,
+            OPENCODE_PAYG_KEY_ENV,
+            "QwenCloud Pay-as-you-go",
+            false,
+        ),
+        "alibaba-cn" => (
+            OPENCODE_PAYG_CN_ENDPOINT,
+            OPENCODE_PAYG_KEY_ENV,
+            "QwenCloud Pay-as-you-go (China)",
+            false,
+        ),
+        _ => return None,
+    };
+    let mut model_config = serde_json::json!({
+        "name": format!("{display_name} qwen3.8-max"),
+    });
+    if token_plan {
+        model_config["options"] = serde_json::json!({
+            "extra_body": {"enable_thinking": true}
+        });
+    }
+    Some(serde_json::json!({
+        "provider": {
+            provider: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": display_name,
+                "options": {
+                    "baseURL": endpoint,
+                    "apiKey": format!("{{env:{key_env}}}"),
+                },
+                "models": {model_id: model_config},
+            }
+        }
+    }))
+}
+
 /// Add explicit Claude config and credential-store directories to a worker.
 ///
 /// This deliberately does nothing for omitted values so ordinary process
@@ -1064,7 +1125,7 @@ impl PtyConfig {
         }
         let mut agents = serde_json::Map::new();
         agents.insert(agent_name.to_string(), serde_json::Value::Object(agent));
-        let inline_config = serde_json::json!({
+        let mut inline_config = serde_json::json!({
             "agent": serde_json::Value::Object(agents),
             "mcp": {
                 "cas": {
@@ -1074,6 +1135,9 @@ impl PtyConfig {
                 }
             }
         });
+        if let Some(provider_config) = model.and_then(opencode_hosted_provider_config) {
+            inline_config["provider"] = provider_config["provider"].clone();
+        }
         env.push((
             "OPENCODE_CONFIG_CONTENT".to_string(),
             serde_json::to_string(&inline_config)
@@ -4433,6 +4497,58 @@ mod tests {
             serde_json::json!(["cas", "serve"])
         );
         assert_eq!(inline["mcp"]["cas"]["enabled"], true);
+    }
+
+    #[test]
+    fn opencode_hosted_lanes_pin_endpoint_and_key_environment_without_values() {
+        let _e = ScopedEnv::new();
+        let cases = [
+            (
+                "qwencloud/qwen3.8-max",
+                "QwenCloud Token Plan",
+                OPENCODE_TOKEN_PLAN_ENDPOINT,
+                "QWENCLOUD_TOKEN_PLAN_API_KEY",
+                true,
+            ),
+            (
+                "alibaba/qwen3.8-max",
+                "QwenCloud Pay-as-you-go",
+                OPENCODE_PAYG_ENDPOINT,
+                "DASHSCOPE_API_KEY",
+                false,
+            ),
+        ];
+        for (model, name, endpoint, key_env, token_plan) in cases {
+            let config = PtyConfig::opencode(
+                "open-worker",
+                "worker",
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                Some(model),
+                None,
+                None,
+            );
+            let inline = config
+                .env
+                .iter()
+                .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+                .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value).unwrap())
+                .unwrap();
+            let provider = &inline["provider"][model.split_once('/').unwrap().0];
+            assert_eq!(provider["name"], name);
+            assert_eq!(provider["options"]["baseURL"], endpoint);
+            assert_eq!(provider["options"]["apiKey"], format!("{{env:{key_env}}}"));
+            assert_eq!(
+                provider["models"]["qwen3.8-max"]["options"]["extra_body"]
+                    .get("enable_thinking")
+                    .and_then(serde_json::Value::as_bool),
+                token_plan.then_some(true)
+            );
+            let encoded = serde_json::to_string(&inline).unwrap();
+            assert!(!encoded.contains("sk-"), "inline config must contain no key value");
+        }
     }
 
     #[test]

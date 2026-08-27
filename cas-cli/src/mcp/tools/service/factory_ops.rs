@@ -1,8 +1,8 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
 use crate::opencode_preflight::{
-    OpenCodeRoute, hosted_serving_identity, opencode_route_for_selector, preflight_hosted_from_env,
-    validate_hosted_effort,
+    OpenCodeRoute, hosted_lane_for_selector, hosted_serving_identity, opencode_route_for_selector,
+    preflight_hosted_from_env, validate_hosted_effort_for_lane,
 };
 
 const HOSTED_PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -19,7 +19,10 @@ fn preflight_hosted_opencode_specs(specs: &[cas_mux::WorkerSpec]) -> Result<(), 
         let Some(model) = spec.model.as_deref() else {
             continue;
         };
-        if opencode_route_for_selector(model)? == OpenCodeRoute::Hosted {
+        if matches!(
+            opencode_route_for_selector(model)?,
+            OpenCodeRoute::HostedTokenPlan | OpenCodeRoute::HostedPayg
+        ) {
             selectors.insert(model.to_string());
         }
     }
@@ -292,9 +295,10 @@ fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> Option<&'static 
         cas_mux::SupervisorCli::Codex => Some(crate::config::STOCK_WORKER_MODEL),
         // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
         cas_mux::SupervisorCli::Grok => Some("grok-4.5"),
-        // OpenCode is multi-provider. The provider/model selector is
-        // operator configuration, never a Cassy hard-coded default.
-        cas_mux::SupervisorCli::OpenCode => None,
+        // The operator's explicit default hosted lane is QwenCloud Token
+        // Plan. Pay-as-you-go remains available through alibaba/... and is
+        // never selected implicitly by a failed Token Plan probe.
+        cas_mux::SupervisorCli::OpenCode => Some("qwencloud/qwen3.8-max"),
     }
 }
 
@@ -307,8 +311,7 @@ fn default_worker_effort_for_cli(cli: cas_mux::SupervisorCli) -> Option<cas_mux:
         cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
             Some(cas_mux::Effort::High)
         }
-        // OpenCode effort comes from the endpoint's probed/configured
-        // accepted set, never a Cassy hard-coded default.
+        // OpenCode effort comes from the selected lane's own contract.
         cas_mux::SupervisorCli::OpenCode => None,
     }
 }
@@ -781,7 +784,7 @@ fn build_spawn_specs_with_project_config(
         }
         if spec.cli == cas_mux::SupervisorCli::OpenCode {
             let model = spec.model.as_deref().ok_or_else(|| {
-                "cli=opencode requires a configured provider/model selector; no OpenCode model default is hard-coded"
+                "cli=opencode requires a configured provider/model selector"
                     .to_string()
             })?;
             match opencode_route_for_selector(model)? {
@@ -790,9 +793,18 @@ fn build_spawn_specs_with_project_config(
                     spec.effort,
                     opencode_accepted_efforts.as_deref(),
                 )?,
-                OpenCodeRoute::Hosted => {
+                OpenCodeRoute::HostedTokenPlan | OpenCodeRoute::HostedPayg => {
+                    let lane = hosted_lane_for_selector(model)?;
                     hosted_serving_identity(model)?;
-                    validate_hosted_effort(spec.effort)?;
+                    validate_hosted_effort_for_lane(lane, spec.effort)?;
+                }
+                // `hosted` is a T8-only receipt spelling and cannot be
+                // selected for a new spawn because it does not pin billing.
+                OpenCodeRoute::Hosted => {
+                    return Err(
+                        "OpenCode hosted selector uses a legacy route identity; choose explicit qwencloud/qwen3.8-max or alibaba/qwen3.8-max"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -9532,17 +9544,18 @@ mod tests {
     }
 
     #[test]
-    fn opencode_requires_a_configured_provider_model_selector() {
+    fn opencode_defaults_to_the_operator_token_plan_lane() {
         let _env = TestEnvGuard::with_optional_vars(&[(
             OPENCODE_ACCEPTED_EFFORTS_ENV,
             None,
         )]);
-        let err = build_spawn_spec_json(Some("opencode"), None, None)
-            .expect_err("OpenCode must not invent a provider/model default");
+        let json = build_spawn_spec_json(Some("opencode"), None, None)
+            .expect("OpenCode should use the operator's explicit Token Plan default");
+        let spec = decoded_spawn_spec(&json);
 
-        assert!(err.contains("cli=opencode"), "{err}");
-        assert!(err.contains("configured provider/model selector"), "{err}");
-        assert!(err.contains("no OpenCode model default is hard-coded"), "{err}");
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(spec.model.as_deref(), Some("qwencloud/qwen3.8-max"));
+        assert_eq!(spec.effort, None);
     }
 
     #[test]
@@ -9578,6 +9591,31 @@ mod tests {
                 effort.map(str::to_string)
             );
         }
+    }
+
+    #[test]
+    fn opencode_token_plan_route_is_explicit_and_separate_from_payg() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            OPENCODE_ACCEPTED_EFFORTS_ENV,
+            None,
+        )]);
+        for selector in [
+            "qwencloud/qwen3.8-max",
+            "hosted-token-plan/qwen3.8-max",
+        ] {
+            let json = build_spawn_spec_json(Some("opencode"), Some(selector), Some("medium"))
+                .unwrap_or_else(|error| panic!("Token Plan selector should resolve: {error}"));
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.model.as_deref(), Some(selector));
+            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+        }
+        let json = build_spawn_spec_json(
+            Some("opencode"),
+            Some("alibaba/qwen3.8-max"),
+            Some("medium"),
+        )
+        .expect("pay-as-you-go selector should remain available");
+        assert_eq!(decoded_spawn_spec(&json).model.as_deref(), Some("alibaba/qwen3.8-max"));
     }
 
     #[test]

@@ -506,14 +506,21 @@ fn factory_agent_unknown_tool_without_cas_root_is_not_auto_approved() {
 // concurrent tests across sibling modules don't race on CAS_AGENT_ROLE.
 // ----------------------------------------------------------------------------
 
-struct RoleGuard(Option<String>);
+struct RoleGuard {
+    role: Option<String>,
+    clone_path: Option<std::ffi::OsString>,
+}
 
 impl Drop for RoleGuard {
     fn drop(&mut self) {
         unsafe {
-            match &self.0 {
+            match &self.role {
                 Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
                 None => std::env::remove_var("CAS_AGENT_ROLE"),
+            }
+            match &self.clone_path {
+                Some(v) => std::env::set_var("CAS_CLONE_PATH", v),
+                None => std::env::remove_var("CAS_CLONE_PATH"),
             }
         }
     }
@@ -521,11 +528,13 @@ impl Drop for RoleGuard {
 
 fn set_role_env(role: Option<&str>) -> RoleGuard {
     let prev = std::env::var("CAS_AGENT_ROLE").ok();
+    let clone_path = std::env::var_os("CAS_CLONE_PATH");
     unsafe {
         match role {
             Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
             None => std::env::remove_var("CAS_AGENT_ROLE"),
         }
+        std::env::remove_var("CAS_CLONE_PATH");
     }
-    RoleGuard(prev)
+    RoleGuard { role: prev, clone_path }
 }

@@ -53,6 +53,30 @@ pub(crate) fn assignment_targets_terminal_task(prompt: &str, status: TaskStatus)
         .flatten()
 }
 
+/// A spawn-time assignment is stale once the addressed worker has already
+/// moved its assigned task past `Open`. This is separate from terminal-task
+/// suppression: an in-progress or parked task is still valid work, but its
+/// original `task start` boilerplate is no longer an actionable instruction.
+/// Require the same assignee so another worker's progress cannot suppress a
+/// message that this recipient may still need.
+pub(crate) fn assignment_targets_started_task(
+    prompt: &str,
+    status: TaskStatus,
+    assignee: Option<&str>,
+    recipient: &str,
+) -> Option<String> {
+    matches!(
+        status,
+        TaskStatus::InProgress
+            | TaskStatus::Blocked
+            | TaskStatus::PendingSupervisorReview
+            | TaskStatus::AwaitingMerge
+    )
+    .then(|| assignment_solicited_task_id(prompt))
+    .flatten()
+    .filter(|_| assignee.is_some_and(|owner| owner.eq_ignore_ascii_case(recipient)))
+}
+
 fn first_task_id_token(text: &str) -> Option<String> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .find(|token| {
@@ -688,7 +712,10 @@ pub(crate) fn revalidate_lifecycle_prompt(
 
 #[cfg(test)]
 mod cas_8aee_assignment_delivery_tests {
-    use super::{assignment_solicited_task_id, assignment_targets_terminal_task};
+    use super::{
+        assignment_solicited_task_id, assignment_targets_started_task,
+        assignment_targets_terminal_task,
+    };
     use cas_types::TaskStatus;
 
     #[test]
@@ -726,6 +753,43 @@ mod cas_8aee_assignment_delivery_tests {
                 "a terminal spawn intro must not reach any renderer with task-start guidance"
             );
         }
+    }
+
+    #[test]
+    fn queued_spawn_intro_is_stale_after_the_addressed_worker_started_it() {
+        let prompt = "You were spawned for task cas-bc5c — \"Customer communications\" — and it is assigned to you now.\n\
+                      Start with `mcp__cas__task action=show id=cas-bc5c`, then \
+                      `mcp__cas__task action=start id=cas-bc5c` before you change any code.";
+        assert_eq!(
+            assignment_targets_started_task(
+                prompt,
+                TaskStatus::InProgress,
+                Some("worker-1"),
+                "worker-1",
+            )
+            .as_deref(),
+            Some("cas-bc5c")
+        );
+        assert!(
+            assignment_targets_started_task(
+                prompt,
+                TaskStatus::InProgress,
+                Some("worker-2"),
+                "worker-1",
+            )
+            .is_none(),
+            "another worker starting the task is not evidence for this recipient"
+        );
+        assert!(
+            assignment_targets_started_task(
+                prompt,
+                TaskStatus::Open,
+                Some("worker-1"),
+                "worker-1",
+            )
+            .is_none(),
+            "an open task still needs its assignment instruction"
+        );
     }
 }
 

@@ -85,6 +85,17 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
     std::fs::write(project_root.join("base.rs"), "fn main() {}\n").expect("write base.rs");
     git(&["add", "base.rs"]);
     git(&["commit", "-m", "init"]);
+    // The close gate re-validates the current factory/test-agent tip before
+    // entering PendingSupervisorReview. Keep the worker branch at the
+    // integration base and add remote-tracking evidence that it was already
+    // published; this shared-checkout fixture exercises the review gate's
+    // staged change without modeling an unmerged worker branch.
+    git(&["branch", "factory/test-agent"]);
+    git(&[
+        "update-ref",
+        "refs/remotes/origin/factory/test-agent",
+        "factory/test-agent",
+    ]);
     std::fs::write(
         project_root.join("feature.rs"),
         "pub fn feature() -> u32 { 42 }\n",

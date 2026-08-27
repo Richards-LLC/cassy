@@ -25,8 +25,15 @@ pub(crate) const INBOX_REDELIVERY_MARKER: &str = "[redelivery]";
 /// A plain sender prefix cannot distinguish a late spawn task brief from a
 /// fresh supervisor reply. The queue already knows the facts a worker needs;
 /// keep them visible at the final render boundary instead of asking an agent
-/// to reconstruct them from prose and timing.
-pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> String {
+/// to reconstruct them from prose and timing. Five minutes is an operational
+/// freshness marker, not the 24-hour terminal quarantine TTL: a message can be
+/// valid but still worth calling out as late to the recipient.
+pub(crate) const MESSAGE_PROVENANCE_STALE_AFTER_SECS: i64 = 5 * 60;
+
+pub(crate) fn queued_message_provenance_at(
+    message: &cas_store::QueuedPrompt,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> String {
     let origin = if message.source.eq_ignore_ascii_case("supervisor") {
         "supervisor-authored"
     } else if message.source.eq_ignore_ascii_case("viktor") {
@@ -50,18 +57,26 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
     } else {
         "first-delivery"
     };
+    let age_secs = (observed_at - message.created_at).num_seconds().max(0);
+    let stale = age_secs >= MESSAGE_PROVENANCE_STALE_AFTER_SECS;
     format!(
-        "CAS provenance: notification_id={} origin={} queued_at={} delivery={}",
+        "CAS provenance: notification_id={} origin={} queued_at={} age_secs={} stale={} delivery={}",
         message.id,
         origin,
         message.created_at.to_rfc3339(),
+        age_secs,
+        stale,
         delivery,
     )
 }
 
+pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> String {
+    queued_message_provenance_at(message, chrono::Utc::now())
+}
+
 #[cfg(test)]
 mod viktor_provenance_tests {
-    use super::queued_message_provenance;
+    use super::queued_message_provenance_at;
     use cas_store::{NotificationPriority, QueuedPrompt};
 
     #[test]
@@ -82,10 +97,36 @@ mod viktor_provenance_tests {
             urgent: false,
         };
 
+        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-08-18T20:06:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         assert_eq!(
-            queued_message_provenance(&row),
-            "CAS provenance: notification_id=73 origin=viktor queued_at=2026-08-18T20:00:00+00:00 delivery=first-delivery"
+            queued_message_provenance_at(&row, observed_at),
+            "CAS provenance: notification_id=73 origin=viktor queued_at=2026-08-18T20:00:00+00:00 age_secs=360 stale=true delivery=first-delivery"
         );
+    }
+
+    #[test]
+    fn provenance_marks_only_rows_past_the_operational_freshness_window() {
+        let row = QueuedPrompt {
+            id: 74,
+            source: "director".to_string(),
+            target: "worker-1".to_string(),
+            prompt: "assignment".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-08-18T20:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            processed_at: None,
+            factory_session: Some("factory-1".to_string()),
+            summary: Some("Assigned task: cas-test".to_string()),
+            priority: NotificationPriority::Normal,
+            acked_at: None,
+            urgent: false,
+        };
+        let observed_at = row.created_at + chrono::Duration::seconds(299);
+        let provenance = queued_message_provenance_at(&row, observed_at);
+        assert!(provenance.contains("age_secs=299"));
+        assert!(provenance.contains("stale=false"));
     }
 }
 
@@ -1559,6 +1600,48 @@ impl CasService {
                 withheld.push((
                     message.id,
                     format!("assignment for {task_id}, already done: {status}"),
+                ));
+                continue;
+            }
+            // GH #589: a registration-time spawn brief that arrives after the
+            // addressed worker has already moved its task beyond Open is stale
+            // even when the daemon never stamped transport delivery. Do not
+            // render old `task start` boilerplate from a direct inbox poll.
+            let started_spawn_assignment = if message.source.eq_ignore_ascii_case("director")
+                && message
+                    .summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.starts_with("Assigned task:"))
+            {
+                solicited_task.as_deref().and_then(|task_id| {
+                    task_store.as_ref().and_then(|store| {
+                        store.get(task_id).ok().and_then(|task| {
+                            crate::prompt_revalidation::assignment_targets_started_task(
+                                &message.prompt,
+                                task.status,
+                                task.assignee.as_deref(),
+                                &recipient,
+                            )
+                            .map(|task_id| (task_id, task.status))
+                        })
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some((task_id, status)) = started_spawn_assignment {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "inbox_withheld_started_assignment",
+                    prompt_id = message.id,
+                    recipient = %recipient,
+                    task_id = %task_id,
+                    status = %status,
+                    "cas-589: withheld a delayed spawn assignment after the addressed worker started the task"
+                );
+                withheld.push((
+                    message.id,
+                    format!("spawn assignment for {task_id}, already started: {status}"),
                 ));
                 continue;
             }

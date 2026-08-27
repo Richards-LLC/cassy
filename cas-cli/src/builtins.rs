@@ -3198,6 +3198,9 @@ This is the body content."#;
 
     /// cas-641f: workers must walk the repository's cross-surface blast
     /// radius before close, rather than proving only the path they changed.
+    /// Release-note transport ownership is detailed in the on-demand
+    /// release-notes skill; keeping it out of the protected worker core
+    /// preserves the SessionStart hard-limit margin.
     #[test]
     fn test_worker_skills_require_cas_src_surface_checklist() {
         for (label, content) in [
@@ -3893,6 +3896,10 @@ This is the body content."#;
                 "Staging",
                 "## POSTED",
                 "UTC timestamp",
+                "Step 1a — preflight and worker ownership",
+                "supervisor-owned",
+                "designed handoff",
+                "timestamps/permalinks",
             ] {
                 assert!(
                     skill.content.contains(required),

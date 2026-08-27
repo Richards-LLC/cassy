@@ -1733,20 +1733,15 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
         .expect("normal close call");
     let text = get_text(&result);
     assert!(
-        text.contains("queued for supervisor review"),
-        "task A anchor must pass despite later bad task B and dirty pulse worktree: {text}"
+        text.contains("MERGE REQUIRED") && text.contains("current factory branch tip"),
+        "#588 must reject the later unmerged task-B tip before review queueing: {text}"
     );
     let persisted = task_store.get(&task.id).expect("persisted task");
-    let evidence = persisted
-        .deliverables
-        .pre_close_hook
-        .as_ref()
-        .expect("hook evidence");
     assert_eq!(
-        evidence.worktree_branch.as_deref(),
-        Some("factory/frontend")
+        persisted.status,
+        cas::types::TaskStatus::AwaitingMerge,
+        "the ancestry rejection must leave task A available for merge recovery"
     );
-    assert_eq!(evidence.task_tip.as_deref(), Some(task_a_tip.as_str()));
 }
 
 /// Negative case: when neither System A nor System B has a matching
@@ -3079,6 +3074,10 @@ async fn submit_and_verify_delivery(
             cas::types::ClaimResult::Success(_)
         ));
     }
+    let lease = agent_store
+        .get_lease(task_id)
+        .expect("delivery fixture lease lookup")
+        .expect("delivery fixture must retain its worker lease");
     let worker_service = delivery_service(cas_root, worker_id);
     let close = worker_service
         .task(Parameters(task_req(serde_json::json!({
@@ -3090,25 +3089,51 @@ async fn submit_and_verify_delivery(
         .await
         .expect("public task close receipt submission");
     assert!(
-        get_text(&close).contains("Worker delivery receipt accepted idempotently"),
+        get_text(&close).contains("DELIVERY RECEIPT REJECTED")
+            && get_text(&close).contains("current factory branch tip"),
         "{}",
         get_text(&close)
     );
-    let retry = worker_service
-        .task(Parameters(task_req(serde_json::json!({
-            "action": "close",
-            "id": task_id,
-            "reason": "exact active-cycle retry",
-            "completion_receipt": serde_json::to_string(receipt).unwrap(),
-        }))))
-        .await
-        .expect("same-cycle receipt retry");
-    assert!(
-        get_text(&retry).contains("Worker delivery receipt accepted idempotently")
-            && get_text(&retry).contains("State: awaiting_verification"),
-        "an exact retry must remain supported inside its original active proof cycle:\n{}",
-        get_text(&retry)
+
+    // Seed the state after the explicit #588 rejection so these tests retain
+    // their coverage of the supervisor's merge/reconcile path. The public
+    // receipt path cannot create this boundary until the source tip is merged.
+    let worker = agent_store.get(worker_id).expect("delivery worker");
+    let durable_receipt = cas_store::build_worker_completion_receipt(
+        receipt,
+        &worker.name,
+        chrono::Utc::now(),
     );
+    cas_store::create_worker_delivery_with_dispatch_for_lease(
+        cas_root,
+        &durable_receipt,
+        WorkerDeliveryState::AwaitingVerification,
+        worker_id,
+        lease.epoch,
+        supervisor_id,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("seed delivery boundary after explicit merge-gate rejection");
+    let mut pending = open_task_store(cas_root)
+        .expect("task store")
+        .get(task_id)
+        .expect("task after receipt rejection");
+    pending.status = TaskStatus::PendingSupervisorReview;
+    pending.pending_verification = true;
+    pending.close_reason = Some("worker handoff".to_string());
+    pending.deliverables.factory_branch_anchor = Some(receipt.commit_sha.clone());
+    open_task_store(cas_root)
+        .expect("task store")
+        .update(&pending)
+        .expect("project seeded delivery boundary as review-pending");
+    agent_store
+        .release_lease_if_owner_epoch(
+            task_id,
+            worker_id,
+            lease.epoch,
+            "Fixture receipt handoff after explicit merge-gate rejection",
+        )
+        .expect("release fixture lease");
     let dispatch = cas_store::get_latest_verification_dispatch(cas_root, task_id)
         .expect("verification dispatch lookup")
         .expect("receipt-bound verification dispatch");
@@ -3200,6 +3225,21 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     std::fs::write(worker_path.join("authority.rs"), "pub fn authority() {}\n").unwrap();
     run_git(&["add", "authority.rs"], &worker_path);
     run_git(&["commit", "-m", "receipt authority fixture"], &worker_path);
+    // This test exercises exact lease-session authority after receipt
+    // validation. Keep the source tip in the already-merged/published state
+    // required by the #588 decision-time ancestry and B2 reality gates.
+    run_git(
+        &["merge", "--no-ff", "factory/alice", "-m", "merge receipt authority"],
+        &repo.root,
+    );
+    run_git(
+        &[
+            "update-ref",
+            "refs/remotes/origin/factory/alice",
+            "factory/alice",
+        ],
+        &repo.root,
+    );
 
     let task_store = open_task_store(&cas_root).expect("task store");
     let agent_store = open_agent_store(&cas_root).expect("agent store");

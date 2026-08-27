@@ -3,10 +3,28 @@
 **This is a hard rule. Runtime releases and harness-diary updates each have a
 mandatory #cas-internal publication workflow. They are separate duties.**
 
-> This file defines **what** to post. For **how** to post it when the session has
-> no working Slack connection of its own — the Codex `codex_apps` Slack plugin,
-> and the stdin / approval / buffering traps that make it look broken — see
+> This file defines **what** to post. For transport preflight, the canonical
+> supervisor-owned route, and the designed handoff used when a worker has no
+> Slack connection of its own, see
 > [docs/SLACK_POSTING_RUNBOOK.md](SLACK_POSTING_RUNBOOK.md).
+
+## Transport ownership and worker handoff
+
+Run the runbook's cheap transport preflight before posting. For cas-src, the
+canonical route is the approved `pippenz@gmail.com` Claude profile's
+`claude.ai Slack` MCP, owned by the supervisor or an explicitly approved Claude
+posting owner. A `Connected` server listing is not a receipt; the read-only
+preflight must succeed before a post is attempted.
+
+Default Codex workers do not have a Slack transport. When a Codex worker reaches
+the release-notes duty, it saves the exact draft and hands the draft path,
+target channel, deploy target, and requested receipt back to the supervisor.
+The supervisor runs the canonical route and returns timestamps/permalinks for
+the worker to record. This is the designed path, not a failed fallback.
+
+If no approved transport passes preflight, leave the draft saved and report the
+duty blocked with the measured error. Do not post from an unapproved profile or
+mark the draft `POSTED` without returned timestamps and permalinks.
 
 ## Runtime releases: two top-level posts
 

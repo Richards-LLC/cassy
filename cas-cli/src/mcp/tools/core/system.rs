@@ -1,5 +1,59 @@
 use crate::mcp::tools::core::imports::*;
 
+#[derive(Debug, Default)]
+struct StoreBackedIndexCounts {
+    entries: usize,
+    tasks: usize,
+    rules: usize,
+    skills: usize,
+    latest_store_update: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Filesystem timestamps can be coarser than the store clock on some
+/// platforms, so tolerate a small amount of clock/filesystem skew while still
+/// catching edits that remain unindexed for an operator-visible interval.
+const INDEX_FRESHNESS_TOLERANCE_SECS: i64 = 2;
+
+fn index_last_modified(index_dir: &std::path::Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    std::fs::metadata(index_dir.join("meta.json"))
+        .ok()?
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from)
+}
+
+impl StoreBackedIndexCounts {
+    fn total(&self) -> usize {
+        self.entries + self.tasks + self.rules + self.skills
+    }
+
+    fn observe(&mut self, timestamp: chrono::DateTime<chrono::Utc>) {
+        self.latest_store_update = Some(
+            self.latest_store_update
+                .map_or(timestamp, |current| current.max(timestamp)),
+        );
+    }
+}
+
+fn format_index_counts(
+    indexed: &StoreBackedIndexCounts,
+    expected: &StoreBackedIndexCounts,
+) -> String {
+    format!(
+        "{} of {} store-backed documents (entries {}/{}, tasks {}/{}, rules {}/{}, skills {}/{})",
+        indexed.total(),
+        expected.total(),
+        indexed.entries,
+        expected.entries,
+        indexed.tasks,
+        expected.tasks,
+        indexed.rules,
+        expected.rules,
+        indexed.skills,
+        expected.skills,
+    )
+}
+
 impl CasCore {
     // ========================================================================
     // System Tools (5)
@@ -303,11 +357,21 @@ impl CasCore {
     pub async fn cas_doctor(&self) -> Result<CallToolResult, McpError> {
         let mut checks = Vec::new();
         let mut issues = Vec::new();
+        let mut expected_index = StoreBackedIndexCounts::default();
 
         // Check store
         match self.open_store() {
             Ok(store) => match store.list() {
-                Ok(entries) => checks.push(format!("Store: OK ({} entries)", entries.len())),
+                Ok(entries) => {
+                    expected_index.entries = entries.len();
+                    if let Ok(recent) = store.recent(1)
+                        && let Some(entry) = recent.first()
+                        && let Ok(updated) = store.recent_timestamp(entry)
+                    {
+                        expected_index.observe(updated);
+                    }
+                    checks.push(format!("Store: OK ({} entries)", entries.len()));
+                }
                 Err(e) => issues.push(format!("Store list failed: {e}")),
             },
             Err(e) => issues.push(format!("Store open failed: {e}")),
@@ -316,7 +380,13 @@ impl CasCore {
         // Check task store
         match self.open_task_store() {
             Ok(store) => match store.list(None) {
-                Ok(tasks) => checks.push(format!("Task Store: OK ({} tasks)", tasks.len())),
+                Ok(tasks) => {
+                    expected_index.tasks = tasks.len();
+                    for task in &tasks {
+                        expected_index.observe(task.updated_at);
+                    }
+                    checks.push(format!("Task Store: OK ({} tasks)", tasks.len()));
+                }
                 Err(e) => issues.push(format!("Task store list failed: {e}")),
             },
             Err(e) => issues.push(format!("Task store open failed: {e}")),
@@ -325,7 +395,13 @@ impl CasCore {
         // Check rule store
         match self.open_rule_store() {
             Ok(store) => match store.list() {
-                Ok(rules) => checks.push(format!("Rule Store: OK ({} rules)", rules.len())),
+                Ok(rules) => {
+                    expected_index.rules = rules.len();
+                    for rule in &rules {
+                        expected_index.observe(rule.created);
+                    }
+                    checks.push(format!("Rule Store: OK ({} rules)", rules.len()));
+                }
                 Err(e) => issues.push(format!("Rule store list failed: {e}")),
             },
             Err(e) => issues.push(format!("Rule store open failed: {e}")),
@@ -334,7 +410,13 @@ impl CasCore {
         // Check skill store
         match self.open_skill_store() {
             Ok(store) => match store.list(None) {
-                Ok(skills) => checks.push(format!("Skill Store: OK ({} skills)", skills.len())),
+                Ok(skills) => {
+                    expected_index.skills = skills.len();
+                    for skill in &skills {
+                        expected_index.observe(skill.updated_at);
+                    }
+                    checks.push(format!("Skill Store: OK ({} skills)", skills.len()));
+                }
                 Err(e) => issues.push(format!("Skill store list failed: {e}")),
             },
             Err(e) => issues.push(format!("Skill store open failed: {e}")),
@@ -342,7 +424,48 @@ impl CasCore {
 
         // Check search index
         match self.open_search_index() {
-            Ok(_) => checks.push("Search Index: OK".to_string()),
+            Ok(search) => {
+                let mut indexed = StoreBackedIndexCounts::default();
+                let count_result = (|| -> Result<(), String> {
+                    indexed.entries = search
+                        .count_documents(DocType::Entry)
+                        .map_err(|e| e.to_string())? as usize;
+                    indexed.tasks = search
+                        .count_documents(DocType::Task)
+                        .map_err(|e| e.to_string())? as usize;
+                    indexed.rules = search
+                        .count_documents(DocType::Rule)
+                        .map_err(|e| e.to_string())? as usize;
+                    indexed.skills = search
+                        .count_documents(DocType::Skill)
+                        .map_err(|e| e.to_string())? as usize;
+                    Ok(())
+                })();
+
+                match count_result {
+                    Ok(())
+                        if indexed.total() != expected_index.total()
+                            || index_last_modified(&self.cas_root.join("index/tantivy"))
+                                .zip(expected_index.latest_store_update.as_ref())
+                                .is_some_and(|(indexed_at, store_update)| {
+                                    store_update.signed_duration_since(indexed_at).num_seconds()
+                                        > INDEX_FRESHNESS_TOLERANCE_SECS
+                                }) =>
+                    {
+                        issues.push(format!(
+                            "Search Index: STALE — run reindex bm25=true ({})",
+                            format_index_counts(&indexed, &expected_index)
+                        ));
+                    }
+                    Ok(()) => checks.push(format!(
+                        "Search Index: OK ({})",
+                        format_index_counts(&indexed, &expected_index)
+                    )),
+                    Err(error) => issues.push(format!(
+                        "Search Index: unable to verify freshness — run reindex bm25=true ({error})"
+                    )),
+                }
+            }
             Err(e) => issues.push(format!("Search index failed: {e}")),
         }
 

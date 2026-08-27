@@ -93,8 +93,10 @@ for content. The operational sequence is:
 1. Write the exact user and dev bodies to a file with `=== MESSAGE N ===`
    separators; keep the headers out of the sent text.
 2. Read the target channel first to deduplicate a previous or partial attempt.
-3. Use the Codex `codex_apps` Slack plugin through the Codex-first route; use
-   Claude Slack MCP only if the already-gated current profile authorizes it.
+3. Use the approved Claude Slack MCP route after the account/server preflight.
+   Use the Codex `codex_apps` Slack plugin only when the current session's
+   resource probe is positive; default Codex workers must use the supervisor
+   handoff in the project runbook when it is absent.
 4. Post the two top-level messages and required replies in rubric order, then
    record the returned message timestamps as receipts.
 

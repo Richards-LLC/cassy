@@ -293,7 +293,12 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         artifact_path: Some(artifact.display().to_string()),
     };
 
-    // Worker submits the immutable receipt, supervisor approves it.
+    // cas-2b667 / GH #588: a worker receipt now projects the task into
+    // PendingSupervisorReview, so the public path must reject this unmerged
+    // source tip before persisting any delivery state. Keep that regression
+    // assertion here, then seed the post-acceptance boundary directly so the
+    // tests below can continue exercising worktree_merge's target CAS and
+    // drift handling independently of the review-queue gate.
     let worker_service = delivery_service(&cas_root, &worker_id);
     let close = worker_service
         .task(Parameters(task_req(serde_json::json!({
@@ -305,10 +310,53 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         .await
         .expect("receipt submission");
     assert!(
-        get_text(&close).contains("Worker delivery receipt accepted idempotently"),
+        get_text(&close).contains("DELIVERY RECEIPT REJECTED")
+            && get_text(&close).contains("current factory branch tip"),
         "{}",
         get_text(&close)
     );
+
+    let lease = open_agent_store(&cas_root)
+        .expect("agent store")
+        .get_lease(&task.id)
+        .expect("fixture lease lookup")
+        .expect("worker lease remains after merge-gate rejection");
+    let durable_receipt = cas_store::build_worker_completion_receipt(
+        &receipt,
+        slug,
+        chrono::Utc::now(),
+    );
+    cas_store::create_worker_delivery_with_dispatch_for_lease(
+        &cas_root,
+        &durable_receipt,
+        WorkerDeliveryState::AwaitingVerification,
+        &worker_id,
+        lease.epoch,
+        &supervisor_id,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("seed the delivery boundary after the explicit #588 rejection");
+    let mut pending = open_task_store(&cas_root)
+        .expect("task store")
+        .get(&task.id)
+        .expect("task after receipt rejection");
+    pending.status = TaskStatus::PendingSupervisorReview;
+    pending.pending_verification = true;
+    pending.close_reason = Some("worker handoff".to_string());
+    pending.deliverables.factory_branch_anchor = Some(receipt.commit_sha.clone());
+    open_task_store(&cas_root)
+        .expect("task store")
+        .update(&pending)
+        .expect("project seeded delivery boundary as review-pending");
+    open_agent_store(&cas_root)
+        .expect("agent store")
+        .release_lease_if_owner_epoch(
+            &task.id,
+            &worker_id,
+            lease.epoch,
+            "Fixture receipt handoff after explicit merge-gate rejection",
+        )
+        .expect("release fixture lease");
 
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
         .expect("dispatch lookup")

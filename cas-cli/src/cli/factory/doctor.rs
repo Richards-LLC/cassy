@@ -169,12 +169,11 @@ fn collect_report(
         .expect("harness catalog was loaded before report collection")
         .into_iter()
         .map(|harness| {
+            let probe = probes.get(&harness).cloned().unwrap_or(CliProbe::Missing);
             harness_row(
                 harness,
                 required.contains(&harness),
-                probes
-                    .get(&harness)
-                    .expect("probe exists for every registered harness"),
+                &probe,
                 capability_snapshot,
             )
         })
@@ -238,6 +237,9 @@ fn harness_row(
                             SupervisorCli::Claude => "Run `claude login`, then rerun doctor.",
                             SupervisorCli::Codex => "Run `codex login`, then rerun doctor.",
                             SupervisorCli::Grok => "Sign in to Grok Build, then rerun doctor.",
+                            SupervisorCli::OpenCode => {
+                                "Set QWENCLOUD_TOKEN_PLAN_API_KEY, then rerun doctor."
+                            }
                         },
                         CapabilityAvailability::Unknown => {
                             "Retry doctor; a transient probe failure is not an unavailable account."
@@ -268,6 +270,7 @@ fn pty_harness(harness: SupervisorCli) -> Harness {
         SupervisorCli::Claude => Harness::ClaudeCode,
         SupervisorCli::Codex => Harness::CodexCli,
         SupervisorCli::Grok => Harness::GrokBuild,
+        SupervisorCli::OpenCode => Harness::OpenCode,
     }
 }
 
@@ -276,6 +279,7 @@ fn harness_name(harness: Harness) -> &'static str {
         Harness::ClaudeCode => "Claude",
         Harness::CodexCli => "Codex",
         Harness::GrokBuild => "Grok",
+        Harness::OpenCode => "OpenCode",
     }
 }
 
@@ -284,6 +288,7 @@ fn harness_binary(harness: SupervisorCli) -> &'static str {
         SupervisorCli::Claude => "claude",
         SupervisorCli::Codex => "codex",
         SupervisorCli::Grok => "grok",
+        SupervisorCli::OpenCode => "opencode",
     }
 }
 
@@ -292,6 +297,7 @@ fn account_dir_for_harness(harness: Harness) -> Option<String> {
         Harness::ClaudeCode => "CLAUDE_CONFIG_DIR",
         Harness::CodexCli => "CODEX_HOME",
         Harness::GrokBuild => "GROK_HOME",
+        Harness::OpenCode => return None,
     };
     std::env::var(variable)
         .ok()
@@ -377,6 +383,7 @@ fn harness_install_remediation(harness: SupervisorCli) -> &'static str {
         SupervisorCli::Claude => "Install Claude Code, then rerun `cas factory doctor`.",
         SupervisorCli::Codex => "Install Codex, then rerun `cas factory doctor`.",
         SupervisorCli::Grok => "Install Grok Build, then rerun `cas factory doctor`.",
+        SupervisorCli::OpenCode => "Install OpenCode, then rerun `cas factory doctor`.",
     }
 }
 
@@ -604,7 +611,15 @@ mod tests {
         );
         assert!(!report.has_required_failure());
         assert_eq!(report.rows[1].state, DoctorState::Ok);
-        assert_eq!(report.rows[3].state, DoctorState::Ok);
+        assert_eq!(
+            report
+                .rows
+                .iter()
+                .find(|row| row.name == "CAS MCP")
+                .unwrap()
+                .state,
+            DoctorState::Ok
+        );
     }
 
     #[test]
@@ -618,7 +633,14 @@ mod tests {
         );
         assert!(!report.has_required_failure());
         assert!(!report.rows[1].required);
-        assert!(!report.rows[3].required);
+        assert!(
+            !report
+                .rows
+                .iter()
+                .find(|row| row.name == "CAS MCP")
+                .unwrap()
+                .required
+        );
     }
 
     #[test]
@@ -700,9 +722,8 @@ mod tests {
 
     #[test]
     fn doctor_rejects_suspended_terra_with_registry_alternatives() {
-        let error = doctor_routing_error(
-            r#"{"cli":"codex","model":"gpt-5.6-terra","effort":"xhigh"}"#,
-        );
+        let error =
+            doctor_routing_error(r#"{"cli":"codex","model":"gpt-5.6-terra","effort":"xhigh"}"#);
         assert!(error.contains("Terra is suspended"), "{error}");
         assert!(error.contains("routing rule 'suspended recipe'"), "{error}");
         assert!(error.contains("codex_luna"), "{error}");
@@ -710,9 +731,8 @@ mod tests {
 
     #[test]
     fn doctor_rejects_luna_high_with_registry_alternatives() {
-        let error = doctor_routing_error(
-            r#"{"cli":"codex","model":"gpt-5.6-luna","effort":"high"}"#,
-        );
+        let error =
+            doctor_routing_error(r#"{"cli":"codex","model":"gpt-5.6-luna","effort":"high"}"#);
         assert!(error.contains("Luna is only permitted"), "{error}");
         assert!(error.contains("routing rule 'allowed effort'"), "{error}");
         assert!(error.contains("codex_luna"), "{error}");

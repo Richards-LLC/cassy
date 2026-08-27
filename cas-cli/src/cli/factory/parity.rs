@@ -1,8 +1,8 @@
 //! Launched-agent skill + instruction parity conformance gate (cas-bd9d).
 //!
 //! This is the integration proof for the catalog-parity (cas-cc8c/cas-20f2) and
-//! role-instruction-injection (cas-0263) tasks. It builds a deterministic 3×2
-//! matrix — Claude / Codex / Grok × supervisor / worker — and, for each cell,
+//! role-instruction-injection (cas-0263) tasks. It builds a deterministic 4×2
+//! matrix — Claude / Codex / Grok / OpenCode × supervisor / worker — and, for each cell,
 //! evaluates staged evidence drawn from the REAL launch configuration:
 //!
 //!   1. `catalog`             — every canonical required + general skill twin and
@@ -29,7 +29,11 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use cas_mux::{ContractRole, PtyConfig, SupervisorCli};
+use cas_mux::{
+    ContractRole, OpenCodeProjectionSpec, OpenCodeRole, PtyConfig, SupervisorCli,
+    render_opencode_config,
+};
+use serde_json::Value;
 use serde::Serialize;
 
 use crate::builtins::{
@@ -43,6 +47,8 @@ fn harness_name(h: SupervisorCli) -> &'static str {
         SupervisorCli::Claude => "claude",
         SupervisorCli::Codex => "codex",
         SupervisorCli::Grok => "grok",
+        // cas-d139 owns OpenCode parity registration.
+        SupervisorCli::OpenCode => "opencode",
     }
 }
 
@@ -91,7 +97,7 @@ pub struct ParityCell {
     pub passed: bool,
 }
 
-/// The full 3×2 machine-readable parity report.
+/// The full 4×2 machine-readable parity report.
 #[derive(Debug, Clone, Serialize)]
 pub struct ParityReport {
     pub cells: Vec<ParityCell>,
@@ -166,6 +172,32 @@ fn launch_instruction_text(harness: SupervisorCli, role: ContractRole) -> Result
                 ContractRole::Worker => cas_mux::claude_worker_contract("probe-worker"),
             })
         }
+        // cas-d139 owns the retained OpenCode instruction-parity proof.
+        SupervisorCli::OpenCode => {
+            let selected_role = match role {
+                ContractRole::Supervisor => OpenCodeRole::Supervisor,
+                ContractRole::Worker => OpenCodeRole::Worker,
+            };
+            let config = render_opencode_config(&OpenCodeProjectionSpec::new(
+                selected_role,
+                selected_role.agent_name(),
+                "parity-cas-session",
+                "/tmp/cas-root",
+                "/tmp/worktree",
+                "/tmp/cas-root/opencode/cassy-opencode-plugin.mjs",
+            ));
+            let json: Value = serde_json::from_str(&config)
+                .map_err(|error| format!("generated OpenCode config is invalid JSON: {error}"))?;
+            json["agent"][selected_role.agent_name()]["prompt"]
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    format!(
+                        "generated OpenCode config is missing {} agent.prompt",
+                        selected_role.agent_name()
+                    )
+                })
+        }
     }
 }
 
@@ -182,6 +214,15 @@ fn foreign_call_forms(harness: SupervisorCli) -> &'static [&'static str] {
             "mcp__cs__task",
             "mcp__cs__coordination",
         ],
+        // cas-d139 owns OpenCode parity; reject every existing foreign prefix.
+        SupervisorCli::OpenCode => &[
+            "mcp__cas__task",
+            "mcp__cas__coordination",
+            "mcp__cs__task",
+            "mcp__cs__coordination",
+            "cas__task",
+            "cas__coordination",
+        ],
     }
 }
 
@@ -190,6 +231,8 @@ fn own_call_forms(harness: SupervisorCli) -> [&'static str; 2] {
         SupervisorCli::Claude => ["mcp__cas__task", "mcp__cas__coordination"],
         SupervisorCli::Codex => ["mcp__cs__task", "mcp__cs__coordination"],
         SupervisorCli::Grok => ["cas__task", "cas__coordination"],
+        // cas-d139 owns the full parity catalog; the namespace itself is fixed.
+        SupervisorCli::OpenCode => ["cas_task", "cas_coordination"],
     }
 }
 
@@ -243,6 +286,8 @@ pub fn evaluate_cell(harness: SupervisorCli, role: ContractRole) -> ParityCell {
         SupervisorCli::Codex => "--config developer_instructions",
         SupervisorCli::Grok => "--rules",
         SupervisorCli::Claude => "queued launch intro prompt",
+        // cas-d139 owns the retained OpenCode parity proof.
+        SupervisorCli::OpenCode => "OPENCODE_CONFIG_CONTENT agent.prompt",
     };
     stages.push(match &launch {
         Ok(_) => StageResult::pass(
@@ -347,13 +392,14 @@ fn rendered_surface_or_launch(
     }
 }
 
-/// Build the full 3×2 parity matrix report.
+/// Build the full 4×2 parity matrix report.
 pub fn run_parity_matrix() -> ParityReport {
-    let mut cells = Vec::with_capacity(6);
+    let mut cells = Vec::with_capacity(8);
     for harness in [
         SupervisorCli::Claude,
         SupervisorCli::Codex,
         SupervisorCli::Grok,
+        SupervisorCli::OpenCode,
     ] {
         for role in [ContractRole::Supervisor, ContractRole::Worker] {
             cells.push(evaluate_cell(harness, role));
@@ -440,6 +486,12 @@ mod tests {
                 supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
                 ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
             },
+            // OpenCode receives the same generated supervisor skill projection
+            // and queued ambient-recall delivery as Grok.
+            SupervisorCli::OpenCode => SupervisorHarnessRequirement {
+                supervisor_skills: ["cas-supervisor", "cas-supervisor-checklist"],
+                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
+            },
         }
     }
 
@@ -450,7 +502,10 @@ mod tests {
     /// covered by a generic fallback.
     fn supervisor_skill_payload(cas_dir: &std::path::Path, harness: SupervisorCli) -> String {
         match harness {
-            SupervisorCli::Claude | SupervisorCli::Codex | SupervisorCli::Grok => {
+            SupervisorCli::Claude
+            | SupervisorCli::Codex
+            | SupervisorCli::Grok
+            | SupervisorCli::OpenCode => {
                 use crate::store::detect::open_prompt_queue_store;
                 use crate::ui::factory::queue_supervisor_intro_prompt;
 
@@ -538,6 +593,7 @@ mod tests {
             SupervisorCli::Claude,
             SupervisorCli::Codex,
             SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
         ] {
             let requirement = supervisor_harness_requirement(harness);
             let skill_payload = supervisor_skill_payload(&cas_dir, harness);
@@ -574,15 +630,15 @@ mod tests {
         }
     }
 
-    /// AC-1/AC-2/AC-3: every one of the six cells passes every stage against the
+    /// AC-1/AC-2/AC-3: every one of the eight cells passes every stage against the
     /// real launch configuration.
     #[test]
     fn parity_matrix_all_cells_pass_all_stages() {
         let report = run_parity_matrix();
         assert_eq!(
             report.cells.len(),
-            6,
-            "matrix must be 3 harnesses × 2 roles"
+            8,
+            "matrix must be 4 harnesses × 2 roles"
         );
         assert!(
             report.all_passed,

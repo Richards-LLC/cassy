@@ -14,6 +14,10 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
 - **Standard** is Codex GPT-5.6 Luna at xhigh: the stock engineering floor for normal feature and bug work.
 - **Taste** is Claude Opus 5 at high: public surfaces, prompts, docs, naming, release notes, and general judgment are normal Opus work, not a special-case escape hatch.
 - **Heavy** is Codex GPT-5.6 Sol at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work.
+- **OpenCode is route-specific** — its local and hosted Qwen lanes each require their
+  own live receipt before production spawning. Never infer provider auth or effort
+  support from the selector alone. The operator's default hosted lane is the explicit
+  QwenCloud Token Plan route.
 
 Terra is a **standing suspension**: `gpt-5.6-terra` is documented for compatibility, but it is not an active lane and must never be spawned. Luna remains xhigh-only; `max` and `ultra` are not Cassy effort values.
 
@@ -22,14 +26,16 @@ Terra is a **standing suspension**: `gpt-5.6-terra` is documented for compatibil
 The route table below is generated from the embedded `cas-factory` registry. Keep the surrounding guidance human-authored; update policy in the registry and let the golden tests catch stale copies.
 
 <!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->
-| Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback |
-|---|---|---|---|---|---|---|---|
-| `light` | `claude_haiku` | `anthropic` | `claude` | `haiku-4.5` | `low` | `active` | `ordered candidates` |
-| `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `ordered candidates` |
-| `taste` | `claude_opus` | `anthropic` | `claude` | `opus-5` | `high` | `active` | `disabled` |
-| `heavy` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `ordered candidates` |
+| Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |
+|---|---|---|---|---|---|---|---|---|
+| `light` | `claude_haiku` | `anthropic` | `claude` | `haiku-4.5` | `low` | `active` | `ordered candidates` |  |
+| `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `ordered candidates` |  |
+| `taste` | `claude_opus` | `anthropic` | `claude` | `opus-5` | `high` | `active` | `disabled` |  |
+| `heavy` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `ordered candidates` |  |
+| `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
+| `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 
-Lane request mode: `coordination action=spawn_workers lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.
+Lane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.
 <!-- END GENERATED ROUTE TABLE -->
 
 Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not a worker and not your own context window.
@@ -46,6 +52,51 @@ Claude Opus is the registry's taste lane and is also the right fit for architect
 
 The registry's active lanes are the enforcement source for copyable routes. Provider capacity, authentication, and throughput may affect whether a lane can run, but availability facts do not create an undocumented fallback recipe. If a route is unavailable, report it and choose another active registry lane deliberately.
 
+### OpenCode lane (route-specific conformance)
+
+OpenCode supports three explicit OpenAI-compatible Qwen lanes through generated
+primary agents and inline `cas` MCP config: `local/<model>` for the operator's
+local server, `qwencloud/qwen3.8-max` for the operator's default QwenCloud Token
+Plan lane, and `alibaba/qwen3.8-max` (or `alibaba-cn/qwen3.8-max`) for DashScope
+pay-as-you-go. A lane is never inferred or used as fallback for another. Receipt
+`opencode-1.18.23-hosted-token-plan-2026-08-27` validates only the Token Plan
+route; local and Alibaba PAYG remain pending-conformance. Factory spawning fails
+closed before queue insertion unless the selected route has its own matching
+passing receipt. Do not persist keys in generated files or task receipts.
+
+Token Plan fan-out follows the operator-declared plan tier: Lite permits 1–2,
+Standard 3–4, and Pro 6–8 concurrent OpenCode agents. Warn or cap a spawn request
+that exceeds the declared tier; do not scrape the operator console. A receipt may
+carry the operator-declared tier as metadata when supplied.
+
+- `cli=opencode model=local/qwen3.8` — local serving; endpoint reachability, model
+  loading, and accepted effort variants come from the local operator preflight.
+- `cli=opencode model=qwencloud/qwen3.8-max effort=low|medium|xhigh` — hosted
+  Token Plan; the pinned endpoint is
+  `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` and
+  preflight requires `QWENCLOUD_TOKEN_PLAN_API_KEY` with the dedicated `sk-sp-`
+  prefix. Its minimal preflight performs auth plus at most one tiny completion;
+  it never lists models and never probes `/apps/anthropic`.
+- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — hosted
+  DashScope pay-as-you-go; preflight requires `DASHSCOPE_API_KEY` with `sk-` or
+  `sk-ws-` prefix, endpoint reachability, and the selected model in `/models`.
+  `alibaba-cn/...` selects the mainland endpoint. Token Plan and pay-as-you-go
+  keys are lane-bound and a mismatch is refused before any network request.
+- Each hosted Qwen lane currently accepts only `low`, `medium`, and `xhigh` for
+  qwen3.8-max; `minimal` and `high` are rejected before OpenCode and are never
+  silently remapped. Token Plan uses the OpenAI-compatible thinking body
+  (`enable_thinking`); its effort table is independent of pay-as-you-go.
+  The Token Plan route is supported by its OpenCode 1.18.23 live receipt, but
+  still requires the dedicated key and bounded auth/answerability preflight on
+  every spawn. Local and Alibaba PAYG remain `pending-conformance` and are
+  refused before queue insertion.
+- Every new conformance receipt records its explicit `route` and secret-free
+  `serving_identity`; legacy receipts without these fields remain readable only as
+  historical local-era fixtures.
+- The OpenCode MCP server name `cas` yields `cas_task`, `cas_coordination`, and
+  `cas_verification`; generated `cassy-worker`/`cassy-supervisor` prompts carry
+  the role contract and remain process-local.
+
 ### Model slug table
 
 | `cli=` | Accepted `model=` slugs | Notes |
@@ -53,6 +104,7 @@ The registry's active lanes are the enforcement source for copyable routes. Prov
 | `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy route; Luna/xhigh is the standard route; **Terra is standing-suspended and has no active lane**. Luna is the gpt-5.4-mini successor. |
 | `claude` | `haiku-4.5`, `opus-5` (full Anthropic ids also ok) | Haiku/low is the light lane; Opus/high is the taste lane and also serves exceptional architecture/safety/rescue/challenge. Sonnet is not a normal worker lane. |
 | `grok` | `grok-4.5`, `grok-composer-2.5-fast` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
+| `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 
 ### Effort vocabulary (Cassy-wide)
 
@@ -65,10 +117,11 @@ How each backend receives them:
 | Claude | `--effort <level>` |
 | Codex | `--config model_reasoning_effort=<level>` |
 | Grok | `--reasoning-effort <level>` |
+| OpenCode | generated primary-agent `variant` (local: endpoint-specific; Token Plan/pay-as-you-go qwen3.8-max: `low`, `medium`, `xhigh`; Token Plan also pins `enable_thinking`) |
 
 For non-Luna multi-step workers, `effort=high` is the ceiling. Luna is the exception: its only permitted Cassy effort is the current maximum, `xhigh`. The registry sets Haiku light to low, Opus taste to high, and Sol heavy to high; do not use `max`/`ultra` until Cassy's vocabulary is extended and validated.
 
-## Spawn cookbook (all three harnesses)
+## Spawn cookbook (all four harnesses)
 
 Copy-paste `spawn_workers` recipes generated from the active registry lanes. The tool prefix changes with the supervisor harness, but every command pins the registry's `cli`, `model`, and `effort`.
 
@@ -91,7 +144,19 @@ mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=
 ```
 <!-- END GENERATED SPAWN RECIPES -->
 
-Parameter table and field names: [reference.md](reference.md#spawn_workers-parameters).
+### OpenCode workers (route-specific conformance)
+
+Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
+
+```
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
+```
+
+The default hosted recipe requires `QWENCLOUD_TOKEN_PLAN_API_KEY` in the operator
+environment and performs one bounded auth/answerability completion without model
+discovery. Use `alibaba/qwen3.8-max` with `DASHSCOPE_API_KEY` for pay-as-you-go, or
+`local/<model>` for a local server. Parameter table and field names:
+[reference.md](reference.md#spawn_workers-parameters).
 
 ## Routing Axes
 

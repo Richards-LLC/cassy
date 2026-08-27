@@ -69,6 +69,18 @@ pub fn harness_route_identity(
         Harness::ClaudeCode => ("anthropic", CLAUDE_ENDPOINT),
         Harness::CodexCli => ("openai", CODEX_ENDPOINT),
         Harness::GrokBuild => ("xai", GROK_ENDPOINT),
+        Harness::OpenCode => (
+            crate::opencode_preflight::QWENCLOUD_TOKEN_PLAN_PROVIDER,
+            crate::opencode_preflight::QWENCLOUD_TOKEN_PLAN_ENDPOINT,
+        ),
+    };
+    let model = if harness == Harness::OpenCode {
+        model
+            .strip_prefix("qwencloud/")
+            .or_else(|| model.strip_prefix("hosted-token-plan/"))
+            .unwrap_or(model)
+    } else {
+        model
     };
     route_identity(harness, provider, endpoint, model, account_profile)
 }
@@ -108,6 +120,16 @@ pub(crate) fn probe_harness(
             Harness::CodexCli => probe_codex_auth(account_dir, now_ms, deadline),
             Harness::GrokBuild => {
                 probe_grok_auth_and_pin(account_dir, receipt, binary, now_ms, deadline)
+            }
+            Harness::OpenCode => {
+                let (_, evidence) = probe_key_presence(
+                    identity.clone(),
+                    crate::opencode_preflight::QWENCLOUD_TOKEN_PLAN_API_KEY_ENV,
+                    None,
+                    None,
+                    now_ms,
+                );
+                evidence
             }
         },
     };
@@ -395,6 +417,10 @@ fn enable_path(harness: Harness) -> String {
         Harness::ClaudeCode => "Run `claude login`, then rerun doctor.".to_string(),
         Harness::CodexCli => "Run `codex login`, then rerun doctor.".to_string(),
         Harness::GrokBuild => "Sign in to Grok Build, then rerun doctor.".to_string(),
+        Harness::OpenCode => format!(
+            "Set {}, then rerun doctor.",
+            crate::opencode_preflight::QWENCLOUD_TOKEN_PLAN_API_KEY_ENV
+        ),
     }
 }
 
@@ -403,6 +429,7 @@ fn harness_name(harness: Harness) -> &'static str {
         Harness::ClaudeCode => "claude",
         Harness::CodexCli => "codex",
         Harness::GrokBuild => "grok",
+        Harness::OpenCode => "opencode",
     }
 }
 

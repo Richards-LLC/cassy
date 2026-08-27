@@ -709,7 +709,7 @@ pub enum FactoryCommands {
 
     /// Run the isolated supervisor/worker communication conformance probe
     /// Launched-agent skill + instruction parity conformance gate (cas-bd9d):
-    /// emit a machine-readable 3×2 (Claude/Codex/Grok × supervisor/worker) report
+    /// emit a machine-readable 4×2 (Claude/Codex/Grok/OpenCode × supervisor/worker) report
     /// proving required skills/agents, effective role clauses, and tool prefix
     /// from the real launch configuration. Non-zero exit if any cell fails.
     Parity {
@@ -727,7 +727,7 @@ pub enum FactoryCommands {
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
 
-        /// Recorded harness artifact root for Claude/Codex/Grok adapters
+        /// Recorded harness artifact root for Claude/Codex/Grok/OpenCode adapters
         #[arg(long)]
         artifact_root: Option<std::path::PathBuf>,
 
@@ -1591,6 +1591,13 @@ fn is_grok_installed() -> bool {
         .is_ok()
 }
 
+fn is_opencode_installed() -> bool {
+    std::process::Command::new("opencode")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 fn parse_supervisor_cli(value: &str) -> Result<cas_mux::SupervisorCli> {
     value
         .parse::<cas_mux::SupervisorCli>()
@@ -1637,6 +1644,10 @@ fn resolve_cli_choice(
         cas_mux::SupervisorCli::Grok => bail!(
             "{role} 'grok' is not installed. Install the xAI Grok Build CLI: \
              curl -fsSL https://x.ai/cli/install.sh | bash"
+        ),
+        cas_mux::SupervisorCli::OpenCode if is_opencode_installed() => Ok(parsed),
+        cas_mux::SupervisorCli::OpenCode => bail!(
+            "{role} 'opencode' is not installed. Install the OpenCode CLI before spawning"
         ),
     }
 }

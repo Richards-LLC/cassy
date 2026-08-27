@@ -423,11 +423,63 @@ pub fn validate_explicit(
     spec: &WorkerSpec,
     _snapshot: &CapabilitySnapshot,
 ) -> Result<(), RoutingError> {
+    let registry = registry()?;
     if let Some(model) = spec.model.as_deref() {
-        validate_model_is_active(model).map_err(RoutingError::Policy)?;
-        validate_model_effort_policy(model, spec.effort).map_err(RoutingError::Policy)?;
+        if let Err(reason) = validate_model_is_active(model) {
+            return Err(RoutingError::Policy(policy_violation_with_alternatives(
+                registry,
+                reason,
+                "suspended recipe",
+                Some(model),
+            )));
+        }
+        if let Err(reason) = validate_model_effort_policy(model, spec.effort) {
+            return Err(RoutingError::Policy(policy_violation_with_alternatives(
+                registry,
+                reason,
+                "allowed effort",
+                None,
+            )));
+        }
     }
     Ok(())
+}
+
+/// Add the violated registry rule and copyable active recipe alternatives to a
+/// policy rejection. The alternatives are derived from the embedded registry,
+/// so a policy change updates every caller's remediation without maintaining a
+/// second hand-written list in an MCP or CLI layer.
+fn policy_violation_with_alternatives(
+    registry: &LaneRegistry,
+    reason: String,
+    rule: &str,
+    excluded_model: Option<&str>,
+) -> String {
+    let mut alternatives = Vec::new();
+    for (recipe_id, recipe) in &registry.recipes {
+        if recipe.status != RecipeStatus::Active
+            || excluded_model.is_some_and(|model| recipe.model.eq_ignore_ascii_case(model))
+        {
+            continue;
+        }
+        alternatives.push(format!(
+            "{recipe_id} (model={}, effort={})",
+            recipe.model, recipe.default_effort
+        ));
+    }
+
+    // A Luna effort violation includes Luna xhigh itself, while a suspension
+    // omits the suspended Terra recipe. Keep the list stable by recipe ID
+    // (the registry is a BTreeMap) and state the rule even if a future
+    // registry has no active alternatives.
+    let alternatives = if alternatives.is_empty() {
+        "none declared".to_string()
+    } else {
+        alternatives.join(", ")
+    };
+    format!(
+        "{reason}; routing rule '{rule}' violated; available registry alternatives: {alternatives}"
+    )
 }
 
 /// Reject the standing Terra suspension, retaining the byte-for-byte message
@@ -620,5 +672,47 @@ candidates = ["first"]
             requester_config_dir: None,
         };
         assert!(validate_explicit(&spec, &CapabilitySnapshot::default()).is_err());
+    }
+
+    #[test]
+    fn validate_explicit_reports_registry_alternatives_without_mutating_spec() {
+        let terra = WorkerSpec {
+            name: Some("terra".to_string()),
+            cli: SupervisorCli::Codex,
+            model: Some("gpt-5.6-terra".to_string()),
+            effort: Some(Effort::XHigh),
+            config_dir: Some("/accounts/codex".to_string()),
+            requester_config_dir: Some("/accounts/requester".to_string()),
+        };
+        let before = terra.clone();
+        let error = validate_explicit(&terra, &CapabilitySnapshot::default())
+            .expect_err("suspended Terra must fail closed")
+            .to_string();
+
+        assert_eq!(terra, before, "validation must not rewrite an explicit spec");
+        assert!(error.contains("Terra is suspended"), "{error}");
+        assert!(error.contains("routing rule 'suspended recipe'"), "{error}");
+        assert!(error.contains("codex_luna"), "{error}");
+        assert!(error.contains("effort=xhigh"), "{error}");
+    }
+
+    #[test]
+    fn validate_explicit_reports_luna_rule_and_active_alternatives() {
+        let luna = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: Some("gpt-5.6-luna".to_string()),
+            effort: Some(Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
+        };
+        let error = validate_explicit(&luna, &CapabilitySnapshot::default())
+            .expect_err("Luna below xhigh must fail closed")
+            .to_string();
+
+        assert!(error.contains("Luna is only permitted"), "{error}");
+        assert!(error.contains("routing rule 'allowed effort'"), "{error}");
+        assert!(error.contains("codex_luna"), "{error}");
+        assert!(error.contains("effort=xhigh"), "{error}");
     }
 }

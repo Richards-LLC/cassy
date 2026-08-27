@@ -11,6 +11,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
+use cas_factory::routing::CapabilitySnapshot;
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use cas_mux::SupervisorCli;
 use serde::Serialize;
@@ -103,6 +104,11 @@ fn required_harnesses(args: &FactoryArgs, project_root: &Path) -> Result<Vec<Sup
     let worker = resolve_specs(1, sources).map_err(|error| {
         anyhow::anyhow!("failed to resolve worker config for factory doctor: {error}")
     })?;
+    for spec in &worker {
+        cas_factory::validate_explicit(spec, &CapabilitySnapshot::default()).map_err(|error| {
+            anyhow::anyhow!("failed to validate worker config for factory doctor: {error}")
+        })?;
+    }
     let sources = ConfigSources {
         cli_flag: (supervisor_cli != SupervisorCli::Claude).then_some(supervisor_cli),
         supervisor_spec_json: args.supervisor_spec.clone(),
@@ -112,6 +118,9 @@ fn required_harnesses(args: &FactoryArgs, project_root: &Path) -> Result<Vec<Sup
     let supervisor = resolve_supervisor_spec(sources).map_err(|error| {
         anyhow::anyhow!("failed to resolve supervisor config for factory doctor: {error}")
     })?;
+    cas_factory::validate_explicit(&supervisor, &CapabilitySnapshot::default()).map_err(
+        |error| anyhow::anyhow!("failed to validate supervisor config for factory doctor: {error}"),
+    )?;
 
     let mut required = Vec::new();
     for harness in worker
@@ -410,5 +419,39 @@ mod tests {
         )
         .unwrap();
         assert!(cas_mcp_registration(directory.path(), None));
+    }
+
+    fn doctor_routing_error(worker_spec: &str) -> String {
+        let _home = crate::test_support::TestEnvGuard::temp_home();
+        let directory = tempfile::tempdir().unwrap();
+        let args = FactoryArgs {
+            workers: 1,
+            worker_spec: vec![worker_spec.to_string()],
+            ..FactoryArgs::default()
+        };
+        required_harnesses(&args, directory.path())
+            .expect_err("doctor must reject an invalid explicit routing spec")
+            .to_string()
+    }
+
+    #[test]
+    fn doctor_rejects_suspended_terra_with_registry_alternatives() {
+        let error = doctor_routing_error(
+            r#"{"cli":"codex","model":"gpt-5.6-terra","effort":"xhigh"}"#,
+        );
+        assert!(error.contains("Terra is suspended"), "{error}");
+        assert!(error.contains("routing rule 'suspended recipe'"), "{error}");
+        assert!(error.contains("codex_luna"), "{error}");
+    }
+
+    #[test]
+    fn doctor_rejects_luna_high_with_registry_alternatives() {
+        let error = doctor_routing_error(
+            r#"{"cli":"codex","model":"gpt-5.6-luna","effort":"high"}"#,
+        );
+        assert!(error.contains("Luna is only permitted"), "{error}");
+        assert!(error.contains("routing rule 'allowed effort'"), "{error}");
+        assert!(error.contains("codex_luna"), "{error}");
+        assert!(error.contains("effort=xhigh"), "{error}");
     }
 }

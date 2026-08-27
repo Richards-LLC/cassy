@@ -2050,6 +2050,8 @@ mod workspace_contract_tests {
         let first_path = first_root.path().to_string_lossy().to_string();
         let second_path = second_root.path().to_string_lossy().to_string();
         let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_SESSION_ID", Some("refresh-session")),
             ("CAS_CLONE_PATH", Some(first_path.as_str())),
         ]);

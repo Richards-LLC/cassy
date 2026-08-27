@@ -1,5 +1,150 @@
 use crate::mcp::tools::service::imports::*;
 
+use std::path::Path;
+use std::process::{Command, Output};
+
+const ISSUE_REPO_SETUP: &str =
+    "issues.repo is not configured; set it with `cas config set issues.repo owner/name`";
+
+#[derive(Debug, PartialEq, Eq)]
+struct BugFilingOutcome {
+    url: String,
+    degradation: Option<String>,
+}
+
+trait BugFilingTransport {
+    fn ensure_agent_reported_label(&self, repo: &str) -> Result<(), String>;
+
+    fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+    ) -> Result<String, String>;
+}
+
+struct GhBugFilingTransport;
+
+impl BugFilingTransport for GhBugFilingTransport {
+    fn ensure_agent_reported_label(&self, repo: &str) -> Result<(), String> {
+        let output = Command::new("gh")
+            .args([
+                "label",
+                "create",
+                "agent-reported",
+                "--repo",
+                repo,
+                "--color",
+                "B60205",
+                "--description",
+                "Reported by an automated Cassy agent",
+                "--force",
+            ])
+            .output()
+            .map_err(|error| format!("Failed to run gh CLI while preparing label: {error}"))?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(command_failure_detail(&output))
+        }
+    }
+
+    fn create_issue(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+    ) -> Result<String, String> {
+        let mut command = Command::new("gh");
+        command.args([
+            "issue", "create", "--repo", repo, "--title", title, "--body", body,
+        ]);
+        for label in labels {
+            command.args(["--label", label]);
+        }
+
+        let output = command.output().map_err(|error| {
+            format!("Failed to run gh CLI: {error}. Is gh installed and authenticated?")
+        })?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(command_failure_detail(&output))
+        }
+    }
+}
+
+fn command_failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        stderr
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit status {}", output.status)
+        }
+    }
+}
+
+fn resolve_issue_repo(cas_root: &Path) -> Result<String, String> {
+    let config = crate::config::Config::load(cas_root)
+        .map_err(|error| format!("Failed to load config: {error}"))?;
+    let Some(repo) = config.issues.and_then(|issues| issues.repo) else {
+        return Err(ISSUE_REPO_SETUP.to_string());
+    };
+
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return Err(ISSUE_REPO_SETUP.to_string());
+    }
+    if crate::gh_graphql::split_repo(repo).is_err() {
+        return Err(
+            "issues.repo must be configured as `owner/name`; set it with `cas config set issues.repo owner/name`"
+                .to_string(),
+        );
+    }
+
+    Ok(repo.to_string())
+}
+
+fn file_bug_report<T: BugFilingTransport>(
+    transport: &T,
+    repo: &str,
+    title: &str,
+    body: &str,
+) -> Result<BugFilingOutcome, String> {
+    let label_error = transport.ensure_agent_reported_label(repo).err();
+    let labels: &[&str] = if label_error.is_none() {
+        &["bug", "agent-reported"]
+    } else {
+        &[]
+    };
+
+    let url = transport.create_issue(repo, title, body, labels).map_err(|error| {
+        if let Some(label_error) = label_error.as_deref() {
+            format!(
+                "Failed to create issue: {error}; agent-reported label setup failed ({label_error})"
+            )
+        } else {
+            format!("Failed to create issue: {error}")
+        }
+    })?;
+
+    let degradation = label_error.map(|error| {
+        format!(
+            "Warning: could not prepare the agent-reported label ({error}); issue was filed labeless."
+        )
+    });
+
+    Ok(BugFilingOutcome { url, degradation })
+}
+
 #[cfg(feature = "mcp-proxy")]
 fn parse_proxy_health_cache(json: &str) -> serde_json::Result<serde_json::Value> {
     serde_json::from_str::<cmcp_core::ProxyHealthSnapshot>(json)
@@ -209,40 +354,20 @@ impl CasService {
             arch = arch,
         );
 
-        let output = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--repo",
-                "Richards-LLC/cassy",
-                "--title",
-                &title,
-                "--body",
-                &body,
-                "--label",
-                "bug,agent-reported",
-            ])
-            .output()
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to run gh CLI: {error}. Is gh installed and authenticated?"),
-                )
-            })?;
+        let repo = resolve_issue_repo(&self.inner.cas_root)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        let outcome = file_bug_report(&GhBugFilingTransport, &repo, &title, &body)
+            .map_err(|message| Self::error(ErrorCode::INTERNAL_ERROR, message))?;
+        let degradation = outcome
+            .degradation
+            .map(|message| format!("\n\n{message}"))
+            .unwrap_or_default();
 
-        if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(Self::success(format!(
-                "Bug report created: {url}\n\nNote: Home directory paths were auto-anonymized. \
-                Please verify the issue doesn't contain sensitive project data."
-            )))
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to create issue: {stderr}"),
-            ))
-        }
+        Ok(Self::success(format!(
+            "Bug report created: {}\n\nNote: Home directory paths were auto-anonymized. \
+            Please verify the issue doesn't contain sensitive project data.{}",
+            outcome.url, degradation
+        )))
     }
 
     // ========================================================================
@@ -532,10 +657,106 @@ impl CasService {
     }
 }
 
-#[cfg(all(test, feature = "mcp-proxy"))]
+#[cfg(test)]
 mod tests {
+    use super::{BugFilingTransport, file_bug_report, resolve_issue_repo};
+
+    #[derive(Debug)]
+    struct FakeTransport {
+        label_result: Result<(), String>,
+        issue_url: String,
+        labels_seen: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl BugFilingTransport for FakeTransport {
+        fn ensure_agent_reported_label(&self, _repo: &str) -> Result<(), String> {
+            self.label_result.clone()
+        }
+
+        fn create_issue(
+            &self,
+            _repo: &str,
+            _title: &str,
+            _body: &str,
+            labels: &[&str],
+        ) -> Result<String, String> {
+            self.labels_seen
+                .borrow_mut()
+                .extend(labels.iter().map(|label| (*label).to_string()));
+            Ok(self.issue_url.clone())
+        }
+    }
+
+    #[test]
+    fn missing_agent_label_files_labeless_and_reports_degradation() {
+        let transport = FakeTransport {
+            label_result: Err("permission denied".to_string()),
+            issue_url: "https://github.com/example/cassy/issues/1".to_string(),
+            labels_seen: std::cell::RefCell::new(Vec::new()),
+        };
+
+        let outcome = file_bug_report(&transport, "example/cassy", "title", "body")
+            .expect("issue creation should continue without the cosmetic label");
+
+        assert_eq!(outcome.url, "https://github.com/example/cassy/issues/1");
+        assert!(
+            outcome
+                .degradation
+                .as_deref()
+                .is_some_and(|message| message.contains("filed labeless"))
+        );
+        assert!(transport.labels_seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn available_agent_label_is_applied_with_the_bug_label() {
+        let transport = FakeTransport {
+            label_result: Ok(()),
+            issue_url: "https://github.com/example/cassy/issues/2".to_string(),
+            labels_seen: std::cell::RefCell::new(Vec::new()),
+        };
+
+        let outcome = file_bug_report(&transport, "example/cassy", "title", "body")
+            .expect("issue creation should succeed");
+
+        assert_eq!(outcome.url, "https://github.com/example/cassy/issues/2");
+        assert!(outcome.degradation.is_none());
+        assert_eq!(
+            &*transport.labels_seen.borrow(),
+            &["bug".to_string(), "agent-reported".to_string()]
+        );
+    }
+
+    #[test]
+    fn unset_issue_repo_refuses_without_an_implicit_target() {
+        let temp = tempfile::tempdir().expect("temporary config directory");
+        let error = resolve_issue_repo(temp.path()).expect_err("unset repo must refuse");
+
+        assert!(error.contains("issues.repo"));
+        assert!(error.contains("cas config set issues.repo owner/name"));
+    }
+
+    #[test]
+    fn configured_issue_repo_is_the_only_filing_target() {
+        let temp = tempfile::tempdir().expect("temporary config directory");
+        let mut config = crate::config::Config::default();
+        config
+            .set("issues.repo", "example/project")
+            .expect("repo setting should be valid");
+        config
+            .save(temp.path())
+            .expect("project config should be saved");
+
+        assert_eq!(
+            resolve_issue_repo(temp.path()).expect("configured repo should resolve"),
+            "example/project"
+        );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
     use super::parse_proxy_health_cache;
 
+    #[cfg(feature = "mcp-proxy")]
     #[test]
     fn forged_cached_health_is_sanitized_before_system_json() {
         let raw_name = "https://user:token@example.invalid/private";

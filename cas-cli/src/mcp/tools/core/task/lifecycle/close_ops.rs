@@ -1210,6 +1210,23 @@ impl CasCore {
             }
         };
 
+        // cas-2b667 / GH #588: the receipt path must not project an
+        // unmerged current source tip into PendingSupervisorReview. The
+        // receipt's commit/target fields are a snapshot supplied by the
+        // worker; re-fetch and inspect the live branch immediately before
+        // creating the immutable delivery boundary so a straggler commit
+        // cannot hide behind an earlier receipt or parked anchor.
+        if let Err(message) = validate_current_factory_branch_tip_ancestry(
+            &context.repo_root,
+            &input.source_branch,
+            &input.target_branch,
+        ) {
+            return Ok(Self::tool_error(format!(
+                "DELIVERY RECEIPT REJECTED: task {} cannot enter pending_supervisor_review until the current source tip is merged.\n\n{message}",
+                task.id
+            )));
+        }
+
         // A receipt creates a fresh proof boundary. A legacy or earlier-cycle
         // verdict must never authorize this immutable commit by accident.
         // Exact retries return the existing transaction (which may already
@@ -3942,6 +3959,28 @@ impl CasCore {
                     )));
                 }
                 LightweightLintOutcome::Pass => {
+                    // cas-2b667 / GH #588: this is the final decision point
+                    // before the task becomes PendingSupervisorReview. The
+                    // earlier merge gate may have used a parked task anchor
+                    // (which is correct for final-close/content accounting),
+                    // but that cached anchor cannot authorize this queue hop
+                    // while the current factory branch has a straggler tip.
+                    if is_factory_worker
+                        && let Some(assignee) = task.assignee.as_deref()
+                    {
+                        let factory_branch = format!("factory/{assignee}");
+                        if let Err(message) = validate_current_factory_branch_tip_ancestry(
+                            &close_project_root,
+                            &factory_branch,
+                            &resolved_parent_branch,
+                        ) {
+                            return Ok(Self::tool_error(format!(
+                                "⚠️ MERGE REQUIRED\n\nTask {} cannot enter pending_supervisor_review until its current factory branch tip is merged.\n\n{message}",
+                                req.id
+                            )));
+                        }
+                    }
+
                     // Transition to PendingSupervisorReview.
                     let mut task_to_pend = task.clone();
                     let now = chrono::Utc::now();
@@ -6544,6 +6583,54 @@ fn delivery_content_anchor_at_close<'a>(
     } else {
         recorded_anchor
     }
+}
+
+/// Re-fetch the integration target and verify the *live* factory branch tip
+/// before a close path enters `PendingSupervisorReview`.
+///
+/// The ordinary merge gate may intentionally use a parked anchor for an
+/// `AwaitingMerge` task: that anchor keeps a recycled worker lane's later,
+/// unrelated commits from re-stranding an already-delivered task. That
+/// historical proof is not sufficient for the supervisor-review queue,
+/// however. Queueing review advertises the current branch as ready, so the
+/// current branch tip must itself be reachable from the current target.
+///
+/// `fetch_parent_branch_best_effort` refreshes `origin/<parent_branch>` before
+/// the target ref is selected. When that remote-tracking ref exists it is the
+/// authoritative target view; local-only repositories retain their local
+/// target behavior. Missing or unresolvable Git state fails closed because a
+/// review-pending transition must never be based on a cached anchor alone.
+pub(crate) fn validate_current_factory_branch_tip_ancestry(
+    repo_path: &std::path::Path,
+    factory_branch: &str,
+    parent_branch: &str,
+) -> Result<String, String> {
+    if !is_safe_git_refname(factory_branch) || !is_safe_git_refname(parent_branch) {
+        return Err(format!(
+            "current close-tip ancestry check rejected unsafe ref name(s): factory branch {factory_branch:?}, target branch {parent_branch:?}."
+        ));
+    }
+
+    let fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+    let branch_tip = resolve_branch_sha(repo_path, factory_branch).ok_or_else(|| {
+        format!(
+            "current factory branch tip {factory_branch} could not be resolved after the target fetch (fetch_attempted={fetch_attempted})."
+        )
+    })?;
+    let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
+    let target_tip = resolve_branch_sha(repo_path, &target_ref).ok_or_else(|| {
+        format!(
+            "current integration target {target_ref} could not be resolved after the target fetch (fetch_attempted={fetch_attempted})."
+        )
+    })?;
+
+    if !git_commit_is_ancestor(repo_path, &branch_tip, &target_ref) {
+        return Err(format!(
+            "current factory branch tip {factory_branch}@{branch_tip} is not an ancestor of the current integration target {target_ref}@{target_tip} after a target fetch (fetch_attempted={fetch_attempted}). Merge the current factory branch tip into {parent_branch} before retrying close."
+        ));
+    }
+
+    Ok(branch_tip)
 }
 
 /// Backwards-compatible shim: evaluate the gate with no delivery-scoping
@@ -18494,6 +18581,135 @@ mod merge_state_gate_tests {
              regardless of task B's later unmerged work on the same branch, \
              got {out:?}"
         );
+    }
+
+    /// cas-2b667 / GH #588: a parked anchor can be fully merged while the
+    /// worker pushes a straggler before the review decision is persisted. The
+    /// ordinary gate intentionally proceeds on the historical anchor, but a
+    /// review-pending transition must reject the current branch tip.
+    #[test]
+    fn review_queue_revalidation_rejects_partial_merge_with_straggler_tip_cas_2b667() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        // The first close captured A+B as the task's parked delivery anchor.
+        for (name, contents) in [("a.rs", "// A\n"), ("b.rs", "// B\n")] {
+            std::fs::write(p.join(name), contents).unwrap();
+            git(p, &["add", name]);
+            git(p, &["commit", "-q", "-m", &format!("feat: task {name}")]);
+        }
+        let parked_anchor = rev_parse(p, "factory/worker");
+
+        // The supervisor merges A+B, then the worker pushes C before the
+        // close decision reaches the supervisor-review queue.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge task A+B",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(p.join("c.rs"), "// straggler C\n").unwrap();
+        git(p, &["add", "c.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: straggler C"]);
+        let current_tip = rev_parse(p, "factory/worker");
+
+        assert!(
+            git_commit_is_ancestor(p, &parked_anchor, "main"),
+            "precondition: the parked A+B anchor must be merged"
+        );
+        assert!(
+            !git_commit_is_ancestor(p, &current_tip, "main"),
+            "precondition: straggler C must not be merged"
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor);
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "precondition: the historical-anchor gate reproduces the GH #588 false Proceed"
+        );
+
+        let rejection = validate_current_factory_branch_tip_ancestry(
+            p,
+            "factory/worker",
+            "main",
+        )
+        .expect_err("review queue must reject the unmerged current tip");
+        assert!(rejection.contains(&current_tip), "{rejection}");
+        assert!(rejection.contains("not an ancestor of"), "{rejection}");
+        assert!(rejection.contains("main"), "{rejection}");
+    }
+
+    /// The decision-time check must use the freshly fetched remote target,
+    /// not a stale local target ref. The live source tip is still rejected
+    /// when the remote target contains only the partially merged A+B.
+    #[test]
+    fn review_queue_revalidation_refreshes_remote_target_before_ancestry_check_cas_2b667() {
+        let bare = tempfile::tempdir().unwrap();
+        git_command(bare.path(), &["init", "-q", "--bare"])
+            .status()
+            .expect("init bare origin");
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+
+        for (name, contents) in [("a.rs", "// A\n"), ("b.rs", "// B\n")] {
+            std::fs::write(p.join(name), contents).unwrap();
+            git(p, &["add", name]);
+            git(p, &["commit", "-q", "-m", &format!("feat: task {name}")]);
+        }
+        let parked_anchor = rev_parse(p, "factory/worker");
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge task A+B",
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        let old_local_main = rev_parse(p, "main~1");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["branch", "-f", "main", &old_local_main]);
+        std::fs::write(p.join("c.rs"), "// straggler C\n").unwrap();
+        git(p, &["add", "c.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: straggler C"]);
+        let current_tip = rev_parse(p, "factory/worker");
+
+        assert!(
+            !git_commit_is_ancestor(p, &parked_anchor, "main"),
+            "precondition: local target ref must be stale"
+        );
+        assert!(
+            git_commit_is_ancestor(p, &parked_anchor, "origin/main"),
+            "precondition: remote target contains the partial merge"
+        );
+
+        let rejection = validate_current_factory_branch_tip_ancestry(
+            p,
+            "factory/worker",
+            "main",
+        )
+        .expect_err("the current straggler tip must not pass against origin/main");
+        assert!(rejection.contains(&current_tip), "{rejection}");
+        assert!(rejection.contains("origin/main"), "{rejection}");
     }
 
     /// cas-fe81: sequential batch merges may edit adjacent context in one

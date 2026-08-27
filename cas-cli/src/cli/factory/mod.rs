@@ -1442,6 +1442,13 @@ fn is_grok_installed() -> bool {
         .is_ok()
 }
 
+fn is_opencode_installed() -> bool {
+    std::process::Command::new("opencode")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 fn parse_supervisor_cli(value: &str) -> Result<cas_mux::SupervisorCli> {
     value
         .parse::<cas_mux::SupervisorCli>()
@@ -1488,14 +1495,10 @@ fn resolve_cli_choice(
             "{role} 'grok' is not installed. Install the xAI Grok Build CLI: \
              curl -fsSL https://x.ai/cli/install.sh | bash"
         ),
-        // OpenCode's adapter and generated projection are implementation-
-        // complete-pending-conformance; T7's live receipt still gates spawn.
-        cas_mux::SupervisorCli::OpenCode => {
-            bail!(
-                "{role} 'opencode' is implementation-complete-pending-conformance; \
-                 live T7 receipt required before spawn"
-            )
-        }
+        cas_mux::SupervisorCli::OpenCode if is_opencode_installed() => Ok(parsed),
+        cas_mux::SupervisorCli::OpenCode => bail!(
+            "{role} 'opencode' is not installed. Install the OpenCode CLI before spawning"
+        ),
     }
 }
 

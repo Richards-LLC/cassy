@@ -1,14 +1,16 @@
-//! Bounded preflight for a locally served OpenAI-compatible OpenCode model.
+//! Bounded preflight for OpenCode's local and hosted OpenAI-compatible routes.
 //!
 //! OpenCode's provider configuration is owned by the factory policy layer, so
 //! this module accepts explicit endpoint/model values and has no dependency on
 //! a particular TOML shape.  The environment names are only an interim input
 //! adapter for callers that have not yet resolved project configuration.
 //!
-//! The probe is deliberately read-only: it lists models, then sends a one-token
-//! chat completion to prove that the selected model is loaded and answerable.
-//! It never sends credentials, persists response data, or includes response
-//! bodies in errors.
+//! Local and pay-as-you-go probes list models, then send a one-token chat
+//! completion. The Token Plan probe is intentionally smaller: the completion
+//! itself is the remote auth/answerability check, and no model-list request is
+//! made. In particular, the Token Plan Anthropic endpoint has no model-list
+//! route and must never be probed here. No probe persists response data or
+//! includes response bodies in errors.
 
 use std::time::Duration;
 
@@ -23,9 +25,13 @@ pub const LOCAL_ENDPOINT_ENV: &str = "CAS_OPENCODE_LOCAL_ENDPOINT";
 /// Interim environment input for the local OpenCode model selector.
 pub const MODEL_ENV: &str = "CAS_OPENCODE_MODEL";
 
-/// Hosted Qwen route credentials.  The value is read only at probe time and
-/// is never copied into a receipt, generated OpenCode config, or an error.
+/// DashScope pay-as-you-go credentials. The value is read only at probe time
+/// and is never copied into a receipt, generated OpenCode config, or an error.
 pub const DASHSCOPE_API_KEY_ENV: &str = "DASHSCOPE_API_KEY";
+
+/// QwenCloud Token Plan credentials. Token Plan keys are dedicated `sk-sp-`
+/// keys and are not interchangeable with DashScope pay-as-you-go keys.
+pub const QWENCLOUD_TOKEN_PLAN_API_KEY_ENV: &str = "QWENCLOUD_TOKEN_PLAN_API_KEY";
 
 /// International DashScope OpenAI-compatible endpoint from Qwen Cloud's
 /// current API documentation.
@@ -36,17 +42,95 @@ pub const DASHSCOPE_INTL_ENDPOINT: &str = "https://dashscope-intl.aliyuncs.com/c
 /// international request.
 pub const DASHSCOPE_CN_ENDPOINT: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
-pub const HOSTED_QWEN_PROVIDER: &str = "alibaba";
+/// QwenCloud Token Plan's OpenAI-compatible endpoint.
+pub const QWENCLOUD_TOKEN_PLAN_ENDPOINT: &str =
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+
+/// Canonical OpenCode provider id for the operator's Token Plan route.
+pub const QWENCLOUD_TOKEN_PLAN_PROVIDER: &str = "qwencloud";
+
+/// Canonical OpenCode provider id for DashScope pay-as-you-go.
+pub const HOSTED_PAYG_PROVIDER: &str = "alibaba";
+/// Legacy T8 name retained for callers that used the DashScope provider.
+pub const HOSTED_QWEN_PROVIDER: &str = HOSTED_PAYG_PROVIDER;
 pub const HOSTED_QWEN_CN_PROVIDER: &str = "alibaba-cn";
 pub const HOSTED_QWEN_MODEL: &str = "qwen3.8-max";
 
+/// Alternate explicit spelling accepted for operator configuration. The
+/// canonical selector remains `qwencloud/qwen3.8-max`.
+pub const HOSTED_TOKEN_PLAN_PROVIDER: &str = "hosted-token-plan";
+
+/// Alternate explicit spelling accepted for operator configuration.
+pub const HOSTED_PAYG_SELECTOR_PROVIDER: &str = "hosted-payg";
+
 /// Qwen3.8-Max's own reasoning variants.  These are intentionally separate
 /// from the local server's probed effort set.
-pub const HOSTED_QWEN_ACCEPTED_EFFORTS: [cas_mux::Effort; 3] = [
+pub const HOSTED_PAYG_ACCEPTED_EFFORTS: [cas_mux::Effort; 3] = [
     cas_mux::Effort::Low,
     cas_mux::Effort::Medium,
     cas_mux::Effort::XHigh,
 ];
+
+/// QwenCloud's Token Plan qwen3.8-max table. The values currently match the
+/// pay-as-you-go model, but the wire contract is separate: Token Plan uses
+/// OpenAI-compatible `enable_thinking` body configuration and must not inherit
+/// a future pay-as-you-go remapping.
+pub const HOSTED_TOKEN_PLAN_ACCEPTED_EFFORTS: [cas_mux::Effort; 3] = [
+    cas_mux::Effort::Low,
+    cas_mux::Effort::Medium,
+    cas_mux::Effort::XHigh,
+];
+
+/// T8 compatibility alias for the DashScope hosted effort table.
+pub const HOSTED_QWEN_ACCEPTED_EFFORTS: [cas_mux::Effort; 3] = HOSTED_PAYG_ACCEPTED_EFFORTS;
+
+/// Explicit hosted billing lane selected by the provider/model selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedLane {
+    TokenPlan,
+    Payg,
+}
+
+impl HostedLane {
+    pub const fn route(self) -> ServingRoute {
+        match self {
+            Self::TokenPlan => ServingRoute::HostedTokenPlan,
+            Self::Payg => ServingRoute::HostedPayg,
+        }
+    }
+
+    pub const fn key_env(self) -> &'static str {
+        match self {
+            Self::TokenPlan => QWENCLOUD_TOKEN_PLAN_API_KEY_ENV,
+            Self::Payg => DASHSCOPE_API_KEY_ENV,
+        }
+    }
+
+    pub const fn endpoint(self) -> &'static str {
+        match self {
+            Self::TokenPlan => QWENCLOUD_TOKEN_PLAN_ENDPOINT,
+            Self::Payg => DASHSCOPE_INTL_ENDPOINT,
+        }
+    }
+
+    pub const fn accepted_efforts(self) -> &'static [cas_mux::Effort] {
+        match self {
+            Self::TokenPlan => &HOSTED_TOKEN_PLAN_ACCEPTED_EFFORTS,
+            Self::Payg => &HOSTED_PAYG_ACCEPTED_EFFORTS,
+        }
+    }
+
+    pub const fn uses_model_list(self) -> bool {
+        matches!(self, Self::Payg)
+    }
+
+    pub const fn wire_contract(self) -> &'static str {
+        match self {
+            Self::TokenPlan => "extra_body.enable_thinking",
+            Self::Payg => "reasoning_effort",
+        }
+    }
+}
 
 /// A route selector carried by the OpenCode `provider/model` selector.
 pub type OpenCodeRoute = ServingRoute;
@@ -86,7 +170,7 @@ pub struct HostedEndpointPreflight {
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Classify a complete OpenCode provider/model selector into one explicit
-/// serving route.  Requiring the provider prefix is important: a hosted
+/// serving route. Requiring the provider prefix is important: a hosted
 /// failure must never silently fall back to a local endpoint (or vice versa).
 pub fn opencode_route_for_selector(selector: &str) -> Result<ServingRoute, String> {
     let selector = selector.trim();
@@ -103,9 +187,33 @@ pub fn opencode_route_for_selector(selector: &str) -> Result<ServingRoute, Strin
     }
     match provider.as_str() {
         "local" => Ok(ServingRoute::Local),
-        HOSTED_QWEN_PROVIDER | HOSTED_QWEN_CN_PROVIDER => Ok(ServingRoute::Hosted),
+        QWENCLOUD_TOKEN_PLAN_PROVIDER | HOSTED_TOKEN_PLAN_PROVIDER => {
+            Ok(ServingRoute::HostedTokenPlan)
+        }
+        HOSTED_PAYG_PROVIDER | HOSTED_QWEN_CN_PROVIDER | HOSTED_PAYG_SELECTOR_PROVIDER => {
+            Ok(ServingRoute::HostedPayg)
+        }
         _ => Err(format!(
-            "OpenCode provider {provider:?} is not a supported route; choose explicit local/<model> or alibaba/qwen3.8-max"
+            "OpenCode provider {provider:?} is not a supported route; choose explicit local/<model>, qwencloud/qwen3.8-max, or alibaba/qwen3.8-max"
+        )),
+    }
+}
+
+/// Return the explicit hosted billing lane selected by a provider/model
+/// selector. A selector without a provider is rejected rather than inferred.
+pub fn hosted_lane_for_selector(selector: &str) -> Result<HostedLane, String> {
+    let Some((provider, _model)) = selector.trim().split_once('/') else {
+        return Err(format!(
+            "hosted OpenCode selector {selector:?} must explicitly name a lane as provider/model"
+        ));
+    };
+    match provider.trim().to_ascii_lowercase().as_str() {
+        QWENCLOUD_TOKEN_PLAN_PROVIDER | HOSTED_TOKEN_PLAN_PROVIDER => Ok(HostedLane::TokenPlan),
+        HOSTED_PAYG_PROVIDER | HOSTED_QWEN_CN_PROVIDER | HOSTED_PAYG_SELECTOR_PROVIDER => {
+            Ok(HostedLane::Payg)
+        }
+        other => Err(format!(
+            "OpenCode hosted provider {other:?} is not a supported billing lane; choose {QWENCLOUD_TOKEN_PLAN_PROVIDER:?} for Token Plan or {HOSTED_PAYG_PROVIDER:?} for pay-as-you-go"
         )),
     }
 }
@@ -113,10 +221,13 @@ pub fn opencode_route_for_selector(selector: &str) -> Result<ServingRoute, Strin
 /// Return the documented hosted endpoint for a provider selector.
 pub fn hosted_endpoint_for_provider(provider: &str) -> Result<&'static str, String> {
     match provider.trim().to_ascii_lowercase().as_str() {
-        HOSTED_QWEN_PROVIDER => Ok(DASHSCOPE_INTL_ENDPOINT),
+        QWENCLOUD_TOKEN_PLAN_PROVIDER | HOSTED_TOKEN_PLAN_PROVIDER => {
+            Ok(QWENCLOUD_TOKEN_PLAN_ENDPOINT)
+        }
+        HOSTED_PAYG_PROVIDER | HOSTED_PAYG_SELECTOR_PROVIDER => Ok(DASHSCOPE_INTL_ENDPOINT),
         HOSTED_QWEN_CN_PROVIDER => Ok(DASHSCOPE_CN_ENDPOINT),
         other => Err(format!(
-            "OpenCode hosted provider {other:?} is unsupported; expected {HOSTED_QWEN_PROVIDER:?} or {HOSTED_QWEN_CN_PROVIDER:?}"
+            "OpenCode hosted provider {other:?} is unsupported; expected {QWENCLOUD_TOKEN_PLAN_PROVIDER:?}, {HOSTED_PAYG_PROVIDER:?}, or {HOSTED_QWEN_CN_PROVIDER:?}"
         )),
     }
 }
@@ -130,46 +241,115 @@ pub fn hosted_serving_identity(selector: &str) -> Result<ServingIdentity, String
     };
     let provider = provider.trim().to_ascii_lowercase();
     let model = model.trim();
-    if !matches!(
-        provider.as_str(),
-        HOSTED_QWEN_PROVIDER | HOSTED_QWEN_CN_PROVIDER
-    ) {
-        return Err(format!(
-            "hosted OpenCode provider {provider:?} is unsupported"
-        ));
-    }
+    let lane = hosted_lane_for_selector(selector)?;
     if model != HOSTED_QWEN_MODEL {
         return Err(format!(
-            "hosted OpenCode provider {provider:?} currently supports model {HOSTED_QWEN_MODEL:?}; received {model:?}"
+            "hosted OpenCode provider {provider:?} on the {} lane currently supports model {HOSTED_QWEN_MODEL:?}; received {model:?}",
+            lane_name(lane)
         ));
     }
+    let endpoint = hosted_endpoint_for_provider(&provider)?.to_string();
     Ok(ServingIdentity {
-        provider: provider.clone(),
+        provider,
         model: model.to_string(),
-        endpoint: hosted_endpoint_for_provider(provider.as_str())?.to_string(),
+        endpoint,
     })
 }
 
-/// Validate a requested shared effort against Qwen3.8-Max's hosted variants.
-/// The provider's compatibility layer maps OpenAI `high`/`minimal` values;
-/// rejecting them here preserves the exact Cassy request in the spawn spec.
+/// Validate a requested effort against the selected hosted lane's own table.
+/// The provider compatibility layer may map OpenAI values; rejecting them here
+/// preserves the exact Cassy request in the spawn spec.
 pub fn validate_hosted_effort(effort: Option<cas_mux::Effort>) -> Result<(), String> {
+    validate_hosted_effort_for_lane(HostedLane::Payg, effort)
+}
+
+pub fn validate_hosted_effort_for_lane(
+    lane: HostedLane,
+    effort: Option<cas_mux::Effort>,
+) -> Result<(), String> {
     let Some(effort) = effort else {
         return Ok(());
     };
-    if HOSTED_QWEN_ACCEPTED_EFFORTS.contains(&effort) {
+    if lane.accepted_efforts().contains(&effort) {
         return Ok(());
     }
     Err(format!(
-        "hosted OpenCode model {HOSTED_QWEN_MODEL:?} rejects effort {effort}; accepted hosted efforts: [low, medium, xhigh]. No effort remapping is performed."
+        "hosted OpenCode {} lane model {HOSTED_QWEN_MODEL:?} rejects effort {effort}; accepted {} efforts: [{}] (accepted hosted efforts: [{}]). No effort remapping is performed.",
+        lane_name(lane),
+        lane_name(lane),
+        format_efforts(lane.accepted_efforts()),
+        format_efforts(lane.accepted_efforts())
     ))
 }
 
-/// Probe the hosted DashScope route with a key supplied by the caller.
+fn lane_name(lane: HostedLane) -> &'static str {
+    match lane {
+        HostedLane::TokenPlan => "hosted-token-plan",
+        HostedLane::Payg => "hosted-payg",
+    }
+}
+
+fn format_efforts(efforts: &[cas_mux::Effort]) -> String {
+    efforts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Validate only the key's non-secret prefix against its explicit hosted lane.
+/// This is intentionally separate from network probing so an accidental key
+/// mix-up cannot consume a provider request or silently change billing.
+pub fn validate_hosted_api_key(lane: HostedLane, api_key: Option<&str>) -> Result<(), String> {
+    let key = api_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} lane requires {}; live hosted conformance remains pending-key",
+                lane_name(lane),
+                lane.key_env()
+            )
+        })?;
+    let observed = key_prefix_class(key);
+    let valid = match lane {
+        HostedLane::TokenPlan => observed == "sk-sp-",
+        HostedLane::Payg => matches!(observed, "sk-" | "sk-ws-"),
+    };
+    if valid {
+        return Ok(());
+    }
+    let expected = match lane {
+        HostedLane::TokenPlan => "sk-sp-",
+        HostedLane::Payg => "sk- or sk-ws-",
+    };
+    Err(format!(
+        "{} lane key prefix mismatch: expected {expected}, received {observed}; set {} for this lane. No secret was inspected or echoed.",
+        lane_name(lane),
+        lane.key_env()
+    ))
+}
+
+fn key_prefix_class(key: &str) -> &'static str {
+    if key.starts_with("sk-sp-") {
+        "sk-sp-"
+    } else if key.starts_with("sk-ws-") {
+        "sk-ws-"
+    } else if key.starts_with("sk-") {
+        "sk-"
+    } else {
+        "unknown"
+    }
+}
+
+/// Probe a hosted route with a key supplied by the caller.
 ///
-/// The probe lists models and performs a one-token completion.  Only status
-/// classes and secret-free metadata are returned in errors; the key is sent
-/// solely as an Authorization header and is never interpolated into output.
+/// Pay-as-you-go performs the T8 model-list plus one-token completion probe.
+/// Token Plan performs only one-token completion: that request validates both
+/// authentication and answerability, and deliberately avoids model discovery.
+/// Only status classes and secret-free metadata are returned in errors; the key
+/// is sent solely as an Authorization header and is never interpolated into
+/// output.
 pub fn preflight_hosted_endpoint(
     selector: &str,
     api_key: Option<&str>,
@@ -191,15 +371,12 @@ pub fn preflight_hosted_endpoint_at(
     api_key: Option<&str>,
     timeout: Duration,
 ) -> Result<HostedEndpointPreflight, String> {
+    let lane = hosted_lane_for_selector(selector)?;
     let mut identity = hosted_serving_identity(selector)?;
+    validate_hosted_api_key(lane, api_key)?;
     let key = api_key
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "OpenCode hosted route {selector:?} requires {DASHSCOPE_API_KEY_ENV}; live hosted conformance remains pending-key"
-            )
-        })?;
+        .expect("validated hosted API key must be present")
+        .trim();
     if timeout.is_zero() {
         return Err(format!(
             "OpenCode hosted preflight for {selector:?} requires a positive timeout"
@@ -207,44 +384,64 @@ pub fn preflight_hosted_endpoint_at(
     }
 
     let endpoint_url = parse_provider_endpoint(endpoint)?;
+    if endpoint_url.path().contains("/apps/anthropic") {
+        return Err(format!(
+            "{} lane preflight requires the OpenAI-compatible endpoint ending in /compatible-mode/v1; the /apps/anthropic endpoint has no model-list route and is not probed",
+            lane_name(lane)
+        ));
+    }
     let display_endpoint = safe_endpoint_display(&endpoint_url);
     identity.endpoint = display_endpoint.clone();
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-    let models_url = endpoint_path(&endpoint_url, "models");
-    let response = agent
-        .get(&models_url)
-        .set("Authorization", &format!("Bearer {key}"))
-        .call()
-        .map_err(|error| {
+    let mut loaded_models = Vec::new();
+    if lane.uses_model_list() {
+        let models_url = endpoint_path(&endpoint_url, "models");
+        let response = agent
+            .get(&models_url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .call()
+            .map_err(|error| {
+                format!(
+                    "OpenCode {} preflight could not validate authentication at {display_endpoint}: {} (check {})",
+                    lane_name(lane),
+                    hosted_transport_error_class(&error),
+                    lane.key_env()
+                )
+            })?;
+        let payload: Value = response.into_json().map_err(|_| {
             format!(
-                "OpenCode hosted preflight could not validate {HOSTED_QWEN_PROVIDER} authentication at {display_endpoint}: {} (check {DASHSCOPE_API_KEY_ENV} and network access)",
-                hosted_transport_error_class(&error)
+                "OpenCode {} preflight reached {display_endpoint}, but the model listing was not valid JSON",
+                lane_name(lane)
             )
         })?;
-    let payload: Value = response.into_json().map_err(|_| {
-        format!(
-            "OpenCode hosted preflight reached {display_endpoint}, but the model listing was not valid JSON"
-        )
-    })?;
-    let loaded_models = model_ids(&payload);
-    if !loaded_models.iter().any(|model| model == HOSTED_QWEN_MODEL) {
-        let listed = if loaded_models.is_empty() {
-            "none".to_string()
-        } else {
-            loaded_models.join(", ")
-        };
-        return Err(format!(
-            "OpenCode hosted preflight authenticated at {display_endpoint}, but model {HOSTED_QWEN_MODEL:?} is not available; endpoint reports: {listed}"
-        ));
+        loaded_models = model_ids(&payload);
+        if !loaded_models.iter().any(|model| model == HOSTED_QWEN_MODEL) {
+            let listed = if loaded_models.is_empty() {
+                "none".to_string()
+            } else {
+                loaded_models.join(", ")
+            };
+            return Err(format!(
+                "OpenCode {} preflight authenticated at {display_endpoint}, but model {HOSTED_QWEN_MODEL:?} is not available; endpoint reports: {listed}",
+                lane_name(lane)
+            ));
+        }
     }
 
     let completions_url = endpoint_path(&endpoint_url, "chat/completions");
-    let probe = serde_json::json!({
+    let mut probe = serde_json::json!({
         "model": HOSTED_QWEN_MODEL,
         "messages": [{"role": "user", "content": "Reply with READY."}],
         "max_tokens": 1,
         "stream": false
     });
+    if matches!(lane, HostedLane::TokenPlan) {
+        // This is the direct HTTP equivalent of the SDK's extra_body. The
+        // endpoint is OpenAI-compatible and QwenCloud uses this body flag to
+        // pin the Token Plan thinking contract; no pay-as-you-go remapping is
+        // inherited.
+        probe["enable_thinking"] = Value::Bool(true);
+    }
     let response = agent
         .post(&completions_url)
         .set("Authorization", &format!("Bearer {key}"))
@@ -252,13 +449,20 @@ pub fn preflight_hosted_endpoint_at(
         .send_json(probe)
         .map_err(|error| {
             format!(
-                "OpenCode hosted preflight found model {HOSTED_QWEN_MODEL:?}, but its answer probe failed at {display_endpoint}: {}",
+                "OpenCode {} preflight {} model {HOSTED_QWEN_MODEL:?}, but its answer probe failed at {display_endpoint}: {}",
+                lane_name(lane),
+                if lane.uses_model_list() {
+                    "found"
+                } else {
+                    "authenticated for"
+                },
                 hosted_transport_error_class(&error)
             )
         })?;
     let answer: Value = response.into_json().map_err(|_| {
         format!(
-            "OpenCode hosted preflight found model {HOSTED_QWEN_MODEL:?}, but its answer probe returned invalid JSON"
+            "OpenCode {} preflight answer probe for model {HOSTED_QWEN_MODEL:?} returned invalid JSON",
+            lane_name(lane)
         )
     })?;
     if !answer
@@ -267,15 +471,17 @@ pub fn preflight_hosted_endpoint_at(
         .is_some_and(|choices| !choices.is_empty())
     {
         return Err(format!(
-            "OpenCode hosted preflight found model {HOSTED_QWEN_MODEL:?}, but its answer probe returned no choices"
+            "OpenCode {} preflight answer probe for model {HOSTED_QWEN_MODEL:?} returned no choices",
+            lane_name(lane)
         ));
     }
 
     Ok(HostedEndpointPreflight {
-        route: ServingRoute::Hosted,
+        route: lane.route(),
         serving_identity: identity,
         loaded_models,
-        accepted_efforts: HOSTED_QWEN_ACCEPTED_EFFORTS
+        accepted_efforts: lane
+            .accepted_efforts()
             .iter()
             .map(ToString::to_string)
             .collect(),
@@ -289,11 +495,9 @@ pub fn preflight_hosted_from_env(
     selector: &str,
     timeout: Duration,
 ) -> Result<HostedEndpointPreflight, String> {
-    preflight_hosted_endpoint(
-        selector,
-        std::env::var(DASHSCOPE_API_KEY_ENV).ok().as_deref(),
-        timeout,
-    )
+    let lane = hosted_lane_for_selector(selector)?;
+    let key = std::env::var(lane.key_env()).ok();
+    preflight_hosted_endpoint(selector, key.as_deref(), timeout)
 }
 
 /// Evidence returned after both model discovery and a bounded answer probe.
@@ -507,7 +711,7 @@ fn transport_error_class(error: &ureq::Error) -> &'static str {
 fn hosted_transport_error_class(error: &ureq::Error) -> &'static str {
     match error {
         ureq::Error::Status(code, _) => match *code {
-            401 | 403 => "DASHSCOPE_API_KEY was rejected",
+            401 | 403 => "the hosted API key was rejected",
             404 => "the hosted provider endpoint returned not found",
             500..=599 => "the hosted provider returned a server error",
             _ => "the hosted provider returned an HTTP error",
@@ -624,11 +828,15 @@ mod tests {
         );
         assert_eq!(
             opencode_route_for_selector("alibaba/qwen3.8-max"),
-            Ok(ServingRoute::Hosted)
+            Ok(ServingRoute::HostedPayg)
         );
         assert_eq!(
             opencode_route_for_selector("alibaba-cn/qwen3.8-max"),
-            Ok(ServingRoute::Hosted)
+            Ok(ServingRoute::HostedPayg)
+        );
+        assert_eq!(
+            opencode_route_for_selector("qwencloud/qwen3.8-max"),
+            Ok(ServingRoute::HostedTokenPlan)
         );
         let error = opencode_route_for_selector("qwen3.8-max").unwrap_err();
         assert!(error.contains("provider/model"), "{error}");
@@ -672,16 +880,16 @@ mod tests {
         let result = preflight_hosted_endpoint_at(
             "alibaba/qwen3.8-max",
             &endpoint,
-            Some("sk-hosted-secret"),
+            Some("sk-payg-test"),
             Duration::from_secs(2),
         )
         .unwrap();
         thread.join().unwrap();
         let requests: Vec<_> = requests_rx.into_iter().collect();
         assert_eq!(requests.len(), 2);
-        assert!(requests[0].contains("Authorization: Bearer sk-hosted-secret"));
-        assert!(requests[1].contains("Authorization: Bearer sk-hosted-secret"));
-        assert_eq!(result.route, ServingRoute::Hosted);
+        assert!(requests[0].contains("Authorization: Bearer sk-payg-test"));
+        assert!(requests[1].contains("Authorization: Bearer sk-payg-test"));
+        assert_eq!(result.route, ServingRoute::HostedPayg);
         assert_eq!(result.serving_identity.provider, "alibaba");
         assert_eq!(result.serving_identity.model, HOSTED_QWEN_MODEL);
         assert_eq!(result.serving_identity.endpoint, format!("{endpoint}/"));
@@ -691,7 +899,7 @@ mod tests {
             vec!["low".to_string(), "medium".to_string(), "xhigh".to_string()]
         );
         let receipt = serde_json::to_string(&result).unwrap();
-        assert!(!receipt.contains("sk-hosted-secret"));
+        assert!(!receipt.contains("sk-payg-test"));
     }
 
     #[test]
@@ -703,4 +911,98 @@ mod tests {
         assert!(error.contains("pending-key"), "{error}");
         assert!(!error.contains("Bearer"), "{error}");
     }
+
+    #[test]
+    fn hosted_lanes_refuse_cross_billing_key_prefixes_without_secret_echo() {
+        assert!(validate_hosted_api_key(HostedLane::TokenPlan, Some("sk-sp-token")).is_ok());
+        assert!(validate_hosted_api_key(HostedLane::Payg, Some("sk-payg-token")).is_ok());
+        assert!(validate_hosted_api_key(HostedLane::Payg, Some("sk-ws-token")).is_ok());
+
+        let token_error =
+            validate_hosted_api_key(HostedLane::TokenPlan, Some("sk-payg-mismatch")).unwrap_err();
+        assert!(token_error.contains("hosted-token-plan"), "{token_error}");
+        assert!(token_error.contains("sk-sp-"), "{token_error}");
+        assert!(token_error.contains("sk-"), "{token_error}");
+        assert!(
+            !token_error.contains("sk-payg-mismatch"),
+            "key leaked: {token_error}"
+        );
+
+        let payg_error =
+            validate_hosted_api_key(HostedLane::Payg, Some("sk-sp-mismatch")).unwrap_err();
+        assert!(payg_error.contains("hosted-payg"), "{payg_error}");
+        assert!(payg_error.contains("sk-sp-"), "{payg_error}");
+        assert!(payg_error.contains("sk- or sk-ws-"), "{payg_error}");
+        assert!(!payg_error.contains("sk-sp-mismatch"), "key leaked: {payg_error}");
+    }
+
+    #[test]
+    fn token_plan_preflight_is_one_openai_completion_without_model_listing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let size = stream.read(&mut buffer).unwrap();
+                if size == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..size]);
+                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            request_tx
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            respond_body(stream, r#"{"choices":[{"message":{"content":"READY"}}]}"#);
+        });
+
+        let result = preflight_hosted_endpoint_at(
+            "qwencloud/qwen3.8-max",
+            &endpoint,
+            Some("sk-sp-token-plan-test"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        thread.join().unwrap();
+        let request = request_rx.recv().unwrap();
+        assert_eq!(request.matches("HTTP/1.1").count(), 1);
+        assert!(request.starts_with("POST /chat/completions HTTP/1.1"), "{request}");
+        assert!(!request.contains("/models"), "Token Plan must not list models: {request}");
+        assert!(request.contains("enable_thinking"), "{request}");
+        assert_eq!(result.route, ServingRoute::HostedTokenPlan);
+        assert!(result.loaded_models.is_empty());
+        assert!(result.authenticated && result.answerable);
+        let receipt = serde_json::to_string(&result).unwrap();
+        assert!(!receipt.contains("sk-sp-token-plan-test"));
+    }
+
+    #[test]
+    fn token_plan_anthropic_endpoint_is_rejected_before_any_probe() {
+        let error = preflight_hosted_endpoint_at(
+            "qwencloud/qwen3.8-max",
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+            Some("sk-sp-token"),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(error.contains("OpenAI-compatible"), "{error}");
+        assert!(error.contains("/apps/anthropic"), "{error}");
+        assert!(!error.contains("sk-sp-token"), "secret leaked: {error}");
+    }
+
 }

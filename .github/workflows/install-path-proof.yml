@@ -1,0 +1,231 @@
+name: Install path proof
+
+# This is an advisory, post-publication proof of the journey a new user takes.
+# It waits for `release.published` rather than racing the release publisher on
+# the tag push, so CAS_VERSION names assets that are already downloadable.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published release tag to install (blank means latest)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-path-proof-${{ github.event.release.tag_name || inputs.version || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  INSTALLER_REPOSITORY: ${{ github.repository }}
+  INSTALLER_VERSION: ${{ inputs.version || github.event.release.tag_name }}
+
+jobs:
+  macos:
+    name: Install path proof — macOS Apple Silicon
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run the published install path
+        shell: bash
+        env:
+          PROOF_TRANSCRIPT: ${{ github.workspace }}/install-path-proof-macos.log
+        run: |
+          set -Eeuo pipefail
+
+          proof_home="$RUNNER_TEMP/cassy-install-proof-home"
+          rm -rf -- "$proof_home"
+          mkdir -p -- "$proof_home"
+          export HOME="$proof_home"
+          : >"$PROOF_TRANSCRIPT"
+          exec > >(tee -a "$PROOF_TRANSCRIPT") 2>&1
+
+          echo "Install path proof: macOS hosted runner"
+          echo "Repository: $INSTALLER_REPOSITORY"
+          echo "Requested release: ${INSTALLER_VERSION:-latest}"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          command -v xattr >/dev/null
+          original_path="$PATH"
+
+          release_version="$INSTALLER_VERSION"
+          if [[ -n "$release_version" ]]; then
+            case "$release_version" in
+              v[0-9]*) ;;
+              *) echo "Release version must be a v<semver> tag: $release_version" >&2; exit 1 ;;
+            esac
+            installer_url="https://raw.githubusercontent.com/$INSTALLER_REPOSITORY/$release_version/scripts/cas-install.sh"
+          else
+            installer_url="https://raw.githubusercontent.com/$INSTALLER_REPOSITORY/main/scripts/cas-install.sh"
+          fi
+
+          installer_env=(
+            "CAS_INSTALL_DIR=$HOME/.local/bin"
+            'CAS_WIRE_PATH=1'
+            "CAS_REPO=$INSTALLER_REPOSITORY"
+            'SHELL=/bin/zsh'
+          )
+          if [[ -n "$release_version" ]]; then
+            installer_env+=("CAS_VERSION=$release_version")
+          fi
+
+          echo "Installer: $installer_url"
+          echo 'Command shape: curl ... cas-install.sh | bash'
+          installer_output="$(
+            curl --fail --silent --show-error --location --retry 3 "$installer_url" \
+              | env "${installer_env[@]}" bash
+          )"
+          printf '%s\n' "$installer_output"
+
+          echo 'Checking the installer success contract.'
+          grep -qF 'Cassy installed successfully!' <<<"$installer_output"
+          grep -qF 'A new terminal can run `cas`.' <<<"$installer_output"
+
+          echo 'Checking a fresh zsh login shell from the pre-install PATH.'
+          fresh_login_output="$(
+            env HOME="$HOME" PATH="$original_path" SHELL=/bin/zsh \
+              /bin/zsh -lc 'set -e; command -v cas; cas --version'
+          )"
+          printf '%s\n' "$fresh_login_output"
+          test "$(printf '%s\n' "$fresh_login_output" | head -n 1)" = "$HOME/.local/bin/cas"
+          grep -qF 'cas ' <<<"$fresh_login_output"
+
+          echo 'Checking the post-install quarantine state without manual clearing.'
+          if xattr -p com.apple.quarantine "$HOME/.local/bin/cas" >/dev/null 2>&1; then
+            echo 'The installed binary still has com.apple.quarantine.' >&2
+            exit 1
+          fi
+          echo 'No com.apple.quarantine attribute remains; executing the installed binary.'
+
+          echo 'Checking bare cas and cas doctor in a fresh login shell.'
+          fresh_commands_output="$(
+            env HOME="$HOME" PATH="$original_path" SHELL=/bin/zsh \
+              /bin/zsh -lc 'set -e; cas; cas doctor'
+          )"
+          printf '%s\n' "$fresh_commands_output"
+          grep -qF 'Welcome to Cassy. Run `cas init` in a project directory to get started.' \
+            <<<"$fresh_commands_output"
+          grep -qF "Not found. Run 'cas init'" <<<"$fresh_commands_output"
+
+          echo 'PASS: macOS Apple Silicon install path, fresh shell, quarantine, bare cas, and doctor verified.'
+
+      - name: Upload macOS install proof transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-path-proof-macos-${{ github.run_id }}
+          path: ${{ github.workspace }}/install-path-proof-macos.log
+          if-no-files-found: error
+          retention-days: 90
+
+  linux:
+    name: Install path proof — clean Linux container
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: ubuntu:24.04
+      options: --user root
+    env:
+      PROOF_TRANSCRIPT: ${{ github.workspace }}/install-path-proof-linux.log
+    steps:
+      - name: Install only the runtime prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : >"$PROOF_TRANSCRIPT"
+          exec > >(tee -a "$PROOF_TRANSCRIPT") 2>&1
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bash ca-certificates coreutils curl grep tar
+          rm -rf -- /var/lib/apt/lists/*
+          if command -v rustc >/dev/null 2>&1; then
+            echo 'The proof container unexpectedly includes Rust.' >&2
+            exit 1
+          fi
+          echo 'Clean Linux proof container has no preinstalled rustc.'
+
+      - name: Run the published install path
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          proof_home="$RUNNER_TEMP/cassy-install-proof-home"
+          rm -rf -- "$proof_home"
+          mkdir -p -- "$proof_home"
+          export HOME="$proof_home"
+          exec > >(tee -a "$PROOF_TRANSCRIPT") 2>&1
+
+          echo "Install path proof: clean Linux container"
+          echo "Repository: $INSTALLER_REPOSITORY"
+          echo "Requested release: ${INSTALLER_VERSION:-latest}"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          original_path="$PATH"
+
+          release_version="$INSTALLER_VERSION"
+          if [[ -n "$release_version" ]]; then
+            case "$release_version" in
+              v[0-9]*) ;;
+              *) echo "Release version must be a v<semver> tag: $release_version" >&2; exit 1 ;;
+            esac
+            installer_url="https://raw.githubusercontent.com/$INSTALLER_REPOSITORY/$release_version/scripts/cas-install.sh"
+          else
+            installer_url="https://raw.githubusercontent.com/$INSTALLER_REPOSITORY/main/scripts/cas-install.sh"
+          fi
+
+          installer_env=(
+            "CAS_INSTALL_DIR=$HOME/.local/bin"
+            'CAS_WIRE_PATH=1'
+            "CAS_REPO=$INSTALLER_REPOSITORY"
+            'SHELL=/bin/bash'
+          )
+          if [[ -n "$release_version" ]]; then
+            installer_env+=("CAS_VERSION=$release_version")
+          fi
+
+          echo "Installer: $installer_url"
+          echo 'Command shape: curl ... cas-install.sh | bash'
+          installer_output="$(
+            curl --fail --silent --show-error --location --retry 3 "$installer_url" \
+              | env "${installer_env[@]}" bash
+          )"
+          printf '%s\n' "$installer_output"
+
+          echo 'Checking the installer success contract.'
+          grep -qF 'Cassy installed successfully!' <<<"$installer_output"
+          grep -qF 'A new terminal can run `cas`.' <<<"$installer_output"
+
+          echo 'Checking a fresh bash login shell from the pre-install PATH.'
+          fresh_login_output="$(
+            env HOME="$HOME" PATH="$original_path" SHELL=/bin/bash \
+              /bin/bash -lc 'set -e; command -v cas; cas --version'
+          )"
+          printf '%s\n' "$fresh_login_output"
+          test "$(printf '%s\n' "$fresh_login_output" | head -n 1)" = "$HOME/.local/bin/cas"
+          grep -qF 'cas ' <<<"$fresh_login_output"
+
+          echo 'Checking bare cas and cas doctor in a fresh login shell.'
+          fresh_commands_output="$(
+            env HOME="$HOME" PATH="$original_path" SHELL=/bin/bash \
+              /bin/bash -lc 'set -e; cas; cas doctor'
+          )"
+          printf '%s\n' "$fresh_commands_output"
+          grep -qF 'Welcome to Cassy. Run `cas init` in a project directory to get started.' \
+            <<<"$fresh_commands_output"
+          grep -qF "Not found. Run 'cas init'" <<<"$fresh_commands_output"
+
+          echo 'PASS: clean Linux install path, fresh shell, bare cas, and doctor verified.'
+
+      - name: Upload Linux install proof transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-path-proof-linux-${{ github.run_id }}
+          path: ${{ github.workspace }}/install-path-proof-linux.log
+          if-no-files-found: error
+          retention-days: 90

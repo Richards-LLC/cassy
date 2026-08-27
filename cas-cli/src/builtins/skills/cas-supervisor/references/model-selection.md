@@ -65,6 +65,11 @@ pay-as-you-go. A lane is never inferred or used as fallback for another. Product
 factory spawning remains gated on the lane's live conformance receipt. Do not
 persist keys in generated files or task receipts.
 
+Token Plan fan-out follows the operator-declared plan tier: Lite permits 1–2,
+Standard 3–4, and Pro 6–8 concurrent OpenCode agents. Warn or cap a spawn request
+that exceeds the declared tier; do not scrape the operator console. A receipt may
+carry the operator-declared tier as metadata when supplied.
+
 - `cli=opencode model=local/qwen3.8` — local serving; endpoint reachability, model
   loading, and accepted effort variants come from the local operator preflight.
 - `cli=opencode model=qwencloud/qwen3.8-max effort=low|medium|xhigh` — hosted

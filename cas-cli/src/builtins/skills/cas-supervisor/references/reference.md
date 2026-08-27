@@ -41,6 +41,8 @@ mcp__cas__coordination action=server_stop ...
 
 `cli`, `model`, and `effort` are per-spawn controls — they apply to the workers spawned by this call only. Supervisors MUST pass explicit `cli=`, `model=`, and `effort=` on every `spawn_workers` call; omitted fields resolve through the config cascade as a fallback and produce an acknowledgement warning. Copy-paste recipes for all four backends: [model-selection.md](model-selection.md#spawn-cookbook-all-four-harnesses).
 
+For OpenCode Token Plan fan-out, honor the operator-declared concurrency tier: Lite 1–2 agents, Standard 3–4, or Pro 6–8. Warn or cap requests beyond that tier; do not scrape the operator console.
+
 **On `mcp__cas__task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are coordination actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
 
 **Priority** is `0=Critical, 1=High, 2=Medium (default), 3=Low, 4=Backlog`. Accepts numeric OR named alias: `priority=1` ≡ `priority="high"`. Other aliases: `critical`, `medium`, `low`, `backlog`, `p0`-`p4`.

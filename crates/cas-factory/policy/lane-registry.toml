@@ -59,7 +59,7 @@ reason = "Standing operator suspension (2026-08-27)"
 required_capability = "codex-account"
 
 [lanes.light]
-candidates = ["claude_haiku", "claude_opus"]
+candidates = ["claude_haiku", "codex_luna"]
 
 [lanes.standard]
 candidates = ["codex_luna", "claude_opus"]

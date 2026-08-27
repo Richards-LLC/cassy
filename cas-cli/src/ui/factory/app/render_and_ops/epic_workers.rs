@@ -1882,6 +1882,19 @@ impl FactoryApp {
         let cwd = result.cwd;
         let cas_root = result.cas_root;
 
+        // Validate the effective post-cascade spec immediately before the
+        // PTY launch. Queue producers validate their resolved payloads, but a
+        // dynamic config reload or a legacy queue row can still supply a
+        // different default at this boundary. Borrowing the spec here keeps
+        // explicit triples immutable while making this the final fail-closed
+        // gate before `Mux::add_worker` starts a process.
+        let effective_spec = self.mux.effective_worker_spec(&worker_name, spec.clone());
+        cas_factory::validate_explicit(
+            &effective_spec,
+            &cas_factory::CapabilitySnapshot::default(),
+        )
+        .map_err(|error| anyhow::anyhow!("Failed to validate worker routing spec: {error}"))?;
+
         // STEP 3 (cas-5232): Capture expected branch before worktree is consumed.
         let expected_branch: Option<String> = result.worktree.as_ref().map(|wt| wt.branch.clone());
 
@@ -2309,6 +2322,17 @@ impl FactoryApp {
         // cas-9bc6: re-read live LlmConfig so harness/model/effort changes made
         // via `cas config set` after daemon boot are reflected in this respawn.
         self.sync_worker_config_from_live_settings();
+
+        // Respawn has no resolver call of its own: it reuses the Mux's
+        // effective per-worker/default spec after the live config sync. Keep
+        // the same shared validator on this recovery path before any worktree
+        // or PTY launch occurs.
+        let effective_spec = self.mux.effective_worker_spec(name, None);
+        cas_factory::validate_explicit(
+            &effective_spec,
+            &cas_factory::CapabilitySnapshot::default(),
+        )
+        .map_err(|error| anyhow::anyhow!("Failed to validate worker routing spec: {error}"))?;
 
         crate::telemetry::track(
             "factory_worker_respawn_requested",

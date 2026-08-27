@@ -951,13 +951,12 @@ fn fast_forward_epic_base_from_parent(
     )))
 }
 
-/// Explain why a declared-parent refresh could not be completed without
-/// hiding the branch pair that needs reconciliation. The caller may still cut
-/// the worker from the existing base, but it must not emit the generic stale
-/// warning as though the refresh path had never been attempted.
-fn epic_base_refresh_impossible_notice(error: &str) -> String {
+/// Turn a declared-parent refresh failure into a hard spawn refusal. The
+/// branch pair in `error` is intentionally preserved so the operator knows
+/// exactly which histories must be reconciled before another cut.
+fn epic_base_refresh_refusal(error: &str) -> String {
     format!(
-        "⚠️ EPIC BASE REFRESH IMPOSSIBLE: {error}. The worker will be cut from the existing base; reconcile the named branches before relying on its history."
+        "EPIC BASE REFRESH REFUSED: {error}. Reconcile the named branches before spawning a worker."
     )
 }
 
@@ -1728,19 +1727,15 @@ impl FactoryApp {
                     .or_else(|| {
                         recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
                     });
-                let mut declared_parent_refresh_warned = false;
                 if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
-                    match fast_forward_epic_base_from_parent(
+                    let refresh = fast_forward_epic_base_from_parent(
                         manager.repo_root(),
                         &epic_branch,
                         &recorded_parent,
-                    ) {
-                        Ok(Some(notice)) => notices.push(notice),
-                        Ok(None) => {}
-                        Err(error) => {
-                            declared_parent_refresh_warned = true;
-                            notices.push(epic_base_refresh_impossible_notice(&error));
-                        }
+                    )
+                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
+                    if let Some(notice) = refresh {
+                        notices.push(notice);
                     }
                 }
                 // cas-d897 (GH #146): the winning branch name still has to be
@@ -1809,9 +1804,8 @@ impl FactoryApp {
                 // branch it names can be far behind trunk. Surface that at
                 // spawn time instead of leaving it to whoever happens to read
                 // `behind:` in worker_status.
-                if !declared_parent_refresh_warned
-                    && let Some(notice) =
-                        stale_spawn_base_notice(manager.repo_root(), effective_base, &trunk)
+                if let Some(notice) =
+                    stale_spawn_base_notice(manager.repo_root(), effective_base, &trunk)
                 {
                     notices.push(notice);
                 }
@@ -3716,6 +3710,12 @@ mod spawn_base_tests {
             .unwrap();
 
         commit(&origin, "parent-advance.txt", "parent advanced upstream");
+        std::fs::create_dir_all(origin.join(".claude/workflows")).unwrap();
+        commit(
+            &origin,
+            ".claude/workflows/current-support-playbook.md",
+            "current support playbook",
+        );
         let parent_tip = head_sha(&origin, "main");
 
         let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
@@ -3758,6 +3758,14 @@ mod spawn_base_tests {
         assert!(
             worker_path.join("parent-advance.txt").exists(),
             "the spawned worktree must include the parent branch advance"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                worker_path.join(".claude/workflows/current-support-playbook.md"),
+            )
+            .unwrap(),
+            "current support playbook",
+            "a no-code worker must receive the current playbook from the refreshed parent"
         );
     }
 
@@ -4051,16 +4059,20 @@ mod spawn_base_tests {
         let error = fast_forward_epic_base_from_parent(&repo, "epic/diverged", "main")
             .expect_err("divergent epic/parent history cannot be fast-forwarded");
         assert!(error.contains("have diverged"), "{error}");
-        let warning = epic_base_refresh_impossible_notice(&error);
+        let refusal = epic_base_refresh_refusal(&error);
         assert!(
-            warning.contains("EPIC BASE REFRESH IMPOSSIBLE"),
-            "{warning}"
+            refusal.contains("EPIC BASE REFRESH REFUSED"),
+            "{refusal}"
         );
-        assert!(warning.contains("epic/diverged"), "{warning}");
-        assert!(warning.contains("main"), "{warning}");
+        assert!(refusal.contains("epic/diverged"), "{refusal}");
+        assert!(refusal.contains("main"), "{refusal}");
         assert!(
-            !warning.contains("STALE WORKER BASE"),
-            "the irreconcilable base must receive its specific warning, not a duplicate generic warning: {warning}"
+            !refusal.contains("will be cut"),
+            "a divergence refusal must never promise a stale worker cut: {refusal}"
+        );
+        assert!(
+            !refusal.contains("STALE WORKER BASE"),
+            "the irreconcilable base must receive its specific refusal, not a duplicate generic warning: {refusal}"
         );
         assert_eq!(
             head_sha(&repo, "epic/diverged"),
@@ -4070,6 +4082,104 @@ mod spawn_base_tests {
         assert!(
             stale_spawn_base_notice(&repo, "epic/diverged", "main").is_some(),
             "the divergence remains explicitly diagnosable to the spawning caller"
+        );
+    }
+
+    /// GH #584 / cas-a075: the production spawn-preparation seam must stop
+    /// before `WorkerSpawnPrep` can cut a no-code worker from a diverged epic.
+    #[test]
+    fn no_code_spawn_refuses_diverged_epic_before_worktree_cut_cas_a075() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/diverged-support"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "epic-only.txt", "support epic work");
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "parent-only.txt", "current support playbook parent");
+
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-support-epic".into(), "support epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/diverged-support".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).unwrap();
+        let mut child = cas_types::Task::new("cas-support-child".into(), "support task".into());
+        child.execution_note = Some("no-code".into());
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id.clone(),
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+
+        let worktree_root = repo.join(".cas").join("worktrees");
+        let manager = WorktreeManager::new(
+            &repo,
+            WorktreeConfig {
+                enabled: true,
+                base_path: worktree_root.to_string_lossy().to_string(),
+                branch_prefix: "factory/".to_string(),
+                auto_merge: false,
+                cleanup_on_close: false,
+                promote_entries_on_merge: false,
+            },
+        )
+        .unwrap();
+        let worker_path = manager.worktree_path_for_worker("diverged-support-worker");
+        let mut app = FactoryApp::from_init_result(
+            cas_dir.clone(),
+            Mux::new(40, 120),
+            Some(manager),
+            DirectorData::load_fast(&cas_dir).unwrap(),
+            "support-supervisor".into(),
+            Vec::new(),
+            crate::ui::factory::notification::NotifyConfig::default(),
+            false,
+            AutoPromptConfig::default(),
+            cas_mux::SupervisorCli::Claude,
+            cas_mux::SupervisorCli::Claude,
+            120,
+            40,
+            false,
+            None,
+            None,
+            repo,
+        )
+        .unwrap();
+
+        let error = match app.prepare_worker_spawn(
+            Some("diverged-support-worker"),
+            true,
+            Some("cas-support-child"),
+        ) {
+            Ok(_) => panic!("diverged no-code epic must refuse before preparing a cut"),
+            Err(error) => error,
+        };
+        let error = error.to_string();
+        assert!(error.contains("EPIC BASE REFRESH REFUSED"), "{error}");
+        assert!(error.contains("epic/diverged-support"), "{error}");
+        assert!(error.contains("main"), "{error}");
+        assert!(
+            !worker_path.exists(),
+            "refused spawn must not create the worker worktree"
         );
     }
 

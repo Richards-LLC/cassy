@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "receipt_id": "opencode-1.18.23-hosted-token-plan-2026-08-27",
+  "harness": "open-code",
+  "route": "hosted-token-plan",
+  "serving_identity": {
+    "provider": "qwencloud",
+    "model": "qwen3.8-max",
+    "endpoint": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+  },
+  "harness_version": "1.18.23",
+  "observed_default_harness_version": "1.18.23",
+  "validated_at": "2026-08-27",
+  "result": "pass",
+  "checklist": [
+    {
+      "id": "cli_version_and_path",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["binary-pin"],
+      "detail": "The installed default resolved to /home/pippenz/.opencode/bin/opencode, reported 1.18.23, and had SHA-256 de0724a36eaf3166e7f1ff38d0f4478b95ccc47725e9597b3fe66d3d3e18baa2."
+    },
+    {
+      "id": "interactive_pty_injection_and_cancel",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["pty-live", "pty-cancel-live"],
+      "detail": "The real TUI submitted its initial --prompt and a 1,532-byte raw follow-up. Ctrl+C aborted an in-flight bash tool without killing the TUI; the same ses_* session accepted a bounded follow-up and returned ACTIVE_CANCEL_READY. Esc did not cancel and corrupted the next input byte, so it is not advertised."
+    },
+    {
+      "id": "auto_and_explicit_deny",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["permission-live"],
+      "detail": "The live process used --auto while its primary-agent policy retained external_directory=deny; an outside-repository read was denied rather than auto-approved."
+    },
+    {
+      "id": "cwd_pwd_and_cas_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["lifecycle-live", "session-export"],
+      "detail": "Tool execution, exported message paths, plugin directory, git commit, and CAS identity resolved to the absolute disposable repository; inherited CAS session and agent metadata registered the expected workers."
+    },
+    {
+      "id": "role_prompt_and_agents_md",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["effort-live", "factory-parity"],
+      "detail": "The cassy-worker primary agent was selected and low/medium/xhigh runs returned the unique AGENTS.md sentinel AGENTS_VISIBLE_7A91."
+    },
+    {
+      "id": "cas_tool_discovery_and_task_lifecycle",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["lifecycle-live"],
+      "detail": "OpenCode discovered cas_coordination, cas_task, and cas_verification. The medium run completed whoami, create/mine/show/start/notes, write, commit 5540ebb28190feb537c21bb5d441856b807140ec, push, resume, and verified close for cas-553d."
+    },
+    {
+      "id": "hosted_auth_tools_and_efforts",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["effort-live", "token-plan-preflight"],
+      "detail": "The Token Plan route authenticated and answered through OpenCode with qwencloud/qwen3.8-max; exported metadata independently recorded exact low, medium, and xhigh variants, with no remapping or secret in evidence."
+    },
+    {
+      "id": "session_mapping_transcript_and_liveness",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["plugin-live", "session-export", "liveness-tests"],
+      "detail": "The fixed async plugin factory persisted the CAS-to-ses_* mapping, awaited tool attribution, busy/idle state, and completion. Bounded export returned the mapped transcript; reverse tests cover error/deleted/process-dead and wedge classifications."
+    },
+    {
+      "id": "isolated_account_roots",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["account-isolation"],
+      "detail": "Two four-XDG roots produced disjoint databases, logs, model caches, and session lists. Neither root persisted the environment key in auth.json."
+    },
+    {
+      "id": "subagent_attribution",
+      "required": false,
+      "status": "pass",
+      "evidence_refs": ["factory-parity"],
+      "detail": "Not claimed: supports_subagents remains false, so this conditional cell is non-gating."
+    },
+    {
+      "id": "existing_harness_parity",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["factory-parity", "flavor-drift"],
+      "detail": "Four-harness launch/prefix parity and builtin flavor-drift targets pass after the measured capability update."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "binary-pin",
+      "kind": "live_diagnostic",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/binary-pin.txt",
+      "summary": "Secret-free executable path, version, and SHA-256 pin from the installed binary used for the live runs."
+    },
+    {
+      "id": "effort-live",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/effort-metadata.json; low-export.json; medium-export.json; transcript-export.json",
+      "summary": "Serial Token Plan sessions whose exported message metadata records exact low, medium, and xhigh variants."
+    },
+    {
+      "id": "lifecycle-live",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/medium.jsonl; medium-close.jsonl",
+      "summary": "Disposable CAS MCP task lifecycle, git commit/push, same-session resume, and verified close through OpenCode."
+    },
+    {
+      "id": "pty-live",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/pty-raw.log; pty-export.json",
+      "summary": "Raw terminal record and exported session proving initial prompt and 1,532-byte unframed follow-up submission."
+    },
+    {
+      "id": "pty-cancel-live",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/pty-cancel-active-export.json; post-cancel-export.json",
+      "summary": "The exported tool result records Ctrl+C as a user-aborted command; the retained ses_* session then returned ACTIVE_CANCEL_READY to a bounded follow-up."
+    },
+    {
+      "id": "permission-live",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/permission-export.json",
+      "summary": "OpenCode --auto run with explicit external_directory deny retained; the outside-repository read was denied."
+    },
+    {
+      "id": "plugin-live",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/disposable-repo/.cas/opencode/sessions/opencode-conformance-plugin-fixed.json",
+      "summary": "Corrected plugin factory persisted ses_* mapping, awaited bash attribution, and idle state."
+    },
+    {
+      "id": "session-export",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/transcript-export.json",
+      "summary": "Mapped export records qwencloud/qwen3.8-max, xhigh, cassy-worker, cwd, tool completion, and response."
+    },
+    {
+      "id": "account-isolation",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-a1c9/logs/account-one-sessions.json; account-two-sessions.json",
+      "summary": "Disjoint session inventories from two separately rooted XDG layouts."
+    },
+    {
+      "id": "token-plan-preflight",
+      "kind": "live_test",
+      "reference": "/home/pippenz/.cas/artifacts/cas-2b23/token-plan-live-preflight-2026-08-27.json",
+      "summary": "One completion-only Token Plan auth/answerability probe recording the sk-sp- credential prefix class, route, and serving identity but no key value."
+    },
+    {
+      "id": "liveness-tests",
+      "kind": "test",
+      "reference": "cas-cli::mcp::tools::service::opencode_liveness; cli::factory::wedged",
+      "summary": "Reverse-state tests cover busy-to-idle, error/deleted, process fallback/death, and wedge integration."
+    },
+    {
+      "id": "factory-parity",
+      "kind": "test",
+      "reference": "cas-cli/tests/factory_parity_test.rs; crates/cas-mux::harness",
+      "summary": "Four-harness selector, launch, prefix, injection, and measured capability contracts."
+    },
+    {
+      "id": "flavor-drift",
+      "kind": "test",
+      "reference": "cas-cli/tests/builtin_flavor_drift_test.rs",
+      "summary": "Claude, Codex, Grok, and OpenCode builtin projections remain synchronized."
+    }
+  ]
+}

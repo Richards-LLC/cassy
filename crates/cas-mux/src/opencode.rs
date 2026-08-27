@@ -165,6 +165,26 @@ pub fn render_opencode_config(spec: &OpenCodeProjectionSpec) -> String {
     format!("{config}\n")
 }
 
+/// Overlay the live role/plugin projection onto the PTY adapter's inline
+/// configuration without dropping route-specific provider settings.
+///
+/// `PtyConfig::opencode` owns the hosted endpoint and environment-key
+/// substitution because the leaf PTY crate cannot depend on this crate. The
+/// backend owns the generated role prompts and lifecycle plugin. Merging the
+/// two at the backend seam keeps both contracts active in the actual launch
+/// configuration instead of only in parity snapshots.
+pub fn merge_opencode_projection(
+    base: &str,
+    spec: &OpenCodeProjectionSpec,
+) -> Result<String, serde_json::Error> {
+    let mut base: Value = serde_json::from_str(base)?;
+    let projected: Value = serde_json::from_str(&render_opencode_config(spec))?;
+    for key in ["agent", "mcp", "plugin"] {
+        base[key] = projected[key].clone();
+    }
+    serde_json::to_string(&base)
+}
+
 fn render_agent(role: OpenCodeRole, spec: &OpenCodeProjectionSpec) -> Value {
     let mut agent = BTreeMap::new();
     let role_name = if role == spec.role {
@@ -306,7 +326,7 @@ async function applySessionEvent(event) {
   });
 }
 
-export const Hooks = {
+export const CassyPlugin = async () => ({
   event: async ({ event }) => { try { await applySessionEvent(event); } catch (error) { console.error("Cassy OpenCode event projection delayed:", error); } },
   "tool.execute.before": async (input) => {
     try { await update((state) => {
@@ -326,7 +346,7 @@ export const Hooks = {
       return { ...state, last_event_at: timestamp, last_activity_at: timestamp, active_tool: null, last_tool: tool || state.last_tool };
     }); } catch (error) { console.error("Cassy OpenCode after-hook projection delayed:", error); }
   }
-};
+});
 "#;
 
 /// A stable filesystem location for one Cassy/OpenCode session's state.
@@ -657,6 +677,43 @@ mod tests {
     }
 
     #[test]
+    fn projection_merge_preserves_hosted_provider_and_adds_live_plugin() {
+        let base = serde_json::json!({
+            "agent": {"cassy-worker": {"mode": "primary"}},
+            "mcp": {"cas": {"type": "local", "command": ["cas", "serve"]}},
+            "provider": {
+                "qwencloud": {
+                    "options": {
+                        "baseURL": "https://token-plan.example/v1",
+                        "apiKey": "{env:QWENCLOUD_TOKEN_PLAN_API_KEY}"
+                    }
+                }
+            }
+        })
+        .to_string();
+        let merged = merge_opencode_projection(&base, &spec()).unwrap();
+        let json: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            json["provider"]["qwencloud"]["options"]["baseURL"],
+            "https://token-plan.example/v1"
+        );
+        assert_eq!(
+            json["provider"]["qwencloud"]["options"]["apiKey"],
+            "{env:QWENCLOUD_TOKEN_PLAN_API_KEY}"
+        );
+        assert_eq!(
+            json["plugin"][0],
+            "/tmp/cas-root/opencode/cassy-opencode-plugin.mjs"
+        );
+        assert!(
+            json["agent"]["cassy-worker"]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("cas_task")
+        );
+    }
+
+    #[test]
     fn generated_plugin_uses_awaited_hooks_and_explicit_permission_boundary() {
         assert!(OPENCODE_PLUGIN_SOURCE.contains("tool.execute.before"));
         assert!(OPENCODE_PLUGIN_SOURCE.contains("tool.execute.after"));
@@ -665,6 +722,11 @@ mod tests {
         assert!(OPENCODE_PLUGIN_SOURCE.contains("await update"));
         assert!(OPENCODE_PLUGIN_SOURCE.contains("permission.ask is not"));
         assert!(OPENCODE_PLUGIN_SOURCE.contains("rename(temp, STATE_PATH)"));
+        assert!(
+            OPENCODE_PLUGIN_SOURCE.contains("export const CassyPlugin = async () => ({"),
+            "OpenCode loads named plugin exports as factory functions"
+        );
+        assert!(!OPENCODE_PLUGIN_SOURCE.contains("export const Hooks = {"));
         assert!(!OPENCODE_PLUGIN_SOURCE.contains("SessionStart"));
         assert!(!OPENCODE_PLUGIN_SOURCE.contains("PreToolUse"));
     }

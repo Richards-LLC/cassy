@@ -155,6 +155,77 @@ pub struct OpenCodeSupportClaim {
     pub status: SupportClaimStatus,
 }
 
+/// Resolve the route-stamped typed receipt that is allowed to back a factory
+/// support claim. A live auth probe proves only that the endpoint answered;
+/// it cannot substitute for the full PTY/session/lifecycle matrix.
+pub fn support_claim_for_selector(selector: &str) -> Result<OpenCodeSupportClaim, String> {
+    let route = opencode_route_for_selector(selector)?;
+    let serving_identity = match route {
+        ServingRoute::HostedTokenPlan | ServingRoute::HostedPayg => {
+            hosted_serving_identity(selector)?
+        }
+        ServingRoute::Local => {
+            let (provider, model) = selector.split_once('/').ok_or_else(|| {
+                format!("local OpenCode selector {selector:?} must be provider/model")
+            })?;
+            let endpoint = std::env::var(LOCAL_ENDPOINT_ENV)
+                .ok()
+                .and_then(|raw| parse_endpoint(&raw).ok())
+                .map(|url| safe_endpoint_display(&url))
+                .unwrap_or_default();
+            ServingIdentity {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                endpoint,
+            }
+        }
+        ServingRoute::Hosted => {
+            return Err(
+                "legacy OpenCode hosted route has no billing identity and cannot carry a support claim"
+                    .to_string(),
+            );
+        }
+    };
+    let supported = cas_pty::harness_conformance_receipts()
+        .map_err(|error| format!("OpenCode conformance receipt could not be decoded: {error}"))?
+        .into_iter()
+        .any(|receipt| {
+            receipt.harness == cas_pty::Harness::OpenCode
+                && receipt.route == Some(route)
+                && receipt.serving_identity.as_ref() == Some(&serving_identity)
+                && receipt.validates_pin()
+        });
+    Ok(OpenCodeSupportClaim {
+        route,
+        serving_identity,
+        status: if supported {
+            SupportClaimStatus::Supported
+        } else {
+            SupportClaimStatus::PendingConformance
+        },
+    })
+}
+
+/// Fail closed before queue insertion when the selected route does not have a
+/// matching passing typed receipt. This gate is deliberately independent of
+/// credentials: a valid key and successful tiny completion are necessary but
+/// do not prove the factory lifecycle.
+pub fn require_supported_selector(selector: &str) -> Result<OpenCodeSupportClaim, String> {
+    let claim = support_claim_for_selector(selector)?;
+    if claim.status == SupportClaimStatus::Supported {
+        return Ok(claim);
+    }
+    Err(format!(
+        "OpenCode route {} for selector {selector:?} remains pending-conformance: no matching passing typed live receipt is embedded; factory spawn was not queued",
+        match claim.route {
+            ServingRoute::Local => "local",
+            ServingRoute::HostedTokenPlan => "hosted-token-plan",
+            ServingRoute::HostedPayg => "hosted-payg",
+            ServingRoute::Hosted => "hosted",
+        }
+    ))
+}
+
 /// Evidence returned after hosted provider authentication and model probes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HostedEndpointPreflight {
@@ -933,7 +1004,10 @@ mod tests {
         assert!(payg_error.contains("hosted-payg"), "{payg_error}");
         assert!(payg_error.contains("sk-sp-"), "{payg_error}");
         assert!(payg_error.contains("sk- or sk-ws-"), "{payg_error}");
-        assert!(!payg_error.contains("sk-sp-mismatch"), "key leaked: {payg_error}");
+        assert!(
+            !payg_error.contains("sk-sp-mismatch"),
+            "key leaked: {payg_error}"
+        );
     }
 
     #[test]
@@ -951,8 +1025,7 @@ mod tests {
                     break;
                 }
                 request.extend_from_slice(&buffer[..size]);
-                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n")
-                else {
+                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
                     continue;
                 };
                 let headers = String::from_utf8_lossy(&request[..header_end]);
@@ -981,8 +1054,14 @@ mod tests {
         thread.join().unwrap();
         let request = request_rx.recv().unwrap();
         assert_eq!(request.matches("HTTP/1.1").count(), 1);
-        assert!(request.starts_with("POST /chat/completions HTTP/1.1"), "{request}");
-        assert!(!request.contains("/models"), "Token Plan must not list models: {request}");
+        assert!(
+            request.starts_with("POST /chat/completions HTTP/1.1"),
+            "{request}"
+        );
+        assert!(
+            !request.contains("/models"),
+            "Token Plan must not list models: {request}"
+        );
         assert!(request.contains("enable_thinking"), "{request}");
         assert_eq!(result.route, ServingRoute::HostedTokenPlan);
         assert!(result.loaded_models.is_empty());
@@ -1005,4 +1084,24 @@ mod tests {
         assert!(!error.contains("sk-sp-token"), "secret leaked: {error}");
     }
 
+    #[test]
+    fn support_claim_gate_accepts_only_the_receipted_token_plan_route() {
+        let token_plan = support_claim_for_selector("qwencloud/qwen3.8-max").unwrap();
+        assert_eq!(token_plan.route, ServingRoute::HostedTokenPlan);
+        assert_eq!(token_plan.status, SupportClaimStatus::Supported);
+        assert!(require_supported_selector("qwencloud/qwen3.8-max").is_ok());
+
+        let payg = support_claim_for_selector("alibaba/qwen3.8-max").unwrap();
+        assert_eq!(payg.route, ServingRoute::HostedPayg);
+        assert_eq!(payg.status, SupportClaimStatus::PendingConformance);
+        let error = require_supported_selector("alibaba/qwen3.8-max").unwrap_err();
+        assert!(error.contains("hosted-payg"), "{error}");
+        assert!(error.contains("pending-conformance"), "{error}");
+        assert!(error.contains("was not queued"), "{error}");
+
+        let local = support_claim_for_selector("local/qwen3.8").unwrap();
+        assert_eq!(local.route, ServingRoute::Local);
+        assert_eq!(local.status, SupportClaimStatus::PendingConformance);
+        assert!(require_supported_selector("local/qwen3.8").is_err());
+    }
 }

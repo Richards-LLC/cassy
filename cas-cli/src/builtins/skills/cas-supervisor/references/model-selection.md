@@ -61,9 +61,11 @@ OpenCode supports three explicit OpenAI-compatible Qwen lanes through generated
 primary agents and inline `cas` MCP config: `local/<model>` for the operator's
 local server, `qwencloud/qwen3.8-max` for the operator's default QwenCloud Token
 Plan lane, and `alibaba/qwen3.8-max` (or `alibaba-cn/qwen3.8-max`) for DashScope
-pay-as-you-go. A lane is never inferred or used as fallback for another. Production
-factory spawning remains gated on the lane's live conformance receipt. Do not
-persist keys in generated files or task receipts.
+pay-as-you-go. A lane is never inferred or used as fallback for another. Receipt
+`opencode-1.18.23-hosted-token-plan-2026-08-27` validates only the Token Plan
+route; local and Alibaba PAYG remain pending-conformance. Factory spawning fails
+closed before queue insertion unless the selected route has its own matching
+passing receipt. Do not persist keys in generated files or task receipts.
 
 Token Plan fan-out follows the operator-declared plan tier: Lite permits 1–2,
 Standard 3–4, and Pro 6–8 concurrent OpenCode agents. Warn or cap a spawn request
@@ -87,9 +89,10 @@ carry the operator-declared tier as metadata when supplied.
   qwen3.8-max; `minimal` and `high` are rejected before OpenCode and are never
   silently remapped. Token Plan uses the OpenAI-compatible thinking body
   (`enable_thinking`); its effort table is independent of pay-as-you-go.
-  Hosted support remains `pending-key` until the lane key is supplied and
-  `pending-conformance` until its live receipt proves authentication and
-  answerability.
+  The Token Plan route is supported by its OpenCode 1.18.23 live receipt, but
+  still requires the dedicated key and bounded auth/answerability preflight on
+  every spawn. Local and Alibaba PAYG remain `pending-conformance` and are
+  refused before queue insertion.
 - Every new conformance receipt records its explicit `route` and secret-free
   `serving_identity`; legacy receipts without these fields remain readable only as
   historical local-era fixtures.
@@ -168,7 +171,7 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=grok model=
 
 ### OpenCode workers (route-specific conformance)
 
-Use this recipe after the Token Plan lane's live conformance receipt is available:
+Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
 
 ```
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"

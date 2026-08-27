@@ -1,5 +1,9 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
+use cas_factory::routing::{
+    default_worker_effort_for_cli, default_worker_model_for_cli, validate_model_effort_policy,
+    validate_model_is_active,
+};
 
 /// Whether this harness has account-directory plumbing at all.
 ///
@@ -255,49 +259,6 @@ fn parse_spawn_effort(effort: Option<&str>) -> Result<Option<cas_mux::Effort>, S
         )),
         None => Ok(None),
     }
-}
-
-fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> &'static str {
-    match cli {
-        cas_mux::SupervisorCli::Claude => "opus",
-        cas_mux::SupervisorCli::Codex => crate::config::STOCK_WORKER_MODEL,
-        // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
-        cas_mux::SupervisorCli::Grok => "grok-4.5",
-    }
-}
-
-fn default_worker_effort_for_cli(cli: cas_mux::SupervisorCli) -> cas_mux::Effort {
-    match cli {
-        // Luna is the standard worker and is only valid at Cassy's current
-        // maximum effort. Claude's exceptional Opus lane retains its high
-        // ceiling; a stock Codex setting must not leak xhigh onto Claude.
-        cas_mux::SupervisorCli::Codex => cas_mux::Effort::XHigh,
-        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
-            cas_mux::Effort::High
-        }
-    }
-}
-
-fn validate_model_is_active(model: &str) -> Result<(), String> {
-    if model.trim().eq_ignore_ascii_case("gpt-5.6-terra") {
-        return Err(
-            "invalid spawn_workers model \"gpt-5.6-terra\": Terra is suspended as a routing target (2026-08-25; operator decision pending); use gpt-5.6-luna with effort=xhigh or another active tier".to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_model_effort_policy(
-    model: &str,
-    effort: Option<cas_mux::Effort>,
-) -> Result<(), String> {
-    if model.trim().eq_ignore_ascii_case("gpt-5.6-luna") && effort != Some(cas_mux::Effort::XHigh)
-    {
-        return Err(
-            "invalid spawn_workers effort for gpt-5.6-luna: Luna is only permitted at its current maximum, effort=xhigh".to_string(),
-        );
-    }
-    Ok(())
 }
 
 /// Request-time shutdown state carried into the supervisor receipt.

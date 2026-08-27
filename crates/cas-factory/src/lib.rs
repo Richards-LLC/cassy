@@ -31,6 +31,7 @@ pub mod director;
 pub mod notify;
 pub mod probe;
 pub mod recording;
+pub mod routing;
 pub mod session;
 pub mod spec_resolver;
 pub use changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
@@ -44,6 +45,12 @@ pub use director::{
 };
 pub use notify::{DaemonNotifier, notify_daemon, notify_socket_path};
 pub use recording::RecordingManager;
+pub use routing::{
+    CapabilityAvailability, CapabilitySnapshot, Lane, LaneDefinition, LaneRegistry, Recipe,
+    RecipeStatus, RouteRecipe, RoutingDecision, RoutingError, default_worker_effort_for_cli,
+    default_worker_model_for_cli, embedded_registry, parse_registry, registry, resolve_lane,
+    validate_explicit, validate_model_effort_policy, validate_model_is_active,
+};
 pub use session::lifecycle::SessionManager;
 pub use session::resume::{
     SharedUnifiedSessionManager, UnifiedSessionConfig, UnifiedSessionManager,

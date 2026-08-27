@@ -52,7 +52,8 @@ fn test_init_yes_flag() {
         .args(["init", "--yes"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Cassy initialized"));
+        .stdout(predicate::str::contains("Cassy initialized"))
+        .stdout(predicate::str::contains("cas hub service install"));
 
     assert!(temp.path().join(".cas").exists());
     assert!(temp.path().join(".cas/cas.db").exists());

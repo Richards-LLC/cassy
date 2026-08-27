@@ -61,6 +61,7 @@ darwin_output="$(
 )"
 grep -qF 'Platform: aarch64-apple-darwin' <<<"$darwin_output"
 grep -qF 'cas fixture version' <<<"$darwin_output"
+grep -qF 'cas hub service install' <<<"$darwin_output"
 test -x "$tmpdir/install/cas"
 grep -qF 'cas-aarch64-apple-darwin.tar.gz' "$tmpdir/curl.log"
 grep -qF -- "-d com.apple.quarantine $tmpdir/install/cas" "$tmpdir/xattr.log"

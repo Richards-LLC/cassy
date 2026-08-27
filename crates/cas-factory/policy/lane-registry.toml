@@ -1,0 +1,72 @@
+schema_version = 1
+
+[defaults.claude]
+model = "opus"
+effort = "high"
+
+[defaults.codex]
+model = "gpt-5.6-luna"
+effort = "xhigh"
+
+[defaults.grok]
+model = "grok-4.5"
+effort = "high"
+
+[recipes.claude_haiku]
+harness = "claude"
+provider = "anthropic"
+model = "haiku-4.5"
+default_effort = "low"
+allowed_efforts = ["low", "medium"]
+status = "active"
+required_capability = "claude-account"
+
+[recipes.codex_luna]
+harness = "codex"
+provider = "openai"
+model = "gpt-5.6-luna"
+default_effort = "xhigh"
+allowed_efforts = ["xhigh"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.claude_opus]
+harness = "claude"
+provider = "anthropic"
+model = "opus-5"
+default_effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+required_capability = "claude-account"
+
+[recipes.codex_sol]
+harness = "codex"
+provider = "openai"
+model = "gpt-5.6-sol"
+default_effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.codex_terra]
+harness = "codex"
+provider = "openai"
+model = "gpt-5.6-terra"
+default_effort = "xhigh"
+allowed_efforts = ["xhigh"]
+status = "suspended"
+reason = "Standing operator suspension (2026-08-27)"
+required_capability = "codex-account"
+
+[lanes.light]
+candidates = ["claude_haiku"]
+
+[lanes.standard]
+candidates = ["codex_luna"]
+
+[lanes.taste]
+candidates = ["claude_opus"]
+no_fallback = true
+
+[lanes.heavy]
+candidates = ["codex_sol"]

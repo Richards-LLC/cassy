@@ -44,8 +44,8 @@
 
 pub mod codex_trust;
 pub mod conformance;
-pub mod opencode;
 mod error;
+pub mod opencode;
 mod pty;
 
 pub use codex_trust::{
@@ -56,7 +56,7 @@ pub use codex_trust::{
 
 pub use conformance::{
     ConformanceCheck, ConformanceEvidence, ConformanceStatus, Harness, HarnessConformanceReceipt,
-    codex_0149_conformance_receipt, grok_0105_conformance_receipt, grok_02114_conformance_receipt,
+    ServingIdentity, ServingRoute, codex_0149_conformance_receipt, grok_02114_conformance_receipt,
     harness_conformance_receipts,
 };
 pub use error::{Error, Result};

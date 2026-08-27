@@ -14,9 +14,10 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
 - **GPT-5.6 Luna is the default worker** — route standard, routine taste, public-surface, and general-judgment work to `cli=codex model=gpt-5.6-luna effort=xhigh`. Luna is only valid at its maximum effort level.
 - **Claude Opus is exceptional-only** — use it for architecture, safety, rescue, or independent challenge. Sonnet is not a normal worker lane.
 - **Grok is a capacity overlay** — route to it while its credits/auth/throughput are healthy; fall back to the same Codex tier when they are not.
-- **OpenCode is implementation-complete-pending-conformance** — its local Qwen lane is a
-  conformance candidate, not a production spawn path. Keep it behind T7's live receipt
-  and never infer provider auth or effort support from the selector alone.
+- **OpenCode is implementation-complete-pending-conformance** — its local and hosted
+  Qwen lanes are conformance candidates, not production spawn paths. Keep each route
+  behind its own live receipt and never infer provider auth or effort support from the
+  selector alone.
 
 Operator routing decision (2026-08-25): Terra is **suspended as a routing target** at every tier pending an explicit operator re-enable; do not spawn it. Keep its slug documented below for compatibility and discovery, but mark every Terra mention as suspended — operator decision pending. Luna's maximum is currently expressed as `effort=xhigh`; `max` and `ultra` are not usable Cassy effort values today. Once Cassy's effort vocabulary is extended and the newer Codex pin is validated, `max` may replace `xhigh` for Luna. Never spawn Luna at lower effort.
 
@@ -56,16 +57,25 @@ Health check before routing to Grok: credits/quota available, auth valid, throug
 
 ### OpenCode lane (implementation-complete-pending-conformance)
 
-OpenCode projects a local OpenAI-compatible Qwen provider through generated
-primary agents and inline `cas` MCP config. Production factory spawning remains
-gated on T7's live conformance receipt.
-Do not persist keys in generated files or task receipts.
+OpenCode supports two explicit OpenAI-compatible Qwen routes through generated
+primary agents and inline `cas` MCP config: `local/<model>` for the operator's
+local server, and `alibaba/qwen3.8-max` (or the explicit `alibaba-cn/qwen3.8-max`)
+for DashScope-hosted Qwen. A route is never inferred or used as fallback for the
+other. Production factory spawning remains gated on the route's live conformance
+receipt. Do not persist keys in generated files or task receipts.
 
-- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — exact Qwen
-  variants from the assessment; provider auth, endpoint reachability, and model
-  loading remain operator preflight inputs.
-- `minimal` and `high` are rejected for this Qwen lane; do not silently map them
-  to `low` or `xhigh`.
+- `cli=opencode model=local/qwen3.8` — local serving; endpoint reachability, model
+  loading, and accepted effort variants come from the local operator preflight.
+- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — hosted
+  DashScope; preflight requires `DASHSCOPE_API_KEY`, endpoint reachability, and the
+  selected model in `/models`. `alibaba-cn/...` selects the mainland endpoint.
+- Hosted Qwen accepts only `low`, `medium`, and `xhigh`; `minimal` and `high` are
+  rejected before OpenCode and are never silently remapped. Hosted support remains
+  `pending-key` until the operator supplies the key and `pending-conformance` until
+  the live receipt proves authentication and answerability.
+- Every new conformance receipt records its explicit `route` and secret-free
+  `serving_identity`; legacy receipts without these fields remain readable only as
+  historical local-era fixtures.
 - The OpenCode MCP server name `cas` yields `cas_task`, `cas_coordination`, and
   `cas_verification`; generated `cassy-worker`/`cassy-supervisor` prompts carry
   the role contract and remain process-local.
@@ -77,7 +87,7 @@ Do not persist keys in generated files or task receipts.
 | `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy/frontier route; Luna/xhigh is the standard default and taste/judgment route; **Terra is suspended (2026-08-25; operator decision pending) and has no active tier**. Luna is the gpt-5.4-mini successor. |
 | `claude` | `opus` (full Anthropic ids also ok) | Supervisor docs only expose Opus for exceptional architecture/safety/rescue/challenge; Sonnet is not a normal worker lane. |
 | `grok` | `grok-4.5`, `grok-composer-2.5-fast` | From live `grok models`. Composer is a **model id on the Grok harness** — never invent `cli=cursor`. |
-| `opencode` | `alibaba/qwen3.8-max` | Implementation-complete-pending-conformance; T7 live receipt required. Provider auth and model availability are operator preflight inputs. |
+| `opencode` | `local/<model>`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local or DashScope-hosted route; per-route conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 
 ### Effort vocabulary (Cassy-wide)
 
@@ -90,7 +100,7 @@ How each backend receives them:
 | Claude | `--effort <level>` |
 | Codex | `--config model_reasoning_effort=<level>` |
 | Grok | `--reasoning-effort <level>` |
-| OpenCode | generated primary-agent `variant` (local Qwen: `low`, `medium`, `xhigh`) |
+| OpenCode | generated primary-agent `variant` (local: endpoint-specific; hosted Qwen: `low`, `medium`, `xhigh`) |
 
 For non-Luna multi-step workers, `effort=high` is the ceiling. Luna is the exception: its only permitted Cassy effort is the current maximum, `xhigh`; do not use `max`/`ultra` until Cassy's vocabulary is extended and the newer Codex pin is validated. Codex tiers use Grok Composer/low for genuinely light work, Luna/xhigh for standard and taste, and Sol/high for heavy/frontier.
 
@@ -139,7 +149,7 @@ mcp__cas__coordination action=spawn_workers count=2 isolate=true cli=grok model=
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=grok model=grok-4.5 effort=high worker_names="gh-ada"
 ```
 
-### OpenCode workers (implementation-complete-pending-conformance)
+### OpenCode workers (implementation-complete-pending-conformance; route-specific)
 
 Do not use this recipe as a production support claim. It is the pinned shape for
 the T7 live-conformance receipt once local/provider preflight is available:
@@ -148,7 +158,9 @@ the T7 live-conformance receipt once local/provider preflight is available:
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=alibaba/qwen3.8-max effort=medium worker_names="oc-ada"
 ```
 
-Parameter table and field names: [reference.md](reference.md#spawn_workers-parameters).
+The hosted recipe requires `DASHSCOPE_API_KEY` in the operator environment and
+performs a bounded auth/model/answerability preflight; use `local/<model>` for a
+local server. Parameter table and field names: [reference.md](reference.md#spawn_workers-parameters).
 
 ## Routing Axes
 

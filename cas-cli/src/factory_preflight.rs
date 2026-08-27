@@ -918,6 +918,7 @@ fn harness_name(harness: Harness) -> &'static str {
         Harness::ClaudeCode => "claude",
         Harness::CodexCli => "codex",
         Harness::GrokBuild => "grok",
+        Harness::OpenCode => "opencode",
     }
 }
 
@@ -1291,6 +1292,8 @@ mod tests {
             schema_version: 1,
             receipt_id: format!("{}-{version}", harness_name(harness)),
             harness,
+            route: None,
+            serving_identity: None,
             harness_version: version.to_string(),
             observed_default_harness_version: Some(version.to_string()),
             validated_at: "2026-07-30".to_string(),

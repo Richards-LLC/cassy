@@ -4,6 +4,10 @@ use crate::opencode_preflight::{
     OpenCodeRoute, hosted_lane_for_selector, hosted_serving_identity, opencode_route_for_selector,
     preflight_hosted_from_env, require_supported_selector, validate_hosted_effort_for_lane,
 };
+use cas_factory::routing::{
+    default_worker_effort_for_cli, default_worker_model_for_cli, resolve_lane_specs,
+    validate_lane_request,
+};
 
 const HOSTED_PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -295,33 +299,6 @@ fn parse_spawn_effort(effort: Option<&str>) -> Result<Option<cas_mux::Effort>, S
     }
 }
 
-fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> Option<&'static str> {
-    match cli {
-        cas_mux::SupervisorCli::Claude => Some("opus"),
-        cas_mux::SupervisorCli::Codex => Some(crate::config::STOCK_WORKER_MODEL),
-        // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
-        cas_mux::SupervisorCli::Grok => Some("grok-4.5"),
-        // The operator's explicit default hosted lane is QwenCloud Token
-        // Plan. Pay-as-you-go remains available through alibaba/... and is
-        // never selected implicitly by a failed Token Plan probe.
-        cas_mux::SupervisorCli::OpenCode => Some("qwencloud/qwen3.8-max"),
-    }
-}
-
-fn default_worker_effort_for_cli(cli: cas_mux::SupervisorCli) -> Option<cas_mux::Effort> {
-    match cli {
-        // Luna is the standard worker and is only valid at Cassy's current
-        // maximum effort. Claude's exceptional Opus lane retains its high
-        // ceiling; a stock Codex setting must not leak xhigh onto Claude.
-        cas_mux::SupervisorCli::Codex => Some(cas_mux::Effort::XHigh),
-        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
-            Some(cas_mux::Effort::High)
-        }
-        // OpenCode effort comes from the selected lane's own contract.
-        cas_mux::SupervisorCli::OpenCode => None,
-    }
-}
-
 const OPENCODE_ACCEPTED_EFFORTS_ENV: &str = "CAS_OPENCODE_ACCEPTED_EFFORTS";
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -350,7 +327,11 @@ struct OpenCodeConfigToml {
 
 fn parse_opencode_effort_set(raw: &str, source: &str) -> Result<Vec<cas_mux::Effort>, String> {
     let mut efforts = Vec::new();
-    for value in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let effort = value.parse::<cas_mux::Effort>().map_err(|error| {
             format!(
                 "invalid OpenCode accepted effort {value:?} from {source}: {error}; use Cassy's effort values"
@@ -392,12 +373,10 @@ fn configured_opencode_efforts(
         if !path.exists() {
             continue;
         }
-        let raw = std::fs::read_to_string(path).map_err(|error| {
-            format!("could not read {source} {}: {error}", path.display())
-        })?;
-        let config = toml::from_str::<OpenCodeConfigToml>(&raw).map_err(|error| {
-            format!("could not parse {source} {}: {error}", path.display())
-        })?;
+        let raw = std::fs::read_to_string(path)
+            .map_err(|error| format!("could not read {source} {}: {error}", path.display()))?;
+        let config = toml::from_str::<OpenCodeConfigToml>(&raw)
+            .map_err(|error| format!("could not parse {source} {}: {error}", path.display()))?;
         let values = config.factory.and_then(|factory| {
             factory
                 .opencode
@@ -449,28 +428,6 @@ fn validate_opencode_effort(
         "OpenCode model {model:?} rejects effort {effort}; endpoint accepted efforts: [{}]. No effort remapping is performed.",
         format_opencode_efforts(accepted_efforts)
     ))
-}
-
-fn validate_model_is_active(model: &str) -> Result<(), String> {
-    if model.trim().eq_ignore_ascii_case("gpt-5.6-terra") {
-        return Err(
-            "invalid spawn_workers model \"gpt-5.6-terra\": Terra is suspended as a routing target (2026-08-25; operator decision pending); use gpt-5.6-luna with effort=xhigh or another active tier".to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_model_effort_policy(
-    model: &str,
-    effort: Option<cas_mux::Effort>,
-) -> Result<(), String> {
-    if model.trim().eq_ignore_ascii_case("gpt-5.6-luna") && effort != Some(cas_mux::Effort::XHigh)
-    {
-        return Err(
-            "invalid spawn_workers effort for gpt-5.6-luna: Luna is only permitted at its current maximum, effort=xhigh".to_string(),
-        );
-    }
-    Ok(())
 }
 
 /// Request-time shutdown state carried into the supervisor receipt.
@@ -632,7 +589,7 @@ fn validate_model_matches_cli(cli: cas_mux::SupervisorCli, model: &str) -> Resul
             cli.backend().name(),
             model_cli.backend().name(),
             cli.backend().name(),
-            default_worker_model_for_cli(cli).unwrap_or("a configured provider/model selector"),
+            default_worker_model_for_cli(cli),
         )),
         _ => Ok(()),
     }
@@ -676,6 +633,86 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     serde_json::to_string(&spec).map_err(|e| format!("failed to serialize WorkerSpec: {e}"))
 }
 
+/// Resolve a registry lane into one immutable recipe decision per spawn slot.
+///
+/// Lane mode may still carry per-worker identity/account metadata, but it may
+/// not smuggle in a partial explicit recipe through `workers=[...]`. Reject
+/// those fields before queueing so the lane's fallback policy remains
+/// unambiguous and explicit recipes retain their fail-closed behavior.
+fn build_lane_spawn_specs(
+    slots: usize,
+    lane: &str,
+    config_dir: Option<&str>,
+    workers_json: Option<&str>,
+    snapshot: &cas_factory::CapabilitySnapshot,
+) -> Result<(Vec<cas_mux::WorkerSpec>, String, Vec<String>), String> {
+    let worker_spec_jsons = parse_spawn_worker_specs(workers_json, slots)?;
+    if slots == 0 {
+        return Err("lane spawn requires at least one worker slot".to_string());
+    }
+    validate_lane_request(lane, false, false, false).map_err(|error| error.to_string())?;
+
+    let decisions = resolve_lane_specs(lane, slots, snapshot).map_err(|error| error.to_string())?;
+    let recipe_id = decisions
+        .first()
+        .ok_or_else(|| "lane spawn has no worker slots".to_string())?
+        .recipe_id
+        .clone();
+    let mut warnings = decisions
+        .iter()
+        .flat_map(|decision| decision.warnings.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut specs = decisions
+        .into_iter()
+        .map(|decision| decision.spec)
+        .collect::<Vec<_>>();
+
+    for spec in &mut specs {
+        if let Some(config_dir) = config_dir {
+            spec.config_dir = Some(config_dir.to_string());
+        }
+    }
+
+    for (slot, json) in worker_spec_jsons.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|error| format!("invalid workers JSON entry: {error}"))?;
+        let Some(object) = value.as_object() else {
+            return Err("invalid workers JSON: every entry must be an object".to_string());
+        };
+        let explicit_fields = ["cli", "model", "effort"]
+            .into_iter()
+            .filter(|field| object.get(*field).is_some_and(|value| !value.is_null()))
+            .collect::<Vec<_>>();
+        if !explicit_fields.is_empty() {
+            return Err(format!(
+                "lane={:?} cannot be combined with explicit {} recipe field(s) in workers[{}]; choose lane= or an explicit cli/model/effort recipe",
+                lane.trim(),
+                explicit_fields.join(", "),
+                slot
+            ));
+        }
+        if let Some(name) = object.get("name") {
+            let name = name
+                .as_str()
+                .ok_or_else(|| format!("invalid workers[{slot}].name: expected a string"))?;
+            specs[slot].name = Some(name.to_string());
+        }
+        if let Some(config_dir) = object.get("config_dir") {
+            let config_dir = config_dir
+                .as_str()
+                .ok_or_else(|| format!("invalid workers[{slot}].config_dir: expected a string"))?;
+            specs[slot].config_dir = Some(config_dir.to_string());
+        }
+    }
+
+    // Each decision currently has the same static warning set per slot. Keep
+    // the receipt concise while retaining every distinct warning from a
+    // capability-aware resolver.
+    warnings.sort();
+    warnings.dedup();
+    Ok((specs, recipe_id, warnings))
+}
+
 /// Resolve one worker spec per spawn slot, applying the batch fields as
 /// defaults and the optional `workers=[{...}]` entries as the final cascade
 /// layer. This deliberately reuses `cas_factory::resolve_specs` rather than
@@ -697,7 +734,6 @@ fn build_spawn_specs_with_project_config(
     // harnesses is rejected here — before anything is queued — instead of
     // surfacing as workers that boot on the wrong CLI.
     if let (Some(requested_cli), Some(model)) = (parsed_cli, model) {
-        validate_model_is_active(model)?;
         validate_model_matches_cli(requested_cli, model)?;
     }
 
@@ -769,11 +805,8 @@ fn build_spawn_specs_with_project_config(
                 }
             }
         }
-        if !model_explicit
-            && spec.model.is_none()
-            && let Some(default_model) = default_worker_model_for_cli(spec.cli)
-        {
-            spec.model = Some(default_model.to_string());
+        if !model_explicit && spec.model.is_none() {
+            spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
         }
         if !effort_explicit && !configured_effort && spec.cli == cas_mux::SupervisorCli::OpenCode {
             // The shared resolver's High placeholder is not an OpenCode
@@ -784,14 +817,20 @@ fn build_spawn_specs_with_project_config(
         } else if !effort_explicit
             && !configured_effort
             && spec.effort == Some(cas_mux::Effort::High)
-            && let Some(default_effort) = default_worker_effort_for_cli(spec.cli)
+            && spec.cli != cas_mux::SupervisorCli::OpenCode
         {
-            spec.effort = Some(default_effort);
+            spec.effort = Some(default_worker_effort_for_cli(spec.cli));
         }
+
+        // Static registry policy is authoritative and always runs before the
+        // route-specific OpenCode support/receipt checks below. This makes a
+        // malformed recipe fail with one stable policy reason while keeping
+        // the hosted pre-queue gate authoritative for otherwise valid routes.
+        cas_factory::validate_explicit(spec, &cas_factory::CapabilitySnapshot::default())
+            .map_err(|error| error.to_string())?;
         if spec.cli == cas_mux::SupervisorCli::OpenCode {
             let model = spec.model.as_deref().ok_or_else(|| {
-                "cli=opencode requires a configured provider/model selector"
-                    .to_string()
+                "cli=opencode requires a configured provider/model selector".to_string()
             })?;
             match opencode_route_for_selector(model)? {
                 OpenCodeRoute::Local => validate_opencode_effort(
@@ -815,8 +854,6 @@ fn build_spawn_specs_with_project_config(
             }
         }
         if let Some(model) = spec.model.as_deref() {
-            validate_model_is_active(model)?;
-            validate_model_effort_policy(model, spec.effort)?;
             validate_model_matches_cli(spec.cli, model)?;
         }
     }
@@ -899,12 +936,10 @@ fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &s
         match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
             Ok(spec) => {
                 let model_uses_policy = model_explicit
-                    || default_worker_model_for_cli(spec.cli)
-                        .is_some_and(|default| spec.model.as_deref() == Some(default));
+                    || spec.model.as_deref() == Some(default_worker_model_for_cli(spec.cli));
                 let effort_uses_policy = effort_explicit
-                    || default_worker_effort_for_cli(spec.cli).is_some_and(|default| {
-                        spec.effort == Some(default)
-                    });
+                    || (spec.cli == cas_mux::SupervisorCli::OpenCode && spec.effort.is_none())
+                    || spec.effort == Some(default_worker_effort_for_cli(spec.cli));
                 let fallback = if model_uses_policy && effort_uses_policy {
                     "policy default"
                 } else {
@@ -1652,16 +1687,45 @@ impl CasService {
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
         // remain the resolver defaults; `workers=[{...}]` is its final,
         // per-slot layer.
-        let mut specs = build_spawn_specs_with_project_config(
-            slots,
-            req.cli.as_deref(),
-            req.model.as_deref(),
-            req.effort.as_deref(),
-            req.config_dir.as_deref(),
-            req.workers.as_deref(),
-            Some(self.inner.cas_root.join("config.toml")),
-        )
-        .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        let (mut specs, lane_recipe, lane_warnings) = if let Some(lane) = req.lane.as_deref() {
+            validate_lane_request(
+                lane,
+                req.cli.is_some(),
+                req.model.is_some(),
+                req.effort.is_some(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            let snapshot = tokio::task::spawn_blocking(
+                crate::factory_preflight::collect_live_capability_snapshot,
+            )
+            .await
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("failed to collect lane capability snapshot: {error}"),
+                )
+            })?;
+            build_lane_spawn_specs(
+                slots,
+                lane,
+                req.config_dir.as_deref(),
+                req.workers.as_deref(),
+                &snapshot,
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
+        } else {
+            let specs = build_spawn_specs_with_project_config(
+                slots,
+                req.cli.as_deref(),
+                req.model.as_deref(),
+                req.effort.as_deref(),
+                req.config_dir.as_deref(),
+                req.workers.as_deref(),
+                Some(self.inner.cas_root.join("config.toml")),
+            )
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+            (specs, String::new(), Vec::new())
+        };
 
         // Hosted DashScope is an explicit route with its own auth/model
         // preflight.  This is intentionally after spec resolution and before
@@ -1694,12 +1758,19 @@ impl CasService {
         // actionable refusal. Rewriting the provider/tier to Claude here is
         // a cost and capability change the supervisor did not approve.
         let strict_cli = true;
-        let notices = cas_factory::apply_codex_fallback(
-            &mut specs,
-            strict_cli,
-            default_worker_model_for_cli(cas_mux::SupervisorCli::Claude),
-        )
-        .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+        let notices = if req.lane.is_some() {
+            // Lane resolution owns capability-aware substitution and warning
+            // semantics. The legacy fallback must not rewrite a selected lane
+            // route after its receipt has been constructed.
+            Vec::new()
+        } else {
+            cas_factory::apply_codex_fallback(
+                &mut specs,
+                strict_cli,
+                Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
+            )
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?
+        };
         let mut config_dir_warnings = Vec::new();
         for spec in &specs {
             if spec.cli == cas_mux::SupervisorCli::Claude
@@ -1748,6 +1819,18 @@ impl CasService {
         })?;
 
         let spec_summary = spawn_specs_summary(&specs, &worker_names);
+        let lane_notice = req
+            .lane
+            .as_deref()
+            .map(|lane| {
+                let mut notice =
+                    format!("\nLane request: lane={lane} resolved recipe={lane_recipe}");
+                for warning in &lane_warnings {
+                    notice.push_str(&format!("\nWarning: {warning}"));
+                }
+                notice
+            })
+            .unwrap_or_default();
         let spec_warning = if legacy_single_spec_payload {
             spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned)
         } else {
@@ -1836,11 +1919,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -9442,6 +9525,53 @@ mod tests {
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
     }
 
+    #[test]
+    fn lane_spawn_specs_use_registry_recipe_and_preserve_slot_metadata() {
+        let snapshot = cas_factory::CapabilitySnapshot::default();
+        let specs = build_lane_spawn_specs(
+            2,
+            "light",
+            Some("~/.claude-alt"),
+            Some(r#"[{"name":"research"},{"name":"review"}]"#),
+            &snapshot,
+        )
+        .expect("lane should resolve");
+
+        assert_eq!(specs.0.len(), 2);
+        assert_eq!(specs.1, "claude_haiku");
+        assert_eq!(specs.0[0].name.as_deref(), Some("research"));
+        assert_eq!(specs.0[1].name.as_deref(), Some("review"));
+        assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
+        assert_eq!(specs.0[0].model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::Low));
+        assert!(specs.2.is_empty(), "static primary should not warn");
+    }
+
+    #[test]
+    fn lane_spawn_specs_reject_explicit_worker_recipe_fields() {
+        let snapshot = cas_factory::CapabilitySnapshot::default();
+        let error = build_lane_spawn_specs(
+            1,
+            "standard",
+            None,
+            Some(r#"[{"model":"gpt-5.6-sol"}]"#),
+            &snapshot,
+        )
+        .expect_err("lane must not accept a partial explicit recipe");
+
+        assert!(error.contains("lane=\"standard\""), "{error}");
+        assert!(error.contains("model"), "{error}");
+        assert!(error.contains("choose lane="), "{error}");
+    }
+
+    #[test]
+    fn lane_spawn_specs_reject_empty_or_zero_slot_requests() {
+        let snapshot = cas_factory::CapabilitySnapshot::default();
+        let error = build_lane_spawn_specs(0, "light", None, None, &snapshot)
+            .expect_err("lane must name a real worker slot");
+        assert!(error.contains("at least one worker slot"), "{error}");
+    }
+
     // -----------------------------------------------------------------------
     // cas-28a4 / GH #71: an invalid cli+model pairing must never reach the
     // spawn queue. The live report: `model=claude-opus-4-5` with no `cli=`
@@ -9483,6 +9613,8 @@ mod tests {
         assert!(err.contains("suspended"), "{err}");
         assert!(err.contains("operator decision pending"), "{err}");
         assert!(err.contains("gpt-5.6-luna"), "{err}");
+        assert!(err.contains("routing rule 'suspended recipe'"), "{err}");
+        assert!(err.contains("codex_luna"), "{err}");
     }
 
     #[test]
@@ -9493,6 +9625,8 @@ mod tests {
 
         assert!(err.contains("gpt-5.6-luna"), "{err}");
         assert!(err.contains("effort=xhigh"), "{err}");
+        assert!(err.contains("routing rule 'allowed effort'"), "{err}");
+        assert!(err.contains("codex_luna"), "{err}");
     }
 
     /// The live #71 case: no `cli=` at all. The model slug is unambiguous, so
@@ -9521,10 +9655,7 @@ mod tests {
 
     #[test]
     fn opencode_spawn_preserves_full_provider_model_selector_and_omits_effort() {
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            None,
-        )]);
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
         let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), None)
             .expect("OpenCode selector should resolve without a hard-coded model default");
         let spec = decoded_spawn_spec(&json);
@@ -9536,10 +9667,7 @@ mod tests {
 
     #[test]
     fn opencode_model_selector_infers_opencode_when_cli_is_omitted() {
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            None,
-        )]);
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
         let json = build_spawn_spec_json(None, Some("local/qwen3.8"), None)
             .expect("provider/model selector should identify OpenCode");
         let spec = decoded_spawn_spec(&json);
@@ -9551,10 +9679,7 @@ mod tests {
 
     #[test]
     fn opencode_defaults_to_the_operator_token_plan_lane() {
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            None,
-        )]);
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
         let json = build_spawn_spec_json(Some("opencode"), None, None)
             .expect("OpenCode should use the operator's explicit Token Plan default");
         let spec = decoded_spawn_spec(&json);
@@ -9566,20 +9691,16 @@ mod tests {
 
     #[test]
     fn opencode_rejects_effort_outside_endpoint_accepted_set_without_remapping() {
-        let _env = TestEnvGuard::with_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            "low,medium,xhigh",
-        )]);
-        let err = build_spawn_spec_json(
-            Some("opencode"),
-            Some("local/qwen3.8"),
-            Some("high"),
-        )
-        .expect_err("unsupported local endpoint effort must fail before spawn");
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "low,medium,xhigh")]);
+        let err = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), Some("high"))
+            .expect_err("unsupported local endpoint effort must fail before spawn");
 
         assert!(err.contains("local/qwen3.8"), "{err}");
         assert!(err.contains("effort high"), "{err}");
-        assert!(err.contains("endpoint accepted efforts: [low, medium, xhigh]"), "{err}");
+        assert!(
+            err.contains("endpoint accepted efforts: [low, medium, xhigh]"),
+            "{err}"
+        );
         assert!(err.contains("No effort remapping is performed"), "{err}");
     }
 
@@ -9601,14 +9722,8 @@ mod tests {
 
     #[test]
     fn opencode_token_plan_route_is_explicit_and_separate_from_payg() {
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            None,
-        )]);
-        for selector in [
-            "qwencloud/qwen3.8-max",
-            "hosted-token-plan/qwen3.8-max",
-        ] {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        for selector in ["qwencloud/qwen3.8-max", "hosted-token-plan/qwen3.8-max"] {
             let json = build_spawn_spec_json(Some("opencode"), Some(selector), Some("medium"))
                 .unwrap_or_else(|error| panic!("Token Plan selector should resolve: {error}"));
             let spec = decoded_spawn_spec(&json);
@@ -9621,7 +9736,34 @@ mod tests {
             Some("medium"),
         )
         .expect("pay-as-you-go selector should remain available");
-        assert_eq!(decoded_spawn_spec(&json).model.as_deref(), Some("alibaba/qwen3.8-max"));
+        assert_eq!(
+            decoded_spawn_spec(&json).model.as_deref(),
+            Some("alibaba/qwen3.8-max")
+        );
+    }
+
+    #[test]
+    fn opencode_registered_recipe_runs_registry_policy_before_route_preflight() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let error = build_spawn_spec_json(
+            Some("opencode"),
+            Some("qwencloud/qwen3.8-max"),
+            Some("high"),
+        )
+        .expect_err("the registered Token Plan recipe must reject high before route preflight");
+
+        assert!(
+            error.contains("recipe \"qwencloud_qwen\" rejects effort high"),
+            "{error}"
+        );
+        assert!(
+            error.contains("routing rule 'recipe allowed efforts'"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("accepted hosted efforts"),
+            "route-specific validation ran before registry policy: {error}"
+        );
     }
 
     #[test]
@@ -9671,12 +9813,8 @@ mod tests {
     #[test]
     fn opencode_accepts_operator_configured_effort_set() {
         let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
-        let json = build_spawn_spec_json(
-            Some("opencode"),
-            Some("local/qwen3.8"),
-            Some("high"),
-        )
-        .expect("local endpoint effort set should be configurable");
+        let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), Some("high"))
+            .expect("local endpoint effort set should be configurable");
         let spec = decoded_spawn_spec(&json);
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
@@ -9686,10 +9824,7 @@ mod tests {
 
     #[test]
     fn opencode_accepts_project_configured_effort_set() {
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            None,
-        )]);
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -9717,10 +9852,7 @@ opencode_accepted_efforts = ["minimal", "high"]
 
     #[test]
     fn opencode_factory_default_model_is_config_driven() {
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            OPENCODE_ACCEPTED_EFFORTS_ENV,
-            None,
-        )]);
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -10007,7 +10139,7 @@ effort = "high"
             let notices = cas_factory::apply_codex_fallback(
                 std::slice::from_mut(&mut spec),
                 false,
-                claude_default_model,
+                Some(claude_default_model),
             )
             .unwrap();
 
@@ -10016,7 +10148,7 @@ effort = "high"
                 cas_mux::SupervisorCli::Claude,
                 "controlled missing binary must fall back with auth_present={auth_present}"
             );
-            assert_eq!(spec.model.as_deref(), claude_default_model);
+            assert_eq!(spec.model.as_deref(), Some(claude_default_model));
             assert_eq!(notices.len(), 1);
             assert!(
                 notices[0].starts_with(

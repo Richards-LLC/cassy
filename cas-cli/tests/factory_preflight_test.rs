@@ -85,6 +85,7 @@ fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
     command
         .current_dir(cwd)
         .env("HOME", home.path())
+        .env("GROK_HOME", cwd.join(".test-grok-home"))
         .env_remove("CAS_ROOT")
         .env_remove("CAS_SOURCE_DIR")
         .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA")
@@ -100,6 +101,7 @@ fn human_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
     command
         .current_dir(cwd)
         .env("HOME", home.path())
+        .env("GROK_HOME", cwd.join(".test-grok-home"))
         .env_remove("CAS_ROOT")
         .env_remove("CAS_SOURCE_DIR")
         .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA")

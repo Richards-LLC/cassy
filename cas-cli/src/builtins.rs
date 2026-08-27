@@ -2513,6 +2513,7 @@ pub fn worker_guidance() -> String {
 #[cfg(test)]
 mod tests {
     use crate::builtins::*;
+    use cas_factory::{embedded_registry, render_route_table, render_spawn_recipes};
 
     thread_local! {
         /// Test-only stand-in for the embedded shipped-version history
@@ -2653,15 +2654,15 @@ This is the body content."#;
             "light",
             "standard",
             "heavy",
-            "frontier",
             "model-selection.md",
-            // cas-b342/cas-96ea: Codex-first tier table + exception/capacity lanes in the body.
-            "Codex-first tiers",
-            "grok/grok-composer-2.5-fast/low",
-            "codex/gpt-5.6-sol/high",
-            "codex/gpt-5.6-luna/xhigh",
-            "Opus",
-            "capacity route",
+            // cas-a7d1: registry lane summary in the small body.
+            "Registry lanes",
+            "Claude/Haiku 4.5/low",
+            "Codex/GPT-5.6 Luna/xhigh",
+            "Claude/Opus 5/high",
+            "Codex/GPT-5.6 Sol/high",
+            "standing suspension",
+            "generated route table and recipes",
         ] {
             assert!(
                 codex_guide.contains(keyword),
@@ -5208,56 +5209,48 @@ This is the body content."#;
             "model-selection.md .claude and .grok copies must be identical apart from \
              the mcp__cas__/cas__ tool prefix",
         );
-        // The Codex-first tier table is the contract: Grok Composer serves
-        // genuinely light work, Luna/xhigh is standard and taste, while
-        // Sol/high is heavy/frontier only and Terra is suspended.
-        for required in [
-            // Codex-first tier table (AC2)
-            "Codex-first",
-            "cli=grok model=grok-composer-2.5-fast effort=low",
-            "cli=codex model=gpt-5.6-luna effort=xhigh",
-            "cli=codex model=gpt-5.6-sol effort=high",
-            "gpt-5.6-luna",
-            "gpt-5.4-mini successor",
-            "Sonnet is not a normal worker lane",
-            "not Sonnet",
-            // Claude Opus exceptional lane (AC3 revised)
-            "Claude Opus",
-            "cli=claude model=opus effort=high",
-            "architecture",
-            "safety",
-            "rescue",
-            "independent challenge",
-            // Grok capacity lane (AC4). The light Grok recipe is pinned with
-            // explicit effort=low — every spawn recipe must carry cli/model/effort.
-            "capacity",
-            "cli=grok model=grok-composer-2.5-fast effort=low",
-            "grok model=grok-4.5",
-            "same-tier Codex fallback",
-            "health",
-            // Rubric contract carried over
-            "light",
-            "standard",
-            "heavy",
-            "frontier",
-            "tier:",
-            "Escalate on failure",
-            "Routing Axes",
-            "Cost",
-            "Intelligence",
-            "Taste",
-            "Taste-sensitive work routes to Codex GPT-5.6 Luna at",
-            "effort=high",
-            "Terra is suspended",
-            "operator decision pending",
-            "Escalate on judgment",
-            "Cost is a tiebreaker only",
+        // cas-a7d1: route values and copyable commands are golden-tested from
+        // the embedded registry, rather than maintained as hand-pinned marker
+        // lists that can drift from enforcement.
+        let registry = embedded_registry().expect("embedded registry validates");
+        let generated_table = render_route_table().expect("route table renders");
+        for (label, content, tool_prefix) in [
+            ("claude", claude.content, "mcp__cas__"),
+            ("codex", codex.content, "mcp__cs__"),
+            ("grok", grok.content, "cas__"),
         ] {
             assert!(
-                claude.content.contains(required),
-                "model-selection.md missing required tier-rubric marker: {required:?}"
+                content.contains(&generated_table),
+                "{label} model-selection.md is missing the registry-generated route table"
+            );
+            let generated_recipes =
+                render_spawn_recipes(tool_prefix).expect("spawn recipes render");
+            assert!(
+                content.contains(&generated_recipes),
+                "{label} model-selection.md is missing the registry-generated spawn recipes"
             );
         }
+        for lane_name in registry.lanes.keys() {
+            let decision = cas_factory::resolve_lane(
+                lane_name,
+                &cas_factory::CapabilitySnapshot::default(),
+            )
+            .expect("registry lane has an active recipe");
+            let recipe = &registry.recipes[&decision.recipe_id];
+            assert!(
+                claude.content.contains(&format!(
+                    "{} model={} effort={}",
+                    recipe.harness.backend().name(),
+                    recipe.model,
+                    recipe.default_effort
+                )),
+                "registry recipe for {lane_name:?} missing from model-selection.md"
+            );
+        }
+        assert!(claude.content.contains("Claude Opus 5 at high"));
+        assert!(claude.content.contains("Claude Haiku 4.5"));
+        assert!(!claude.content.contains("operator decision pending"));
+        assert!(!claude.content.contains("exceptional-only"));
         // cas-b342 edge case: the exact frontier slug is `gpt-5.6-sol`; a bare
         // `gpt-5.6` must never appear as a spawn recipe (`model=gpt-5.6` or the
         // `codex/gpt-5.6` tier shorthand). Documentation may still mention the
@@ -6094,14 +6087,14 @@ This is the body content."#;
             "light",
             "standard",
             "heavy",
-            "frontier",
-            // cas-b342/cas-96ea: Codex-first tier table + exception/capacity lanes in the body.
-            "Codex-first tiers",
-            "grok/grok-composer-2.5-fast/low",
-            "codex/gpt-5.6-sol/high",
-            "codex/gpt-5.6-luna/xhigh",
-            "Opus",
-            "capacity route",
+            // cas-a7d1: registry lane summary in the small body.
+            "Registry lanes",
+            "Claude/Haiku 4.5/low",
+            "Codex/GPT-5.6 Luna/xhigh",
+            "Claude/Opus 5/high",
+            "Codex/GPT-5.6 Sol/high",
+            "standing suspension",
+            "generated route table and recipes",
         ] {
             assert!(
                 supervisor.content.contains(keyword),

@@ -29,6 +29,7 @@ use crate::ui::factory::{
 };
 use crate::worktree::GitOperations;
 use anyhow::{Result, bail};
+use cas_factory::routing::{CapabilitySnapshot, resolve_lane_specs, validate_lane_request};
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use clap::{Args, Subcommand};
 use std::io::IsTerminal;
@@ -286,6 +287,13 @@ pub struct FactoryArgs {
     #[arg(long = "worker-spec", value_name = "JSON")]
     pub worker_spec: Vec<String>,
 
+    /// Resolve workers through the embedded lane registry.
+    ///
+    /// A lane is mutually exclusive with explicit worker CLI/model/effort
+    /// recipe controls; names and account metadata may still be supplied.
+    #[arg(long, global = true)]
+    pub lane: Option<String>,
+
     /// Supervisor spec override as a JSON object (singular).
     ///
     /// A JSON object with optional fields `cli`, `model`, `effort`.
@@ -328,12 +336,120 @@ impl Default for FactoryArgs {
             worker_cli: "claude".to_string(),
             no_phone_home: false,
             worker_spec: vec![],
+            lane: None,
             supervisor_spec: None,
             set_default: false,
             supervisor_cli_explicit: false,
             strict_cli: false,
         }
     }
+}
+
+/// Resolve direct-CLI workers through the same registry lane seam used by the
+/// MCP `spawn_workers` request. Identity/account metadata is allowed to remain
+/// per-worker, but recipe controls are rejected so lane fallback cannot be
+/// silently combined with an explicit override.
+fn resolve_lane_worker_specs(
+    lane: &str,
+    slots: usize,
+    worker_names: &[String],
+    worker_cli: cas_mux::SupervisorCli,
+    worker_spec_jsons: &[String],
+    snapshot: &CapabilitySnapshot,
+) -> Result<(Vec<cas_mux::WorkerSpec>, String)> {
+    if slots == 0 {
+        bail!("lane spawn requires at least one worker slot");
+    }
+    if worker_spec_jsons.len() > slots {
+        bail!(
+            "--worker-spec has {} entries but this spawn has only {slots} worker slot(s)",
+            worker_spec_jsons.len()
+        );
+    }
+    validate_lane_request(
+        lane,
+        worker_cli != cas_mux::SupervisorCli::Claude,
+        false,
+        false,
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    let decisions = resolve_lane_specs(lane, slots, snapshot)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let recipe_id = decisions
+        .first()
+        .map(|decision| decision.recipe_id.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let mut warnings = decisions
+        .iter()
+        .flat_map(|decision| decision.warnings.iter().cloned())
+        .collect::<Vec<_>>();
+    warnings.sort();
+    warnings.dedup();
+    let mut specs = decisions
+        .into_iter()
+        .enumerate()
+        .map(|(slot, decision)| {
+            let mut spec = decision.spec;
+            if let Some(name) = worker_names.get(slot) {
+                spec.name = Some(name.clone());
+            }
+            spec
+        })
+        .collect::<Vec<_>>();
+
+    for (slot, json) in worker_spec_jsons.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
+            anyhow::anyhow!("invalid --worker-spec JSON for lane mode: {error}")
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            anyhow::anyhow!("invalid --worker-spec JSON: every entry must be an object")
+        })?;
+        let explicit_fields = ["cli", "model", "effort"]
+            .into_iter()
+            .filter(|field| object.get(*field).is_some_and(|value| !value.is_null()))
+            .collect::<Vec<_>>();
+        if !explicit_fields.is_empty() {
+            return Err(anyhow::anyhow!(
+                "lane={:?} cannot be combined with explicit {} recipe field(s) in --worker-spec[{}]; choose --lane or an explicit cli/model/effort recipe",
+                lane.trim(),
+                explicit_fields.join(", "),
+                slot
+            ));
+        }
+        if let Some(name) = object.get("name") {
+            specs[slot].name = Some(
+                name.as_str()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("invalid --worker-spec[{slot}].name: expected a string")
+                    })?
+                    .to_string(),
+            );
+        }
+        if let Some(config_dir) = object.get("config_dir") {
+            specs[slot].config_dir = Some(
+                config_dir
+                    .as_str()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "invalid --worker-spec[{slot}].config_dir: expected a string"
+                        )
+                    })?
+                    .to_string(),
+            );
+        }
+    }
+
+    for spec in &specs {
+        cas_factory::validate_explicit(spec, snapshot)
+            .map_err(|error| anyhow::anyhow!("Failed to validate lane routing spec: {error}"))?;
+    }
+
+    let mut notice = format!("lane={} resolved recipe={recipe_id}", lane.trim());
+    for warning in warnings {
+        notice.push_str(&format!("; warning: {warning}"));
+    }
+    Ok((specs, notice))
 }
 
 /// Arguments for `cas attach`
@@ -1128,34 +1244,58 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // Resolve per-worker specs from the cascade (cas-2992): config files,
     // CLI flags, and per-worker JSON overrides in priority order.
-    let (mut resolved_worker_specs, worker_fallback_model) = {
-        // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited: this
-        // `!= Claude` check is harness-agnostic by construction ("only pass
-        // an explicit override when it's not the Claude default"), so Grok
-        // already flows through correctly as `Some(Grok)` — no code change
-        // needed here.
-        let sources = ConfigSources {
-            cli_flag: if preflight.worker_cli != cas_mux::SupervisorCli::Claude {
-                Some(preflight.worker_cli)
-            } else {
-                None
-            },
-            model_flag: llm.model_for_role("worker").map(String::from),
-            effort_flag: llm
-                .reasoning_effort_for_role("worker")
-                .and_then(|s| s.parse().ok()),
-            config_dir_flag: None,
-            worker_spec_jsons: args.worker_spec.clone(),
-            supervisor_spec_json: None,
-            user_config: None, // auto-resolve from home dir
-            project_config: Some(cwd.join(".cas").join("config.toml")),
-        };
-        let fallback_model = cas_factory::configured_factory_default_model(&sources)
-            .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
-        let specs = resolve_specs(args.workers as usize, sources)
-            .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
-        (specs, fallback_model)
+    let (mut resolved_worker_specs, worker_fallback_model, lane_route_notice) = {
+        if let Some(lane) = args.lane.as_deref() {
+            let (specs, notice) = resolve_lane_worker_specs(
+                lane,
+                args.workers as usize,
+                &worker_names,
+                preflight.worker_cli,
+                &args.worker_spec,
+                &preflight.capability_snapshot,
+            )?;
+            (specs, None, Some(notice))
+        } else {
+            // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited: this
+            // `!= Claude` check is harness-agnostic by construction ("only pass
+            // an explicit override when it's not the Claude default"), so Grok
+            // already flows through correctly as `Some(Grok)` — no code change
+            // needed here.
+            let sources = ConfigSources {
+                cli_flag: if preflight.worker_cli != cas_mux::SupervisorCli::Claude {
+                    Some(preflight.worker_cli)
+                } else {
+                    None
+                },
+                model_flag: llm.model_for_role("worker").map(String::from),
+                effort_flag: llm
+                    .reasoning_effort_for_role("worker")
+                    .and_then(|s| s.parse().ok()),
+                config_dir_flag: None,
+                worker_spec_jsons: args.worker_spec.clone(),
+                supervisor_spec_json: None,
+                user_config: None, // auto-resolve from home dir
+                project_config: Some(cwd.join(".cas").join("config.toml")),
+            };
+            let fallback_model = cas_factory::configured_factory_default_model(&sources)
+                .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
+            let specs = resolve_specs(args.workers as usize, sources)
+                .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
+            for spec in &specs {
+                cas_factory::validate_explicit(spec, &CapabilitySnapshot::default())
+                    .map_err(|e| anyhow::anyhow!("Failed to validate worker routing spec: {e}"))?;
+            }
+            (specs, fallback_model, None)
+        }
     };
+
+    if let Some(notice) = lane_route_notice.as_deref() {
+        tracing::info!(target: "cas::factory", "Factory lane route: {notice}");
+        let theme = crate::ui::theme::ActiveTheme::default();
+        let mut stdout = std::io::stdout();
+        let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+        fmt.info(&format!("Factory lane route: {notice}"))?;
+    }
 
     // cas-7199 / cas-a487: any resolved worker spec that landed on Codex
     // (built-in default since cas-fbac, project config, CLI flag, or a
@@ -1166,12 +1306,19 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // strict_cli bails instead. An incompatible Codex model is replaced by
     // the cascaded `[factory.defaults].model`, if configured.
     let strict_cli = args.strict_cli || cas_config.factory().strict_cli;
-    let codex_fallback_notices = cas_factory::apply_codex_fallback(
-        &mut resolved_worker_specs,
-        strict_cli,
-        worker_fallback_model.as_deref(),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let codex_fallback_notices = if args.lane.is_some() {
+        // Lane resolution owns capability-aware substitution and warning
+        // semantics. The legacy Codex-only fallback must not rewrite a lane
+        // decision behind the lane receipt's back.
+        Vec::new()
+    } else {
+        cas_factory::apply_codex_fallback(
+            &mut resolved_worker_specs,
+            strict_cli,
+            worker_fallback_model.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
     for notice in &codex_fallback_notices {
         tracing::warn!(target: "cas::factory", "{notice}");
     }
@@ -1210,6 +1357,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
         let spec = resolve_supervisor_spec(sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
+        cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
+            .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;
         (spec, fallback_model)
     };
 
@@ -1459,6 +1608,7 @@ struct FactoryPreflight {
     cas_root: std::path::PathBuf,
     supervisor_cli: cas_mux::SupervisorCli,
     worker_cli: cas_mux::SupervisorCli,
+    capability_snapshot: CapabilitySnapshot,
     enable_worktrees: bool,
     notices: Vec<String>,
 }
@@ -1747,6 +1897,11 @@ fn preflight_factory_launch(
         cas_root: resolved_cas_root.expect("preflight must set cas_root on success"),
         supervisor_cli: supervisor_cli.expect("preflight must parse supervisor_cli on success"),
         worker_cli: worker_cli.expect("preflight must parse worker_cli on success"),
+        capability_snapshot: if args.lane.is_some() {
+            crate::factory_preflight::collect_live_capability_snapshot()
+        } else {
+            CapabilitySnapshot::default()
+        },
         enable_worktrees,
         notices,
     })

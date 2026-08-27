@@ -3158,6 +3158,10 @@ This is the body content."#;
                 "cas-2327",
                 "reverse states",
                 "release-notes impact",
+                "Release-note transport handoff",
+                "do not spend a turn searching for one",
+                "supervisor-owned posting",
+                "returned receipt",
             ] {
                 assert!(content.contains(required), "{label} surface checklist missing {required:?}");
             }
@@ -3833,6 +3837,10 @@ This is the body content."#;
                 "Staging",
                 "## POSTED",
                 "UTC timestamp",
+                "Step 1a — preflight and worker ownership",
+                "supervisor-owned",
+                "designed handoff",
+                "timestamps/permalinks",
             ] {
                 assert!(
                     skill.content.contains(required),

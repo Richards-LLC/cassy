@@ -1732,20 +1732,15 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
         .expect("normal close call");
     let text = get_text(&result);
     assert!(
-        text.contains("queued for supervisor review"),
-        "task A anchor must pass despite later bad task B and dirty pulse worktree: {text}"
+        text.contains("MERGE REQUIRED") && text.contains("current factory branch tip"),
+        "#588 must reject the later unmerged task-B tip before review queueing: {text}"
     );
     let persisted = task_store.get(&task.id).expect("persisted task");
-    let evidence = persisted
-        .deliverables
-        .pre_close_hook
-        .as_ref()
-        .expect("hook evidence");
     assert_eq!(
-        evidence.worktree_branch.as_deref(),
-        Some("factory/frontend")
+        persisted.status,
+        cas::types::TaskStatus::AwaitingMerge,
+        "the ancestry rejection must leave task A available for merge recovery"
     );
-    assert_eq!(evidence.task_tip.as_deref(), Some(task_a_tip.as_str()));
 }
 
 /// Negative case: when neither System A nor System B has a matching
@@ -3229,6 +3224,21 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     std::fs::write(worker_path.join("authority.rs"), "pub fn authority() {}\n").unwrap();
     run_git(&["add", "authority.rs"], &worker_path);
     run_git(&["commit", "-m", "receipt authority fixture"], &worker_path);
+    // This test exercises exact lease-session authority after receipt
+    // validation. Keep the source tip in the already-merged/published state
+    // required by the #588 decision-time ancestry and B2 reality gates.
+    run_git(
+        &["merge", "--no-ff", "factory/alice", "-m", "merge receipt authority"],
+        &repo.root,
+    );
+    run_git(
+        &[
+            "update-ref",
+            "refs/remotes/origin/factory/alice",
+            "factory/alice",
+        ],
+        &repo.root,
+    );
 
     let task_store = open_task_store(&cas_root).expect("task store");
     let agent_store = open_agent_store(&cas_root).expect("agent store");

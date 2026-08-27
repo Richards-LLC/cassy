@@ -96,6 +96,16 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
     std::fs::write(project_root.join("base.rs"), "fn main() {}\n").expect("write should succeed");
     git(&["add", "base.rs"]);
     git(&["commit", "-m", "init"]);
+    // The close gate re-validates the live factory/test-agent tip and the B2
+    // merge-reality check requires push evidence for a locally retained
+    // merged branch. Model that post-push/post-merge state while keeping the
+    // staged change below as the behavior under test.
+    git(&["branch", "factory/test-agent"]);
+    git(&[
+        "update-ref",
+        "refs/remotes/origin/factory/test-agent",
+        "factory/test-agent",
+    ]);
     std::fs::write(
         project_root.join("feature.rs"),
         "pub fn feature() -> u32 { 42 }\n",

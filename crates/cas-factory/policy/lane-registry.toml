@@ -59,14 +59,18 @@ reason = "Standing operator suspension (2026-08-27)"
 required_capability = "codex-account"
 
 [lanes.light]
-candidates = ["claude_haiku"]
+candidates = ["claude_haiku", "claude_opus"]
 
 [lanes.standard]
-candidates = ["codex_luna"]
+candidates = ["codex_luna", "claude_opus"]
 
 [lanes.taste]
 candidates = ["claude_opus"]
+# Keep the only taste fallback as an explicit, reviewable registry edge while
+# disabling it in the shipped policy. A host may remove this guard only when
+# its own routing policy permits taste to degrade to Luna.
+fallbacks = ["codex_luna"]
 no_fallback = true
 
 [lanes.heavy]
-candidates = ["codex_sol"]
+candidates = ["codex_sol", "codex_luna"]

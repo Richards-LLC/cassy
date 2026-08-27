@@ -786,27 +786,43 @@ fn collect_capability_snapshot(
     receipts: &[HarnessConformanceReceipt],
     deadline: Deadline,
 ) -> cas_factory::CapabilitySnapshot {
-    let jobs = registered_harnesses()
-        .into_iter()
-        .map(|harness| {
-            let binary = match default_versions.get(&harness) {
-                Some(VersionProbe::Observed(version)) => {
-                    crate::capability::BinaryObservation::Observed(version.clone())
-                }
-                Some(VersionProbe::TimedOut) => crate::capability::BinaryObservation::TimedOut,
-                Some(VersionProbe::Unavailable) | None => {
-                    crate::capability::BinaryObservation::Unavailable
-                }
-            };
-            let model = cas_factory::default_worker_model_for_cli(supervisor_harness(harness));
-            let account_dir = account_dir_for_harness(harness);
-            let receipt = receipts
-                .iter()
-                .find(|receipt| receipt.harness == harness)
-                .cloned();
-            (harness, model.to_string(), account_dir, binary, receipt)
-        })
-        .collect::<Vec<_>>();
+    let registry = cas_factory::registry()
+        .expect("embedded lane registry must expose valid capability routes");
+    let mut jobs = Vec::new();
+    for harness in registered_harnesses() {
+        let binary = match default_versions.get(&harness) {
+            Some(VersionProbe::Observed(version)) => {
+                crate::capability::BinaryObservation::Observed(version.clone())
+            }
+            Some(VersionProbe::TimedOut) => crate::capability::BinaryObservation::TimedOut,
+            Some(VersionProbe::Unavailable) | None => {
+                crate::capability::BinaryObservation::Unavailable
+            }
+        };
+        let account_dir = account_dir_for_harness(harness);
+        let receipt = receipts
+            .iter()
+            .find(|receipt| receipt.harness == harness)
+            .cloned();
+        let default_model = cas_factory::default_worker_model_for_cli(supervisor_harness(harness));
+        let mut models = vec![default_model.to_string()];
+        for recipe in registry.recipes.values() {
+            if recipe.harness == supervisor_harness(harness)
+                && !models.iter().any(|model| model == &recipe.model)
+            {
+                models.push(recipe.model.clone());
+            }
+        }
+        for model in models {
+            jobs.push((
+                harness,
+                model,
+                account_dir.clone(),
+                binary.clone(),
+                receipt.clone(),
+            ));
+        }
+    }
 
     let now_ms = cas_factory::CapabilitySnapshot::now_ms();
     let mut snapshot = cas_factory::CapabilitySnapshot::default();
@@ -833,6 +849,19 @@ fn collect_capability_snapshot(
         }
     });
     snapshot
+}
+
+/// Collect the current capability evidence used by an explicit lane spawn.
+///
+/// This is intentionally separate from session startup: lane selection is an
+/// explicit factory operation, so it may use the same bounded provider probes
+/// as `cas factory doctor`/`preflight` without turning ordinary MCP startup
+/// into a network or credential probe.
+pub fn collect_live_capability_snapshot() -> cas_factory::CapabilitySnapshot {
+    let deadline = Deadline::after(COLLECTION_BUDGET);
+    let default_versions = probe_default_harness_versions(deadline);
+    let receipts = harness_conformance_receipts().unwrap_or_default();
+    collect_capability_snapshot(&default_versions, &receipts, deadline)
 }
 
 fn classify_harnesses(

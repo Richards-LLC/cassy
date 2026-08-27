@@ -1,6 +1,9 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
-use cas_factory::routing::{default_worker_effort_for_cli, default_worker_model_for_cli};
+use cas_factory::routing::{
+    default_worker_effort_for_cli, default_worker_model_for_cli, resolve_lane_specs,
+    validate_lane_request,
+};
 
 /// Whether this harness has account-directory plumbing at all.
 ///
@@ -451,6 +454,86 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
         .pop()
         .ok_or_else(|| "failed to resolve worker spec: no worker slots returned".to_string())?;
     serde_json::to_string(&spec).map_err(|e| format!("failed to serialize WorkerSpec: {e}"))
+}
+
+/// Resolve a registry lane into one immutable recipe decision per spawn slot.
+///
+/// Lane mode may still carry per-worker identity/account metadata, but it may
+/// not smuggle in a partial explicit recipe through `workers=[...]`. Reject
+/// those fields before queueing so the lane's fallback policy remains
+/// unambiguous and explicit recipes retain their fail-closed behavior.
+fn build_lane_spawn_specs(
+    slots: usize,
+    lane: &str,
+    config_dir: Option<&str>,
+    workers_json: Option<&str>,
+    snapshot: &cas_factory::CapabilitySnapshot,
+) -> Result<(Vec<cas_mux::WorkerSpec>, String, Vec<String>), String> {
+    let worker_spec_jsons = parse_spawn_worker_specs(workers_json, slots)?;
+    if slots == 0 {
+        return Err("lane spawn requires at least one worker slot".to_string());
+    }
+    validate_lane_request(lane, false, false, false).map_err(|error| error.to_string())?;
+
+    let decisions = resolve_lane_specs(lane, slots, snapshot).map_err(|error| error.to_string())?;
+    let recipe_id = decisions
+        .first()
+        .ok_or_else(|| "lane spawn has no worker slots".to_string())?
+        .recipe_id
+        .clone();
+    let mut warnings = decisions
+        .iter()
+        .flat_map(|decision| decision.warnings.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut specs = decisions
+        .into_iter()
+        .map(|decision| decision.spec)
+        .collect::<Vec<_>>();
+
+    for spec in &mut specs {
+        if let Some(config_dir) = config_dir {
+            spec.config_dir = Some(config_dir.to_string());
+        }
+    }
+
+    for (slot, json) in worker_spec_jsons.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|error| format!("invalid workers JSON entry: {error}"))?;
+        let Some(object) = value.as_object() else {
+            return Err("invalid workers JSON: every entry must be an object".to_string());
+        };
+        let explicit_fields = ["cli", "model", "effort"]
+            .into_iter()
+            .filter(|field| object.get(*field).is_some_and(|value| !value.is_null()))
+            .collect::<Vec<_>>();
+        if !explicit_fields.is_empty() {
+            return Err(format!(
+                "lane={:?} cannot be combined with explicit {} recipe field(s) in workers[{}]; choose lane= or an explicit cli/model/effort recipe",
+                lane.trim(),
+                explicit_fields.join(", "),
+                slot
+            ));
+        }
+        if let Some(name) = object.get("name") {
+            let name = name
+                .as_str()
+                .ok_or_else(|| format!("invalid workers[{slot}].name: expected a string"))?;
+            specs[slot].name = Some(name.to_string());
+        }
+        if let Some(config_dir) = object.get("config_dir") {
+            let config_dir = config_dir
+                .as_str()
+                .ok_or_else(|| format!("invalid workers[{slot}].config_dir: expected a string"))?;
+            specs[slot].config_dir = Some(config_dir.to_string());
+        }
+    }
+
+    // Each decision currently has the same static warning set per slot. Keep
+    // the receipt concise while retaining every distinct warning from a
+    // capability-aware resolver.
+    warnings.sort();
+    warnings.dedup();
+    Ok((specs, recipe_id, warnings))
 }
 
 /// Resolve one worker spec per spawn slot, applying the batch fields as
@@ -1385,16 +1468,45 @@ impl CasService {
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
         // remain the resolver defaults; `workers=[{...}]` is its final,
         // per-slot layer.
-        let mut specs = build_spawn_specs_with_project_config(
-            slots,
-            req.cli.as_deref(),
-            req.model.as_deref(),
-            req.effort.as_deref(),
-            req.config_dir.as_deref(),
-            req.workers.as_deref(),
-            Some(self.inner.cas_root.join("config.toml")),
-        )
-        .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        let (mut specs, lane_recipe, lane_warnings) = if let Some(lane) = req.lane.as_deref() {
+            validate_lane_request(
+                lane,
+                req.cli.is_some(),
+                req.model.is_some(),
+                req.effort.is_some(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+            let snapshot = tokio::task::spawn_blocking(
+                crate::factory_preflight::collect_live_capability_snapshot,
+            )
+            .await
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("failed to collect lane capability snapshot: {error}"),
+                )
+            })?;
+            build_lane_spawn_specs(
+                slots,
+                lane,
+                req.config_dir.as_deref(),
+                req.workers.as_deref(),
+                &snapshot,
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
+        } else {
+            let specs = build_spawn_specs_with_project_config(
+                slots,
+                req.cli.as_deref(),
+                req.model.as_deref(),
+                req.effort.as_deref(),
+                req.config_dir.as_deref(),
+                req.workers.as_deref(),
+                Some(self.inner.cas_root.join("config.toml")),
+            )
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+            (specs, String::new(), Vec::new())
+        };
 
         // `workers[].name` is optional, but when every slot names itself it
         // is equivalent to worker_names= and must become the actual visible
@@ -1420,12 +1532,19 @@ impl CasService {
         // actionable refusal. Rewriting the provider/tier to Claude here is
         // a cost and capability change the supervisor did not approve.
         let strict_cli = true;
-        let notices = cas_factory::apply_codex_fallback(
-            &mut specs,
-            strict_cli,
-            Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
-        )
-        .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+        let notices = if req.lane.is_some() {
+            // Lane resolution owns capability-aware substitution and warning
+            // semantics. The legacy fallback must not rewrite a selected lane
+            // route after its receipt has been constructed.
+            Vec::new()
+        } else {
+            cas_factory::apply_codex_fallback(
+                &mut specs,
+                strict_cli,
+                Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
+            )
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?
+        };
         let mut config_dir_warnings = Vec::new();
         for spec in &specs {
             if spec.cli == cas_mux::SupervisorCli::Claude
@@ -1474,6 +1593,18 @@ impl CasService {
         })?;
 
         let spec_summary = spawn_specs_summary(&specs, &worker_names);
+        let lane_notice = req
+            .lane
+            .as_deref()
+            .map(|lane| {
+                let mut notice =
+                    format!("\nLane request: lane={lane} resolved recipe={lane_recipe}");
+                for warning in &lane_warnings {
+                    notice.push_str(&format!("\nWarning: {warning}"));
+                }
+                notice
+            })
+            .unwrap_or_default();
         let spec_warning = if legacy_single_spec_payload {
             spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned)
         } else {
@@ -1562,11 +1693,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{task_id_note}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -9000,6 +9131,53 @@ mod tests {
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn lane_spawn_specs_use_registry_recipe_and_preserve_slot_metadata() {
+        let snapshot = cas_factory::CapabilitySnapshot::default();
+        let specs = build_lane_spawn_specs(
+            2,
+            "light",
+            Some("~/.claude-alt"),
+            Some(r#"[{"name":"research"},{"name":"review"}]"#),
+            &snapshot,
+        )
+        .expect("lane should resolve");
+
+        assert_eq!(specs.0.len(), 2);
+        assert_eq!(specs.1, "claude_haiku");
+        assert_eq!(specs.0[0].name.as_deref(), Some("research"));
+        assert_eq!(specs.0[1].name.as_deref(), Some("review"));
+        assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
+        assert_eq!(specs.0[0].model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::Low));
+        assert!(specs.2.is_empty(), "static primary should not warn");
+    }
+
+    #[test]
+    fn lane_spawn_specs_reject_explicit_worker_recipe_fields() {
+        let snapshot = cas_factory::CapabilitySnapshot::default();
+        let error = build_lane_spawn_specs(
+            1,
+            "standard",
+            None,
+            Some(r#"[{"model":"gpt-5.6-sol"}]"#),
+            &snapshot,
+        )
+        .expect_err("lane must not accept a partial explicit recipe");
+
+        assert!(error.contains("lane=\"standard\""), "{error}");
+        assert!(error.contains("model"), "{error}");
+        assert!(error.contains("choose lane="), "{error}");
+    }
+
+    #[test]
+    fn lane_spawn_specs_reject_empty_or_zero_slot_requests() {
+        let snapshot = cas_factory::CapabilitySnapshot::default();
+        let error = build_lane_spawn_specs(0, "light", None, None, &snapshot)
+            .expect_err("lane must name a real worker slot");
+        assert!(error.contains("at least one worker slot"), "{error}");
     }
 
     // -----------------------------------------------------------------------

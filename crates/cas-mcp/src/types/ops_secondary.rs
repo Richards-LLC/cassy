@@ -655,6 +655,14 @@ pub struct FactoryRequest {
     pub cross_session: Option<bool>,
 
     // ========== Spawn-time worker spec overrides (cas-2992) ==========
+    /// Registry lane to resolve for spawn_workers. A lane is mutually
+    /// exclusive with explicit cli/model/effort recipe fields.
+    #[schemars(
+        description = "spawn_workers only: registry lane to resolve (for example 'light', 'standard', 'taste', or 'heavy'). The lane chooses the ordered recipe; do not combine it with cli, model, or effort."
+    )]
+    #[serde(default)]
+    pub lane: Option<String>,
+
     /// Worker CLI override for spawn_workers ('claude' or 'codex').
     /// Applies to every spawned worker in this request.
     #[schemars(
@@ -952,6 +960,14 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub isolate: Option<bool>,
 
+    /// Registry lane to resolve for spawn_workers. Mutually exclusive with
+    /// explicit cli/model/effort recipe fields.
+    #[schemars(
+        description = "spawn_workers only: registry lane to resolve (for example 'light', 'standard', 'taste', or 'heavy'). The lane chooses the ordered recipe; do not combine it with cli, model, or effort."
+    )]
+    #[serde(default)]
+    pub lane: Option<String>,
+
     /// Worker CLI override for spawn_workers ('claude' or 'codex').
     /// Applies to every spawned worker in this request.
     #[schemars(
@@ -1169,6 +1185,7 @@ impl CoordinationRequest {
             remind_id: self.remind_id,
             remind_ttl_secs: self.remind_ttl_secs,
             cross_session: self.cross_session,
+            lane: self.lane.clone(),
             cli: self.cli.clone(),
             model: self.model.clone(),
             effort: self.effort.clone(),

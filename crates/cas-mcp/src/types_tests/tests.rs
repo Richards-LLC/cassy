@@ -76,6 +76,20 @@ fn test_factory_request_spawn() {
 }
 
 #[test]
+fn spawn_workers_lane_survives_factory_and_coordination_decoding() {
+    let factory: FactoryRequest =
+        serde_json::from_str(r#"{"action":"spawn_workers","count":2,"lane":"standard"}"#).unwrap();
+    assert_eq!(factory.lane.as_deref(), Some("standard"));
+
+    let coordination: CoordinationRequest =
+        serde_json::from_str(r#"{"action":"spawn_workers","count":2,"lane":"standard"}"#).unwrap();
+    assert_eq!(
+        coordination.to_factory_request().lane.as_deref(),
+        Some("standard")
+    );
+}
+
+#[test]
 fn test_system_request_report_bug() {
     let req: SystemRequest = serde_json::from_str(
         r#"{

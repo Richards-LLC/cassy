@@ -236,6 +236,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         notification_id: None,
         count: None,
         worker_names: None,
+        lane: None,
         branch: None,
         older_than_secs: None,
         isolate: None,

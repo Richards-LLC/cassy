@@ -308,13 +308,15 @@ fn deliver_worker_task_brief(
         message.push_str("\n\n");
         message.push_str(&instruction);
     }
-    Ok(queue.enqueue_with_summary(
+    let id = queue.enqueue_with_summary(
         "director",
         worker_name,
         &message,
         Some(factory_session),
         Some(&summary),
-    )?)
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
 }
 
 /// Surface stale output-path instructions before a worker acts on them. This is
@@ -462,13 +464,15 @@ fn enqueue_spawn_cancelled_notice(
         "Factory spawn for worker '{worker_name}' was cancelled by a shutdown that arrived \
          while it was still building. No worker pane was registered. {cleanup_status}"
     );
-    Ok(queue.enqueue_with_summary(
+    let id = queue.enqueue_with_summary(
         "director",
         supervisor_name,
         &message,
         Some(factory_session),
         Some(&summary),
-    )?)
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
 }
 
 fn append_spawn_audit(
@@ -587,13 +591,15 @@ fn enqueue_spawn_warning_notice(
         .unwrap_or_else(|| "direct spawn".to_string());
     let summary = format!("Worker spawn base warning: {worker_name}");
     let message = format!("Factory spawn {request} for worker '{worker_name}': {warning}");
-    Ok(queue.enqueue_with_summary(
+    let id = queue.enqueue_with_summary(
         "director",
         supervisor_name,
         &message,
         Some(factory_session),
         Some(&summary),
-    )?)
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
 }
 
 /// Drain spawn-prep warnings into the audit trail + the supervisor inbox.
@@ -658,13 +664,15 @@ fn enqueue_spawn_outcome_notice(
             ),
         )
     };
-    Ok(queue.enqueue_with_summary(
+    let id = queue.enqueue_with_summary(
         "director",
         supervisor_name,
         &message,
         Some(factory_session),
         Some(&summary),
-    )?)
+    )?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
 }
 
 /// cas-2327 (GH #170): a booted worker whose promised task did not bind is a
@@ -701,10 +709,12 @@ fn enqueue_preassign_failure_lifecycle_relay(
         Some(crate::store::NotificationPriority::High),
         &format!("spawn-preassign-failed:{request}:{worker_name}:{task_id}"),
     )?;
-    Ok(match result {
+    let id = match result {
         cas_store::EnqueueIdempotentResult::Created(id)
         | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
-    })
+    };
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
 }
 
 fn take_unverified_spawn_on_exit(
@@ -1542,6 +1552,8 @@ impl FactoryDaemon {
                         &self.session_name,
                     ) {
                         tracing::error!(%error, message_id = row_id, "failed to queue normal delivery watchdog flag");
+                    } else {
+                        super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
                     }
                     tracing::warn!(
                         target: "cas::coordination",
@@ -2985,6 +2997,7 @@ impl FactoryDaemon {
                         false,
                     ) {
                         Ok(_) => {
+                            super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
                             tracing::info!(
                                 target: "cas::coordination",
                                 stage = "suppress_stale_merge_request",
@@ -3145,6 +3158,45 @@ impl FactoryDaemon {
                     task_id = %task_id,
                     status = %task.status,
                     "cas-8aee: suppressed a queued assignment/start instruction for a terminal task"
+                );
+                continue;
+            }
+
+            // A registration-time spawn brief is historical once the same
+            // addressed worker has already started or parked its task. This
+            // closes the other side of GH #589: if the queue wake was delayed,
+            // do not inject a stale `task start` imperative after the worker
+            // has already acted on the assignment through another turn.
+            if queued.source.eq_ignore_ascii_case("director")
+                && queued
+                    .summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.starts_with("Assigned task:"))
+                && let Some(task_id) =
+                    crate::prompt_revalidation::assignment_solicited_task_id(&queued.prompt)
+                && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
+                && let Ok(task) = store.get(&task_id)
+                && let Some(task_id) = crate::prompt_revalidation::assignment_targets_started_task(
+                    &queued.prompt,
+                    task.status,
+                    task.assignee.as_deref(),
+                    &queued.target,
+                )
+            {
+                let detail = format!(
+                    "withdrawn before transport: spawn assignment for {task_id} is stale because the addressed worker already moved the task to {}",
+                    task.status
+                );
+                let _ = queue.mark_superseded(queued.id, &detail);
+                self.forget_row_delivery_state(queued.id);
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "suppress_started_assignment",
+                    prompt_id = queued.id,
+                    task_id = %task_id,
+                    status = %task.status,
+                    target_agent = %queued.target,
+                    "cas-589: suppressed a delayed spawn assignment after the addressed worker started the task"
                 );
                 continue;
             }
@@ -4215,12 +4267,19 @@ impl FactoryDaemon {
                                      </system-notice>",
                                     queued.source, pane_target, &queued.prompt
                                 );
-                                let _ = queue.enqueue_with_session(
+                                if let Err(error) = queue.enqueue_with_session(
                                     super::teams::DIRECTOR_AGENT_NAME,
                                     self.app.supervisor_name(),
                                     &notice,
                                     &self.session_name,
-                                );
+                                ) {
+                                    tracing::error!(
+                                        %error,
+                                        "failed to re-queue undelivered message notice"
+                                    );
+                                } else {
+                                    super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                                }
                             }
                         }
                     }
@@ -5704,6 +5763,7 @@ fn fire_reminder(
         {
             tracing::error!("Failed to enqueue reminder prompt: {}", e);
         } else {
+            super::delivery::wake_daemon_after_enqueue(cas_dir);
             tracing::info!(
                 "Fired reminder #{} → {} ({}): {}",
                 reminder.id,
@@ -5878,6 +5938,38 @@ mod tests {
         assert_eq!(tail.chars().count(), 2_000, "tail must remain bounded");
         assert!(tail.ends_with("tail from Claude"), "tail: {tail}");
         assert!(!tail.contains("\x1b["), "ANSI must be stripped: {tail}");
+    }
+
+    /// GH #589: the registration-time assignment brief must wake the daemon
+    /// in the same enqueue transaction boundary as an MCP message. A queued
+    /// row without this signal is only picked up by the fallback timer and,
+    /// once written to a Teams inbox, may wait for an unrelated turn boundary.
+    #[tokio::test]
+    async fn spawn_assignment_brief_wakes_daemon_within_transport_budget() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut notifier = cas_factory::DaemonNotifier::bind(&cas_dir).unwrap();
+
+        let message_id = deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "worker-1",
+            "cas-5890",
+            "wake the worker",
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), notifier.recv())
+            .await
+            .expect("spawn assignment enqueue must wake the daemon promptly")
+            .expect("daemon notification socket must receive the wake datagram");
+        let queued = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, message_id);
+        assert_eq!(queued[0].target, "worker-1");
     }
 
     #[test]

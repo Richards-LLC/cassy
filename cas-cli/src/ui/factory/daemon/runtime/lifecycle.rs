@@ -220,6 +220,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     {
         return WorkerAttentionRelayOutcome::Pending;
     }
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
     WorkerAttentionRelayOutcome::Persisted { notification_id }
 }
 
@@ -323,6 +324,7 @@ fn enqueue_worker_attention_relay_detail(
         tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
         return WorkerAttentionRelayOutcome::Pending;
     }
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
     if let Err(error) = supervisor_queue.mark_prompt_delivered(notification_id) {
         tracing::warn!(notification_id, %error, "worker attention relay prompt stamp failed; idempotent replay remains safe");
         return WorkerAttentionRelayOutcome::Pending;
@@ -1007,13 +1009,18 @@ impl FactoryDaemon {
                                                 &self.session_name,
                                                 &failure,
                                             ) {
-                                                Ok(true) => tracing::warn!(
-                                                    branch = %failure.branch,
-                                                    head_sha = %failure.head_sha,
-                                                    run_url = %failure.run_url,
-                                                    failing_job = %failure.failing_job,
-                                                    "queued CI red-run lifecycle wake for supervisor"
-                                                ),
+                                                Ok(true) => {
+                                                    super::delivery::wake_daemon_after_enqueue(
+                                                        self.app.cas_dir(),
+                                                    );
+                                                    tracing::warn!(
+                                                        branch = %failure.branch,
+                                                        head_sha = %failure.head_sha,
+                                                        run_url = %failure.run_url,
+                                                        failing_job = %failure.failing_job,
+                                                        "queued CI red-run lifecycle wake for supervisor"
+                                                    )
+                                                }
                                                 Ok(false) => tracing::debug!(
                                                     branch = %failure.branch,
                                                     head_sha = %failure.head_sha,

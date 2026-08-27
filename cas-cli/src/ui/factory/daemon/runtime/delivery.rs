@@ -18,8 +18,26 @@
 
 use cas_mux::{InjectOutcome, SupervisorCli};
 use cas_store::WakeAttempt;
+use std::path::Path;
 
 use super::super::FactoryDaemon;
+
+/// Wake the daemon after a producer appends to `prompt_queue`.
+///
+/// The MCP message path has always sent this best-effort datagram, but daemon
+/// lifecycle producers used to rely on the timer poll. That left a spawn brief
+/// and other internally generated prompts at the mercy of the next unrelated
+/// wake. The queue remains durable when no daemon is listening; this helper is
+/// only the low-latency handoff signal.
+pub(crate) fn wake_daemon_after_enqueue(cas_dir: &Path) {
+    if let Err(error) = cas_factory::notify_daemon(cas_dir) {
+        tracing::debug!(
+            target: "cas::coordination",
+            %error,
+            "prompt_queue enqueue wake signal could not reach the daemon"
+        );
+    }
+}
 
 /// The result of a delivery that may carry a wake nudge (cas-7a01, GH #155).
 ///
@@ -284,13 +302,15 @@ pub(crate) fn enqueue_director_prompt(
     text: &str,
 ) -> anyhow::Result<i64> {
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
-    Ok(queue.enqueue_with_summary(
+    let id = queue.enqueue_with_summary(
         super::teams::DIRECTOR_AGENT_NAME,
         target,
         text,
         Some(factory_session),
         Some("Task assignment"),
-    )?)
+    )?;
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
 }
 
 /// Prefix PTY-delivered text with literal sender attribution.
@@ -536,7 +556,7 @@ impl FactoryDaemon {
         // Match coordination's best-effort wake signal. This daemon will also
         // observe the row on its next queue pass if signaling is unavailable.
         if matches!(outcome, cas_store::EnqueueOutcome::Created(_)) {
-            let _ = cas_factory::notify_daemon(self.app.cas_dir());
+            wake_daemon_after_enqueue(self.app.cas_dir());
         }
         Ok(outcome)
     }

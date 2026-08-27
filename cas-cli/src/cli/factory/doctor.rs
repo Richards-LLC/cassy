@@ -12,7 +12,6 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
-use cas_factory::routing::CapabilitySnapshot;
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use cas_factory::{CapabilityAvailability, CapabilitySnapshot, CapabilityStatus};
 use cas_mux::SupervisorCli;

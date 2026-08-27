@@ -534,6 +534,92 @@ pub fn default_worker_effort_for_cli(cli: SupervisorCli) -> Effort {
         )
 }
 
+const GENERATED_ROUTE_TABLE_START: &str =
+    "<!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->";
+const GENERATED_ROUTE_TABLE_END: &str = "<!-- END GENERATED ROUTE TABLE -->";
+const GENERATED_SPAWN_RECIPES_START: &str =
+    "<!-- BEGIN GENERATED SPAWN RECIPES: cas-factory lane registry -->";
+const GENERATED_SPAWN_RECIPES_END: &str = "<!-- END GENERATED SPAWN RECIPES -->";
+
+/// Render the route table embedded in supervisor guidance.
+///
+/// The surrounding prose remains human-authored. This small generated block
+/// is the one source of truth for lane, recipe, provider, harness, model, and
+/// default-effort values shown in the supervisor-facing documentation.
+pub fn render_route_table() -> Result<String, RoutingError> {
+    let registry = registry()?;
+    let mut output = String::from(GENERATED_ROUTE_TABLE_START);
+    output.push_str(
+        "\n| Lane | Recipe | Provider | CLI | Model | Effort | Status |\n|---|---|---|---|---|---|---|\n",
+    );
+
+    for lane_name in ordered_lane_names(registry) {
+        let decision = resolve_lane(lane_name, &CapabilitySnapshot::default())?;
+        let recipe = &registry.recipes[&decision.recipe_id];
+        output.push_str(&format!(
+            "| `{lane_name}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+            decision.recipe_id,
+            recipe.provider,
+            recipe.harness.backend().name(),
+            recipe.model,
+            recipe.default_effort,
+            recipe_status_name(recipe.status),
+        ));
+    }
+
+    output.push_str(GENERATED_ROUTE_TABLE_END);
+    Ok(output)
+}
+
+/// Render copyable `spawn_workers` commands for every active registry lane.
+///
+/// `tool_prefix` is the harness-specific MCP namespace (`mcp__cas__`,
+/// `mcp__cs__`, or `cas__`). The command's route fields always come from the
+/// embedded registry, and every generated command pins all three controls.
+pub fn render_spawn_recipes(tool_prefix: &str) -> Result<String, RoutingError> {
+    let registry = registry()?;
+    let mut output = String::from(GENERATED_SPAWN_RECIPES_START);
+    output.push_str(
+        "\nCopy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:\n\n```text\n",
+    );
+
+    for lane_name in ordered_lane_names(registry) {
+        let decision = resolve_lane(lane_name, &CapabilitySnapshot::default())?;
+        let recipe = &registry.recipes[&decision.recipe_id];
+        output.push_str(&format!(
+            "# {lane_name} — recipe {}\n{tool_prefix}coordination action=spawn_workers count=1 isolate=true cli={} model={} effort={}\n\n",
+            decision.recipe_id,
+            recipe.harness.backend().name(),
+            recipe.model,
+            recipe.default_effort,
+        ));
+    }
+
+    output.push_str("```");
+    output.push('\n');
+    output.push_str(GENERATED_SPAWN_RECIPES_END);
+    Ok(output)
+}
+
+fn ordered_lane_names(registry: &LaneRegistry) -> Vec<&str> {
+    let mut names: Vec<_> = registry.lanes.keys().map(String::as_str).collect();
+    names.sort_by_key(|name| match *name {
+        "light" => (0, *name),
+        "standard" => (1, *name),
+        "taste" => (2, *name),
+        "heavy" => (3, *name),
+        _ => (4, *name),
+    });
+    names
+}
+
+fn recipe_status_name(status: RecipeStatus) -> &'static str {
+    match status {
+        RecipeStatus::Active => "active",
+        RecipeStatus::Suspended => "suspended",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,5 +800,31 @@ candidates = ["first"]
         assert!(error.contains("routing rule 'allowed effort'"), "{error}");
         assert!(error.contains("codex_luna"), "{error}");
         assert!(error.contains("effort=xhigh"), "{error}");
+    }
+
+    #[test]
+    fn generated_route_table_and_recipes_follow_embedded_registry() {
+        let registry = registry().expect("embedded registry validates");
+        let table = render_route_table().expect("route table renders");
+        let recipes = render_spawn_recipes("mcp__cas__").expect("spawn recipes render");
+
+        for lane_name in registry.lanes.keys() {
+            let decision = resolve_lane(lane_name, &CapabilitySnapshot::default())
+                .expect("decided lane has an active recipe");
+            let recipe = &registry.recipes[&decision.recipe_id];
+            assert!(table.contains(&format!("`{lane_name}`")));
+            assert!(table.contains(&format!("`{}`", recipe.model)));
+            assert!(table.contains(&format!("`{}`", recipe.default_effort)));
+            assert!(recipes.contains(&format!("# {lane_name} — recipe {}", decision.recipe_id)));
+            assert!(recipes.contains(&format!(
+                "cli={} model={} effort={}",
+                recipe.harness.backend().name(),
+                recipe.model,
+                recipe.default_effort
+            )));
+        }
+
+        assert!(!recipes.contains("gpt-5.6-terra"));
+        assert!(recipes.contains("mcp__cas__coordination action=spawn_workers"));
     }
 }

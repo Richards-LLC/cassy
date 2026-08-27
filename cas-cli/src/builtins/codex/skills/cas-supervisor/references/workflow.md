@@ -64,25 +64,31 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
-   `model=`, and `effort=`. Codex is the default matrix
-   (`cli=codex model=gpt-5.6-luna effort=xhigh` for standard); genuinely light work uses Grok Composer/low; taste/judgment uses
-   `cli=codex model=gpt-5.6-luna effort=xhigh`, while Sol/high is heavy/frontier only; Opus is exceptional, and Grok
-   is the health-gated capacity route.
+   `model=`, and `effort=`. The active registry matrix is Claude Haiku 4.5/low for light, Codex GPT-5.6 Luna/xhigh for standard, Claude Opus 5/high for taste, and Codex GPT-5.6 Sol/high for heavy. Opus is a normal taste lane as well as the fit for exceptional architecture, safety, rescue, and challenge; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
    selection intentional and visible.
 
-   **Tiered mix example** — Luna default + non-Terra light alternative + heavy:
-   ```
-   # Standard floor (Codex gpt-5.6-luna xhigh; Luna maximum only)
-   mcp__cs__coordination action=spawn_workers count=2 cli=codex model=gpt-5.6-luna effort=xhigh isolate=true
+   **Tiered mix example** — use the active registry lanes below; each command carries explicit controls:
 
-   # Light / bulk (Grok Composer non-Terra alternative)
-   mcp__cs__coordination action=spawn_workers count=1 cli=grok model=grok-composer-2.5-fast effort=low worker_names="lt-ada" isolate=true
+<!-- BEGIN GENERATED SPAWN RECIPES: cas-factory lane registry -->
+Copy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:
 
-   # Heavy (Codex gpt-5.6-sol high); frontier is model=gpt-5.6-sol
-   mcp__cs__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-sol effort=high worker_names="hv-ada" isolate=true
-   ```
+```text
+# light — recipe claude_haiku
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=haiku-4.5 effort=low
+
+# standard — recipe codex_luna
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
+
+# taste — recipe claude_opus
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus-5 effort=high
+
+# heavy — recipe codex_sol
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high
+
+```
+<!-- END GENERATED SPAWN RECIPES -->
    `cli`, `model`, and `effort` are per-spawn controls for the workers spawned
    by that call.
    Spawn the tier mix the ready backlog needs — one `spawn_workers` call per tier; rubric

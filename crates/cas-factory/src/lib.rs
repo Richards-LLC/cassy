@@ -48,8 +48,9 @@ pub use recording::RecordingManager;
 pub use routing::{
     CapabilityAvailability, CapabilitySnapshot, Lane, LaneDefinition, LaneRegistry, Recipe,
     RecipeStatus, RouteRecipe, RoutingDecision, RoutingError, default_worker_effort_for_cli,
-    default_worker_model_for_cli, embedded_registry, parse_registry, registry, resolve_lane,
-    validate_explicit, validate_model_effort_policy, validate_model_is_active,
+    default_worker_model_for_cli, embedded_registry, parse_registry, registry, render_route_table,
+    render_spawn_recipes, resolve_lane, validate_explicit, validate_model_effort_policy,
+    validate_model_is_active,
 };
 pub use session::lifecycle::SessionManager;
 pub use session::resume::{

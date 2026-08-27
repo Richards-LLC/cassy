@@ -29,6 +29,7 @@ use crate::ui::factory::{
 };
 use crate::worktree::GitOperations;
 use anyhow::{Result, bail};
+use cas_factory::routing::CapabilitySnapshot;
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use clap::{Args, Subcommand};
 use std::io::IsTerminal;
@@ -1154,6 +1155,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
         let specs = resolve_specs(args.workers as usize, sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
+        for spec in &specs {
+            cas_factory::validate_explicit(spec, &CapabilitySnapshot::default())
+                .map_err(|e| anyhow::anyhow!("Failed to validate worker routing spec: {e}"))?;
+        }
         (specs, fallback_model)
     };
 
@@ -1210,6 +1215,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
         let spec = resolve_supervisor_spec(sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
+        cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
+            .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;
         (spec, fallback_model)
     };
 

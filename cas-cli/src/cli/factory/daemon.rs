@@ -5,6 +5,7 @@ use crate::ui::factory::{
     daemon_log_path, daemonize, fork_first_daemon, run_boot_screen_client,
 };
 use anyhow::{Result, bail};
+use cas_factory::routing::CapabilitySnapshot;
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use std::time::Duration;
 
@@ -90,8 +91,13 @@ pub(super) fn execute_daemon(
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        resolve_specs(effective_workers, sources)
-            .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?
+        let specs = resolve_specs(effective_workers, sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
+        for spec in &specs {
+            cas_factory::validate_explicit(spec, &CapabilitySnapshot::default())
+                .map_err(|e| anyhow::anyhow!("Failed to validate worker routing spec: {e}"))?;
+        }
+        specs
     };
 
     // Resolve supervisor spec from the cascade (cas-1948).
@@ -114,8 +120,11 @@ pub(super) fn execute_daemon(
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        resolve_supervisor_spec(sources)
-            .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?
+        let spec = resolve_supervisor_spec(sources)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
+        cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
+            .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;
+        spec
     };
 
     // Resolve supervisor name up front so teams_configs and FactoryConfig agree.

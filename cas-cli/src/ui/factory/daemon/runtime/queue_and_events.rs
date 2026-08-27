@@ -4536,6 +4536,50 @@ impl FactoryDaemon {
                             spec.requester_config_dir = request.requester_config_dir.clone();
                         }
                     }
+                    // MCP and cloud producers validate before enqueueing, but
+                    // this daemon also consumes legacy/direct queue rows. Keep
+                    // the queue boundary fail-closed so a stale or manually
+                    // inserted explicit triple cannot reach worktree/PTY
+                    // launch, and report the same routing error to operators.
+                    if let Some(error) = specs.iter().find_map(|spec| {
+                        cas_factory::validate_explicit(
+                            spec,
+                            &cas_factory::CapabilitySnapshot::default(),
+                        )
+                        .err()
+                    }) {
+                        let detail = format!(
+                            "Rejected spawn request {} before launch: {error}",
+                            request.id
+                        );
+                        self.app.set_error(detail.clone());
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            Some(request.id),
+                            None,
+                            "validate",
+                            "failed",
+                            &detail,
+                        );
+                        if let Err(notice_error) = enqueue_spawn_outcome_notice(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            Some(request.id),
+                            "unresolved",
+                            "validate",
+                            false,
+                            &detail,
+                        ) {
+                            tracing::warn!(
+                                request_id = request.id,
+                                error = %notice_error,
+                                "failed to enqueue supervisor-visible routing rejection"
+                            );
+                        }
+                        continue;
+                    }
                     let spec_for_slot = |slot: usize| {
                         if specs.len() == 1 {
                             specs.first().cloned()

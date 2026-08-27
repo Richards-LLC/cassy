@@ -1,9 +1,6 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
-use cas_factory::routing::{
-    default_worker_effort_for_cli, default_worker_model_for_cli, validate_model_effort_policy,
-    validate_model_is_active,
-};
+use cas_factory::routing::{default_worker_effort_for_cli, default_worker_model_for_cli};
 
 /// Whether this harness has account-directory plumbing at all.
 ///
@@ -477,7 +474,6 @@ fn build_spawn_specs_with_project_config(
     // harnesses is rejected here — before anything is queued — instead of
     // surfacing as workers that boot on the wrong CLI.
     if let (Some(requested_cli), Some(model)) = (parsed_cli, model) {
-        validate_model_is_active(model)?;
         validate_model_matches_cli(requested_cli, model)?;
     }
 
@@ -554,9 +550,9 @@ fn build_spawn_specs_with_project_config(
         if !effort_explicit && !configured_effort && spec.effort == Some(cas_mux::Effort::High) {
             spec.effort = Some(default_worker_effort_for_cli(spec.cli));
         }
+        cas_factory::validate_explicit(spec, &cas_factory::CapabilitySnapshot::default())
+            .map_err(|error| error.to_string())?;
         if let Some(model) = spec.model.as_deref() {
-            validate_model_is_active(model)?;
-            validate_model_effort_policy(model, spec.effort)?;
             validate_model_matches_cli(spec.cli, model)?;
         }
     }
@@ -9047,6 +9043,8 @@ mod tests {
         assert!(err.contains("suspended"), "{err}");
         assert!(err.contains("operator decision pending"), "{err}");
         assert!(err.contains("gpt-5.6-luna"), "{err}");
+        assert!(err.contains("routing rule 'suspended recipe'"), "{err}");
+        assert!(err.contains("codex_luna"), "{err}");
     }
 
     #[test]
@@ -9057,6 +9055,8 @@ mod tests {
 
         assert!(err.contains("gpt-5.6-luna"), "{err}");
         assert!(err.contains("effort=xhigh"), "{err}");
+        assert!(err.contains("routing rule 'allowed effort'"), "{err}");
+        assert!(err.contains("codex_luna"), "{err}");
     }
 
     /// The live #71 case: no `cli=` at all. The model slug is unambiguous, so

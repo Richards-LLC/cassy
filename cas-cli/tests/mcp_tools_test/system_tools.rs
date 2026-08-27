@@ -1,6 +1,8 @@
 use crate::support::*;
 use cas::mcp::CasService;
 use cas::mcp::tools::*;
+use cas::store::open_task_store;
+use cas::types::Task;
 use cas_mcp::{SearchContextRequest, SystemRequest};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
@@ -212,6 +214,70 @@ async fn test_doctor() {
 
     let text = extract_text(result);
     assert!(text.contains("CAS Diagnostics") || text.contains("OK") || text.contains("healthy"));
+}
+
+/// GH #587: opening a stale index is not enough to call the search surface
+/// healthy. A task added after the last index build must make doctor name the
+/// count mismatch and the BM25 reindex remedy.
+#[tokio::test]
+async fn doctor_flags_stale_search_index_after_store_growth() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).expect("task store should open");
+
+    let indexed_task = Task::new("task-indexed".to_string(), "Indexed task".to_string());
+    task_store
+        .add(&indexed_task)
+        .expect("indexed task should be stored");
+
+    let search = cas::hybrid_search::SearchIndex::open(&cas_dir.join("index/tantivy"))
+        .expect("search index should open");
+    search
+        .index_task(&indexed_task)
+        .expect("indexed task should be searchable");
+
+    let stale_task = Task::new(
+        "task-stale".to_string(),
+        "Task added after reindex".to_string(),
+    );
+    task_store
+        .add(&stale_task)
+        .expect("stale task should be stored");
+
+    let result = core.cas_doctor().await.expect("doctor should succeed");
+    let text = extract_text(result);
+    assert!(
+        text.contains("Search Index: STALE"),
+        "doctor must flag a count mismatch: {text}"
+    );
+    assert!(
+        text.contains("run reindex"),
+        "doctor must name the reindex remedy: {text}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_accepts_a_fresh_search_index() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).expect("task store should open");
+    let task = Task::new("task-fresh".to_string(), "Freshly indexed task".to_string());
+    task_store.add(&task).expect("task should be stored");
+
+    let search = cas::hybrid_search::SearchIndex::open(&cas_dir.join("index/tantivy"))
+        .expect("search index should open");
+    search.index_task(&task).expect("task should be indexed");
+
+    let result = core.cas_doctor().await.expect("doctor should succeed");
+    let text = extract_text(result);
+    assert!(
+        text.contains("Search Index: OK"),
+        "doctor should accept matching counts: {text}"
+    );
+    assert!(
+        !text.contains("Search Index: STALE"),
+        "fresh index was rejected: {text}"
+    );
 }
 
 #[tokio::test]

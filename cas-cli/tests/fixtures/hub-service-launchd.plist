@@ -21,5 +21,9 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/test/.cas/hub/hub.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/test/.cas/hub/hub.log</string>
 </dict>
 </plist>

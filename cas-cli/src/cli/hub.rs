@@ -63,10 +63,17 @@ pub struct HubServiceArgs {
     pub command: HubServiceCommands,
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct HubServiceInstallArgs {
+    /// Preview the service definition and manager actions without changing the host
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum HubServiceCommands {
     /// Install and start a user-level service for the loopback hub
-    Install,
+    Install(HubServiceInstallArgs),
     /// Report service-manager supervision alongside hub health
     Status,
     /// Stop and remove service-manager supervision without touching hub identity or auth

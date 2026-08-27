@@ -8,6 +8,8 @@ Type=simple
 ExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1 --port 4173 --tailscale-serve --tailscale-serve-port 8443
 Restart=on-failure
 RestartSec=3
+StandardOutput=append:%h/.cas/hub/hub.log
+StandardError=append:%h/.cas/hub/hub.log
 
 [Install]
 WantedBy=default.target

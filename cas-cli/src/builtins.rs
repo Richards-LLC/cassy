@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// Factory supervisor guide - embedded at compile time (source of truth)
 pub const SUPERVISOR_GUIDE: &str = include_str!("builtins/skills/cas-supervisor.md");
@@ -1346,6 +1347,46 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/grok/skills/cas-to-questionnaire/SKILL.md") },
 ];
 
+/// OpenCode does not load a filesystem skill/agent home for its generated
+/// primary agents.  Keep a process-local catalog anyway: it is the parity
+/// source used by the projection and drift gate, and it makes the four
+/// harnesses resolve the same required roles without pretending that an
+/// OpenCode config write occurred.  Claude's canonical content is the richest
+/// common source; only MCP spelling is adapted to OpenCode's `cas_<tool>`
+/// sanitizer.  `OnceLock` keeps the leaked transformed strings immutable and
+/// initializes them once per process.
+fn project_opencode_catalog(source: &[BuiltinFile]) -> Vec<BuiltinFile> {
+    source
+        .iter()
+        .map(|builtin| BuiltinFile {
+            path: builtin.path,
+            content: Box::leak(
+                builtin
+                    .content
+                    .replace("mcp__cas__", "cas_")
+                    .replace("mcp__cs__", "cas_")
+                    .replace("cas__", "cas_")
+                    .into_boxed_str(),
+            ),
+        })
+        .collect()
+}
+
+static OPENCODE_BUILTIN_AGENTS: OnceLock<Vec<BuiltinFile>> = OnceLock::new();
+static OPENCODE_BUILTIN_SKILLS: OnceLock<Vec<BuiltinFile>> = OnceLock::new();
+
+fn opencode_builtin_agents() -> &'static [BuiltinFile] {
+    OPENCODE_BUILTIN_AGENTS
+        .get_or_init(|| project_opencode_catalog(BUILTIN_AGENTS))
+        .as_slice()
+}
+
+fn opencode_builtin_skills() -> &'static [BuiltinFile] {
+    OPENCODE_BUILTIN_SKILLS
+        .get_or_init(|| project_opencode_catalog(BUILTIN_SKILLS))
+        .as_slice()
+}
+
 /// A factory-critical capability that every harness must resolve from its own
 /// catalog (cas-cc8c). The *capability* is harness-neutral; the concrete skill
 /// that provides it may be a tailored twin whose directory name differs by
@@ -1452,13 +1493,14 @@ pub const REQUIRED_FACTORY_CAPABILITIES: &[RequiredCapability] = &[
 ];
 
 /// General (non-factory-critical) Cassy skills that must still reach FULL parity
-/// across all three harnesses (cas-20f2 — operator-requested full parity beyond
+/// across all four harnesses (cas-20f2 — operator-requested full parity beyond
 /// the minimal factory roles). Every one of these is a general-purpose skill
 /// already exposed to Claude/Codex; Grok now owns a `cas__`-prefixed twin of
 /// each rather than relying on `~/.claude`. Twin directory names are identical
-/// across harnesses (no tailored spelling), so the same `RequiredCapability`
-/// shape applies with all three fields set — the only allowed `None` is a
-/// documented, tested runtime-prerequisite exemption.
+/// across the filesystem harnesses (no tailored spelling); OpenCode projects
+/// the Claude paths into its process-local catalog. The same
+/// `RequiredCapability` shape applies with all three source fields set — the
+/// only allowed `None` is a documented, tested runtime-prerequisite exemption.
 pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
     RequiredCapability {
         id: "session-learn",
@@ -1597,6 +1639,7 @@ pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFil
         SupervisorCli::Claude => BUILTIN_SKILLS,
         SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+        SupervisorCli::OpenCode => opencode_builtin_skills(),
     }
 }
 
@@ -1606,6 +1649,7 @@ pub fn agent_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFil
         SupervisorCli::Claude => BUILTIN_AGENTS,
         SupervisorCli::Codex => CODEX_BUILTIN_AGENTS,
         SupervisorCli::Grok => GROK_BUILTIN_AGENTS,
+        SupervisorCli::OpenCode => opencode_builtin_agents(),
     }
 }
 
@@ -1616,6 +1660,9 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
         SupervisorCli::Claude => cap.claude,
         SupervisorCli::Codex => cap.codex,
         SupervisorCli::Grok => cap.grok,
+        // OpenCode projects the Claude catalog in-process and normalizes its
+        // tool names; no user-level skill directory is written.
+        SupervisorCli::OpenCode => cap.claude,
     }
 }
 
@@ -1854,6 +1901,9 @@ pub fn mark_missing_owned_references_for_replacement(
         SupervisorCli::Claude => BUILTIN_SKILLS,
         SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+        // OpenCode keeps builtin references in the generated primary-agent
+        // projection; its user-level config has no reference ledger.
+        SupervisorCli::OpenCode => opencode_builtin_skills(),
     };
     let mut state = BuiltinReferenceState::load(target_dir)?;
     let mut marked = 0;
@@ -2169,6 +2219,9 @@ pub fn sync_all_builtins_for_harness(
         // EPIC cas-8888 (cas-6f46, Phase 5): dedicated GROK_BUILTIN_AGENTS/
         // GROK_BUILTIN_SKILLS set, cas__-prefixed (no mcp__ wrapper).
         SupervisorCli::Grok => sync_all_grok_builtins(target_dir),
+        // OpenCode receives this catalog through OPENCODE_CONFIG_CONTENT; no
+        // user-level skill tree is written by the sync command.
+        SupervisorCli::OpenCode => Ok(SyncResult::default()),
     }
 }
 
@@ -2264,6 +2317,9 @@ pub fn prune_stale_user_skills_for_harness(
         SupervisorCli::Claude => BUILTIN_SKILLS,
         SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
         SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+        // OpenCode has no user-level skill tree; the process-local projection
+        // is installed by its generated primary-agent config.
+        SupervisorCli::OpenCode => &[],
     };
     let keep = builtin_skill_dir_names(builtins);
     prune_stale_cas_skill_dirs(&harness_dir.join("skills"), &keep)
@@ -2386,6 +2442,9 @@ pub fn preview_all_builtins_for_harness(
         SupervisorCli::Claude => preview_all_builtins(target_dir),
         SupervisorCli::Codex => preview_all_codex_builtins(target_dir),
         SupervisorCli::Grok => preview_all_grok_builtins(target_dir),
+        // OpenCode has no user-level skill tree to preview; its process-local
+        // projection is rendered at launch.
+        SupervisorCli::OpenCode => Ok(Vec::new()),
     }
 }
 
@@ -6142,6 +6201,7 @@ This is the body content."#;
             SupervisorCli::Claude,
             SupervisorCli::Codex,
             SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
         ] {
             let catalog = skill_catalog_for_harness(harness);
             for cap in REQUIRED_FACTORY_CAPABILITIES {
@@ -6171,6 +6231,7 @@ This is the body content."#;
             SupervisorCli::Claude,
             SupervisorCli::Codex,
             SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
         ] {
             let catalog = skill_catalog_for_harness(harness);
             for cap in GENERAL_PARITY_CAPABILITIES {
@@ -6218,6 +6279,7 @@ This is the body content."#;
             SupervisorCli::Claude,
             SupervisorCli::Codex,
             SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
         ] {
             let catalog = skill_catalog_for_harness(harness);
             for cap in REQUIRED_FACTORY_CAPABILITIES {
@@ -6242,7 +6304,7 @@ This is the body content."#;
         }
     }
 
-    /// Required agent roles have equivalent coverage across all three harnesses.
+    /// Required agent roles have equivalent coverage across all four harnesses.
     /// Harness-specific extras (Codex `factory-supervisor`) are allowed and are
     /// simply not in the required set.
     #[test]
@@ -6251,6 +6313,7 @@ This is the body content."#;
             SupervisorCli::Claude,
             SupervisorCli::Codex,
             SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
         ] {
             let catalog = agent_catalog_for_harness(harness);
             for agent in REQUIRED_FACTORY_AGENTS {
@@ -6294,6 +6357,35 @@ This is the body content."#;
                 b.path
             );
         }
+        for b in opencode_builtin_skills()
+            .iter()
+            .chain(opencode_builtin_agents().iter())
+        {
+            assert!(
+                !b.content.contains("mcp__cas__")
+                    && !b.content.contains("mcp__cs__")
+                    && !b.content.contains("cas__"),
+                "OpenCode {} leaks a foreign MCP prefix",
+                b.path
+            );
+        }
+    }
+
+    #[test]
+    fn test_opencode_projection_has_required_catalog_and_cas_tool_names() {
+        let skills = skill_catalog_for_harness(SupervisorCli::OpenCode);
+        let agents = agent_catalog_for_harness(SupervisorCli::OpenCode);
+        assert_eq!(skills.len(), BUILTIN_SKILLS.len());
+        assert_eq!(agents.len(), BUILTIN_AGENTS.len());
+        assert!(skills.iter().any(|b| {
+            b.path == "skills/cas-task-tracking/SKILL.md" && b.content.contains("cas_task")
+        }));
+        assert!(agents.iter().any(|b| b.path == "agents/task-verifier.md"));
+        assert!(required_dir_for(
+            &REQUIRED_FACTORY_CAPABILITIES[0],
+            SupervisorCli::OpenCode
+        )
+        .is_some());
     }
 
     /// Demo / AC-2 end-to-end: a fresh sync of EACH harness into an empty temp
@@ -6306,6 +6398,8 @@ This is the body content."#;
     fn test_fresh_sync_installs_required_capabilities_for_every_harness() {
         use tempfile::tempdir;
 
+        // OpenCode's catalog is projected into its generated primary-agent
+        // config; it intentionally has no user-level skill tree to sync.
         for harness in [
             SupervisorCli::Claude,
             SupervisorCli::Codex,

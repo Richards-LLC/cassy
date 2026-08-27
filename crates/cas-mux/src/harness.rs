@@ -16,6 +16,12 @@ pub enum SupervisorCli {
     /// agent-teams --team-name/--agent-id; MCP + prompt injection only).
     /// See EPIC cas-8888.
     Grok,
+    /// OpenCode TUI. MCP tools are projected as `<server>_<tool>` (for the
+    /// injected `cas` server: `cas_task`, `cas_coordination`). Interactive
+    /// Terminal injection, Ctrl+C cancellation, and plugin lifecycle behavior
+    /// are pinned by the OpenCode 1.18.23 hosted-token-plan receipt. Subagent
+    /// support remains disabled because it was not part of the retained run.
+    OpenCode,
 }
 
 impl FromStr for SupervisorCli {
@@ -26,6 +32,7 @@ impl FromStr for SupervisorCli {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "grok" => Ok(Self::Grok),
+            "opencode" => Ok(Self::OpenCode),
             _ => Err(format!("unsupported harness: {s}")),
         }
     }
@@ -150,6 +157,44 @@ mod tests {
     }
 
     #[test]
+    fn opencode_selector_round_trips_with_its_native_tool_prefix() {
+        assert_eq!(SupervisorCli::OpenCode.backend().name(), "opencode");
+        assert_eq!(
+            SupervisorCli::from_str("opencode"),
+            Ok(SupervisorCli::OpenCode)
+        );
+        assert_eq!(
+            SupervisorCli::from_str(" OpenCode "),
+            Ok(SupervisorCli::OpenCode)
+        );
+        assert_eq!(
+            serde_json::to_string(&SupervisorCli::OpenCode).unwrap(),
+            "\"opencode\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SupervisorCli>("\"opencode\"").unwrap(),
+            SupervisorCli::OpenCode
+        );
+        assert_eq!(
+            SupervisorCli::OpenCode.backend().capabilities().tool_prefix,
+            "cas_"
+        );
+    }
+
+    #[test]
+    fn opencode_capabilities_match_retained_11823_measurements() {
+        let caps = SupervisorCli::OpenCode.backend().capabilities();
+        assert!(caps.supports_hooks);
+        assert!(!caps.supports_subagents);
+        assert!(!caps.supports_textbox_submit);
+        assert!(!caps.requires_bracketed_paste_injection);
+        assert_eq!(
+            SupervisorCli::OpenCode.backend().turn_cancel_bytes(),
+            &[0x03]
+        );
+    }
+
+    #[test]
     fn from_str_rejects_unknown_harness() {
         assert!(SupervisorCli::from_str("gemini").is_err());
     }
@@ -249,5 +294,9 @@ mod tests {
         assert_eq!(SupervisorCli::Claude.backend().turn_cancel_bytes(), &[0x1b]);
         assert_eq!(SupervisorCli::Codex.backend().turn_cancel_bytes(), &[0x1b]);
         assert_eq!(SupervisorCli::Grok.backend().turn_cancel_bytes(), &[0x03]);
+        assert_eq!(
+            SupervisorCli::OpenCode.backend().turn_cancel_bytes(),
+            &[0x03]
+        );
     }
 }

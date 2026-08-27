@@ -14,6 +14,10 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
 - **GPT-5.6 Luna is the default worker** — route standard, routine taste, public-surface, and general-judgment work to `cli=codex model=gpt-5.6-luna effort=xhigh`. Luna is only valid at its maximum effort level.
 - **Claude Opus is exceptional-only** — use it for architecture, safety, rescue, or independent challenge. Sonnet is not a normal worker lane.
 - **Grok is a capacity overlay** — route to it while its credits/auth/throughput are healthy; fall back to the same Codex tier when they are not.
+- **OpenCode is route-specific** — its local and hosted Qwen lanes each require their
+  own live receipt before production spawning. Never infer provider auth or effort
+  support from the selector alone. The operator's default hosted lane is the explicit
+  QwenCloud Token Plan route.
 
 Operator routing decision (2026-08-25): Terra is **suspended as a routing target** at every tier pending an explicit operator re-enable; do not spawn it. Keep its slug documented below for compatibility and discovery, but mark every Terra mention as suspended — operator decision pending. Luna's maximum is currently expressed as `effort=xhigh`; `max` and `ultra` are not usable Cassy effort values today. Once Cassy's effort vocabulary is extended and the newer Codex pin is validated, `max` may replace `xhigh` for Luna. Never spawn Luna at lower effort.
 
@@ -51,6 +55,51 @@ Grok is an optional credit/capacity route, not a required rung. Use it while hea
 
 Health check before routing to Grok: credits/quota available, auth valid, throughput healthy (`grok models` responds). If any is red, take the same-tier Codex rung instead.
 
+### OpenCode lane (route-specific conformance)
+
+OpenCode supports three explicit OpenAI-compatible Qwen lanes through generated
+primary agents and inline `cas` MCP config: `local/<model>` for the operator's
+local server, `qwencloud/qwen3.8-max` for the operator's default QwenCloud Token
+Plan lane, and `alibaba/qwen3.8-max` (or `alibaba-cn/qwen3.8-max`) for DashScope
+pay-as-you-go. A lane is never inferred or used as fallback for another. Receipt
+`opencode-1.18.23-hosted-token-plan-2026-08-27` validates only the Token Plan
+route; local and Alibaba PAYG remain pending-conformance. Factory spawning fails
+closed before queue insertion unless the selected route has its own matching
+passing receipt. Do not persist keys in generated files or task receipts.
+
+Token Plan fan-out follows the operator-declared plan tier: Lite permits 1–2,
+Standard 3–4, and Pro 6–8 concurrent OpenCode agents. Warn or cap a spawn request
+that exceeds the declared tier; do not scrape the operator console. A receipt may
+carry the operator-declared tier as metadata when supplied.
+
+- `cli=opencode model=local/qwen3.8` — local serving; endpoint reachability, model
+  loading, and accepted effort variants come from the local operator preflight.
+- `cli=opencode model=qwencloud/qwen3.8-max effort=low|medium|xhigh` — hosted
+  Token Plan; the pinned endpoint is
+  `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` and
+  preflight requires `QWENCLOUD_TOKEN_PLAN_API_KEY` with the dedicated `sk-sp-`
+  prefix. Its minimal preflight performs auth plus at most one tiny completion;
+  it never lists models and never probes `/apps/anthropic`.
+- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — hosted
+  DashScope pay-as-you-go; preflight requires `DASHSCOPE_API_KEY` with `sk-` or
+  `sk-ws-` prefix, endpoint reachability, and the selected model in `/models`.
+  `alibaba-cn/...` selects the mainland endpoint. Token Plan and pay-as-you-go
+  keys are lane-bound and a mismatch is refused before any network request.
+- Each hosted Qwen lane currently accepts only `low`, `medium`, and `xhigh` for
+  qwen3.8-max; `minimal` and `high` are rejected before OpenCode and are never
+  silently remapped. Token Plan uses the OpenAI-compatible thinking body
+  (`enable_thinking`); its effort table is independent of pay-as-you-go.
+  The Token Plan route is supported by its OpenCode 1.18.23 live receipt, but
+  still requires the dedicated key and bounded auth/answerability preflight on
+  every spawn. Local and Alibaba PAYG remain `pending-conformance` and are
+  refused before queue insertion.
+- Every new conformance receipt records its explicit `route` and secret-free
+  `serving_identity`; legacy receipts without these fields remain readable only as
+  historical local-era fixtures.
+- The OpenCode MCP server name `cas` yields `cas_task`, `cas_coordination`, and
+  `cas_verification`; generated `cassy-worker`/`cassy-supervisor` prompts carry
+  the role contract and remain process-local.
+
 ### Model slug table
 
 | `cli=` | Accepted `model=` slugs | Notes |
@@ -58,6 +107,7 @@ Health check before routing to Grok: credits/quota available, auth valid, throug
 | `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy/frontier route; Luna/xhigh is the standard default and taste/judgment route; **Terra is suspended (2026-08-25; operator decision pending) and has no active tier**. Luna is the gpt-5.4-mini successor. |
 | `claude` | `opus` (full Anthropic ids also ok) | Supervisor docs only expose Opus for exceptional architecture/safety/rescue/challenge; Sonnet is not a normal worker lane. |
 | `grok` | `grok-4.5`, `grok-composer-2.5-fast` | From live `grok models`. Composer is a **model id on the Grok harness** — never invent `cli=cursor`. |
+| `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 
 ### Effort vocabulary (Cassy-wide)
 
@@ -70,10 +120,11 @@ How each backend receives them:
 | Claude | `--effort <level>` |
 | Codex | `--config model_reasoning_effort=<level>` |
 | Grok | `--reasoning-effort <level>` |
+| OpenCode | generated primary-agent `variant` (local: endpoint-specific; Token Plan/pay-as-you-go qwen3.8-max: `low`, `medium`, `xhigh`; Token Plan also pins `enable_thinking`) |
 
 For non-Luna multi-step workers, `effort=high` is the ceiling. Luna is the exception: its only permitted Cassy effort is the current maximum, `xhigh`; do not use `max`/`ultra` until Cassy's vocabulary is extended and the newer Codex pin is validated. Codex tiers use Grok Composer/low for genuinely light work, Luna/xhigh for standard and taste, and Sol/high for heavy/frontier.
 
-## Spawn cookbook (all three harnesses)
+## Spawn cookbook (all four harnesses)
 
 Copy-paste `spawn_workers` recipes. Examples below use this harness's coordination tool prefix. Worker `cli=`/`model=`/`effort=` are independent of which harness the supervisor runs on — `cli=codex` works from Claude, Codex, or Grok supervisors alike.
 
@@ -118,7 +169,19 @@ mcp__cas__coordination action=spawn_workers count=2 isolate=true cli=grok model=
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=grok model=grok-4.5 effort=high worker_names="gh-ada"
 ```
 
-Parameter table and field names: [reference.md](reference.md#spawn_workers-parameters).
+### OpenCode workers (route-specific conformance)
+
+Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
+
+```
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
+```
+
+The default hosted recipe requires `QWENCLOUD_TOKEN_PLAN_API_KEY` in the operator
+environment and performs one bounded auth/answerability completion without model
+discovery. Use `alibaba/qwen3.8-max` with `DASHSCOPE_API_KEY` for pay-as-you-go, or
+`local/<model>` for a local server. Parameter table and field names:
+[reference.md](reference.md#spawn_workers-parameters).
 
 ## Routing Axes
 

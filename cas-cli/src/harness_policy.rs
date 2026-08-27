@@ -253,6 +253,7 @@ pub fn worker_coordination_tool() -> &'static str {
     match worker_harness_from_env() {
         SupervisorCli::Codex => "mcp__cs__coordination",
         SupervisorCli::Grok => "cas__coordination",
+        SupervisorCli::OpenCode => "cas_coordination",
         SupervisorCli::Claude => "mcp__cas__coordination",
     }
 }
@@ -271,6 +272,7 @@ pub fn supervisor_verification_tool() -> &'static str {
     match supervisor_harness_from_env() {
         SupervisorCli::Codex => "mcp__cs__verification",
         SupervisorCli::Grok => "cas__verification",
+        SupervisorCli::OpenCode => "cas_verification",
         SupervisorCli::Claude => "mcp__cas__verification",
     }
 }
@@ -300,7 +302,7 @@ pub fn own_harness_from_env() -> SupervisorCli {
     }
 }
 
-/// The MCP tool-call prefix (`mcp__cas__`, `mcp__cs__`, or `cas__`) for
+/// The MCP tool-call prefix (`mcp__cas__`, `mcp__cs__`, `cas__`, or `cas_`) for
 /// *this process's own* harness. See `own_harness_from_env` for why this is
 /// distinct from `worker_coordination_tool`/`supervisor_verification_tool`
 /// (which describe *another* role's namespace, not the reader's own).
@@ -592,6 +594,13 @@ mod tests {
         assert!(!p.epic_required());
     }
 
+    #[test]
+    fn opencode_is_conservative_and_bypasses_subagent_verification() {
+        let p = verification_policy(SupervisorCli::OpenCode, SupervisorCli::OpenCode);
+        assert!(!p.task_required());
+        assert!(!p.epic_required());
+    }
+
     // ----------------------------------------------------------------------
     // cas-8aaf: MCP alias helpers
     // ----------------------------------------------------------------------
@@ -641,6 +650,19 @@ mod tests {
     }
 
     #[test]
+    fn worker_coordination_tool_returns_cas_underscore_for_opencode_harness() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_FACTORY_WORKER_CLI",
+            Some("opencode"),
+        )]);
+        assert_eq!(
+            super::worker_coordination_tool(),
+            "cas_coordination",
+            "CAS_FACTORY_WORKER_CLI=opencode → cas_coordination"
+        );
+    }
+
+    #[test]
     fn supervisor_verification_tool_returns_cas_when_supervisor_unset() {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", None)]);
         assert_eq!(
@@ -669,6 +691,19 @@ mod tests {
             super::supervisor_verification_tool(),
             "cas__verification",
             "CAS_FACTORY_SUPERVISOR_CLI=grok → cas__verification"
+        );
+    }
+
+    #[test]
+    fn supervisor_verification_tool_returns_cas_underscore_for_opencode_supervisor() {
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_FACTORY_SUPERVISOR_CLI",
+            Some("opencode"),
+        )]);
+        assert_eq!(
+            super::supervisor_verification_tool(),
+            "cas_verification",
+            "CAS_FACTORY_SUPERVISOR_CLI=opencode → cas_verification"
         );
     }
 
@@ -731,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn own_tool_prefix_all_three_harnesses_as_worker() {
+    fn own_tool_prefix_all_four_harnesses_as_worker() {
         let mut env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_SUPERVISOR_CLI", None),
@@ -745,10 +780,13 @@ mod tests {
 
         env.set("CAS_FACTORY_WORKER_CLI", "grok");
         assert_eq!(super::own_tool_prefix(), "cas__");
+
+        env.set("CAS_FACTORY_WORKER_CLI", "opencode");
+        assert_eq!(super::own_tool_prefix(), "cas_");
     }
 
     #[test]
-    fn own_tool_prefix_all_three_harnesses_as_supervisor() {
+    fn own_tool_prefix_all_four_harnesses_as_supervisor() {
         let mut env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("supervisor")),
             ("CAS_FACTORY_WORKER_CLI", None),
@@ -762,5 +800,8 @@ mod tests {
 
         env.set("CAS_FACTORY_SUPERVISOR_CLI", "grok");
         assert_eq!(super::own_tool_prefix(), "cas__");
+
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "opencode");
+        assert_eq!(super::own_tool_prefix(), "cas_");
     }
 }

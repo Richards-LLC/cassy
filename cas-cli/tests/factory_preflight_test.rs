@@ -224,12 +224,13 @@ fn json_cli_is_bounded_deterministic_and_warnings_exit_zero() {
             .iter()
             .map(|harness| harness["harness"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["claude", "codex", "grok"]
+        vec!["claude", "codex", "grok", "opencode"]
     );
     let harnesses = report["harnesses"].as_array().unwrap();
     assert_eq!(harnesses[0]["required"], true);
     assert_eq!(harnesses[1]["required"], true);
     assert_eq!(harnesses[2]["required"], false);
+    assert_eq!(harnesses[3]["required"], false);
     for harness in harnesses {
         assert!(matches!(
             harness["default_probe"].as_str(),

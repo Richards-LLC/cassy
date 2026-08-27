@@ -748,7 +748,12 @@ fn classify_harnesses(
     required_harnesses: &HashSet<Harness>,
     findings: &mut Vec<PreflightFinding>,
 ) -> Vec<HarnessPreflight> {
-    [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild]
+    [
+        Harness::ClaudeCode,
+        Harness::CodexCli,
+        Harness::GrokBuild,
+        Harness::OpenCode,
+    ]
         .into_iter()
         .map(|harness| {
             let receipt = receipts.iter().find(|receipt| receipt.harness == harness);
@@ -918,6 +923,7 @@ fn harness_name(harness: Harness) -> &'static str {
         Harness::ClaudeCode => "claude",
         Harness::CodexCli => "codex",
         Harness::GrokBuild => "grok",
+        Harness::OpenCode => "opencode",
     }
 }
 
@@ -1122,6 +1128,7 @@ fn harness_from_config(value: &str) -> Option<Harness> {
         "claude" | "claude-code" => Some(Harness::ClaudeCode),
         "codex" | "codex-cli" => Some(Harness::CodexCli),
         "grok" | "grok-build" => Some(Harness::GrokBuild),
+        "opencode" => Some(Harness::OpenCode),
         _ => None,
     }
 }
@@ -1131,6 +1138,7 @@ fn probe_default_harness_versions(deadline: Deadline) -> HashMap<Harness, Versio
         let claude = scope.spawn(|| probe_version("claude", deadline));
         let codex = scope.spawn(|| probe_version("codex", deadline));
         let grok = scope.spawn(|| probe_version("grok", deadline));
+        let opencode = scope.spawn(|| probe_version("opencode", deadline));
         [
             (
                 Harness::ClaudeCode,
@@ -1143,6 +1151,10 @@ fn probe_default_harness_versions(deadline: Deadline) -> HashMap<Harness, Versio
             (
                 Harness::GrokBuild,
                 grok.join().unwrap_or(VersionProbe::Unavailable),
+            ),
+            (
+                Harness::OpenCode,
+                opencode.join().unwrap_or(VersionProbe::Unavailable),
             ),
         ]
         .into_iter()
@@ -1291,6 +1303,8 @@ mod tests {
             schema_version: 1,
             receipt_id: format!("{}-{version}", harness_name(harness)),
             harness,
+            route: None,
+            serving_identity: None,
             harness_version: version.to_string(),
             observed_default_harness_version: Some(version.to_string()),
             validated_at: "2026-07-30".to_string(),
@@ -1745,6 +1759,40 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+    }
+
+    #[test]
+    fn opencode_role_policy_requires_its_typed_receipt_and_version_probe() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".cas")).unwrap();
+        std::fs::write(
+            project.path().join(".cas/config.toml"),
+            "[llm.supervisor]\nharness = \"opencode\"\n[llm.worker]\nharness = \"opencode\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            required_harnesses(project.path()),
+            [Harness::OpenCode].into_iter().collect()
+        );
+
+        let mut facts = healthy_facts();
+        facts.required_harnesses = [Harness::OpenCode].into_iter().collect();
+        facts.default_versions.insert(
+            Harness::OpenCode,
+            VersionProbe::Observed("1.18.23".to_string()),
+        );
+        let report = build_report(facts);
+        let opencode = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == "opencode")
+            .unwrap();
+        assert!(opencode.required);
+        assert_eq!(opencode.default_version.as_deref(), Some("1.18.23"));
+        assert_eq!(opencode.state, ComponentState::Missing);
+        assert!(report.findings.iter().any(|finding| {
+            finding.code == "harness.receipt_missing" && finding.component == "harness.opencode"
+        }));
     }
 
     #[test]

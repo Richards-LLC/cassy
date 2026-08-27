@@ -18,8 +18,9 @@ pub enum SupervisorCli {
     Grok,
     /// OpenCode TUI. MCP tools are projected as `<server>_<tool>` (for the
     /// injected `cas` server: `cas_task`, `cas_coordination`). Interactive
-    /// injection and lifecycle capabilities remain disabled until retained
-    /// live conformance measures the terminal protocol.
+    /// Terminal injection, Ctrl+C cancellation, and plugin lifecycle behavior
+    /// are pinned by the OpenCode 1.18.23 hosted-token-plan receipt. Subagent
+    /// support remains disabled because it was not part of the retained run.
     OpenCode,
 }
 
@@ -181,15 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn opencode_capabilities_do_not_claim_unmeasured_terminal_features() {
+    fn opencode_capabilities_match_retained_11823_measurements() {
         let caps = SupervisorCli::OpenCode.backend().capabilities();
-        assert!(!caps.supports_hooks);
+        assert!(caps.supports_hooks);
         assert!(!caps.supports_subagents);
         assert!(!caps.supports_textbox_submit);
         assert!(!caps.requires_bracketed_paste_injection);
         assert_eq!(
             SupervisorCli::OpenCode.backend().turn_cancel_bytes(),
-            &[] as &[u8]
+            &[0x03]
         );
     }
 
@@ -293,5 +294,9 @@ mod tests {
         assert_eq!(SupervisorCli::Claude.backend().turn_cancel_bytes(), &[0x1b]);
         assert_eq!(SupervisorCli::Codex.backend().turn_cancel_bytes(), &[0x1b]);
         assert_eq!(SupervisorCli::Grok.backend().turn_cancel_bytes(), &[0x03]);
+        assert_eq!(
+            SupervisorCli::OpenCode.backend().turn_cancel_bytes(),
+            &[0x03]
+        );
     }
 }

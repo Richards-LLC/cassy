@@ -2,7 +2,7 @@ use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED
 use crate::mcp::tools::service::imports::*;
 use crate::opencode_preflight::{
     OpenCodeRoute, hosted_lane_for_selector, hosted_serving_identity, opencode_route_for_selector,
-    preflight_hosted_from_env, validate_hosted_effort_for_lane,
+    preflight_hosted_from_env, require_supported_selector, validate_hosted_effort_for_lane,
 };
 
 const HOSTED_PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -19,11 +19,17 @@ fn preflight_hosted_opencode_specs(specs: &[cas_mux::WorkerSpec]) -> Result<(), 
         let Some(model) = spec.model.as_deref() else {
             continue;
         };
-        if matches!(
-            opencode_route_for_selector(model)?,
-            OpenCodeRoute::HostedTokenPlan | OpenCodeRoute::HostedPayg
-        ) {
-            selectors.insert(model.to_string());
+        require_supported_selector(model)?;
+        match opencode_route_for_selector(model)? {
+            OpenCodeRoute::HostedTokenPlan | OpenCodeRoute::HostedPayg => {
+                selectors.insert(model.to_string());
+            }
+            OpenCodeRoute::Local => {}
+            OpenCodeRoute::Hosted => {
+                return Err(
+                    "legacy OpenCode hosted route cannot pass the support-claim gate".to_string(),
+                );
+            }
         }
     }
     for selector in selectors {
@@ -9616,6 +9622,23 @@ mod tests {
         )
         .expect("pay-as-you-go selector should remain available");
         assert_eq!(decoded_spawn_spec(&json).model.as_deref(), Some("alibaba/qwen3.8-max"));
+    }
+
+    #[test]
+    fn opencode_support_claim_gate_refuses_unreceipted_routes_before_queueing() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            (OPENCODE_ACCEPTED_EFFORTS_ENV, None),
+            (crate::opencode_preflight::DASHSCOPE_API_KEY_ENV, None),
+        ]);
+        for selector in ["local/qwen3.8", "alibaba/qwen3.8-max"] {
+            let json = build_spawn_spec_json(Some("opencode"), Some(selector), None)
+                .expect("selector remains syntactically valid");
+            let spec = decoded_spawn_spec(&json);
+            let error = preflight_hosted_opencode_specs(&[spec])
+                .expect_err("unreceipted route must fail before queue insertion");
+            assert!(error.contains("pending-conformance"), "{error}");
+            assert!(error.contains("was not queued"), "{error}");
+        }
     }
 
     #[test]

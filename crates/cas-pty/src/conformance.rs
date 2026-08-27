@@ -121,6 +121,8 @@ impl HarnessConformanceReceipt {
 const CODEX_0149_RECEIPT: &str = include_str!("../conformance/codex-cli-0.149.1-2026-08-25.json");
 const GROK_02114_RECEIPT: &str = include_str!("../conformance/grok-build-0.2.114-2026-07-30.json");
 const GROK_0105_RECEIPT: &str = include_str!("../conformance/grok-build-1.0.5-2026-08-25.json");
+const OPENCODE_11823_TOKEN_PLAN_RECEIPT: &str =
+    include_str!("../conformance/opencode-1.18.23-hosted-token-plan-2026-08-27.json");
 
 pub fn codex_0149_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
     serde_json::from_str(CODEX_0149_RECEIPT)
@@ -134,12 +136,18 @@ pub fn grok_0105_conformance_receipt() -> Result<HarnessConformanceReceipt, serd
     serde_json::from_str(GROK_0105_RECEIPT)
 }
 
+pub fn opencode_11823_token_plan_conformance_receipt()
+-> Result<HarnessConformanceReceipt, serde_json::Error> {
+    serde_json::from_str(OPENCODE_11823_TOKEN_PLAN_RECEIPT)
+}
+
 /// Latest recorded receipt for each harness that currently has typed evidence.
 /// Later preflight work can consume this without parsing comments or Markdown.
 pub fn harness_conformance_receipts() -> Result<Vec<HarnessConformanceReceipt>, serde_json::Error> {
     Ok(vec![
         codex_0149_conformance_receipt()?,
         grok_0105_conformance_receipt()?,
+        opencode_11823_token_plan_conformance_receipt()?,
     ])
 }
 
@@ -336,5 +344,36 @@ mod tests {
         assert!(encoded.contains("\"route\":\"hosted\""));
         let decoded: HarnessConformanceReceipt = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.route, Some(ServingRoute::Hosted));
+    }
+
+    #[test]
+    fn opencode_11823_token_plan_receipt_is_route_typed_complete_and_passing() {
+        let receipt = opencode_11823_token_plan_conformance_receipt().unwrap();
+        assert_eq!(receipt.harness, Harness::OpenCode);
+        assert_eq!(receipt.route, Some(ServingRoute::HostedTokenPlan));
+        assert_eq!(receipt.harness_version, "1.18.23");
+        assert_eq!(receipt.observed_default_matches_validated(), Some(true));
+        assert!(receipt.validates_pin());
+        assert_eq!(
+            receipt.serving_identity,
+            Some(ServingIdentity {
+                provider: "qwencloud".to_string(),
+                model: "qwen3.8-max".to_string(),
+                endpoint: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+                    .to_string(),
+            })
+        );
+        let evidence_ids: HashSet<&str> = receipt
+            .evidence
+            .iter()
+            .map(|evidence| evidence.id.as_str())
+            .collect();
+        assert!(receipt.checklist.iter().all(|check| {
+            !check.evidence_refs.is_empty()
+                && check
+                    .evidence_refs
+                    .iter()
+                    .all(|id| evidence_ids.contains(id.as_str()))
+        }));
     }
 }

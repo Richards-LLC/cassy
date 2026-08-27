@@ -45,10 +45,10 @@ pub use input_stream::{BracketedPasteTracker, StreamByteClass, key_stream_marks_
 pub use mux::{InjectOutcome, Mux, MuxConfig, MuxEvent};
 pub use opencode::{
     OPENCODE_PLUGIN_FILE_NAME, OPENCODE_PLUGIN_SOURCE, OPENCODE_STATE_DIRECTORY,
-    OPENCODE_STATE_SCHEMA_VERSION, OpenCodeEventOutcome, OpenCodeLiveness,
-    OpenCodeLivenessVerdict, OpenCodeProjectionSpec, OpenCodeRole, OpenCodeSessionEvent,
-    OpenCodeSessionEventKind, OpenCodeSessionState, OpenCodeStatus, OpenCodeToolAttribution,
-    load_opencode_session_state, opencode_session_state_path, persist_opencode_plugin,
+    OPENCODE_STATE_SCHEMA_VERSION, OpenCodeEventOutcome, OpenCodeLiveness, OpenCodeLivenessVerdict,
+    OpenCodeProjectionSpec, OpenCodeRole, OpenCodeSessionEvent, OpenCodeSessionEventKind,
+    OpenCodeSessionState, OpenCodeStatus, OpenCodeToolAttribution, load_opencode_session_state,
+    merge_opencode_projection, opencode_session_state_path, persist_opencode_plugin,
     persist_opencode_session_state, render_opencode_config, valid_opencode_session_id,
 };
 pub use pane::TerminalSnapshot;

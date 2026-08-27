@@ -1,5 +1,33 @@
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
+use crate::opencode_preflight::{
+    OpenCodeRoute, hosted_serving_identity, opencode_route_for_selector, preflight_hosted_from_env,
+    validate_hosted_effort,
+};
+
+const HOSTED_PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Validate every distinct hosted selector before it reaches the spawn queue.
+/// Local selectors never enter this function, so a missing or invalid hosted
+/// key cannot block the independently usable local route.
+fn preflight_hosted_opencode_specs(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
+    let mut selectors = std::collections::BTreeSet::new();
+    for spec in specs {
+        if spec.cli != cas_mux::SupervisorCli::OpenCode {
+            continue;
+        }
+        let Some(model) = spec.model.as_deref() else {
+            continue;
+        };
+        if opencode_route_for_selector(model)? == OpenCodeRoute::Hosted {
+            selectors.insert(model.to_string());
+        }
+    }
+    for selector in selectors {
+        preflight_hosted_from_env(&selector, HOSTED_PREFLIGHT_TIMEOUT)?;
+    }
+    Ok(())
+}
 
 /// Whether this harness has account-directory plumbing at all.
 ///
@@ -756,11 +784,17 @@ fn build_spawn_specs_with_project_config(
                 "cli=opencode requires a configured provider/model selector; no OpenCode model default is hard-coded"
                     .to_string()
             })?;
-            validate_opencode_effort(
-                model,
-                spec.effort,
-                opencode_accepted_efforts.as_deref(),
-            )?;
+            match opencode_route_for_selector(model)? {
+                OpenCodeRoute::Local => validate_opencode_effort(
+                    model,
+                    spec.effort,
+                    opencode_accepted_efforts.as_deref(),
+                )?,
+                OpenCodeRoute::Hosted => {
+                    hosted_serving_identity(model)?;
+                    validate_hosted_effort(spec.effort)?;
+                }
+            }
         }
         if let Some(model) = spec.model.as_deref() {
             validate_model_is_active(model)?;
@@ -1610,6 +1644,13 @@ impl CasService {
             Some(self.inner.cas_root.join("config.toml")),
         )
         .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+
+        // Hosted DashScope is an explicit route with its own auth/model
+        // preflight.  This is intentionally after spec resolution and before
+        // queue insertion: an invalid hosted key cannot leave an apparently
+        // runnable queue row, while local OpenCode rows remain unaffected.
+        preflight_hosted_opencode_specs(&specs)
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
 
         // `workers[].name` is optional, but when every slot names itself it
         // is equivalent to worker_names= and must become the actual visible
@@ -9521,6 +9562,49 @@ mod tests {
         assert!(err.contains("effort high"), "{err}");
         assert!(err.contains("endpoint accepted efforts: [low, medium, xhigh]"), "{err}");
         assert!(err.contains("No effort remapping is performed"), "{err}");
+    }
+
+    #[test]
+    fn opencode_hosted_route_preserves_selector_and_uses_hosted_efforts() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        for effort in [None, Some("low"), Some("medium"), Some("xhigh")] {
+            let json = build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), effort)
+                .unwrap_or_else(|error| panic!("hosted effort {effort:?} should resolve: {error}"));
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
+            assert_eq!(spec.model.as_deref(), Some("alibaba/qwen3.8-max"));
+            assert_eq!(
+                spec.effort.map(|value| value.to_string()),
+                effort.map(str::to_string)
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_hosted_route_rejects_openai_effort_remaps() {
+        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        for effort in ["minimal", "high"] {
+            let error =
+                build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), Some(effort))
+                    .expect_err("hosted Qwen must reject OpenAI compatibility remaps");
+            assert!(error.contains("accepted hosted efforts: [low, medium, xhigh]"));
+            assert!(error.contains("No effort remapping"));
+        }
+    }
+
+    #[test]
+    fn opencode_hosted_route_requires_supported_explicit_provider() {
+        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        for selector in ["qwen3.8-max", "cloud/qwen3.8-max", "alibaba/other-model"] {
+            let error = build_spawn_spec_json(Some("opencode"), Some(selector), None)
+                .expect_err("unsupported OpenCode route must fail before spawn");
+            assert!(
+                error.contains("provider/model")
+                    || error.contains("supported route")
+                    || error.contains("currently supports model"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

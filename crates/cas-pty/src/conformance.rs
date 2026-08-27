@@ -11,6 +11,7 @@ pub enum Harness {
     ClaudeCode,
     CodexCli,
     GrokBuild,
+    OpenCode,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -18,6 +19,28 @@ pub enum Harness {
 pub enum ConformanceStatus {
     Pass,
     Fail,
+}
+
+/// Serving route covered by a harness conformance/support claim.
+///
+/// OpenCode can reach the same model through the local OpenAI-compatible
+/// server or through the hosted DashScope provider.  Keeping the route typed
+/// prevents a receipt for one route from being read as evidence for the
+/// other.  Existing Claude/Codex/Grok receipts omit this field for backwards
+/// compatibility; OpenCode receipts must set it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ServingRoute {
+    Local,
+    Hosted,
+}
+
+/// Secret-free identity of the serving stack covered by a receipt.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ServingIdentity {
+    pub provider: String,
+    pub model: String,
+    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -42,6 +65,13 @@ pub struct HarnessConformanceReceipt {
     pub schema_version: u32,
     pub receipt_id: String,
     pub harness: Harness,
+    /// Route covered by this receipt.  Optional only so pre-route receipts
+    /// already committed for the other harnesses remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<ServingRoute>,
+    /// Provider/model/endpoint identity with credentials intentionally absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_identity: Option<ServingIdentity>,
     pub harness_version: String,
     /// Version selected by the host's default harness command at validation
     /// time. A differing value is a typed stale/warn signal for preflight,
@@ -55,10 +85,18 @@ pub struct HarnessConformanceReceipt {
 }
 
 impl HarnessConformanceReceipt {
+    /// Whether this receipt names the route and serving stack it validates.
+    /// Legacy receipts for the original harnesses may omit both fields, but a
+    /// new OpenCode receipt cannot be accepted without an explicit identity.
+    pub fn has_explicit_serving_identity(&self) -> bool {
+        self.route.is_some() && self.serving_identity.is_some()
+    }
+
     /// A version is eligible for CAS's validated pin only when the receipt and
     /// every required checklist entry pass. This intentionally fails closed.
     pub fn validates_pin(&self) -> bool {
         self.result == ConformanceStatus::Pass
+            && (self.harness != Harness::OpenCode || self.has_explicit_serving_identity())
             && self
                 .checklist
                 .iter()
@@ -251,5 +289,29 @@ mod tests {
         let receipts = harness_conformance_receipts().unwrap();
         let unique: HashSet<Harness> = receipts.iter().map(|receipt| receipt.harness).collect();
         assert_eq!(receipts.len(), unique.len());
+    }
+
+    #[test]
+    fn opencode_receipt_requires_explicit_route_and_round_trips_identity() {
+        let mut receipt = codex_0149_conformance_receipt().unwrap();
+        receipt.harness = Harness::OpenCode;
+        assert!(!receipt.validates_pin());
+
+        receipt.route = Some(ServingRoute::Hosted);
+        receipt.serving_identity = Some(ServingIdentity {
+            provider: "alibaba".to_string(),
+            model: "qwen3.8-max".to_string(),
+            endpoint: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_string(),
+        });
+        assert!(receipt.has_explicit_serving_identity());
+        assert!(receipt.validates_pin());
+
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        assert!(encoded.contains("\"route\":\"hosted\""));
+        assert!(encoded.contains("\"serving_identity\""));
+        assert!(!encoded.contains("DASHSCOPE_API_KEY"));
+        let decoded: HarnessConformanceReceipt = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.route, Some(ServingRoute::Hosted));
+        assert_eq!(decoded.serving_identity, receipt.serving_identity);
     }
 }

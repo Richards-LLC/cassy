@@ -9,7 +9,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use cas_factory::{CapabilityAvailability, CapabilityEvidence, CapabilitySnapshot, RouteIdentity};
+#[cfg(test)]
+use cas_factory::CapabilitySnapshot;
+use cas_factory::{CapabilityAvailability, CapabilityEvidence, RouteIdentity};
 use cas_pty::{Harness, HarnessConformanceReceipt};
 use serde::Deserialize;
 

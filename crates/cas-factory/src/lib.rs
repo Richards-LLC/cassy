@@ -50,8 +50,9 @@ pub use routing::{
     CapabilityAvailability, CapabilityEvidence, CapabilitySnapshot, CapabilityStatus, Lane,
     LaneDefinition, LaneRegistry, Recipe, RecipeStatus, RouteIdentity, RouteRecipe,
     RoutingDecision, RoutingError, default_worker_effort_for_cli, default_worker_model_for_cli,
-    embedded_registry, parse_registry, registered_harnesses, registry, render_route_table,
-    render_spawn_recipes, resolve_lane, validate_explicit, validate_model_effort_policy,
+    embedded_registry, parse_registry, recipe_route_identity, registered_harnesses, registry,
+    render_route_table, render_spawn_recipes, resolve_lane, resolve_lane_from_registry,
+    resolve_lane_specs, validate_explicit, validate_lane_request, validate_model_effort_policy,
     validate_model_is_active,
 };
 pub use session::lifecycle::SessionManager;

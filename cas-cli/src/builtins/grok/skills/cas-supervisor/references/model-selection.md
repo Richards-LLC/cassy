@@ -22,12 +22,14 @@ Terra is a **standing suspension**: `gpt-5.6-terra` is documented for compatibil
 The route table below is generated from the embedded `cas-factory` registry. Keep the surrounding guidance human-authored; update policy in the registry and let the golden tests catch stale copies.
 
 <!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->
-| Lane | Recipe | Provider | CLI | Model | Effort | Status |
-|---|---|---|---|---|---|---|
-| `light` | `claude_haiku` | `anthropic` | `claude` | `haiku-4.5` | `low` | `active` |
-| `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` |
-| `taste` | `claude_opus` | `anthropic` | `claude` | `opus-5` | `high` | `active` |
-| `heavy` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` |
+| Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback |
+|---|---|---|---|---|---|---|---|
+| `light` | `claude_haiku` | `anthropic` | `claude` | `haiku-4.5` | `low` | `active` | `ordered candidates` |
+| `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `ordered candidates` |
+| `taste` | `claude_opus` | `anthropic` | `claude` | `opus-5` | `high` | `active` | `disabled` |
+| `heavy` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `ordered candidates` |
+
+Lane request mode: `coordination action=spawn_workers lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.
 <!-- END GENERATED ROUTE TABLE -->
 
 Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not a worker and not your own context window.

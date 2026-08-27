@@ -298,6 +298,58 @@ pub struct RoutingDecision {
     pub warnings: Vec<String>,
 }
 
+/// Resolve one registry lane for each requested worker slot.
+///
+/// Keeping the slot expansion here means MCP and direct CLI callers use the
+/// same lane spelling, registry lookup, and capability-aware decision seam.
+/// The returned decisions are intentionally independent values: later callers
+/// may attach worker names and account directories without mutating the
+/// registry result or another slot's decision.
+pub fn resolve_lane_specs(
+    lane: &str,
+    slots: usize,
+    snapshot: &CapabilitySnapshot,
+) -> Result<Vec<RoutingDecision>, RoutingError> {
+    let decision = resolve_lane(lane, snapshot)?;
+    Ok((0..slots).map(|_| decision.clone()).collect())
+}
+
+/// Reject mixing registry lane mode with explicit recipe controls.
+///
+/// A lane is an operator-level request for the registry to choose the whole
+/// route. Accepting one explicit control alongside it would create a hybrid
+/// recipe whose fallback and warning semantics are ambiguous. This validator
+/// is deliberately independent of capability facts so every request surface
+/// fails closed before queueing or launching.
+pub fn validate_lane_request(
+    lane: &str,
+    cli_explicit: bool,
+    model_explicit: bool,
+    effort_explicit: bool,
+) -> Result<(), RoutingError> {
+    if lane.trim().is_empty() {
+        return Err(RoutingError::UnknownLane(lane.to_string()));
+    }
+    if cli_explicit || model_explicit || effort_explicit {
+        let mut fields = Vec::new();
+        if cli_explicit {
+            fields.push("cli");
+        }
+        if model_explicit {
+            fields.push("model");
+        }
+        if effort_explicit {
+            fields.push("effort");
+        }
+        return Err(RoutingError::Policy(format!(
+            "lane={:?} cannot be combined with explicit {} recipe field(s); choose lane= or an explicit cli/model/effort recipe",
+            lane.trim(),
+            fields.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Parse and semantically validate a registry document.
 pub fn parse_registry(source: &str) -> Result<LaneRegistry, RoutingError> {
     let registry: LaneRegistry = toml::from_str(source)
@@ -544,16 +596,39 @@ pub fn registered_harnesses() -> Result<Vec<SupervisorCli>, RoutingError> {
     Ok(harnesses.into_iter().collect())
 }
 
-/// Resolve a lane's first active static recipe into a worker spec.
+/// Build the canonical capability identity for a registry recipe.
 ///
-/// R1 deliberately does not perform availability probing or fallback policy;
-/// the snapshot is part of the seam so later capability-aware work can make
-/// that decision without changing callers.
-pub fn resolve_lane(
+/// The provider adapters live in `cas-cli`, while this crate owns the
+/// registry and must remain usable by the MCP/CLI crates. Keep this mapping
+/// here in lockstep with `cas_cli::capability::harness_route_identity` so the
+/// snapshot lookup uses all route dimensions without making the factory crate
+/// depend on a concrete probe implementation.
+pub fn recipe_route_identity(recipe: &RouteRecipe, account_profile: &str) -> RouteIdentity {
+    let (harness, endpoint) = match recipe.harness {
+        SupervisorCli::Claude => ("claude", "https://api.anthropic.com"),
+        SupervisorCli::Codex => ("codex", "https://api.openai.com"),
+        SupervisorCli::Grok => ("grok", "https://api.x.ai"),
+    };
+    RouteIdentity::new(
+        harness,
+        recipe.provider.clone(),
+        endpoint,
+        recipe.model.clone(),
+        account_profile,
+    )
+}
+
+/// Resolve a lane from a caller-provided registry and capability snapshot.
+///
+/// This is the deep routing seam: callers provide immutable policy and live
+/// evidence, while candidate ordering, suspension handling, tri-state
+/// freshness, and warning text stay in one implementation. The embedded
+/// [`resolve_lane`] wrapper below is the normal production entry point.
+pub fn resolve_lane_from_registry(
     lane: &str,
-    _snapshot: &CapabilitySnapshot,
+    snapshot: &CapabilitySnapshot,
+    registry: &LaneRegistry,
 ) -> Result<RoutingDecision, RoutingError> {
-    let registry = registry()?;
     let lane_name = lane.trim();
     let lane_definition = registry
         .lanes
@@ -561,32 +636,104 @@ pub fn resolve_lane(
         .ok_or_else(|| RoutingError::UnknownLane(lane.to_string()))?;
     let mut candidates = Vec::new();
     flattened_candidates(registry, lane_name, &mut candidates);
-    for recipe_id in candidates {
+    let primary_recipe_id = candidates.first().cloned();
+    let now_ms = CapabilitySnapshot::now_ms();
+    let mut skipped = Vec::new();
+
+    for (index, recipe_id) in candidates.into_iter().enumerate() {
         let recipe = &registry.recipes[&recipe_id];
         if recipe.status != RecipeStatus::Active {
+            let reason = recipe
+                .reason
+                .as_deref()
+                .unwrap_or("recipe is suspended")
+                .trim();
+            skipped.push(format!("recipe {recipe_id:?} is suspended ({reason})"));
             if lane_definition.no_fallback {
                 break;
             }
             continue;
         }
-        let spec = WorkerSpec {
-            name: None,
-            cli: recipe.harness,
-            model: Some(recipe.model.clone()),
-            effort: Some(recipe.default_effort),
-            config_dir: None,
-            requester_config_dir: None,
-        };
-        return Ok(RoutingDecision {
-            lane: lane_name.to_string(),
-            recipe_id,
-            spec,
-            warnings: Vec::new(),
-        });
+
+        let identity = recipe_route_identity(recipe, "default");
+        let status = snapshot.status_at(&identity, now_ms);
+        let availability = status
+            .as_ref()
+            .map_or(CapabilityAvailability::Unknown, |status| {
+                status.availability
+            });
+        match availability {
+            CapabilityAvailability::Available => {
+                let warning = if skipped.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![format!(
+                        "lane={lane_name:?} selected fallback recipe {recipe_id:?} instead of primary recipe {:?}: {}",
+                        primary_recipe_id.as_deref().unwrap_or("unknown"),
+                        skipped.join("; ")
+                    )]
+                };
+                return Ok(routing_decision(lane_name, recipe_id, recipe, warning));
+            }
+            CapabilityAvailability::Unavailable => {
+                let reason = status
+                    .as_ref()
+                    .and_then(|status| status.reason.as_deref())
+                    .unwrap_or("capability is unavailable");
+                skipped.push(format!("recipe {recipe_id:?} is unavailable ({reason})"));
+                if lane_definition.no_fallback {
+                    break;
+                }
+            }
+            CapabilityAvailability::Unknown => {
+                if index == 0 || lane_definition.no_fallback {
+                    // An unknown primary is allowed only when no substitution
+                    // is being attempted. Unknown evidence must never justify
+                    // selecting a later fallback route.
+                    return Ok(routing_decision(lane_name, recipe_id, recipe, Vec::new()));
+                }
+                return Err(RoutingError::Policy(format!(
+                    "lane {lane_name:?} cannot select fallback recipe {recipe_id:?}: capability availability is Unknown; refusing fallback after {}",
+                    skipped.join("; ")
+                )));
+            }
+        }
     }
+
     Err(RoutingError::NoActiveRecipe {
         lane: lane_name.to_string(),
     })
+}
+
+fn routing_decision(
+    lane: &str,
+    recipe_id: String,
+    recipe: &RouteRecipe,
+    warnings: Vec<String>,
+) -> RoutingDecision {
+    let spec = WorkerSpec {
+        name: None,
+        cli: recipe.harness,
+        model: Some(recipe.model.clone()),
+        effort: Some(recipe.default_effort),
+        config_dir: None,
+        requester_config_dir: None,
+    };
+    RoutingDecision {
+        lane: lane.to_string(),
+        recipe_id,
+        spec,
+        warnings,
+    }
+}
+
+/// Resolve a lane's ordered candidates against capability evidence.
+pub fn resolve_lane(
+    lane: &str,
+    snapshot: &CapabilitySnapshot,
+) -> Result<RoutingDecision, RoutingError> {
+    let registry = registry()?;
+    resolve_lane_from_registry(lane, snapshot, registry)
 }
 
 /// Validate a resolved explicit worker recipe against static suspension and
@@ -723,22 +870,31 @@ pub fn render_route_table() -> Result<String, RoutingError> {
     let registry = registry()?;
     let mut output = String::from(GENERATED_ROUTE_TABLE_START);
     output.push_str(
-        "\n| Lane | Recipe | Provider | CLI | Model | Effort | Status |\n|---|---|---|---|---|---|---|\n",
+        "\n| Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback |\n|---|---|---|---|---|---|---|---|\n",
     );
 
     for lane_name in ordered_lane_names(registry) {
         let decision = resolve_lane(lane_name, &CapabilitySnapshot::default())?;
         let recipe = &registry.recipes[&decision.recipe_id];
         output.push_str(&format!(
-            "| `{lane_name}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+            "| `{lane_name}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
             decision.recipe_id,
             recipe.provider,
             recipe.harness.backend().name(),
             recipe.model,
             recipe.default_effort,
             recipe_status_name(recipe.status),
+            if registry.lanes[lane_name].no_fallback {
+                "disabled"
+            } else {
+                "ordered candidates"
+            },
         ));
     }
+
+    output.push_str(
+        "\nLane request mode: `coordination action=spawn_workers lane=<lane>`. The registry resolves the ordered candidates; any non-primary selection is reported as a warning with the selected recipe and reason. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
+    );
 
     output.push_str(GENERATED_ROUTE_TABLE_END);
     Ok(output)
@@ -818,11 +974,21 @@ candidates = ["codex_luna"]
     fn embedded_registry_has_decided_lanes_and_recipes() {
         let registry = registry().expect("embedded registry validates");
         assert_eq!(registry.schema_version, 1);
-        assert_eq!(registry.lanes["light"].candidates, ["claude_haiku"]);
-        assert_eq!(registry.lanes["standard"].candidates, ["codex_luna"]);
+        assert_eq!(
+            registry.lanes["light"].candidates,
+            ["claude_haiku", "claude_opus"]
+        );
+        assert_eq!(
+            registry.lanes["standard"].candidates,
+            ["codex_luna", "claude_opus"]
+        );
         assert_eq!(registry.lanes["taste"].candidates, ["claude_opus"]);
+        assert_eq!(registry.lanes["taste"].fallbacks, ["codex_luna"]);
         assert!(registry.lanes["taste"].no_fallback);
-        assert_eq!(registry.lanes["heavy"].candidates, ["codex_sol"]);
+        assert_eq!(
+            registry.lanes["heavy"].candidates,
+            ["codex_sol", "codex_luna"]
+        );
 
         let haiku = &registry.recipes["claude_haiku"];
         assert_eq!(haiku.model, "haiku-4.5");
@@ -933,6 +1099,172 @@ candidates = ["first"]
     }
 
     #[test]
+    fn resolve_lane_specs_expands_one_registry_decision_per_slot() {
+        let decisions = resolve_lane_specs("standard", 3, &CapabilitySnapshot::default())
+            .expect("standard lane resolves");
+
+        assert_eq!(decisions.len(), 3);
+        assert!(decisions.iter().all(|decision| {
+            decision.lane == "standard"
+                && decision.recipe_id == "codex_luna"
+                && decision.spec.model.as_deref() == Some("gpt-5.6-luna")
+        }));
+    }
+
+    #[test]
+    fn resolve_lane_selects_available_fallback_with_reasoned_warning() {
+        let registry = parse_registry(
+            r#"
+schema_version = 1
+
+[recipes.primary]
+harness = "codex"
+provider = "openai"
+model = "primary"
+effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[recipes.fallback]
+harness = "claude"
+provider = "anthropic"
+model = "fallback"
+effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[lanes.test]
+candidates = ["primary", "fallback"]
+"#,
+        )
+        .unwrap();
+        let now = CapabilitySnapshot::now_ms();
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["primary"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now)
+                .with_reason("Codex account is logged out"),
+        );
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["fallback"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+
+        let decision = resolve_lane_from_registry("test", &snapshot, &registry).unwrap();
+        assert_eq!(decision.recipe_id, "fallback");
+        assert_eq!(decision.warnings.len(), 1);
+        assert!(decision.warnings[0].contains("primary"));
+        assert!(decision.warnings[0].contains("fallback"));
+        assert!(decision.warnings[0].contains("Codex account is logged out"));
+    }
+
+    #[test]
+    fn resolve_lane_refuses_unknown_fallback_availability() {
+        let registry = parse_registry(
+            r#"
+schema_version = 1
+
+[recipes.primary]
+harness = "codex"
+provider = "openai"
+model = "primary"
+effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[recipes.fallback]
+harness = "claude"
+provider = "anthropic"
+model = "fallback"
+effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[lanes.test]
+candidates = ["primary", "fallback"]
+"#,
+        )
+        .unwrap();
+        let now = CapabilitySnapshot::now_ms();
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["primary"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now),
+        );
+
+        let error = resolve_lane_from_registry("test", &snapshot, &registry)
+            .expect_err("unknown fallback must fail closed")
+            .to_string();
+        assert!(error.contains("availability is Unknown"), "{error}");
+        assert!(error.contains("refusing fallback"), "{error}");
+    }
+
+    #[test]
+    fn resolve_lane_respects_no_fallback_for_unavailable_primary() {
+        let registry = parse_registry(
+            r#"
+schema_version = 1
+
+[recipes.primary]
+harness = "claude"
+provider = "anthropic"
+model = "primary"
+effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[recipes.fallback]
+harness = "codex"
+provider = "openai"
+model = "fallback"
+effort = "high"
+allowed_efforts = ["high"]
+status = "active"
+
+[lanes.test]
+candidates = ["primary", "fallback"]
+no_fallback = true
+"#,
+        )
+        .unwrap();
+        let now = CapabilitySnapshot::now_ms();
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["primary"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, now),
+        );
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["fallback"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+
+        let error = resolve_lane_from_registry("test", &snapshot, &registry)
+            .expect_err("no-fallback lane must fail closed")
+            .to_string();
+        assert!(error.contains("no active recipe candidates"), "{error}");
+    }
+
+    #[test]
+    fn lane_request_rejects_explicit_recipe_controls() {
+        let error = validate_lane_request("heavy", false, true, false)
+            .expect_err("lane and explicit model are ambiguous")
+            .to_string();
+
+        assert!(error.contains("lane=\"heavy\""), "{error}");
+        assert!(error.contains("model"), "{error}");
+        assert!(error.contains("choose lane="), "{error}");
+    }
+
+    #[test]
+    fn lane_request_rejects_empty_lane() {
+        let error = validate_lane_request("  ", false, false, false)
+            .expect_err("empty lane is not a request")
+            .to_string();
+
+        assert!(error.contains("unknown lane"), "{error}");
+    }
+
+    #[test]
     fn validate_explicit_preserves_static_rejections() {
         let spec = WorkerSpec {
             name: None,
@@ -960,7 +1292,10 @@ candidates = ["first"]
             .expect_err("suspended Terra must fail closed")
             .to_string();
 
-        assert_eq!(terra, before, "validation must not rewrite an explicit spec");
+        assert_eq!(
+            terra, before,
+            "validation must not rewrite an explicit spec"
+        );
         assert!(error.contains("Terra is suspended"), "{error}");
         assert!(error.contains("routing rule 'suspended recipe'"), "{error}");
         assert!(error.contains("codex_luna"), "{error}");
@@ -1011,5 +1346,8 @@ candidates = ["first"]
 
         assert!(!recipes.contains("gpt-5.6-terra"));
         assert!(recipes.contains("mcp__cas__coordination action=spawn_workers"));
+        assert!(table.contains("Lane request mode"));
+        assert!(table.contains("Fallback"));
+        assert!(table.contains("disabled"));
     }
 }

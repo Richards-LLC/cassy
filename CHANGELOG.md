@@ -7,9 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-08-27
+
 ### Added
+- **Cassy can run workers on a fourth AI backend: OpenCode driving Qwen.** `cli=opencode` spawns workers on Qwen 3.8 Max through a QwenCloud Token Plan subscription (`sk-sp-` key), validated end-to-end by a live conformance receipt — a Qwen-driven worker completed a real Cassy task lifecycle (create, code, commit, push, verified close), survived cancellation, retained permission denials, and kept two account roots isolated. Model selectors carry an explicit route (`qwencloud/…`, `alibaba/…`, `local/…`) with no silent cross-route fallback; routes without a receipt are refused before queue insertion.
+- **Model routing is now a checked rulebook, not folklore.** A typed, embedded lane registry defines the worker lanes — light: Haiku 4.5, standard: GPT-5.6 Luna at xhigh, taste: Claude Opus 5 at high, heavy: GPT-5.6 Sol at high, with Terra under standing suspension — and every spawn path (MCP, direct CLI, daemon respawn, doctor) enforces it with rejections that name the violated rule and the available alternatives. Work can be requested by `lane=`; a missing primary backend produces a warned, never-silent substitute, and asking for an exact model is never rewritten. Doctor and preflight report per-backend availability as available / unavailable (with the enable command) / unknown. The docs' routing tables are generated from the same registry the code enforces.
+- **The Commander hub installs as a managed service.** `cas hub service install|uninstall|status` (with `--dry-run`) writes and enables a systemd user unit on Linux (linger handled) or a launchd agent on macOS: restart-on-failure, discoverable logs, no secrets in unit files, idempotent re-runs, wired into the installer's next steps.
+- **Every release now proves its own installer on real machines.** A `release.published`-triggered workflow runs the actual `curl … | sh` install on a hosted Apple Silicon Mac and a clean Linux container, verifies `cas` works from a fresh login shell, and uploads full transcripts; release copy may only claim "install works" with that green receipt.
 - **Installing Cassy now leaves a working `cas` in a new terminal.** The installer detects whether its install directory is on PATH in your *login* shell, offers to add a marker-guarded guard to the right startup file (`.zshenv` on zsh, so the non-interactive shells MCP clients spawn also see it; `.bashrc` or `.profile` on bash), never edits the same file twice, and prints the exact line to add if you decline or there is no terminal to ask on. It then checks the result by running `cas --version` in a fresh login shell and only reports success when that actually works.
 - **A brand-new machine gets one friendly line.** Typing `cas` before anything is configured now names the next command instead of printing a factory preflight's list of everything missing.
+
+### Fixed
+- **Factory messages arrive when sent, not when someone happens to wake.** Enqueuing a message now nudges the daemon immediately, delivered messages carry their age and a staleness marker, and a spawn assignment for a task the worker has already finished is withdrawn instead of replayed as if new.
+- **A task can no longer be waved into supervisor review while its branch is unmerged.** Every close-path transition re-fetches and re-validates the live branch tip's ancestry at decision time, closing the race where a straggler commit slid past a partial merge.
+- **The workspace-contract hook stops rejecting writes inside a worker's own worktree.** Containment now uses the registered worktree binding with canonicalized, fail-closed path comparison instead of guessing from the current directory, fixing the case where one subtree was allowed and its sibling was blocked.
+- **Workers are never cut from a stale epic branch again.** A behind-only epic base fast-forwards at cut time; a diverged base refuses the cut with the exact branches to reconcile, instead of warning and cutting stale anyway.
+- **`cas doctor` no longer calls a dead search index healthy.** The search-index check compares per-type document counts and freshness against the store and fails with the exact reindex command when they diverge.
+- **Filing a bug report no longer dies on a missing label or guesses a repository.** A missing `agent-reported` label degrades to a labeless filing with the degradation stated, and an unset `issues.repo` refuses with the exact config command instead of proceeding against an implicit default.
+- **Release-note posting has a working, verified Slack route again.** The runbook documents the measured transport inventory and the canonical approved route with a real receipt, and codifies the supervisor handoff for workers without a Slack surface.
 
 ## [3.4.1] - 2026-08-20
 

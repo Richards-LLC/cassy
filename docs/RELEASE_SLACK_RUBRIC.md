@@ -202,6 +202,12 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
   `release-published-receipt.sh --write-draft` succeeded from fresh downloads
   before any digest enters the draft (a local audit archive is not
   shipped-byte evidence)
+- [ ] The advisory `Install path proof` workflow is green for the release on
+  hosted macOS Apple Silicon and a clean Linux container; retain the run URL
+  and both transcript artifacts before claiming that installation works.
+- [ ] Hosted install proof is supplemented by the manual consumer-Mac
+  Gatekeeper checklist in [the install-proof guide](ci/install-path-proof.md);
+  its GUI/SIP limits are not silently presented as covered by CI.
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

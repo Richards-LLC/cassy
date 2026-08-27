@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cas_mux::{Effort, SupervisorCli, WorkerSpec};
 use serde::{Deserialize, Serialize};
@@ -19,26 +20,179 @@ pub const LANE_REGISTRY_TOML: &str = include_str!("../policy/lane-registry.toml"
 /// table rather than a lane registry.
 pub const REGISTRY_TOML: &str = LANE_REGISTRY_TOML;
 
-/// Availability facts are intentionally supplied by a later capability layer.
-/// R1 only needs a typed argument at the seam; it must not probe a provider or
-/// claim that a route is available merely because it is in the registry.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilitySnapshot {
-    /// Optional route-keyed facts supplied by a capability probe.
-    ///
-    /// The map is public so the R4 capability layer can add facts without
-    /// changing the `resolve_lane`/`validate_explicit` call shape. R1 does not
-    /// read it when selecting the static primary recipe.
-    pub availability: BTreeMap<String, CapabilityAvailability>,
+/// A complete serving route identity.
+///
+/// Harness, provider, endpoint, model, and account profile are all part of the
+/// key. In particular, a Qwen Token Plan route and a DashScope route must not
+/// share evidence merely because they use the same harness and model.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RouteIdentity {
+    pub harness: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub model: String,
+    pub account_profile: String,
 }
 
-/// Tri-state capability fact reserved for the capability-aware routing layer.
+impl RouteIdentity {
+    pub fn new(
+        harness: impl Into<String>,
+        provider: impl Into<String>,
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        account_profile: impl Into<String>,
+    ) -> Self {
+        Self {
+            harness: harness.into(),
+            provider: provider.into(),
+            endpoint: endpoint.into(),
+            model: model.into(),
+            account_profile: account_profile.into(),
+        }
+    }
+
+    /// Stable, secret-free display key for logs and evidence references.
+    pub fn key(&self) -> String {
+        [
+            self.harness.as_str(),
+            self.provider.as_str(),
+            self.endpoint.as_str(),
+            self.model.as_str(),
+            self.account_profile.as_str(),
+        ]
+        .join("|")
+    }
+}
+
+/// Tri-state capability fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum CapabilityAvailability {
     Available,
     Unavailable,
     Unknown,
+}
+
+impl CapabilityAvailability {
+    pub const fn default_ttl_ms(self) -> u64 {
+        match self {
+            Self::Available => CAPABILITY_AVAILABLE_TTL_MS,
+            Self::Unavailable => CAPABILITY_UNAVAILABLE_TTL_MS,
+            Self::Unknown => CAPABILITY_UNKNOWN_TTL_MS,
+        }
+    }
+}
+
+/// Default freshness windows for runtime capability evidence.
+pub const CAPABILITY_AVAILABLE_TTL_MS: u64 = 5 * 60 * 1_000;
+pub const CAPABILITY_UNAVAILABLE_TTL_MS: u64 = 60 * 1_000;
+pub const CAPABILITY_UNKNOWN_TTL_MS: u64 = 5 * 1_000;
+
+/// One observation for one complete route identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityEvidence {
+    pub availability: CapabilityAvailability,
+    pub observed_at_ms: u64,
+    pub ttl_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+impl CapabilityEvidence {
+    pub fn new(availability: CapabilityAvailability, observed_at_ms: u64) -> Self {
+        Self {
+            availability,
+            observed_at_ms,
+            ttl_ms: availability.default_ttl_ms(),
+            reason: None,
+            remediation: None,
+        }
+    }
+
+    pub fn with_ttl_ms(mut self, ttl_ms: u64) -> Self {
+        self.ttl_ms = ttl_ms;
+        self
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
+        self.remediation = Some(remediation.into());
+        self
+    }
+
+    pub fn expires_at_ms(&self) -> u64 {
+        self.observed_at_ms.saturating_add(self.ttl_ms)
+    }
+
+    pub fn is_stale_at(&self, now_ms: u64) -> bool {
+        now_ms >= self.expires_at_ms()
+    }
+
+    /// Expired evidence is explicitly Unknown. Callers must not route from a
+    /// stale Available or Unavailable observation.
+    pub fn availability_at(&self, now_ms: u64) -> CapabilityAvailability {
+        if self.is_stale_at(now_ms) {
+            CapabilityAvailability::Unknown
+        } else {
+            self.availability
+        }
+    }
+}
+
+/// The externally useful projection of a route observation at a point in
+/// time. `stale` stays visible even though stale evidence is classified as
+/// `Unknown`, so doctor/preflight can explain why a prior verdict was dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityStatus {
+    pub availability: CapabilityAvailability,
+    pub stale: bool,
+    pub observed_at_ms: u64,
+    pub expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+/// Runtime capability evidence keyed by the complete route identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapabilitySnapshot {
+    pub availability: BTreeMap<RouteIdentity, CapabilityEvidence>,
+}
+
+impl CapabilitySnapshot {
+    pub fn record(&mut self, identity: RouteIdentity, evidence: CapabilityEvidence) {
+        self.availability.insert(identity, evidence);
+    }
+
+    pub fn get(&self, identity: &RouteIdentity) -> Option<&CapabilityEvidence> {
+        self.availability.get(identity)
+    }
+
+    pub fn status_at(&self, identity: &RouteIdentity, now_ms: u64) -> Option<CapabilityStatus> {
+        let evidence = self.get(identity)?;
+        let stale = evidence.is_stale_at(now_ms);
+        Some(CapabilityStatus {
+            availability: evidence.availability_at(now_ms),
+            stale,
+            observed_at_ms: evidence.observed_at_ms,
+            expires_at_ms: evidence.expires_at_ms(),
+            reason: evidence.reason.clone(),
+            remediation: evidence.remediation.clone(),
+        })
+    }
+
+    pub fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as u64)
+    }
 }
 
 /// Errors from parsing, validating, or using the static routing policy.
@@ -371,6 +525,25 @@ pub fn embedded_registry() -> Result<&'static LaneRegistry, RoutingError> {
     registry()
 }
 
+/// Return every harness represented by the embedded registry.
+///
+/// Defaults and recipes are both included because a harness may be present
+/// before it has a lane recipe (Grok is currently in that state). Keeping this
+/// catalog derived from the registry prevents doctor and preflight from
+/// silently growing separate hard-coded harness lists.
+pub fn registered_harnesses() -> Result<Vec<SupervisorCli>, RoutingError> {
+    let registry = registry()?;
+    let mut harnesses = BTreeSet::new();
+    harnesses.extend(
+        registry
+            .defaults
+            .keys()
+            .filter_map(|key| parse_cli_key(key)),
+    );
+    harnesses.extend(registry.recipes.values().map(|recipe| recipe.harness));
+    Ok(harnesses.into_iter().collect())
+}
+
 /// Resolve a lane's first active static recipe into a worker spec.
 ///
 /// R1 deliberately does not perform availability probing or fallback policy;
@@ -691,6 +864,18 @@ candidates = ["codex_luna"]
                 .contains("operator decision pending")
         );
         assert!(validate_model_effort_policy("gpt-5.6-luna", Some(Effort::High)).is_err());
+    }
+
+    #[test]
+    fn registered_harnesses_are_derived_from_the_embedded_registry() {
+        assert_eq!(
+            registered_harnesses().unwrap(),
+            vec![
+                SupervisorCli::Claude,
+                SupervisorCli::Codex,
+                SupervisorCli::Grok
+            ]
+        );
     }
 
     #[test]

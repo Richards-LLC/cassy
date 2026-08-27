@@ -141,6 +141,10 @@ pub struct HarnessPreflight {
     pub harness: String,
     pub required: bool,
     pub state: ComponentState,
+    pub capability: cas_factory::CapabilityAvailability,
+    pub capability_stale: bool,
+    pub capability_observed_at_ms: Option<u64>,
+    pub capability_expires_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validated_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -270,6 +274,7 @@ struct PreflightFacts {
     receipts: Vec<HarnessConformanceReceipt>,
     default_versions: HashMap<Harness, VersionProbe>,
     required_harnesses: HashSet<Harness>,
+    capability_snapshot: cas_factory::CapabilitySnapshot,
     cloud_queue: CloudQueueFacts,
     runtime_elapsed_ms: u64,
 }
@@ -309,6 +314,7 @@ pub fn collect_factory_preflight(
         KNOWN_REPO_LIMIT,
     );
     let default_versions = probe_default_harness_versions(deadline);
+    let receipts = harness_conformance_receipts().unwrap_or_default();
     let facts = PreflightFacts {
         binary: collect_binary_facts(project_root, &repo_probe),
         repository: collect_repository_facts(invocation_root, cas_root, &repo_probe),
@@ -319,7 +325,8 @@ pub fn collect_factory_preflight(
             tools: compiled_cas_tool_names(),
         },
         proxy: collect_proxy_facts(cas_root, live_proxy),
-        receipts: harness_conformance_receipts().unwrap_or_default(),
+        capability_snapshot: collect_capability_snapshot(&default_versions, &receipts, deadline),
+        receipts,
         default_versions,
         required_harnesses: required_harnesses(project_root),
         cloud_queue: collect_cloud_queue_facts(cas_root),
@@ -356,6 +363,7 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
         facts.receipts,
         facts.default_versions,
         &facts.required_harnesses,
+        &facts.capability_snapshot,
         &mut findings,
     );
 
@@ -742,13 +750,99 @@ fn classify_proxy(
     }
 }
 
+fn registered_harnesses() -> Vec<Harness> {
+    cas_factory::registered_harnesses()
+        .expect("embedded lane registry must expose a valid harness catalog")
+        .into_iter()
+        .map(|harness| match harness {
+            cas_mux::SupervisorCli::Claude => Harness::ClaudeCode,
+            cas_mux::SupervisorCli::Codex => Harness::CodexCli,
+            cas_mux::SupervisorCli::Grok => Harness::GrokBuild,
+        })
+        .collect()
+}
+
+fn supervisor_harness(harness: Harness) -> cas_mux::SupervisorCli {
+    match harness {
+        Harness::ClaudeCode => cas_mux::SupervisorCli::Claude,
+        Harness::CodexCli => cas_mux::SupervisorCli::Codex,
+        Harness::GrokBuild => cas_mux::SupervisorCli::Grok,
+    }
+}
+
+fn account_dir_for_harness(harness: Harness) -> Option<String> {
+    let variable = match harness {
+        Harness::ClaudeCode => "CLAUDE_CONFIG_DIR",
+        Harness::CodexCli => "CODEX_HOME",
+        Harness::GrokBuild => "GROK_HOME",
+    };
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn collect_capability_snapshot(
+    default_versions: &HashMap<Harness, VersionProbe>,
+    receipts: &[HarnessConformanceReceipt],
+    deadline: Deadline,
+) -> cas_factory::CapabilitySnapshot {
+    let jobs = registered_harnesses()
+        .into_iter()
+        .map(|harness| {
+            let binary = match default_versions.get(&harness) {
+                Some(VersionProbe::Observed(version)) => {
+                    crate::capability::BinaryObservation::Observed(version.clone())
+                }
+                Some(VersionProbe::TimedOut) => crate::capability::BinaryObservation::TimedOut,
+                Some(VersionProbe::Unavailable) | None => {
+                    crate::capability::BinaryObservation::Unavailable
+                }
+            };
+            let model = cas_factory::default_worker_model_for_cli(supervisor_harness(harness));
+            let account_dir = account_dir_for_harness(harness);
+            let receipt = receipts
+                .iter()
+                .find(|receipt| receipt.harness == harness)
+                .cloned();
+            (harness, model.to_string(), account_dir, binary, receipt)
+        })
+        .collect::<Vec<_>>();
+
+    let now_ms = cas_factory::CapabilitySnapshot::now_ms();
+    let mut snapshot = cas_factory::CapabilitySnapshot::default();
+    std::thread::scope(|scope| {
+        let handles = jobs
+            .into_iter()
+            .map(|(harness, model, account_dir, binary, receipt)| {
+                scope.spawn(move || {
+                    crate::capability::probe_harness(
+                        harness,
+                        &model,
+                        account_dir.as_deref(),
+                        &binary,
+                        receipt.as_ref(),
+                        now_ms,
+                        deadline,
+                    )
+                })
+            });
+        for handle in handles {
+            if let Ok((identity, evidence)) = handle.join() {
+                snapshot.record(identity, evidence);
+            }
+        }
+    });
+    snapshot
+}
+
 fn classify_harnesses(
     receipts: Vec<HarnessConformanceReceipt>,
     default_versions: HashMap<Harness, VersionProbe>,
     required_harnesses: &HashSet<Harness>,
+    capability_snapshot: &cas_factory::CapabilitySnapshot,
     findings: &mut Vec<PreflightFinding>,
 ) -> Vec<HarnessPreflight> {
-    [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild]
+    registered_harnesses()
         .into_iter()
         .map(|harness| {
             let receipt = receipts.iter().find(|receipt| receipt.harness == harness);
@@ -763,6 +857,29 @@ fn classify_harnesses(
                 VersionProbe::TimedOut => (None, ProbeState::TimedOut),
             };
             let harness_name = harness_name(harness).to_string();
+            let model = cas_factory::default_worker_model_for_cli(supervisor_harness(harness));
+            let account_profile = account_dir_for_harness(harness).unwrap_or_else(|| "default".into());
+            let identity = crate::capability::harness_route_identity(
+                harness,
+                model,
+                &account_profile,
+            );
+            let capability_status = capability_snapshot.status_at(
+                &identity,
+                cas_factory::CapabilitySnapshot::now_ms(),
+            );
+            let capability = capability_status
+                .as_ref()
+                .map_or(cas_factory::CapabilityAvailability::Unknown, |status| {
+                    status.availability
+                });
+            let capability_stale = capability_status.as_ref().is_some_and(|status| status.stale);
+            let capability_observed_at_ms = capability_status
+                .as_ref()
+                .map(|status| status.observed_at_ms);
+            let capability_expires_at_ms = capability_status
+                .as_ref()
+                .map(|status| status.expires_at_ms);
             let Some(receipt) = receipt else {
                 let remediation = format!(
                     "Run and persist the typed {harness_name} factory conformance matrix."
@@ -782,6 +899,10 @@ fn classify_harnesses(
                     harness: harness_name,
                     required,
                     state: ComponentState::Missing,
+                    capability,
+                    capability_stale,
+                    capability_observed_at_ms,
+                    capability_expires_at_ms,
                     validated_version: None,
                     default_version,
                     default_probe,
@@ -851,10 +972,50 @@ fn classify_harnesses(
                 remediation = Some(action);
             }
 
+            if capability != cas_factory::CapabilityAvailability::Available {
+                let action = capability_status
+                    .as_ref()
+                    .and_then(|status| status.remediation.clone())
+                    .unwrap_or_else(|| {
+                        "Rerun `cas factory doctor` to refresh route capability evidence."
+                            .to_string()
+                    });
+                if required {
+                    findings.push(warning(
+                        "harness.capability_unavailable",
+                        &format!("harness.{harness_name}"),
+                        &format!(
+                            "{harness_name} capability is {:?}{}.",
+                            capability,
+                            capability_stale.then_some(" (evidence is stale)").unwrap_or_default()
+                        ),
+                        &action,
+                        capability_observed_at_ms.and_then(|timestamp| {
+                            chrono::DateTime::from_timestamp_millis(timestamp as i64)
+                                .map(|time| time.to_rfc3339())
+                        }),
+                    ));
+                }
+                if state == ComponentState::Ready {
+                    state = if capability == cas_factory::CapabilityAvailability::Unavailable {
+                        ComponentState::Missing
+                    } else {
+                        ComponentState::Stale
+                    };
+                }
+                if remediation.is_none() {
+                    remediation = Some(action);
+                }
+            }
+
             HarnessPreflight {
                 harness: harness_name,
                 required,
                 state,
+                capability,
+                capability_stale,
+                capability_observed_at_ms,
+                capability_expires_at_ms,
                 validated_version: Some(receipt.harness_version.clone()),
                 default_version,
                 default_probe,
@@ -1128,26 +1289,28 @@ fn harness_from_config(value: &str) -> Option<Harness> {
 
 fn probe_default_harness_versions(deadline: Deadline) -> HashMap<Harness, VersionProbe> {
     std::thread::scope(|scope| {
-        let claude = scope.spawn(|| probe_version("claude", deadline));
-        let codex = scope.spawn(|| probe_version("codex", deadline));
-        let grok = scope.spawn(|| probe_version("grok", deadline));
-        [
-            (
-                Harness::ClaudeCode,
-                claude.join().unwrap_or(VersionProbe::Unavailable),
-            ),
-            (
-                Harness::CodexCli,
-                codex.join().unwrap_or(VersionProbe::Unavailable),
-            ),
-            (
-                Harness::GrokBuild,
-                grok.join().unwrap_or(VersionProbe::Unavailable),
-            ),
-        ]
-        .into_iter()
-        .collect()
+        let handles = registered_harnesses()
+            .into_iter()
+            .map(|harness| {
+                (
+                    harness,
+                    scope.spawn(move || probe_version(harness_program(harness), deadline)),
+                )
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|(harness, handle)| (harness, handle.join().unwrap_or(VersionProbe::Unavailable)))
+            .collect()
     })
+}
+
+fn harness_program(harness: Harness) -> &'static str {
+    match harness {
+        Harness::ClaudeCode => "claude",
+        Harness::CodexCli => "codex",
+        Harness::GrokBuild => "grok",
+    }
 }
 
 fn probe_version(program: &str, deadline: Deadline) -> VersionProbe {
@@ -1230,10 +1393,18 @@ pub fn render_factory_preflight_human(report: &FactoryPreflightReport) -> String
     ));
     for harness in &report.harnesses {
         lines.push(format!(
-            "  {}: {} required={} validated={} live_default={} probe={} receipt_observed={} evidence={}",
+            "  {}: {} required={} capability={:?}{} observed={} expires={} validated={} live_default={} probe={} receipt_observed={} evidence={}",
             harness.harness,
             state_label(harness.state),
             harness.required,
+            harness.capability,
+            if harness.capability_stale { " (stale)" } else { "" },
+            harness
+                .capability_observed_at_ms
+                .map_or_else(|| "none".to_string(), |value| value.to_string()),
+            harness
+                .capability_expires_at_ms
+                .map_or_else(|| "none".to_string(), |value| value.to_string()),
             harness.validated_version.as_deref().unwrap_or("none"),
             harness.default_version.as_deref().unwrap_or("unavailable"),
             probe_label(harness.default_probe),
@@ -1361,6 +1532,25 @@ mod tests {
             required_harnesses: [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild]
                 .into_iter()
                 .collect(),
+            capability_snapshot: {
+                let mut snapshot = cas_factory::CapabilitySnapshot::default();
+                for harness in [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild] {
+                    let model =
+                        cas_factory::default_worker_model_for_cli(supervisor_harness(harness));
+                    let account_profile =
+                        account_dir_for_harness(harness).unwrap_or_else(|| "default".into());
+                    let identity =
+                        crate::capability::harness_route_identity(harness, model, &account_profile);
+                    snapshot.record(
+                        identity,
+                        cas_factory::CapabilityEvidence::new(
+                            cas_factory::CapabilityAvailability::Available,
+                            cas_factory::CapabilitySnapshot::now_ms(),
+                        ),
+                    );
+                }
+                snapshot
+            },
             cloud_queue: CloudQueueFacts {
                 health: None,
                 pending_warning: 200,
@@ -1377,6 +1567,10 @@ mod tests {
         assert_eq!(report.overall, PreflightOverall::Ready);
         assert!(!report.factory_blocked);
         assert!(report.findings.is_empty());
+        assert!(report
+            .harnesses
+            .iter()
+            .all(|harness| harness.capability == cas_factory::CapabilityAvailability::Available));
     }
 
     #[test]
@@ -1945,6 +2139,7 @@ mod tests {
         let human = render_factory_preflight_human(&report);
         assert!(human.starts_with("Factory preflight: WARN"));
         assert!(human.contains("binary.identity_untrusted"));
+        assert!(human.contains("capability=Available"));
         assert!(!human.contains("/home/"));
     }
 }

@@ -46,9 +46,11 @@ pub use director::{
 pub use notify::{DaemonNotifier, notify_daemon, notify_socket_path};
 pub use recording::RecordingManager;
 pub use routing::{
-    CapabilityAvailability, CapabilitySnapshot, Lane, LaneDefinition, LaneRegistry, Recipe,
-    RecipeStatus, RouteRecipe, RoutingDecision, RoutingError, default_worker_effort_for_cli,
-    default_worker_model_for_cli, embedded_registry, parse_registry, registry, resolve_lane,
+    CAPABILITY_AVAILABLE_TTL_MS, CAPABILITY_UNAVAILABLE_TTL_MS, CAPABILITY_UNKNOWN_TTL_MS,
+    CapabilityAvailability, CapabilityEvidence, CapabilitySnapshot, CapabilityStatus, Lane,
+    LaneDefinition, LaneRegistry, Recipe, RecipeStatus, RouteIdentity, RouteRecipe,
+    RoutingDecision, RoutingError, default_worker_effort_for_cli, default_worker_model_for_cli,
+    embedded_registry, parse_registry, registered_harnesses, registry, resolve_lane,
     validate_explicit, validate_model_effort_policy, validate_model_is_active,
 };
 pub use session::lifecycle::SessionManager;

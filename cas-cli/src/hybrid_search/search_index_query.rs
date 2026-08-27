@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use tantivy::{IndexReader, ReloadPolicy};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
+use tantivy::{IndexReader, ReloadPolicy};
 
 use cas_core::dedup::{SearchHit, SearchIndexTrait};
 use cas_core::error::CoreError;
@@ -94,6 +94,19 @@ impl SearchIndex {
 }
 
 impl SearchIndex {
+    /// Count committed documents for one logical search document type.
+    ///
+    /// The unified index can also contain code, history, artifact, and
+    /// knowledge documents, so doctor must compare store-backed types
+    /// individually instead of comparing the total Tantivy document count.
+    pub fn count_documents(&self, doc_type: DocType) -> Result<u64, MemError> {
+        let reader = self.reader()?;
+        reader.reload()?;
+        let term = tantivy::Term::from_field_text(self.doc_type_field, doc_type.as_str());
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+        Ok(reader.searcher().search(&query, &Count)? as u64)
+    }
+
     /// Resolve a filter key (from [`parse_filter_query`]) to its Tantivy field.
     /// Returns `None` for unrecognized keys — caller should treat them as
     /// raw keyword text.

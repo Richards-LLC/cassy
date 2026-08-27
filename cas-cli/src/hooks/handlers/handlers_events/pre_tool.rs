@@ -296,21 +296,36 @@ pub fn handle_pre_tool_use(
     // A scratchpad may itself be under /tmp, but it is explicitly ephemeral
     // and is rejected later if cited as close evidence.
     if is_factory_agent {
-        let config = stores.config();
-        let factory = config.factory();
-        let scratch_root = config
-            .staging
-            .as_ref()
-            .and_then(|staging| staging.scratch_root.as_deref());
-        if let Some(path) = factory_unsanctioned_write_path(
+        // `input.cwd` is the tool's current directory, not the worker's
+        // registered checkout. Claude can report a nested cwd (and it may
+        // change during a long session), so resolve the durable binding from
+        // the current agent row on every hook invocation. The environment is
+        // the bootstrap fallback until SessionStart has registered the row.
+        let registered_worktree = registered_factory_worktree_root(&mut stores, input);
+        let (artifacts_root, scratch_root) = {
+            let config = stores.config();
+            let factory = config.factory();
+            (
+                factory.artifacts_root.clone(),
+                config
+                    .staging
+                    .as_ref()
+                    .and_then(|staging| staging.scratch_root.clone()),
+            )
+        };
+        if let Some(violation) = factory_write_violation(
             input,
-            &factory.artifacts_root,
-            scratch_root,
+            &artifacts_root,
+            scratch_root.as_deref(),
             crate::harness_policy::is_supervisor(input),
+            registered_worktree.as_deref(),
         ) {
+            let path = &violation.resolved_path;
+            log_factory_workspace_rejection(cas_root, input, &violation);
             let artifacts =
-                crate::config::resolved_factory_artifacts_root(factory.artifacts_root.as_deref());
+                crate::config::resolved_factory_artifacts_root(artifacts_root.as_deref());
             let scratch = scratch_root
+                .as_deref()
                 .map(|root| format!(" or `{root}/...` for ephemeral scratch output"))
                 .unwrap_or_default();
             return Ok(HookOutput::with_pre_tool_permission(
@@ -1474,6 +1489,30 @@ fn factory_unsanctioned_write_path(
     configured_scratch_root: Option<&str>,
     is_supervisor: bool,
 ) -> Option<std::path::PathBuf> {
+    factory_write_violation(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        None,
+    )
+    .map(|violation| violation.resolved_path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactoryWriteViolation {
+    evaluated_path: String,
+    resolved_path: std::path::PathBuf,
+    matched_rule: &'static str,
+}
+
+fn factory_write_violation(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
+    is_supervisor: bool,
+    registered_worktree_root: Option<&std::path::Path>,
+) -> Option<FactoryWriteViolation> {
     let tool = input.tool_name.as_deref()?;
     let tool_input = input.tool_input.as_ref()?;
     let raw_paths = match tool {
@@ -1491,13 +1530,19 @@ fn factory_unsanctioned_write_path(
     };
 
     raw_paths.into_iter().find_map(|raw_path| {
-        unsanctioned_factory_path(
+        unsanctioned_factory_path_with_worktree(
             input,
             configured_artifacts_root,
             configured_scratch_root,
             is_supervisor,
             &raw_path,
+            registered_worktree_root,
         )
+        .map(|resolved_path| FactoryWriteViolation {
+            evaluated_path: raw_path,
+            resolved_path,
+            matched_rule: "none",
+        })
     })
 }
 
@@ -1508,21 +1553,45 @@ fn unsanctioned_factory_path(
     is_supervisor: bool,
     raw_path: &str,
 ) -> Option<std::path::PathBuf> {
+    unsanctioned_factory_path_with_worktree(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        raw_path,
+        None,
+    )
+}
+
+fn unsanctioned_factory_path_with_worktree(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
+    is_supervisor: bool,
+    raw_path: &str,
+    registered_worktree_root: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let mut sanctioned = vec![lexically_normalize_path(std::path::PathBuf::from(
-        &input.cwd,
-    ))];
-    sanctioned.push(lexically_normalize_path(
-        crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref()),
+    let env_worktree_root = std::env::var_os("CAS_CLONE_PATH")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let worktree_root = registered_worktree_root
+        .map(std::path::Path::to_path_buf)
+        .or(env_worktree_root);
+    // Once a durable clone binding exists, cwd is only a tool location and
+    // must not widen the contract. Keep cwd as the standalone-worker fallback
+    // for sessions that have no registered or environment-provided root.
+    let mut sanctioned = vec![worktree_root
+        .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd))];
+    sanctioned.push(crate::config::resolved_factory_artifacts_root(
+        configured_artifacts_root.as_deref(),
     ));
     if let Some(scratch_root) = configured_scratch_root.filter(|root| !root.trim().is_empty()) {
-        sanctioned.push(lexically_normalize_path(std::path::PathBuf::from(
-            scratch_root,
-        )));
+        sanctioned.push(std::path::PathBuf::from(scratch_root));
     }
     for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
         if let Some(value) = std::env::var_os(key) {
-            sanctioned.push(lexically_normalize_path(std::path::PathBuf::from(value)));
+            sanctioned.push(std::path::PathBuf::from(value));
         }
     }
 
@@ -1538,15 +1607,100 @@ fn unsanctioned_factory_path(
     } else {
         lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(raw_path))
     };
-    let is_explicitly_sanctioned = sanctioned.iter().any(|root| path.starts_with(root));
-    if is_non_creation_stream_device(&path)
-        || is_harness_session_scratchpad(&path, &input.session_id)
-        || (is_supervisor && is_harness_file_memory_path(&path, home.as_deref()))
+    // A path whose symlink chain cannot be resolved is not safely attributable
+    // to any sanctioned root. Fail closed rather than letting `None` mean
+    // "allowed"; the narrow stream-device exception is handled first.
+    if is_non_creation_stream_device(&path) {
+        return None;
+    }
+    let Some(resolved_path) = canonicalize_for_containment(&path) else {
+        return Some(path);
+    };
+    let is_explicitly_sanctioned = sanctioned.iter().any(|root| {
+        canonicalize_for_containment(&lexically_normalize_path(root.clone()))
+            .is_some_and(|root| resolved_path.starts_with(root))
+    });
+    if is_harness_session_scratchpad(&resolved_path, &input.session_id)
+        || (is_supervisor && is_harness_file_memory_path(&resolved_path, home.as_deref()))
         || is_explicitly_sanctioned
     {
         return None;
     }
-    Some(path)
+    Some(resolved_path)
+}
+
+/// Resolve the worker's registered checkout for each hook call.
+///
+/// SessionStart persists `CAS_CLONE_PATH` in the current agent's metadata.
+/// Reading that row here makes a mid-session registration refresh visible to
+/// PreToolUse immediately. The environment remains the bootstrap fallback for
+/// the short interval before the first registration succeeds.
+fn registered_factory_worktree_root(
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+) -> Option<std::path::PathBuf> {
+    let agent_id = current_agent_id(input);
+    stores
+        .agents()
+        .and_then(|store| store.get(&agent_id).ok())
+        .and_then(|agent| agent.metadata.get("clone_path").cloned())
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("CAS_CLONE_PATH")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+}
+
+/// Canonicalize a path for containment checks even when its final components
+/// do not exist yet. The nearest existing ancestor carries symlink semantics;
+/// the missing suffix is then appended. Dangling symlinks fail closed because
+/// they are reported by `symlink_metadata` but cannot be canonicalized.
+fn canonicalize_for_containment(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let normalized = lexically_normalize_path(path.to_path_buf());
+    let mut existing = normalized.clone();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        if std::fs::symlink_metadata(&existing).is_ok() {
+            break;
+        }
+        let name = existing.file_name()?.to_os_string();
+        missing.push(name);
+        existing.pop();
+    }
+
+    let mut canonical = existing.canonicalize().ok()?;
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
+    }
+    Some(canonical)
+}
+
+fn log_factory_workspace_rejection(
+    cas_root: &Path,
+    input: &HookInput,
+    violation: &FactoryWriteViolation,
+) {
+    let tool = input.tool_name.as_deref().unwrap_or("unknown");
+    let payload_bytes = input
+        .tool_input
+        .as_ref()
+        .and_then(|value| serde_json::to_vec(value).ok())
+        .map(|payload| payload.len().to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let resolved_path = violation.resolved_path.display().to_string();
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_root,
+        "workspace_contract_rejection",
+        &[
+            ("tool", tool),
+            ("evaluated_path", violation.evaluated_path.as_str()),
+            ("resolved_path", resolved_path.as_str()),
+            ("matched_rule", violation.matched_rule),
+            ("payload_bytes", payload_bytes.as_str()),
+        ],
+    );
 }
 
 /// Normalize `.` and `..` without requiring the target to exist. Write
@@ -1555,12 +1709,20 @@ fn unsanctioned_factory_path(
 fn lexically_normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
     use std::path::Component;
 
+    let rooted = matches!(
+        path.components().next(),
+        Some(Component::RootDir | Component::Prefix(_))
+    );
     let mut normalized = std::path::PathBuf::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                normalized.pop();
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                } else if !rooted {
+                    normalized.push(component.as_os_str());
+                }
             }
             Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
                 normalized.push(component.as_os_str());
@@ -1737,6 +1899,7 @@ mod workspace_contract_tests {
     #[test]
     fn relative_worktree_writes_remain_sanctioned_and_bare_tmp_is_denied() {
         let cwd = tempfile::tempdir().expect("worktree");
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);
         let input = bash_input("true", cwd.path());
 
         assert_eq!(
@@ -1757,6 +1920,319 @@ mod workspace_contract_tests {
             Some(std::env::temp_dir().join("cas-3bd6-tool-temp.log")),
             "bare system temp must remain outside the workspace contract"
         );
+    }
+
+    #[test]
+    fn registered_worktree_allows_sibling_subtrees_when_cwd_is_nested() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        let frontend = cwd.path().join("apps/frontend");
+        let backend = cwd.path().join("apps/backend");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        let clone_path = cwd.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_CLONE_PATH",
+            Some(clone_path.as_str()),
+        )]);
+        let input = bash_input("true", &backend);
+
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                None,
+                false,
+                &frontend.join("new-component.ts").to_string_lossy(),
+            ),
+            None,
+            "the registered worktree root must permit every nested subtree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_registered_worktree_root_is_canonicalized() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent");
+        let real_root = parent.path().join("real-worktree");
+        let linked_root = parent.path().join("linked-worktree");
+        std::fs::create_dir_all(real_root.join("apps/frontend")).expect("real root");
+        std::fs::create_dir_all(real_root.join("apps/backend")).expect("real subtrees");
+        symlink(&real_root, &linked_root).expect("worktree symlink");
+        let clone_path = linked_root.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_CLONE_PATH",
+            Some(clone_path.as_str()),
+        )]);
+        let input = bash_input("true", &linked_root.join("apps/backend"));
+
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                None,
+                false,
+                &linked_root
+                    .join("apps/frontend/new-component.ts")
+                    .to_string_lossy(),
+            ),
+            None,
+            "symlinked registered roots must compare by their canonical target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_worktree_subtree_that_escapes_is_denied() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent");
+        let worktree = parent.path().join("worktree");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        std::fs::create_dir_all(&outside).expect("outside");
+        symlink(&outside, worktree.join("link-out")).expect("escape symlink");
+        let clone_path = worktree.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_CLONE_PATH",
+            Some(clone_path.as_str()),
+        )]);
+        let input = bash_input("true", worktree.as_path());
+        let target = worktree.join("link-out/escape.txt");
+
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                None,
+                false,
+                &target.to_string_lossy(),
+            ),
+            Some(outside.join("escape.txt")),
+            "canonical containment must reject a symlinked subtree outside the worktree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_write_is_denied() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent");
+        let worktree = parent.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        symlink(
+            worktree.join("missing-target"),
+            worktree.join("dangling"),
+        )
+        .expect("dangling symlink");
+        let clone_path = worktree.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_CLONE_PATH",
+            Some(clone_path.as_str()),
+        )]);
+        let input = bash_input("true", worktree.as_path());
+        let target = worktree.join("dangling/escape.txt");
+
+        assert_eq!(
+            unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy()),
+            Some(target),
+            "unresolvable symlink targets must fail closed"
+        );
+    }
+
+    #[test]
+    fn refreshed_registered_worktree_is_used_mid_session() {
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let first_root = tempfile::tempdir().expect("first worktree");
+        let second_root = tempfile::tempdir().expect("refreshed worktree");
+        let first_path = first_root.path().to_string_lossy().to_string();
+        let second_path = second_root.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_SESSION_ID", Some("refresh-session")),
+            ("CAS_CLONE_PATH", Some(first_path.as_str())),
+        ]);
+
+        let agent_store = open_agent_store(cas_root.path()).expect("agent store");
+        let mut agent = Agent::new("refresh-session".to_string(), "refresh-worker".to_string());
+        agent.role = AgentRole::Worker;
+        agent
+            .metadata
+            .insert("clone_path".to_string(), first_path.clone());
+        agent_store.register(&agent).expect("register worker");
+
+        let input = bash_input("true", &second_root.path().join("apps/backend"));
+        assert_eq!(
+            registered_factory_worktree_root(
+                &mut ToolHookStores::new(cas_root.path()),
+                &input,
+            )
+            .as_deref(),
+            Some(first_root.path()),
+            "the initial durable registration should be authoritative"
+        );
+
+        agent
+            .metadata
+            .insert("clone_path".to_string(), second_path.clone());
+        agent_store.update(&agent).expect("refresh worker");
+        let mut stores = ToolHookStores::new(cas_root.path());
+        let refreshed = registered_factory_worktree_root(&mut stores, &input)
+            .expect("refreshed registered root");
+        assert_eq!(refreshed, second_root.path());
+        assert_eq!(
+            unsanctioned_factory_path_with_worktree(
+                &input,
+                &None,
+                None,
+                false,
+                &second_root
+                    .path()
+                    .join("apps/frontend/new-component.ts")
+                    .to_string_lossy(),
+                Some(&refreshed),
+            ),
+            None,
+            "PreToolUse must see a refreshed worktree binding without a new process"
+        );
+    }
+
+    #[test]
+    fn pre_tool_uses_registered_worktree_for_nested_cwd() {
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let frontend = worktree.path().join("apps/frontend");
+        let backend = worktree.path().join("apps/backend");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        let clone_path = worktree.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_SESSION_ID", Some("registered-session")),
+            ("CAS_CLONE_PATH", None),
+        ]);
+
+        let agent_store = open_agent_store(cas_root.path()).expect("agent store");
+        let mut agent = Agent::new(
+            "registered-session".to_string(),
+            "registered-worker".to_string(),
+        );
+        agent.role = AgentRole::Worker;
+        agent
+            .metadata
+            .insert("clone_path".to_string(), clone_path);
+        agent_store.register(&agent).expect("register worker");
+
+        let input = HookInput {
+            session_id: "native-session-id".to_string(),
+            cwd: backend.to_string_lossy().to_string(),
+            hook_event_name: "PreToolUse".to_string(),
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": frontend.join("new-component.ts")
+            })),
+            agent_role: Some("worker".to_string()),
+            ..HookInput::default()
+        };
+
+        let output = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
+        let value = serde_json::to_value(output).expect("hook output JSON");
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"],
+            "allow",
+            "a registered worktree sibling must not be rejected: {value}"
+        );
+    }
+
+    #[test]
+    fn outside_worktree_with_similar_prefix_stays_denied() {
+        let parent = tempfile::tempdir().expect("parent");
+        let worktree = parent.path().join("worktree");
+        let sibling = parent.path().join("worktree-sibling");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        std::fs::create_dir_all(&sibling).expect("sibling");
+        let clone_path = worktree.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_CLONE_PATH",
+            Some(clone_path.as_str()),
+        )]);
+        let input = bash_input("true", worktree.as_path());
+        let target = sibling.join("not-allowed.txt");
+
+        assert_eq!(
+            unsanctioned_factory_path(
+                &input,
+                &None,
+                None,
+                false,
+                &target.to_string_lossy(),
+            ),
+            Some(target),
+            "a sibling path sharing the root's string prefix must remain outside"
+        );
+    }
+
+    #[test]
+    fn cwd_outside_registered_worktree_stays_denied() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let outside = tempfile::tempdir().expect("outside");
+        let clone_path = worktree.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_CLONE_PATH",
+            Some(clone_path.as_str()),
+        )]);
+        let input = bash_input("true", outside.path());
+        let target = outside.path().join("not-allowed.txt");
+
+        assert_eq!(
+            unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy()),
+            Some(target),
+            "an out-of-worktree cwd must not become a sanctioned write root"
+        );
+    }
+
+    #[test]
+    fn workspace_rejection_log_contains_path_rule_and_payload_size() {
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let outside = tempfile::tempdir().expect("outside");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_SESSION", Some("workspace-contract-test")),
+            ("CAS_AGENT_NAME", Some("test-worker")),
+            ("CAS_AGENT_ROLE", Some("worker")),
+        ]);
+        let input = HookInput {
+            session_id: "test-session".to_string(),
+            cwd: outside.path().to_string_lossy().to_string(),
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "/not-sanctioned/escape.txt",
+                "content": "payload"
+            })),
+            ..HookInput::default()
+        };
+        let violation = FactoryWriteViolation {
+            evaluated_path: "/not-sanctioned/escape.txt".to_string(),
+            resolved_path: std::path::PathBuf::from("/not-sanctioned/escape.txt"),
+            matched_rule: "none",
+        };
+
+        log_factory_workspace_rejection(cas_root.path(), &input, &violation);
+        let log_path = cas_root
+            .path()
+            .join(format!("logs/factory-session-{}.log", chrono::Utc::now().format("%Y-%m-%d")));
+        let line = std::fs::read_to_string(log_path).expect("workspace rejection log");
+        let record: serde_json::Value = serde_json::from_str(line.trim()).expect("JSON event");
+        let expected_payload_bytes = serde_json::to_vec(input.tool_input.as_ref().unwrap())
+            .unwrap()
+            .len()
+            .to_string();
+        assert_eq!(record["event"], "workspace_contract_rejection");
+        assert_eq!(record["evaluated_path"], "/not-sanctioned/escape.txt");
+        assert_eq!(record["resolved_path"], "/not-sanctioned/escape.txt");
+        assert_eq!(record["matched_rule"], "none");
+        assert_eq!(record["payload_bytes"], expected_payload_bytes);
     }
 }
 

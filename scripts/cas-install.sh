@@ -481,9 +481,10 @@ verify_install() {
   echo ""
   bold "Next steps:"
   echo "  1. Initialize a project:  cd your-project && cas init"
-  echo "  2. Refresh all projects:  cas update --all-projects"
-  echo "  3. Start a session:       cas factory"
-  echo "  4. Check the docs:        cas --help"
+  echo "  2. Start the hub service:  cas hub service install"
+  echo "  3. Refresh all projects:  cas update --all-projects"
+  echo "  4. Start a session:        cas factory"
+  echo "  5. Check the docs:         cas --help"
   echo ""
 }
 

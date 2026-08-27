@@ -1092,6 +1092,7 @@ fn print_quick_start() {
             vec!["cas", "Launch multi-agent factory"],
             vec!["cas attach", "Attach to running session"],
             vec!["cas serve", "Start MCP server"],
+            vec!["cas hub service install", "Start persistent Commander hub"],
             vec!["cas doctor", "Run diagnostics"],
         ])
         .indent(2);

@@ -8,7 +8,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -32,8 +32,10 @@ struct ServiceReport {
     platform: &'static str,
     supervision: &'static str,
     installed: bool,
+    enabled: Option<bool>,
     active: Option<bool>,
     unit_path: Option<String>,
+    log_path: Option<String>,
     hub_running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'static str>,
@@ -47,7 +49,9 @@ pub(super) fn manage_service(
 ) -> Result<()> {
     let platform = native_platform();
     match command {
-        HubServiceCommands::Install => install(platform, cli, tailscale_serve, tailscale_port),
+        HubServiceCommands::Install(args) => {
+            install(platform, cli, tailscale_serve, tailscale_port, args.dry_run)
+        }
         HubServiceCommands::Status => status(platform, cli),
         HubServiceCommands::Uninstall => uninstall(platform, cli),
     }
@@ -77,40 +81,53 @@ fn install(
     cli: &Cli,
     tailscale_serve: bool,
     tailscale_port: u16,
+    dry_run: bool,
 ) -> Result<()> {
+    let paths = HubRuntimePaths::default_for_user()?;
     match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
-            let binary = service_binary()?;
-            write_service_file(
-                &path,
-                &launchd_plist(&binary, tailscale_serve, tailscale_port),
-            )?;
+            let binary = service_binary(dry_run)?;
+            let definition =
+                launchd_plist(&binary, &paths.log_path(), tailscale_serve, tailscale_port);
+            if dry_run {
+                return print_dry_run(
+                    cli,
+                    platform,
+                    &path,
+                    &definition,
+                    &launchd_preview_actions(&path),
+                );
+            }
+            crate::hub::ensure_private_dir(paths.root())?;
+            write_service_file(&path, &definition)?;
             let domain = launchd_domain()?;
             // bootstrap is idempotent only after the previous service has been
             // removed from the bootstrap namespace.
             let _ = Command::new("launchctl")
-                .args(["bootout", &domain])
-                .arg(&path)
+                .args(launchd_bootout_args(&domain, &path))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status();
-            run_manager("launchctl", ["bootstrap", &domain], Some(&path))?;
-            run_manager(
-                "launchctl",
-                ["kickstart", "-k", &format!("{domain}/{LAUNCHD_LABEL}")],
-                None,
-            )?;
-            print_report(
-                cli,
-                report(ServicePlatform::Launchd, true, Some(true), Some(path), None)?,
-            )
+            run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
+            run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
+            status(platform, cli)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
-            let binary = service_binary()?;
-            write_service_file(
-                &path,
-                &systemd_unit(&binary, tailscale_serve, tailscale_port),
-            )?;
+            let binary = service_binary(dry_run)?;
+            let definition = systemd_unit(&binary, tailscale_serve, tailscale_port);
+            if dry_run {
+                return print_dry_run(
+                    cli,
+                    platform,
+                    &path,
+                    &definition,
+                    &systemd_preview_actions(),
+                );
+            }
+            crate::hub::ensure_private_dir(paths.root())?;
+            write_service_file(&path, &definition)?;
             // A user service only survives logout/reboot when lingering is
             // enabled. Do this before activation so a partial install never
             // advertises reboot persistence that it does not have.
@@ -122,10 +139,7 @@ fn install(
                 ["--user", "enable", "--now", SYSTEMD_UNIT],
                 None,
             )?;
-            print_report(
-                cli,
-                report(ServicePlatform::Systemd, true, Some(true), Some(path), None)?,
-            )
+            status(platform, cli)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -148,22 +162,18 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
             let installed = path.exists();
-            let active = installed.then(|| {
-                launchd_domain().is_ok_and(|domain| {
-                    command_succeeds("launchctl", ["print", &format!("{domain}/{LAUNCHD_LABEL}")])
-                })
+            let active = launchd_domain().ok().map(|domain| {
+                command_succeeds("launchctl", ["print", &format!("{domain}/{LAUNCHD_LABEL}")])
             });
             print_report(cli, report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
             let installed = path.exists();
-            let active = installed.then(|| {
-                command_succeeds(
-                    "systemctl",
-                    ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
-                )
-            });
+            let active = Some(command_succeeds(
+                "systemctl",
+                ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
+            ));
             print_report(cli, report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::ManualLinux => print_report(
@@ -193,6 +203,8 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 let _ = Command::new("launchctl")
                     .args(["bootout", &domain])
                     .arg(&path)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
                 fs::remove_file(&path).context("remove Cassy launchd agent")?;
             }
@@ -203,6 +215,8 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
             if path.exists() {
                 let _ = Command::new("systemctl")
                     .args(["--user", "disable", "--now", SYSTEMD_UNIT])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
                 fs::remove_file(&path).context("remove Cassy systemd unit")?;
                 run_manager("systemctl", ["--user", "daemon-reload"], None)?;
@@ -247,8 +261,17 @@ fn report(
         platform: platform_name,
         supervision,
         installed,
+        enabled: match platform {
+            ServicePlatform::Launchd => Some(installed),
+            ServicePlatform::Systemd => Some(command_succeeds(
+                "systemctl",
+                ["--user", "is-enabled", "--quiet", SYSTEMD_UNIT],
+            )),
+            ServicePlatform::ManualLinux | ServicePlatform::Unsupported => None,
+        },
         active,
         unit_path: path.map(|path| path.display().to_string()),
+        log_path: Some(paths.log_path().display().to_string()),
         hub_running,
         instructions,
     })
@@ -267,18 +290,31 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
             }
             manager => {
                 println!(
-                    "Cassy hub service ({manager}) is {}{}",
+                    "Cassy hub service ({manager}) is {}{}{}; hub is {}",
                     if report.installed {
                         "installed"
                     } else {
                         "not installed"
                     },
+                    match report.enabled {
+                        Some(true) => ", enabled",
+                        Some(false) => ", disabled",
+                        None => "",
+                    },
                     match report.active {
                         Some(true) => " and active",
                         Some(false) => " and inactive",
                         None => "",
-                    }
+                    },
+                    if report.hub_running {
+                        "running"
+                    } else {
+                        "not running"
+                    },
                 );
+                if let Some(log_path) = report.log_path {
+                    println!("  Logs: {log_path}");
+                }
             }
         }
     }
@@ -314,17 +350,19 @@ fn launchd_domain() -> Result<String> {
     }
 }
 
-fn service_binary() -> Result<PathBuf> {
+fn service_binary(dry_run: bool) -> Result<PathBuf> {
     let binary = std::env::current_exe().context("cannot resolve the running cas binary")?;
     ensure!(
         binary.is_absolute(),
         "Cassy service requires an absolute installed binary path"
     );
-    ensure!(
-        !binary.components().any(|part| part.as_os_str() == ".cas")
-            || !binary.to_string_lossy().contains("/.cas/worktrees/"),
-        "refusing to install a hub service from a disposable Cassy worktree; install a released cas binary first"
-    );
+    if !dry_run {
+        ensure!(
+            !binary.components().any(|part| part.as_os_str() == ".cas")
+                || !binary.to_string_lossy().contains("/.cas/worktrees/"),
+            "refusing to install a hub service from a disposable Cassy worktree; install a released cas binary first"
+        );
+    }
     Ok(binary)
 }
 
@@ -361,6 +399,7 @@ fn run_manager<const N: usize>(
 ) -> Result<()> {
     let mut child = Command::new(command);
     child.args(args);
+    child.stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = trailing_path {
         child.arg(path);
     }
@@ -372,14 +411,111 @@ fn run_manager<const N: usize>(
     Ok(())
 }
 
+fn run_manager_vec(command: &str, args: &[String]) -> Result<()> {
+    let status = Command::new(command)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("run {command}"))?;
+    ensure!(
+        status.success(),
+        "{command} refused the Cassy hub service operation"
+    );
+    Ok(())
+}
+
 fn command_succeeds<const N: usize>(command: &str, args: [&str; N]) -> bool {
     Command::new(command)
         .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
 
-fn launchd_plist(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> String {
+fn launchd_bootout_args(domain: &str, path: &Path) -> Vec<String> {
+    vec!["bootout".into(), domain.into(), path.display().to_string()]
+}
+
+fn launchd_bootstrap_args(domain: &str, path: &Path) -> Vec<String> {
+    vec![
+        "bootstrap".into(),
+        domain.into(),
+        path.display().to_string(),
+    ]
+}
+
+fn launchd_kickstart_args(domain: &str) -> Vec<String> {
+    vec![
+        "kickstart".into(),
+        "-k".into(),
+        format!("{domain}/{LAUNCHD_LABEL}"),
+    ]
+}
+
+fn launchd_preview_actions(path: &Path) -> Vec<String> {
+    vec![
+        format!(
+            "launchctl bootout gui/$UID {} (ignore if absent)",
+            path.display()
+        ),
+        format!("launchctl bootstrap gui/$UID {}", path.display()),
+        format!("launchctl kickstart -k gui/$UID/{LAUNCHD_LABEL}"),
+    ]
+}
+
+fn systemd_preview_actions() -> Vec<String> {
+    vec![
+        "loginctl enable-linger $USER".into(),
+        "systemctl --user daemon-reload".into(),
+        format!("systemctl --user enable --now {SYSTEMD_UNIT}"),
+    ]
+}
+
+fn print_dry_run(
+    cli: &Cli,
+    platform: ServicePlatform,
+    path: &Path,
+    definition: &str,
+    actions: &[String],
+) -> Result<()> {
+    let (platform_name, supervision) = match platform {
+        ServicePlatform::Launchd => ("macos", "launchd"),
+        ServicePlatform::Systemd => ("linux", "systemd-user"),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => ("unsupported", "none"),
+    };
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "dry_run": true,
+                "platform": platform_name,
+                "supervision": supervision,
+                "unit_path": path.display().to_string(),
+                "log_path": HubRuntimePaths::default_for_user()?.log_path().display().to_string(),
+                "actions": actions,
+                "definition": definition,
+            })
+        );
+    } else {
+        println!("Cassy hub service ({supervision}) dry run — no files or manager state changed.");
+        println!("Would write: {}", path.display());
+        println!("Would run:");
+        for action in actions {
+            println!("  {action}");
+        }
+        println!("\nService definition:\n{definition}");
+    }
+    Ok(())
+}
+
+fn launchd_plist(
+    binary: &Path,
+    log_path: &Path,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+) -> String {
     let args = service_args(binary, tailscale_serve, tailscale_port)
         .into_iter()
         .map(|arg| format!("    <string>{}</string>", xml_escape(&arg)))
@@ -400,9 +536,14 @@ fn launchd_plist(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> S
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>StandardOutPath</key>
+  <string>{log_path}</string>
+  <key>StandardErrorPath</key>
+  <string>{log_path}</string>
 </dict>
 </plist>
-"#
+"#,
+        log_path = xml_escape(&log_path.display().to_string())
     )
 }
 
@@ -413,7 +554,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=3\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -470,7 +611,12 @@ mod tests {
 
     #[test]
     fn launchd_plist_is_a_secret_free_golden_with_tailscale_round_trip() {
-        let plist = launchd_plist(Path::new("/opt/cas/bin/cas"), true, 8443);
+        let plist = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            true,
+            8443,
+        );
         assert_eq!(
             plist,
             include_str!("../../tests/fixtures/hub-service-launchd.plist")
@@ -478,6 +624,9 @@ mod tests {
         assert!(plist.contains("<string>--tailscale-serve</string>"));
         assert!(plist.contains("<string>8443</string>"));
         assert!(plist.contains("<string>127.0.0.1</string>"));
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>"));
+        assert!(plist.contains("/Users/test/.cas/hub/hub.log"));
         assert!(!plist.to_ascii_lowercase().contains("token"));
         assert!(!plist.contains("auth.json"));
     }
@@ -492,6 +641,8 @@ mod tests {
         assert!(unit.contains("ExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1 --port 4173 --tailscale-serve --tailscale-serve-port 8443"));
         assert!(!unit.to_ascii_lowercase().contains("token"));
         assert!(!unit.contains("credentials"));
+        assert!(unit.contains("StandardOutput=append:%h/.cas/hub/hub.log"));
+        assert!(unit.contains("StandardError=append:%h/.cas/hub/hub.log"));
     }
 
     #[test]
@@ -538,14 +689,24 @@ mod tests {
         let definition = home.join("Library/LaunchAgents/cas-test.plist");
         write_service_file(
             &definition,
-            &launchd_plist(Path::new("/opt/cas/bin/cas"), true, 443),
+            &launchd_plist(
+                Path::new("/opt/cas/bin/cas"),
+                Path::new("/Users/test/.cas/hub/hub.log"),
+                true,
+                443,
+            ),
         )
         .unwrap();
         // A repeat install replaces only its own definition, including a
         // changed Serve choice, and never touches the hub state directory.
         write_service_file(
             &definition,
-            &launchd_plist(Path::new("/opt/cas/bin/cas"), false, 443),
+            &launchd_plist(
+                Path::new("/opt/cas/bin/cas"),
+                Path::new("/Users/test/.cas/hub/hub.log"),
+                false,
+                443,
+            ),
         )
         .unwrap();
         fs::remove_file(&definition).unwrap();
@@ -555,5 +716,34 @@ mod tests {
         assert_eq!(fs::metadata(&hub).unwrap().mode() & 0o777, 0o700);
         assert_eq!(fs::metadata(&auth).unwrap().mode() & 0o777, 0o600);
         assert!(!definition.exists());
+    }
+
+    #[test]
+    fn launchd_bootstrap_uses_the_user_gui_domain_and_definition_path() {
+        let path = Path::new("/Users/test/Library/LaunchAgents/dev.cas.commander-hub.plist");
+        assert_eq!(
+            launchd_bootstrap_args("gui/501", path),
+            vec![
+                "bootstrap",
+                "gui/501",
+                "/Users/test/Library/LaunchAgents/dev.cas.commander-hub.plist"
+            ]
+        );
+        assert_eq!(
+            launchd_kickstart_args("gui/501"),
+            vec!["kickstart", "-k", "gui/501/dev.cas.commander-hub"]
+        );
+    }
+
+    #[test]
+    fn dry_run_preview_is_explicit_and_contains_no_manager_side_effect() {
+        let actions = systemd_preview_actions();
+        assert_eq!(actions[0], "loginctl enable-linger $USER");
+        assert!(actions[2].contains("enable --now cas-hub.service"));
+        assert!(
+            launchd_preview_actions(Path::new("/tmp/cas-hub.plist"))
+                .iter()
+                .any(|action| action.contains("bootstrap gui/$UID"))
+        );
     }
 }

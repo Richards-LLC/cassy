@@ -145,7 +145,11 @@ worth knowing before enabling it:
 3. Push the tag (`scripts/release.sh --publish-tag`). The script reports the
    same thing one last time before it pushes, so a tag is never pushed blind
    into a 15-minute path by accident.
-4. Run both receipts once the release is published.
+4. Run the published-asset receipts once the release is published, then wait
+   for the advisory `Install path proof` workflow to finish green on macOS ARM
+   and clean Linux before calling the release installable. Its transcript and
+   manual consumer-Mac limitation are documented in
+   [Install path proof](install-path-proof.md).
 
 Pushing the tag before the prebuild finishes is safe — it just costs the old
 tag-time build. Nothing breaks; the release is simply slow.

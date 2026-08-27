@@ -46,12 +46,21 @@ cas hub service install --tailscale-serve
 cas hub service status
 ```
 
+Preview the definition and manager actions without writing a unit, changing
+launchd/systemd state, or starting the hub:
+
+```sh
+cas hub service install --dry-run
+```
+
 On macOS this writes and bootstraps the launchd LaunchAgent at
 `~/Library/LaunchAgents/dev.cas.commander-hub.plist` with `RunAtLoad` and
 `KeepAlive`. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
 enables it, starts it, and enables user lingering so it survives logout and
 reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`;
 they never contain hub identity, auth state, tokens, or credential paths.
+Service output is written to `~/.cas/hub/hub.log`; `cas hub service status`
+reports the manager state, hub health, and this log path.
 
 Use the port flag when the existing Tailscale HTTPS port is deliberately not
 443:

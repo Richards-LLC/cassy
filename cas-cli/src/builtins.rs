@@ -2502,12 +2502,36 @@ pub fn supervisor_guidance() -> String {
     extract_body(SUPERVISOR_GUIDE).to_string()
 }
 
+/// Remove one top-level Markdown section while preserving the surrounding
+/// guidance. On-demand sections belong in the synchronized skill file, not in
+/// every SessionStart's protected payload.
+fn without_markdown_section(body: &str, heading: &str) -> String {
+    let mut output = String::with_capacity(body.len());
+    let mut skipping = false;
+    for line in body.split_inclusive('\n') {
+        let title = line.trim_end_matches(['\r', '\n']);
+        if title == heading {
+            skipping = true;
+            continue;
+        }
+        if skipping && title.starts_with("## ") {
+            skipping = false;
+        }
+        if !skipping {
+            output.push_str(line);
+        }
+    }
+    output
+}
+
 /// Get the worker guidance injected at factory SessionStart.
 ///
 /// Returns only the worker SKILL.md. task-tracking/memory/search load on
-/// demand — same rationale as `supervisor_guidance`.
+/// demand — same rationale as `supervisor_guidance`. The structured execution
+/// state section remains in the on-demand skill file but is omitted here so
+/// protected SessionStart guidance keeps its 800-byte harness margin.
 pub fn worker_guidance() -> String {
-    extract_body(WORKER_GUIDE).to_string()
+    without_markdown_section(extract_body(WORKER_GUIDE), "## Structured execution state")
 }
 
 #[cfg(test)]
@@ -2787,6 +2811,15 @@ This is the body content."#;
         assert!(
             !guide.contains("Cassy Task Tracking"),
             "should NOT bundle task-tracking — loads on demand"
+        );
+        assert!(
+            WORKER_GUIDE.contains("## Structured execution state")
+                && WORKER_GUIDE.contains("state_patch"),
+            "on-demand worker skill must retain structured-state instructions"
+        );
+        assert!(
+            !guide.contains("## Structured execution state"),
+            "protected SessionStart guidance must omit on-demand structured-state section"
         );
     }
 

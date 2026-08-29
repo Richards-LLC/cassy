@@ -177,6 +177,17 @@ fn references_document_research_and_unwired_provider_boundaries() {
         );
     }
     for marker in [
+        "svg-web-assets.md",
+        "agent-authored SVG",
+        "author-directly",
+        "raster-to-vector",
+    ] {
+        assert!(
+            playbook.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()),
+            "asset playbook missing vector routing marker {marker:?}"
+        );
+    }
+    for marker in [
         "DESIGN.md",
         "Tailwind",
         "CSS custom properties",

@@ -283,7 +283,7 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskUpdateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.cas_task_update_with_target(req, None, None, false, None)
+        self.cas_task_update_with_target(req, None, None, false, None, None)
             .await
     }
 
@@ -294,6 +294,7 @@ impl CasCore {
         target_branch: Option<&str>,
         proof_scope_fix: bool,
         proof_scope_fix_reason: Option<&str>,
+        state_patch: Option<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
         let requested_fields =

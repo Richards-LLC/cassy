@@ -311,6 +311,67 @@ async fn task_show_renders_work_target_and_explicit_trunk_fallback_cas_0094() {
     }
 }
 
+#[tokio::test]
+async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
+    let (_temp, core) = setup_cas();
+    let created = core
+        .cas_task_create(Parameters(TaskCreateRequest {
+            ..basic_create("Structured state target", None)
+        }))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    let service = CasService::new(core, None);
+
+    let update: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "state_patch": {
+            "phase": "implement",
+            "files_touched": ["src/lib.rs"],
+            "receipts": [{"command": "cargo check", "exit_status": 0}],
+            "next_step": "run focused tests"
+        }
+    }))
+    .expect("deserialize state patch");
+    service.task(Parameters(update)).await.expect("state update");
+
+    let show: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "show",
+        "id": task_id,
+    }))
+    .expect("deserialize show");
+    let shown = extract_text(service.task(Parameters(show)).await.expect("show task"));
+    assert!(shown.contains("Structured execution state:"), "{shown}");
+    assert!(shown.contains("run focused tests"), "{shown}");
+
+    let invalid: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "state_patch": {"files_touched": "not-an-array"}
+    }))
+    .expect("deserialize invalid state patch");
+    assert!(
+        service.task(Parameters(invalid)).await.is_err(),
+        "malformed state patch must be rejected"
+    );
+
+    let show_after_rejection: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "show",
+        "id": task_id,
+    }))
+    .expect("deserialize second show");
+    let shown_after = extract_text(
+        service
+            .task(Parameters(show_after_rejection))
+            .await
+            .expect("show task after rejection"),
+    );
+    assert!(shown_after.contains("run focused tests"), "{shown_after}");
+}
+
 // =============================================================================
 // cas-7fc1: execution_note field end-to-end coverage
 // =============================================================================

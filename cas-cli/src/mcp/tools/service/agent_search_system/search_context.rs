@@ -93,6 +93,26 @@ impl CasService {
         ))
     }
 
+    pub(in crate::mcp::tools::service) async fn skill_impact_impl(
+        &self,
+        req: SearchContextRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use cas_store::SqliteSurfacedArtifactStore;
+
+        let store = SqliteSurfacedArtifactStore::open(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let artifacts = store
+            .aggregate(req.limit.unwrap_or(100).clamp(1, 1_000))
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        Ok(Self::success(
+            serde_json::json!({
+                "version": 1,
+                "artifacts": artifacts,
+            })
+            .to_string(),
+        ))
+    }
+
     pub(in crate::mcp::tools::service) async fn context_impl(
         &self,
         req: SearchContextRequest,

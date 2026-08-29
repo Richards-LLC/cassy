@@ -13,7 +13,7 @@
 //! The core logic lives in `cas-core::hooks::context`.
 
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cas_code::{CodeSymbol, SymbolKind};
 use cas_core::hooks::{
@@ -22,7 +22,8 @@ use cas_core::hooks::{
     token_display, truncate,
 };
 use cas_store::{
-    AgentStore, KnowledgeStore, RuleStore, SkillStore, SqliteKnowledgeStore, Store, TaskStore,
+    AgentStore, KnowledgeStore, RuleStore, SkillStore, SqliteKnowledgeStore,
+    SqliteSurfacedArtifactStore, Store, SurfacedArtifact, TaskStore,
 };
 use cas_types::{Entry, Rule, RuleStatus, Skill, Task, TaskStatus};
 
@@ -123,19 +124,27 @@ pub fn build_context_with_token_budget(
 
     let start_time = std::time::Instant::now();
 
-    // Create surfaced item callback for feedback tracking
-    let surfaced_callback: Option<SurfacedItemCallback> =
-        if crate::tracing::DevTracer::get().is_some() {
-            Some(Box::new(
-                |id: &str, item_type: &str, preview: Option<&str>| {
-                    if let Some(tracer) = crate::tracing::DevTracer::get() {
-                        let _ = tracer.record_surfaced_item(id, item_type, preview);
-                    }
-                },
-            ))
-        } else {
-            None
-        };
+    // Collect rule/skill surfaces in memory so the CLI can persist all rows
+    // and rule counter increments in one transaction after context builds.
+    // The existing DevTracer receives every surfaced item, including memory.
+    let surfaced_artifacts = Arc::new(Mutex::new(Vec::<SurfacedArtifact>::new()));
+    let surfaced_artifacts_for_callback = Arc::clone(&surfaced_artifacts);
+    let surfaced_callback: Option<SurfacedItemCallback> = Some(Box::new(
+        move |id: &str, item_type: &str, preview: Option<&str>| {
+            if let Some(tracer) = crate::tracing::DevTracer::get() {
+                let _ = tracer.record_surfaced_item(id, item_type, preview);
+            }
+            if matches!(item_type, "rule" | "skill")
+                && let Ok(mut artifacts) = surfaced_artifacts_for_callback.lock()
+            {
+                artifacts.push(SurfacedArtifact {
+                    artifact_id: id.to_string(),
+                    artifact_type: item_type.to_string(),
+                    preview: preview.map(str::to_string),
+                });
+            }
+        },
+    ));
 
     // Build context using cas-core
     let (context, stats) = build_context_with_stores(
@@ -147,6 +156,18 @@ pub fn build_context_with_token_budget(
         crate::harness_policy::own_tool_prefix(),
     )
     .map_err(|e| MemError::Other(e.to_string()))?;
+
+    let surfaced_artifacts = surfaced_artifacts
+        .lock()
+        .map(|mut artifacts| std::mem::take(&mut *artifacts))
+        .unwrap_or_default();
+    if !surfaced_artifacts.is_empty()
+        && let Ok(store) = SqliteSurfacedArtifactStore::open(cas_root)
+    {
+        // Impact bookkeeping is observational and must never make the
+        // context hook fail after successfully building the prompt.
+        let _ = store.record_batch(&input.session_id, &surfaced_artifacts);
+    }
 
     let context = {
         let mut ctx = context;

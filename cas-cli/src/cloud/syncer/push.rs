@@ -501,10 +501,11 @@ impl CloudSyncer {
             }
 
             let delete_url = format!(
-                "{}/api/sync/{}/{}",
+                "{}/api/sync/{}/{}?project_id={}",
                 self.cloud_config.endpoint,
                 item.entity_type.as_str(),
-                cas_id
+                cas_id,
+                self.personal_push_project_id()?.replace('/', "%2F")
             );
 
             let response = ureq::delete(&delete_url)

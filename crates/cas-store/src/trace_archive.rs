@@ -22,9 +22,8 @@ static ARCHIVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A recording row and its relational children as one archive record.
 ///
-/// FTS rows are intentionally omitted: they are a derived live index and can
-/// be rebuilt from the recording payload when a future archive reader needs
-/// them.  The recording and entity-correlating rows are the durable record.
+/// FTS rows are retained as searchable transcript payload, while the live
+/// index remains a derived structure that a future archive reader may rebuild.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingArchive {
     pub recording: Recording,

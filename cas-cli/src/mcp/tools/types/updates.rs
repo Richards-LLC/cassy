@@ -55,6 +55,14 @@ pub struct RuleUpdateRequest {
     #[schemars(description = "Path patterns for auto-approval (comma-separated globs)")]
     #[serde(default)]
     pub auto_approve_paths: Option<String>,
+
+    /// Actor recorded in rule history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+
+    /// Reason recorded in rule history.
+    #[serde(default)]
+    pub change_note: Option<String>,
 }
 
 // ============================================================================
@@ -98,4 +106,12 @@ pub struct SkillUpdateRequest {
     #[schemars(description = "Prevent skill from invoking the model (for command-only skills)")]
     #[serde(default)]
     pub disable_model_invocation: Option<bool>,
+
+    /// Actor recorded in skill history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+
+    /// Reason recorded in skill history.
+    #[serde(default)]
+    pub change_note: Option<String>,
 }

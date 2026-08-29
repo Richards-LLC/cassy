@@ -12,6 +12,25 @@ pub struct IdRequest {
     pub id: String,
 }
 
+/// Request for rule/skill history and restoration operations.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VersionRequest {
+    /// Entity ID
+    pub id: String,
+    /// Version number to restore; omitted restores the newest prior state.
+    #[serde(default)]
+    pub version: Option<i64>,
+    /// Compatibility field for clients that call this version_id.
+    #[serde(default)]
+    pub version_id: Option<i64>,
+    /// Actor recorded in lifecycle history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+    /// Human-readable reason for the lifecycle mutation.
+    #[serde(default)]
+    pub change_note: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LimitRequest {
     /// Maximum number of items

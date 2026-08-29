@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 static SKILL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::error::StoreError;
+use crate::version_store::{
+    SKILL_VERSIONS_SCHEMA_STATEMENTS, SkillVersion, default_changed_by, parse_datetime,
+};
 use crate::{Result, SkillStore};
 use cas_types::{Scope, Skill, SkillHooks, SkillStatus, SkillType};
 
@@ -217,12 +220,195 @@ impl SqliteSkillStore {
             source_ids: Self::parse_tags(&row.get::<_, String>(27).unwrap_or_default()),
         })
     }
+
+    fn update_recorded(
+        &self,
+        skill: &Skill,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let previous = self.get(&skill.id)?;
+        let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
+            StoreError::Parse(format!("failed to serialize skill history: {error}"))
+        })?;
+        let changed_by = changed_by
+            .map(ToOwned::to_owned)
+            .or_else(default_changed_by);
+        let change_note = change_note.unwrap_or("update");
+        let changed_at = Utc::now().to_rfc3339();
+
+        let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+        let tx = conn.transaction()?;
+        let next_version: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM skill_versions WHERE skill_id = ?1",
+            params![&skill.id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO skill_versions
+             (skill_id, version, snapshot_json, name, description, status, changed_by, changed_at, change_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                &skill.id,
+                next_version,
+                snapshot_json,
+                previous.name,
+                previous.description,
+                previous.status.to_string(),
+                changed_by,
+                changed_at,
+                change_note,
+            ],
+        )?;
+        let rows = tx.execute(
+            "UPDATE skills SET name = ?1, description = ?2, skill_type = ?3,
+             invocation = ?4, parameters_schema = ?5, example = ?6,
+             preconditions = ?7, postconditions = ?8, validation_script = ?9,
+             status = ?10, tags = ?11, summary = ?12, usage_count = ?13,
+             updated_at = ?14, last_used = ?15, invokable = ?16, argument_hint = ?17,
+             context_mode = ?18, agent_type = ?19, allowed_tools = ?20, hooks = ?21,
+             disable_model_invocation = ?22, team_id = ?23, share = ?24,
+             disallowed_tools = ?25, source_ids = ?26
+             WHERE id = ?27",
+            params![
+                skill.name,
+                skill.description,
+                skill.skill_type.to_string(),
+                skill.invocation,
+                skill.parameters_schema,
+                skill.example,
+                Self::tags_to_string(&skill.preconditions),
+                Self::tags_to_string(&skill.postconditions),
+                skill.validation_script,
+                skill.status.to_string(),
+                Self::tags_to_string(&skill.tags),
+                skill.summary,
+                skill.usage_count,
+                Utc::now().to_rfc3339(),
+                skill.last_used.map(|t| t.to_rfc3339()),
+                skill.invokable as i32,
+                skill.argument_hint,
+                skill.context_mode,
+                skill.agent_type,
+                Self::tags_to_string(&skill.allowed_tools),
+                Self::hooks_to_string(&skill.hooks),
+                skill.disable_model_invocation as i32,
+                skill.team_id,
+                skill.share.as_ref().map(|s| s.to_string()),
+                Self::tags_to_string(&skill.disallowed_tools),
+                Self::tags_to_string(&skill.source_ids),
+                skill.id,
+            ],
+        )?;
+        if rows == 0 {
+            return Err(StoreError::NotFound(format!("skill not found: {}", skill.id)));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn delete_recorded(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let previous = self.get(id)?;
+        if previous.status == SkillStatus::Retired {
+            return Ok(());
+        }
+        let mut retired = previous;
+        retired.status = SkillStatus::Retired;
+        self.update_recorded(
+            &retired,
+            changed_by,
+            Some(change_note.unwrap_or("tombstone delete")),
+        )
+    }
+
+    pub fn list_versions(&self, id: &str) -> Result<Vec<SkillVersion>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, skill_id, version, snapshot_json, name, description, status,
+                    changed_by, changed_at, change_note
+             FROM skill_versions WHERE skill_id = ?1 ORDER BY version DESC",
+        )?;
+        let versions = stmt
+            .query_map(params![id], |row| {
+                Ok(SkillVersion {
+                    id: row.get(0)?,
+                    skill_id: row.get(1)?,
+                    version: row.get(2)?,
+                    snapshot_json: row.get(3)?,
+                    name: row.get(4)?,
+                    description: row.get(5)?,
+                    status: row
+                        .get::<_, String>(6)?
+                        .parse()
+                        .unwrap_or(SkillStatus::Enabled),
+                    changed_by: row.get(7)?,
+                    changed_at: parse_datetime(&row.get::<_, String>(8)?),
+                    change_note: row.get(9)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(versions)
+    }
+
+    pub fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let snapshot_json: String = match version {
+            Some(version) => conn
+                .query_row(
+                    "SELECT snapshot_json FROM skill_versions WHERE skill_id = ?1 AND version = ?2",
+                    params![id, version],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::Parse(format!("skill version not found: {id} v{version}")))?,
+            None => conn
+                .query_row(
+                    "SELECT snapshot_json FROM skill_versions WHERE skill_id = ?1 ORDER BY version DESC LIMIT 1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::Parse(format!("no skill history for: {id}")))?,
+        };
+        drop(conn);
+
+        let restored: Skill = serde_json::from_str(&snapshot_json).map_err(|error| {
+            StoreError::Parse(format!("invalid skill history for {id}: {error}"))
+        })?;
+        if restored.id != id {
+            return Err(StoreError::Parse(format!("skill history ID mismatch for: {id}")));
+        }
+        let default_note;
+        let note = match (change_note, version) {
+            (Some(note), _) => Some(note),
+            (None, Some(version)) => {
+                default_note = format!("restore version {version}");
+                Some(default_note.as_str())
+            }
+            (None, None) => Some("restore latest version"),
+        };
+        self.update_recorded(&restored, changed_by, note)
+    }
 }
 
 impl SkillStore for SqliteSkillStore {
     fn init(&self) -> Result<()> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(SKILL_SCHEMA)?;
+        for statement in SKILL_VERSIONS_SCHEMA_STATEMENTS {
+            conn.execute(statement, [])?;
+        }
         // NOTE: Column migrations are handled by `cas update --schema-only`
         Ok(())
     }
@@ -291,63 +477,43 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn update(&self, skill: &Skill) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let rows = conn.execute(
-            "UPDATE skills SET name = ?1, description = ?2, skill_type = ?3,
-             invocation = ?4, parameters_schema = ?5, example = ?6,
-             preconditions = ?7, postconditions = ?8, validation_script = ?9,
-             status = ?10, tags = ?11, summary = ?12, usage_count = ?13,
-             updated_at = ?14, last_used = ?15, invokable = ?16, argument_hint = ?17,
-             context_mode = ?18, agent_type = ?19, allowed_tools = ?20, hooks = ?21,
-             disable_model_invocation = ?22, team_id = ?23, share = ?24,
-             disallowed_tools = ?25, source_ids = ?26
-             WHERE id = ?27",
-            params![
-                skill.name,
-                skill.description,
-                skill.skill_type.to_string(),
-                skill.invocation,
-                skill.parameters_schema,
-                skill.example,
-                Self::tags_to_string(&skill.preconditions),
-                Self::tags_to_string(&skill.postconditions),
-                skill.validation_script,
-                skill.status.to_string(),
-                Self::tags_to_string(&skill.tags),
-                skill.summary,
-                skill.usage_count,
-                Utc::now().to_rfc3339(),
-                skill.last_used.map(|t| t.to_rfc3339()),
-                skill.invokable as i32,
-                skill.argument_hint,
-                skill.context_mode,
-                skill.agent_type,
-                Self::tags_to_string(&skill.allowed_tools),
-                Self::hooks_to_string(&skill.hooks),
-                skill.disable_model_invocation as i32,
-                skill.team_id,
-                skill.share.as_ref().map(|s| s.to_string()),
-                Self::tags_to_string(&skill.disallowed_tools),
-                Self::tags_to_string(&skill.source_ids),
-                skill.id,
-            ],
-        )?;
-        if rows == 0 {
-            return Err(StoreError::NotFound(format!(
-                "skill not found: {}",
-                skill.id
-            )));
-        }
-        Ok(())
+        self.update_recorded(skill, None, None)
+    }
+
+    fn update_with_metadata(
+        &self,
+        skill: &Skill,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.update_recorded(skill, changed_by, change_note)
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let rows = conn.execute("DELETE FROM skills WHERE id = ?", params![id])?;
-        if rows == 0 {
-            return Err(StoreError::NotFound(format!("skill not found: {id}")));
-        }
-        Ok(())
+        self.delete_recorded(id, None, None)
+    }
+
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.delete_recorded(id, changed_by, change_note)
+    }
+
+    fn list_versions(&self, id: &str) -> Result<Vec<SkillVersion>> {
+        SqliteSkillStore::list_versions(self, id)
+    }
+
+    fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        SqliteSkillStore::restore_version(self, id, version, changed_by, change_note)
     }
 
     fn list(&self, status: Option<SkillStatus>) -> Result<Vec<Skill>> {
@@ -466,7 +632,8 @@ mod tests {
 
         // Delete skill
         store.delete(&id).unwrap();
-        assert!(store.get(&id).is_err());
+        assert_eq!(store.get(&id).unwrap().status, SkillStatus::Retired);
+        assert!(store.list_enabled().unwrap().is_empty());
     }
 
     #[test]
@@ -504,6 +671,58 @@ mod tests {
         // Search by tag
         let results = store.search("search").unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    /// cas-30af: skill updates retain prior snapshots and deletes are
+    /// tombstones so a retired skill remains restorable in the database.
+    #[test]
+    fn test_skill_history_and_tombstone_delete() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteSkillStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let skill = Skill::new("skill-history-01".to_string(), "History Skill".to_string());
+        store.add(&skill).unwrap();
+        let mut updated = skill.clone();
+        updated.description = "updated description".to_string();
+        store
+            .update_with_metadata(&updated, Some("test-actor"), Some("revise instructions"))
+            .unwrap();
+
+        let versions = store.list_versions("skill-history-01").unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].description, "");
+        assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
+        assert_eq!(versions[0].change_note, "revise instructions");
+
+        let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+        let prior_description: String = conn
+            .query_row(
+                "SELECT description FROM skill_versions WHERE skill_id = 'skill-history-01' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prior_description, "");
+
+        store.delete("skill-history-01").unwrap();
+        let retired = store.get("skill-history-01").unwrap();
+        assert_eq!(retired.status.to_string(), "retired");
+        let version_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM skill_versions WHERE skill_id = 'skill-history-01'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_count, 2);
+
+        store
+            .restore_version("skill-history-01", Some(1), Some("restorer"), None)
+            .unwrap();
+        let restored = store.get("skill-history-01").unwrap();
+        assert_eq!(restored.description, "");
+        assert_eq!(restored.status, SkillStatus::Enabled);
     }
 
     #[test]

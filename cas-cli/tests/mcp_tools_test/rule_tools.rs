@@ -1,5 +1,7 @@
 use crate::support::*;
 use cas::mcp::tools::*;
+use cas::store::open_rule_store;
+use cas::types::RuleStatus;
 use rmcp::handler::server::wrapper::Parameters;
 
 #[tokio::test]
@@ -205,6 +207,112 @@ async fn test_rule_helpful_and_harmful() {
 
     let text = extract_text(result);
     assert!(text.contains("harmful"));
+}
+
+#[tokio::test]
+async fn test_rule_helpful_requires_evidence_threshold() {
+    let (_temp, service) = setup_cas();
+
+    let result = service
+        .cas_rule_create(Parameters(RuleCreateRequest {
+            scope: "project".to_string(),
+            content: "Threshold test rule".to_string(),
+            paths: None,
+            tags: None,
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+        }))
+        .await
+        .unwrap();
+    let id = extract_rule_id(&extract_text(result)).expect("rule ID");
+
+    service
+        .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .unwrap();
+
+    let rule = open_rule_store(&_temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
+    assert_eq!(rule.helpful_count, 1);
+    assert_eq!(rule.status, RuleStatus::Draft);
+}
+
+#[tokio::test]
+async fn test_rule_helpful_promotes_at_configured_threshold() {
+    let (_temp, service) = setup_cas();
+    std::fs::write(
+        _temp.path().join(".cas/config.toml"),
+        "[sync]\npromotion_threshold = 3\n",
+    )
+    .unwrap();
+
+    let result = service
+        .cas_rule_create(Parameters(RuleCreateRequest {
+            scope: "project".to_string(),
+            content: "Configured threshold rule".to_string(),
+            paths: None,
+            tags: None,
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+        }))
+        .await
+        .unwrap();
+    let id = extract_rule_id(&extract_text(result)).expect("rule ID");
+
+    for expected_status in [RuleStatus::Draft, RuleStatus::Draft, RuleStatus::Proven] {
+        service
+            .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+        let rule = open_rule_store(&_temp.path().join(".cas"))
+            .unwrap()
+            .get(&id)
+            .unwrap();
+        assert_eq!(rule.status, expected_status);
+    }
+}
+
+#[tokio::test]
+async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
+    let (temp, service) = setup_cas();
+
+    let result = service
+        .cas_rule_create(Parameters(RuleCreateRequest {
+            scope: "project".to_string(),
+            content: "Demotion test rule".to_string(),
+            paths: None,
+            tags: None,
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+        }))
+        .await
+        .unwrap();
+    let id = extract_rule_id(&extract_text(result)).expect("rule ID");
+
+    for _ in 0..2 {
+        service
+            .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+    }
+    let injected = temp
+        .path()
+        .join(".claude/rules/cas")
+        .join(format!("{id}.md"));
+    assert!(injected.is_file(), "proven rule should be injected");
+
+    service
+        .cas_rule_harmful(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .unwrap();
+    let rule = open_rule_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
+    assert_eq!(rule.status, RuleStatus::Stale);
+    assert!(!injected.exists(), "stale rule must stop being injected");
 }
 
 #[tokio::test]

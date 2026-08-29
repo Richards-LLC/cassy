@@ -1491,6 +1491,25 @@ mod tests {
         (guard, temp, user_path, project_path)
     }
 
+    /// Create a disposable project outside the runtime's system temp root.
+    ///
+    /// Test archives may be built on one machine and executed on another, so
+    /// compile-time paths such as `CARGO_MANIFEST_DIR` are not valid fixture
+    /// locations. Prefer the runtime working directory, then the runtime home.
+    fn project_fixture_outside_system_temp() -> TempDir {
+        [std::env::current_dir().ok(), dirs::home_dir()]
+            .into_iter()
+            .flatten()
+            .filter(|parent| !path_is_under_system_temp(parent))
+            .find_map(|parent| {
+                tempfile::Builder::new()
+                    .prefix("cas-11f9-project-")
+                    .tempdir_in(parent)
+                    .ok()
+            })
+            .expect("test requires a writable runtime directory outside the system temp root")
+    }
+
     #[test]
     fn login_is_machine_wide_so_a_second_project_is_already_logged_in() {
         // Ben #3 (cas-046d): after `cas login` in one project, a freshly
@@ -1630,12 +1649,7 @@ mod tests {
         let user_path = temp.path().join("home-cas").join("cloud.json");
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
 
-        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
-        std::fs::create_dir_all(&target_dir).unwrap();
-        let project = tempfile::Builder::new()
-            .prefix("cas-11f9-project-")
-            .tempdir_in(target_dir)
-            .unwrap();
+        let project = project_fixture_outside_system_temp();
         let project_cas = project.path().join(".cas");
         std::fs::create_dir_all(&project_cas).unwrap();
         let project_cloud = project_cas.join("cloud.json");
@@ -1655,12 +1669,7 @@ mod tests {
 
     #[test]
     fn test_fixture_cloud_write_is_rejected_outside_temp_directory() {
-        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
-        std::fs::create_dir_all(&target_dir).unwrap();
-        let project = tempfile::Builder::new()
-            .prefix("cas-11f9-project-")
-            .tempdir_in(target_dir)
-            .unwrap();
+        let project = project_fixture_outside_system_temp();
         let cloud_path = project.path().join(".cas/cloud.json");
         std::fs::create_dir_all(cloud_path.parent().unwrap()).unwrap();
         let config = CloudConfig {
@@ -1681,12 +1690,7 @@ mod tests {
 
     #[test]
     fn loopback_ephemeral_fixture_cloud_write_is_rejected_outside_temp_directory() {
-        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
-        std::fs::create_dir_all(&target_dir).unwrap();
-        let project = tempfile::Builder::new()
-            .prefix("cas-11f9-project-")
-            .tempdir_in(target_dir)
-            .unwrap();
+        let project = project_fixture_outside_system_temp();
         let cloud_path = project.path().join(".cas/cloud.json");
         std::fs::create_dir_all(cloud_path.parent().unwrap()).unwrap();
         let config = CloudConfig {

@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-08-29
+
+### Added
+- `cas-image-generate` builtin skill: style-aware asset generation for apps,
+  websites, and reports. Harvests a project's design context (palette, motifs,
+  typography feel) into style tokens, routes each asset type to Google's Nano
+  Banana models with per-type prompt templates, supports reference images for
+  style consistency, and degrades with explicit setup guidance when
+  `GEMINI_API_KEY` is absent. Shipped in Claude / Codex / Grok flavors.
+- SVG & web-assets reference for the image skill: agent-authored SVG as a
+  first-class route (decision table, 24px-grid authoring standards, palette
+  CSS variables, worked examples), a raster→vector bridge that probes local
+  tooling (vtracer/potrace/inkscape), and the favicon/OG/WebP web pipeline.
+- Explicit origin-project identity on tasks (`origin_project`, m241): foreign
+  tasks replicated by the historical unscoped-sync era no longer rank in
+  another project's ready/available surfaces; sync stamps identity on push and
+  pull, and supervisors get an audited reassignment path.
+- New Cassy logo (generated with the image skill) and refreshed README
+  capability documentation.
+
+### Fixed
+- Image-generate helper: reference payloads are assembled via files instead of
+  argv (`--reference` no longer fails on ARG_MAX for real image sizes), and
+  output naming honors the API's returned MIME type instead of writing
+  mislabeled bytes.
+- Merge-request suppression resolves repository context from the explicit
+  local root before the host known-repos registry (a duplicate registry
+  selector could silently disable suppression), handles linked git worktrees
+  correctly, and an explicitly registered agent role now takes precedence over
+  the ambient `CAS_AGENT_ROLE` environment.
+- Global-scope tasks queue with no origin project instead of inheriting a
+  project identity they should not carry.
+
 ## [3.5.0] - 2026-08-29
 
 ### Fixed

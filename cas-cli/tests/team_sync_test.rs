@@ -28,6 +28,7 @@ use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 use cas::cli::cloud::execute_team_push;
 use cas::cloud::{
     CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue,
+    get_project_canonical_id,
 };
 use cas::store::open_task_store_local;
 use cas::types::Task;
@@ -35,7 +36,7 @@ use flate2::read::GzDecoder;
 use std::io::Read;
 use std::sync::Arc;
 use tempfile::TempDir;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Create a `.cas`-style directory and seed the sync queue with one
@@ -432,10 +433,13 @@ async fn team_delete_for_live_task_is_neutralized_without_http() {
 #[tokio::test]
 async fn team_delete_uses_singular_entity_path() {
     let server = MockServer::start().await;
+    let expected_project_id = get_project_canonical_id()
+        .expect("team delete test must resolve the canonical project id");
     Mock::given(method("DELETE"))
         .and(path(format!(
             "/api/teams/{TEST_TEAM}/sync/task/absent-team-task"
         )))
+        .and(query_param("project_id", expected_project_id))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)

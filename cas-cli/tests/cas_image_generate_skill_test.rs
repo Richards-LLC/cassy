@@ -2,6 +2,8 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use quick_xml::Reader;
+use quick_xml::events::Event;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -51,6 +53,9 @@ fn skill_mirrors_are_managed_and_cover_the_asset_workflow() {
             "style token block",
             "manual vectorization",
             "cas-image-generate/scripts/generate-image.sh",
+            "agent-authored SVG",
+            "svg-web-assets.md",
+            "raster-to-vector bridge",
         ] {
             assert!(
                 body.to_ascii_lowercase()
@@ -59,6 +64,98 @@ fn skill_mirrors_are_managed_and_cover_the_asset_workflow() {
             );
         }
     }
+}
+
+#[test]
+fn svg_web_assets_reference_is_mirrored_and_covers_the_pipeline() {
+    let paths = [
+        "cas-cli/src/builtins/skills/cas-image-generate/references/svg-web-assets.md",
+        "cas-cli/src/builtins/codex/skills/cas-image-generate/references/svg-web-assets.md",
+        "cas-cli/src/builtins/grok/skills/cas-image-generate/references/svg-web-assets.md",
+    ];
+
+    for path in paths {
+        let body = load(path);
+        for marker in [
+            "Agent-authored SVG",
+            "author directly",
+            "24px",
+            "viewBox",
+            "currentColor",
+            "--color-",
+            "favicon.svg",
+            "raster-to-vector",
+            "vtracer",
+            "potrace",
+            "Inkscape",
+            "public/",
+            "assets/brand/",
+            "1200x630",
+            "srcset",
+            "cwebp",
+            "ImageMagick",
+            "output-checklist.md",
+        ] {
+            assert!(
+                body.to_ascii_lowercase()
+                    .contains(&marker.to_ascii_lowercase()),
+                "{path} missing SVG/web-asset marker {marker:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn worked_svg_examples_are_well_formed_and_use_palette_tokens() {
+    let reference =
+        load("cas-cli/src/builtins/skills/cas-image-generate/references/svg-web-assets.md");
+    let examples = fenced_svg_examples(&reference);
+    assert_eq!(
+        examples.len(),
+        3,
+        "expected icon, divider, and favicon examples"
+    );
+
+    for (index, example) in examples.iter().enumerate() {
+        let mut reader = Reader::from_str(example);
+        reader.config_mut().trim_text(true);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(error) => panic!("worked SVG example {index} is not XML: {error}"),
+            }
+        }
+        assert!(
+            example.contains("viewBox"),
+            "example {index} needs a viewBox"
+        );
+        assert!(
+            example.contains("--color-") || example.contains("currentColor"),
+            "example {index} needs a palette token"
+        );
+    }
+}
+
+fn fenced_svg_examples(body: &str) -> Vec<String> {
+    let mut examples = Vec::new();
+    let mut current = None;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed == "```svg" {
+            assert!(current.is_none(), "nested SVG example fence");
+            current = Some(String::new());
+        } else if trimmed == "```" {
+            if let Some(example) = current.take() {
+                examples.push(example);
+            }
+        } else if let Some(example) = current.as_mut() {
+            example.push_str(line);
+            example.push('\n');
+        }
+    }
+    assert!(current.is_none(), "unterminated SVG example fence");
+    examples
 }
 
 #[test]
@@ -84,6 +181,19 @@ fn references_document_research_and_unwired_provider_boundaries() {
         assert!(
             providers.contains(marker) || playbook.contains(marker),
             "research/provider reference missing {marker:?}"
+        );
+    }
+    for marker in [
+        "svg-web-assets.md",
+        "agent-authored SVG",
+        "author-directly",
+        "raster-to-vector",
+    ] {
+        assert!(
+            playbook
+                .to_ascii_lowercase()
+                .contains(&marker.to_ascii_lowercase()),
+            "asset playbook missing vector routing marker {marker:?}"
         );
     }
     for marker in [
@@ -122,6 +232,9 @@ fn builtin_catalog_registers_all_mirror_entries() {
         "builtins/skills/cas-image-generate/references/asset-playbook.md",
         "builtins/codex/skills/cas-image-generate/references/asset-playbook.md",
         "builtins/grok/skills/cas-image-generate/references/asset-playbook.md",
+        "builtins/skills/cas-image-generate/references/svg-web-assets.md",
+        "builtins/codex/skills/cas-image-generate/references/svg-web-assets.md",
+        "builtins/grok/skills/cas-image-generate/references/svg-web-assets.md",
         "builtins/skills/cas-image-generate/scripts/generate-image.sh",
         "builtins/codex/skills/cas-image-generate/scripts/generate-image.sh",
         "builtins/grok/skills/cas-image-generate/scripts/generate-image.sh",
@@ -168,6 +281,7 @@ fn cas_update_syncs_the_skill_to_all_enabled_harnesses() {
         for relative in [
             "skills/cas-image-generate/SKILL.md",
             "skills/cas-image-generate/references/providers.md",
+            "skills/cas-image-generate/references/svg-web-assets.md",
             "skills/cas-image-generate/scripts/generate-image.sh",
         ] {
             assert!(

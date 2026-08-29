@@ -684,6 +684,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "qrcode",
+ "quick-xml",
  "rand 0.9.2",
  "ratatui",
  "rayon",

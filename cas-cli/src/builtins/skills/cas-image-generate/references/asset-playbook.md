@@ -12,10 +12,21 @@ final, cover, or dense in-image copy. The requested dimensions belong in the
 prompt and in the output review; the helper sends references and decodes the
 returned image but does not silently resize it.
 
+Vector-suitable rows are the exception to the raster default. Read
+[svg-web-assets.md](svg-web-assets.md) before choosing a medium: the
+agent-authored SVG route is preferred for geometric, flat, limited-palette
+assets, while raster-to-vector is reserved for approved organic marks that
+cannot be expressed cleanly as simple paths. `author-directly` means write the
+SVG in the repository; it does not mean ask Nano Banana for SVG output.
+
 | Asset | Tier | Suggested output | Prompt emphasis |
 |---|---|---|---|
-| Logo / logomark | NB2 → NB Pro | square PNG, 1024px or larger | flat, simple mark, the wordmark TEXT (spelled exactly, no quotation marks), high contrast, generous clear space; manual vectorization required |
-| Icon set | NB2 → NB Pro | one square grid sheet, 1024–2048px | one locked 24px-grid spec sentence, uniform stroke, padding, one color; manually trace approved glyphs |
+| SVG icon / icon set | author-directly | `icon.svg` or an SVG set on a 24px grid | geometric, flat, limited palette; follow [svg-web-assets.md](svg-web-assets.md) |
+| SVG logomark / favicon | author-directly | `logo.svg` or `favicon.svg` | simple paths, CSS palette vars, generous clear space; use raster only when the mark is organic |
+| SVG divider / pattern | author-directly | reusable `divider.svg` or `pattern.svg` | waves, blobs, grids, and flat repeats with a stable `viewBox` |
+| Organic logo / ribbon-C | NB2 → NB Pro, then raster-to-vector | approved raster plus cleaned SVG | generate a flat high-contrast master, trace only after approval, and manually clean paths |
+| Logo / logomark (complex or text-heavy) | NB2 → NB Pro | square PNG, 1024px or larger | flat, simple mark, the wordmark TEXT (spelled exactly, no quotation marks), high contrast, generous clear space; manual vectorization required |
+| Icon set (painterly or textured) | NB2 → NB Pro | one square grid sheet, 1024–2048px | one locked 24px-grid spec sentence, uniform stroke, padding, one color; manually trace approved glyphs |
 | Hero image | NB2 → NB Pro | 16:9, up to 1920px wide | focal subject, camera, lighting, and negative space for copy |
 | Background / texture | NB2 | 16:9 or tileable square, 2K | low contrast, no focal object, exact palette, usable behind text |
 | OG / social card | NB Pro | 1200x630 PNG | exact quoted copy early, safe area, brand contrast, no gibberish |

@@ -4,6 +4,15 @@ use crate::daemon::DaemonConfig;
 use crate::error::CasError;
 use crate::store::Store;
 
+fn parse_learning_source_ids(source_id: &str) -> Vec<String> {
+    source_id
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 pub(crate) fn process_observations(
     store: &Arc<dyn Store>,
     config: &DaemonConfig,
@@ -54,6 +63,7 @@ pub(crate) fn process_observations(
                         entry_type: EntryType::Learning,
                         content: learning.content,
                         tags: learning.tags,
+                        source_ids: parse_learning_source_ids(&learning.source_id),
                         importance: learning.confidence,
                         ..Default::default()
                     };
@@ -80,4 +90,18 @@ pub(crate) fn process_observations(
     }
 
     Ok(extracted_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_learning_source_ids;
+
+    #[test]
+    fn learning_source_ids_preserve_every_observation_id() {
+        assert_eq!(
+            parse_learning_source_ids("obs-1, obs-2,,  obs-3 "),
+            ["obs-1", "obs-2", "obs-3"]
+        );
+        assert!(parse_learning_source_ids("  , ").is_empty());
+    }
 }

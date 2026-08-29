@@ -4,6 +4,7 @@ use tempfile::TempDir;
 
 fn create_test_skill(name: &str, enabled: bool) -> Skill {
     Skill {
+        source_ids: Vec::new(),
         id: format!("sk-{name}"),
         scope: Scope::default(),
         name: name.to_string(),

@@ -355,7 +355,7 @@ Adjust confidence based on both completeness AND quality:
 
 For each unique issue category in a rejection:
 1. Check: `mcp__cas__rule action=check_similar content="[proposed rule]"`
-2. If no match: `mcp__cas__rule action=create content="[rule]" tags="from_verification,category:[cat]"`
+2. If no match: `mcp__cas__rule action=create content="[rule]" tags="from_verification,category:[cat]" source_ids="<originating learning/entry IDs, comma-separated>"`; pass the IDs when the verified context provides them.
 
 One rule per category per rejection. Rules start as Draft.
 

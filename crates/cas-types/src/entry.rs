@@ -239,6 +239,10 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_type: Option<ObservationType>,
 
+    /// Entry IDs this entry was derived from (for example, source observations)
+    #[serde(default)]
+    pub source_ids: Vec<String>,
+
     /// Optional categorization tags
     #[serde(default)]
     pub tags: Vec<String>,

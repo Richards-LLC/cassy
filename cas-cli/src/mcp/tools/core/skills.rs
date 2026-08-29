@@ -77,7 +77,7 @@ impl CasCore {
             "database"
         };
         let output = format!(
-            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
+            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nSource entries: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
             skill.name,
             skill.id,
             "=".repeat(skill.name.len() + skill.id.len() + 4),
@@ -89,6 +89,11 @@ impl CasCore {
                 "none".to_string()
             } else {
                 skill.tags.join(", ")
+            },
+            if skill.source_ids.is_empty() {
+                "none".to_string()
+            } else {
+                skill.source_ids.join(", ")
             },
             skill.created_at.format("%Y-%m-%d %H:%M"),
             skill.description,
@@ -202,6 +207,16 @@ impl CasCore {
             updated_at: chrono::Utc::now(),
             last_used: None,
             team_id: None,
+            source_ids: req
+                .source_ids
+                .map(|ids| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
             share: None,
         };
 

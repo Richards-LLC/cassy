@@ -13,7 +13,7 @@ impl SqliteStore {
              harmful_count, last_accessed, archived, session_id, source_tool,
              pending_extraction, observation_type, stability, access_count,
              raw_content, compressed, memory_tier, importance, valid_from, valid_until, review_after, last_reviewed, pending_embedding,
-             belief_type, confidence, domain, branch, scope, team_id, share
+             belief_type, confidence, domain, branch, scope, team_id, share, source_ids
              FROM entries WHERE pending_extraction = 1 AND archived = 0
              ORDER BY created DESC LIMIT ?",
         )?;
@@ -42,7 +42,7 @@ impl SqliteStore {
              harmful_count, last_accessed, archived, session_id, source_tool,
              pending_extraction, observation_type, stability, access_count,
              raw_content, compressed, memory_tier, importance, valid_from, valid_until, review_after, last_reviewed, pending_embedding,
-             belief_type, confidence, domain, branch, scope, team_id, share
+             belief_type, confidence, domain, branch, scope, team_id, share, source_ids
              FROM entries WHERE memory_tier = 'in-context' AND archived = 0
              ORDER BY created DESC",
         )?;
@@ -60,7 +60,7 @@ impl SqliteStore {
              harmful_count, last_accessed, archived, session_id, source_tool,
              pending_extraction, observation_type, stability, access_count,
              raw_content, compressed, memory_tier, importance, valid_from, valid_until, review_after, last_reviewed, pending_embedding,
-             belief_type, confidence, domain, branch, scope, team_id, share
+             belief_type, confidence, domain, branch, scope, team_id, share, source_ids
              FROM entries
              WHERE archived = 0 AND (helpful_count - harmful_count) > 0
              ORDER BY (helpful_count - harmful_count) DESC, last_accessed DESC
@@ -80,7 +80,7 @@ impl SqliteStore {
              harmful_count, last_accessed, archived, session_id, source_tool,
              pending_extraction, observation_type, stability, access_count,
              raw_content, compressed, memory_tier, importance, valid_from, valid_until, review_after, last_reviewed, pending_embedding,
-             belief_type, confidence, domain, branch, scope, team_id, share
+             belief_type, confidence, domain, branch, scope, team_id, share, source_ids
              FROM entries
              WHERE session_id = ? AND archived = 0
              ORDER BY created DESC LIMIT 10000",
@@ -99,7 +99,7 @@ impl SqliteStore {
              harmful_count, last_accessed, archived, session_id, source_tool,
              pending_extraction, observation_type, stability, access_count,
              raw_content, compressed, memory_tier, importance, valid_from, valid_until, review_after, last_reviewed, pending_embedding,
-             belief_type, confidence, domain, branch, scope, team_id, share
+             belief_type, confidence, domain, branch, scope, team_id, share, source_ids
              FROM entries
              WHERE type = 'learning' AND archived = 0 AND last_reviewed IS NULL
              ORDER BY created DESC

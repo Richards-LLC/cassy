@@ -690,6 +690,7 @@ impl CasCore {
         };
 
         let entry = Entry {
+            source_ids: Vec::new(),
             id: id.clone(),
             scope: Scope::default(),
             entry_type,

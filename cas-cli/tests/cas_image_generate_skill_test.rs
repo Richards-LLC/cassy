@@ -29,8 +29,14 @@ fn skill_mirrors_are_managed_and_cover_the_asset_workflow() {
     for path in skill_paths() {
         let body = load(path);
         assert!(body.starts_with("---\n"), "{path} lacks frontmatter");
-        assert!(body.contains("name: cas-image-generate"), "{path} has wrong name");
-        assert!(body.contains("managed_by: cas"), "{path} is not CAS-managed");
+        assert!(
+            body.contains("name: cas-image-generate"),
+            "{path} has wrong name"
+        );
+        assert!(
+            body.contains("managed_by: cas"),
+            "{path} is not CAS-managed"
+        );
         for marker in [
             "logo",
             "icon set",
@@ -46,17 +52,22 @@ fn skill_mirrors_are_managed_and_cover_the_asset_workflow() {
             "manual vectorization",
             "cas-image-generate/scripts/generate-image.sh",
         ] {
-            assert!(body.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()),
-                "{path} missing workflow marker {marker:?}");
+            assert!(
+                body.to_ascii_lowercase()
+                    .contains(&marker.to_ascii_lowercase()),
+                "{path} missing workflow marker {marker:?}"
+            );
         }
     }
 }
 
 #[test]
 fn references_document_research_and_unwired_provider_boundaries() {
-    let playbook = load("cas-cli/src/builtins/skills/cas-image-generate/references/asset-playbook.md");
+    let playbook =
+        load("cas-cli/src/builtins/skills/cas-image-generate/references/asset-playbook.md");
     let providers = load("cas-cli/src/builtins/skills/cas-image-generate/references/providers.md");
-    let output = load("cas-cli/src/builtins/skills/cas-image-generate/references/output-checklist.md");
+    let output =
+        load("cas-cli/src/builtins/skills/cas-image-generate/references/output-checklist.md");
     let style = load("cas-cli/src/builtins/skills/cas-image-generate/references/style-harvest.md");
 
     for marker in [
@@ -70,14 +81,34 @@ fn references_document_research_and_unwired_provider_boundaries() {
         "unwired",
         "Imagen",
     ] {
-        assert!(providers.contains(marker) || playbook.contains(marker),
-            "research/provider reference missing {marker:?}");
+        assert!(
+            providers.contains(marker) || playbook.contains(marker),
+            "research/provider reference missing {marker:?}"
+        );
     }
-    for marker in ["DESIGN.md", "Tailwind", "--", "palette", "typography", "motif"] {
+    for marker in [
+        "DESIGN.md",
+        "Tailwind",
+        "CSS custom properties",
+        "palette",
+        "typography",
+        "motif",
+    ] {
         assert!(style.contains(marker), "style reference missing {marker:?}");
     }
-    for marker in ["1200x630", "transparent", "license", "favicon", "webp", "SVG"] {
-        assert!(output.contains(marker), "output reference missing {marker:?}");
+    let output_lower = output.to_ascii_lowercase();
+    for marker in [
+        "1200x630",
+        "transparent",
+        "license",
+        "favicon",
+        "webp",
+        "svg",
+    ] {
+        assert!(
+            output_lower.contains(marker),
+            "output reference missing {marker:?}"
+        );
     }
 }
 
@@ -95,7 +126,10 @@ fn builtin_catalog_registers_all_mirror_entries() {
         "builtins/codex/skills/cas-image-generate/scripts/generate-image.sh",
         "builtins/grok/skills/cas-image-generate/scripts/generate-image.sh",
     ] {
-        assert!(builtins.contains(include_path), "missing catalog include {include_path}");
+        assert!(
+            builtins.contains(include_path),
+            "missing catalog include {include_path}"
+        );
     }
 }
 
@@ -136,15 +170,18 @@ fn cas_update_syncs_the_skill_to_all_enabled_harnesses() {
             "skills/cas-image-generate/references/providers.md",
             "skills/cas-image-generate/scripts/generate-image.sh",
         ] {
-            assert!(project.path().join(harness).join(relative).is_file(),
-                "missing {harness}/{relative} after cas update --sync");
+            assert!(
+                project.path().join(harness).join(relative).is_file(),
+                "missing {harness}/{relative} after cas update --sync"
+            );
         }
     }
 }
 
 #[test]
 fn generation_helper_reports_missing_key_without_network_access() {
-    let script = repo_root().join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
+    let script = repo_root()
+        .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
     Command::new("bash")
         .arg(&script)
         .args(["--prompt", "test", "--output", "out.png"])
@@ -158,10 +195,19 @@ fn generation_helper_reports_missing_key_without_network_access() {
 
 #[test]
 fn generation_helper_dry_run_validates_present_key_without_calling_api() {
-    let script = repo_root().join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
+    let script = repo_root()
+        .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
     Command::new("bash")
         .arg(&script)
-        .args(["--tier", "final", "--prompt", "test", "--output", "out.png", "--dry-run"])
+        .args([
+            "--tier",
+            "final",
+            "--prompt",
+            "test",
+            "--output",
+            "out.png",
+            "--dry-run",
+        ])
         .env("GEMINI_API_KEY", "test-key-not-sent")
         .assert()
         .success()

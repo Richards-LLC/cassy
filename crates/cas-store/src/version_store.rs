@@ -1,21 +1,21 @@
 //! Shared schema and records for rule/skill lifecycle history.
 
-use chrono::{DateTime, Utc};
 use cas_types::{RuleStatus, SkillStatus};
+use chrono::{DateTime, Utc};
 
 /// Statements used by the numbered migration and lazy SQLite store bootstrap.
 pub const RULE_VERSIONS_SCHEMA_STATEMENTS: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS rule_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot_json TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, changed_by TEXT, changed_at TEXT NOT NULL, change_note TEXT NOT NULL, UNIQUE(rule_id, version))",
+    "CREATE TABLE IF NOT EXISTS rule_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot_json TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, changed_by TEXT, changed_at TEXT NOT NULL, change_note TEXT NOT NULL, operation TEXT NOT NULL DEFAULT 'update', UNIQUE(rule_id, version))",
     "CREATE INDEX IF NOT EXISTS idx_rule_versions_rule ON rule_versions(rule_id, version DESC)",
 ];
 
 /// Statements used by the numbered migration and lazy SQLite store bootstrap.
 pub const SKILL_VERSIONS_SCHEMA_STATEMENTS: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS skill_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot_json TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL, changed_by TEXT, changed_at TEXT NOT NULL, change_note TEXT NOT NULL, UNIQUE(skill_id, version))",
+    "CREATE TABLE IF NOT EXISTS skill_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot_json TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL, changed_by TEXT, changed_at TEXT NOT NULL, change_note TEXT NOT NULL, operation TEXT NOT NULL DEFAULT 'update', UNIQUE(skill_id, version))",
     "CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, version DESC)",
 ];
 
-/// Combined statements for migration m237.
+/// Combined statements for migration m240 and lazy SQLite store bootstrap.
 pub const RULE_AND_SKILL_VERSIONS_SCHEMA_STATEMENTS: &[&str] = &[
     RULE_VERSIONS_SCHEMA_STATEMENTS[0],
     RULE_VERSIONS_SCHEMA_STATEMENTS[1],
@@ -34,6 +34,9 @@ pub struct RuleVersion {
     pub changed_by: Option<String>,
     pub changed_at: DateTime<Utc>,
     pub change_note: String,
+    /// Lifecycle operation that produced this snapshot (`create`, `update`,
+    /// `delete`, or `restore`).
+    pub operation: String,
     pub snapshot_json: String,
 }
 
@@ -49,6 +52,9 @@ pub struct SkillVersion {
     pub changed_by: Option<String>,
     pub changed_at: DateTime<Utc>,
     pub change_note: String,
+    /// Lifecycle operation that produced this snapshot (`create`, `update`,
+    /// `delete`, or `restore`).
+    pub operation: String,
     pub snapshot_json: String,
 }
 
@@ -56,7 +62,11 @@ pub struct SkillVersion {
 pub(crate) fn default_changed_by() -> Option<String> {
     ["CAS_AGENT_NAME", "CAS_AGENT_ID", "USER"]
         .into_iter()
-        .find_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
 }
 
 pub(crate) fn parse_datetime(value: &str) -> DateTime<Utc> {

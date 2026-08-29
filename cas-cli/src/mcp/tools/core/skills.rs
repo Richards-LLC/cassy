@@ -531,10 +531,10 @@ impl CasCore {
                     req.change_note.as_deref(),
                 )
                 .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to update: {e}")),
-                data: None,
-            })?;
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to update: {e}")),
+                    data: None,
+                })?;
 
             // Re-sync if enabled
             if skill.status == SkillStatus::Enabled {
@@ -564,13 +564,18 @@ impl CasCore {
             return Ok(Self::success(format!("No history for skill {}", req.id)));
         }
 
-        let mut output = format!("Skill history for {} ({} versions):\n\n", req.id, versions.len());
+        let mut output = format!(
+            "Skill history for {} ({} versions):\n\n",
+            req.id,
+            versions.len()
+        );
         for version in versions {
             let preview: String = version.description.chars().take(120).collect();
             output.push_str(&format!(
-                "- v{} [{}] {} by {} at {}\n  {}\n",
+                "- v{} [{}: {}] {} by {} at {}\n  {}\n",
                 version.version,
                 version.status,
+                version.operation,
                 version.change_note,
                 version.changed_by.as_deref().unwrap_or("unknown actor"),
                 version.changed_at.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -608,7 +613,9 @@ impl CasCore {
         Ok(Self::success(format!(
             "Restored skill {}{} (status: {})",
             req.id,
-            version.map(|v| format!(" to version {v}")).unwrap_or_default(),
+            version
+                .map(|v| format!(" to version {v}"))
+                .unwrap_or_default(),
             restored.status
         )))
     }

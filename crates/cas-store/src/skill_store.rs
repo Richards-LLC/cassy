@@ -1,7 +1,7 @@
 //! SQLite-based skill storage
 
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,43 @@ pub struct SqliteSkillStore {
 }
 
 impl SqliteSkillStore {
+    fn insert_version(
+        tx: &Transaction<'_>,
+        skill_id: &str,
+        snapshot_json: &str,
+        name: &str,
+        description: &str,
+        status: SkillStatus,
+        changed_by: &Option<String>,
+        changed_at: &str,
+        change_note: &str,
+        operation: &str,
+    ) -> Result<()> {
+        let next_version: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM skill_versions WHERE skill_id = ?1",
+            params![skill_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO skill_versions
+             (skill_id, version, snapshot_json, name, description, status, changed_by, changed_at, change_note, operation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                skill_id,
+                next_version,
+                snapshot_json,
+                name,
+                description,
+                status.to_string(),
+                changed_by,
+                changed_at,
+                change_note,
+                operation,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Open or create a SQLite skill store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -226,6 +263,7 @@ impl SqliteSkillStore {
         skill: &Skill,
         changed_by: Option<&str>,
         change_note: Option<&str>,
+        operation: &str,
     ) -> Result<()> {
         let previous = self.get(&skill.id)?;
         let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
@@ -239,26 +277,17 @@ impl SqliteSkillStore {
 
         let mut conn = crate::shared_db::lock_connection(&self.conn)?;
         let tx = conn.transaction()?;
-        let next_version: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM skill_versions WHERE skill_id = ?1",
-            params![&skill.id],
-            |row| row.get(0),
-        )?;
-        tx.execute(
-            "INSERT INTO skill_versions
-             (skill_id, version, snapshot_json, name, description, status, changed_by, changed_at, change_note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                &skill.id,
-                next_version,
-                snapshot_json,
-                previous.name,
-                previous.description,
-                previous.status.to_string(),
-                changed_by,
-                changed_at,
-                change_note,
-            ],
+        Self::insert_version(
+            &tx,
+            &skill.id,
+            &snapshot_json,
+            &previous.name,
+            &previous.description,
+            previous.status,
+            &changed_by,
+            &changed_at,
+            change_note,
+            operation,
         )?;
         let rows = tx.execute(
             "UPDATE skills SET name = ?1, description = ?2, skill_type = ?3,
@@ -301,7 +330,10 @@ impl SqliteSkillStore {
             ],
         )?;
         if rows == 0 {
-            return Err(StoreError::NotFound(format!("skill not found: {}", skill.id)));
+            return Err(StoreError::NotFound(format!(
+                "skill not found: {}",
+                skill.id
+            )));
         }
         tx.commit()?;
         Ok(())
@@ -323,6 +355,7 @@ impl SqliteSkillStore {
             &retired,
             changed_by,
             Some(change_note.unwrap_or("tombstone delete")),
+            "delete",
         )
     }
 
@@ -330,7 +363,7 @@ impl SqliteSkillStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, skill_id, version, snapshot_json, name, description, status,
-                    changed_by, changed_at, change_note
+                    changed_by, changed_at, change_note, operation
              FROM skill_versions WHERE skill_id = ?1 ORDER BY version DESC",
         )?;
         let versions = stmt
@@ -349,6 +382,7 @@ impl SqliteSkillStore {
                     changed_by: row.get(7)?,
                     changed_at: parse_datetime(&row.get::<_, String>(8)?),
                     change_note: row.get(9)?,
+                    operation: row.get(10)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -387,7 +421,9 @@ impl SqliteSkillStore {
             StoreError::Parse(format!("invalid skill history for {id}: {error}"))
         })?;
         if restored.id != id {
-            return Err(StoreError::Parse(format!("skill history ID mismatch for: {id}")));
+            return Err(StoreError::Parse(format!(
+                "skill history ID mismatch for: {id}"
+            )));
         }
         let default_note;
         let note = match (change_note, version) {
@@ -398,7 +434,7 @@ impl SqliteSkillStore {
             }
             (None, None) => Some("restore latest version"),
         };
-        self.update_recorded(&restored, changed_by, note)
+        self.update_recorded(&restored, changed_by, note, "restore")
     }
 }
 
@@ -418,8 +454,14 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn add(&self, skill: &Skill) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        conn.execute(
+        let snapshot_json = serde_json::to_string(skill).map_err(|error| {
+            StoreError::Parse(format!("failed to serialize skill history: {error}"))
+        })?;
+        let changed_by = default_changed_by();
+        let changed_at = Utc::now().to_rfc3339();
+        let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO skills (id, name, description, skill_type, invocation, parameters_schema,
              example, preconditions, postconditions, validation_script, status, tags, summary,
              usage_count, created_at, updated_at, last_used, invokable, argument_hint,
@@ -457,6 +499,19 @@ impl SkillStore for SqliteSkillStore {
                 Self::tags_to_string(&skill.source_ids),
             ],
         )?;
+        Self::insert_version(
+            &tx,
+            &skill.id,
+            &snapshot_json,
+            &skill.name,
+            &skill.description,
+            skill.status,
+            &changed_by,
+            &changed_at,
+            "create",
+            "create",
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -477,7 +532,7 @@ impl SkillStore for SqliteSkillStore {
     }
 
     fn update(&self, skill: &Skill) -> Result<()> {
-        self.update_recorded(skill, None, None)
+        self.update_recorded(skill, None, None, "update")
     }
 
     fn update_with_metadata(
@@ -486,7 +541,7 @@ impl SkillStore for SqliteSkillStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.update_recorded(skill, changed_by, change_note)
+        self.update_recorded(skill, changed_by, change_note, "update")
     }
 
     fn delete(&self, id: &str) -> Result<()> {
@@ -690,8 +745,9 @@ mod tests {
             .unwrap();
 
         let versions = store.list_versions("skill-history-01").unwrap();
-        assert_eq!(versions.len(), 1);
+        assert_eq!(versions.len(), 2);
         assert_eq!(versions[0].description, "");
+        assert_eq!(versions[0].operation, "update");
         assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
         assert_eq!(versions[0].change_note, "revise instructions");
 
@@ -715,7 +771,15 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version_count, 2);
+        assert_eq!(version_count, 3);
+        let operation: String = conn
+            .query_row(
+                "SELECT operation FROM skill_versions WHERE skill_id = 'skill-history-01' AND version = 3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(operation, "delete");
 
         store
             .restore_version("skill-history-01", Some(1), Some("restorer"), None)

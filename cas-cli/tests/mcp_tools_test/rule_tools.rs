@@ -270,6 +270,7 @@ async fn test_rule_helpful_requires_evidence_threshold() {
             content: "Threshold test rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -305,6 +306,7 @@ async fn test_rule_helpful_promotes_at_configured_threshold() {
             content: "Configured threshold rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -340,6 +342,7 @@ async fn test_rule_helpful_accepts_configured_retrieval_evidence() {
             content: "Retrieval evidence rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -410,6 +413,7 @@ async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
             content: "Demotion test rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -451,6 +455,7 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
             content: "Corrected retrieval rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))

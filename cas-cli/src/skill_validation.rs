@@ -16,9 +16,9 @@ const MAX_VALIDATION_OUTPUT_BYTES: usize = 8 * 1024;
 ///
 /// The probe runs from a fresh temporary directory with a scrubbed environment
 /// (only PATH is retained for executable lookup). This keeps relative writes
-/// out of the project and avoids leaking CAS credentials. Validation scripts
-/// must therefore be local, deterministic availability checks; network access
-/// is neither provided nor required by this contract.
+/// out of the project and avoids leaking CAS credentials. The process boundary
+/// does not promise network isolation, so validation scripts must be local,
+/// deterministic availability checks that do not require network access.
 pub(crate) fn validate_skill(skill: &Skill) -> Result<(), String> {
     if skill.validation_script.trim().is_empty() {
         return Ok(());

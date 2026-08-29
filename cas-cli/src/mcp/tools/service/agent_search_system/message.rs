@@ -750,9 +750,49 @@ impl CasService {
 
             if let Some(task) = merge_task
                 && let Some(work_target) = task.deliverables.work_target.as_ref()
-                && let Ok(repo) =
-                    resolve_repo_context_from_local_root(&self.inner.cas_root, work_target)
-                        .or_else(|_| resolve_repo_context(&self.inner.cas_root, work_target))
+                && let Ok(repo) = {
+                    match resolve_repo_context_from_local_root(&self.inner.cas_root, work_target) {
+                        Ok(repo) => {
+                            tracing::debug!(
+                                task_id = %task.id,
+                                resolution = "local_checkout",
+                                repo_root = %repo.repo_root.display(),
+                                git_common_dir = %repo.git_common_dir.display(),
+                                "merge request revalidation selected explicit local checkout"
+                            );
+                            Ok(repo)
+                        }
+                        Err(local_error) => {
+                            tracing::debug!(
+                                task_id = %task.id,
+                                resolution = "local_checkout_miss",
+                                error = %local_error,
+                                "merge request revalidation falling back to host registry"
+                            );
+                            match resolve_repo_context(&self.inner.cas_root, work_target) {
+                                Ok(repo) => {
+                                    tracing::debug!(
+                                        task_id = %task.id,
+                                        resolution = "host_registry_fallback",
+                                        repo_root = %repo.repo_root.display(),
+                                        git_common_dir = %repo.git_common_dir.display(),
+                                        "merge request revalidation selected host registry checkout"
+                                    );
+                                    Ok(repo)
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        task_id = %task.id,
+                                        resolution = "host_registry_miss",
+                                        error = %error,
+                                        "merge request revalidation could not resolve checkout"
+                                    );
+                                    Err(error)
+                                }
+                            }
+                        }
+                    }
+                }
             {
                 let branch = task
                     .deliverables

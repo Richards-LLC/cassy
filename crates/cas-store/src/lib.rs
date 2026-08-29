@@ -452,6 +452,16 @@ pub trait RuleStore: Send + Sync {
         self.update(rule)
     }
 
+    /// Increment the number of times a rule was actually injected into
+    /// context. Implementations with an atomic write path should override
+    /// this method; the default preserves compatibility for lightweight
+    /// stores and wrappers.
+    fn increment_surface_count(&self, id: &str) -> Result<()> {
+        let mut rule = self.get(id)?;
+        rule.surface_count = rule.surface_count.saturating_add(1);
+        self.update(&rule)
+    }
+
     /// Delete a rule
     fn delete(&self, id: &str) -> Result<()>;
 

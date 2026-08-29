@@ -152,6 +152,10 @@ impl CasCore {
             if !rule.paths.is_empty() {
                 output.push_str(&format!("  Paths: {}\n", rule.paths));
             }
+            output.push_str(&format!(
+                "  Impact: surfaced {} | feedback: +{} helpful, -{} harmful\n",
+                rule.surface_count, rule.helpful_count, rule.harmful_count
+            ));
         }
 
         Ok(Self::success(output))
@@ -249,7 +253,7 @@ impl CasCore {
         })?;
 
         let output = format!(
-            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nFeedback: +{} -{}\nCreated: {}\n\nContent:\n{}",
+            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nSource entries: {}\nImpact: surfaced {} | feedback: +{} helpful, -{} harmful\nCreated: {}\n\nContent:\n{}",
             rule.id,
             "=".repeat(rule.id.len() + 6),
             rule.status,
@@ -263,6 +267,12 @@ impl CasCore {
             } else {
                 rule.tags.join(", ")
             },
+            if rule.source_ids.is_empty() {
+                "none".to_string()
+            } else {
+                rule.source_ids.join(", ")
+            },
+            rule.surface_count,
             rule.helpful_count,
             rule.harmful_count,
             rule.created.format("%Y-%m-%d %H:%M"),
@@ -327,7 +337,16 @@ impl CasCore {
             harmful_count: 0,
             created: chrono::Utc::now(),
             last_accessed: None,
-            source_ids: Vec::new(),
+            source_ids: req
+                .source_ids
+                .map(|ids| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
             review_after: None,
             hook_command: None,
             category: crate::types::RuleCategory::default(),
@@ -601,9 +620,10 @@ impl CasCore {
         );
         for rule in rules.iter().take(limit) {
             output.push_str(&format!(
-                "- [{}] {:?} (+{} -{}) {}\n",
+                "- [{}] {:?} (surfaced: {}, feedback: +{} -{}) {}\n",
                 rule.id,
                 rule.status,
+                rule.surface_count,
                 rule.helpful_count,
                 rule.harmful_count,
                 rule.preview(60)

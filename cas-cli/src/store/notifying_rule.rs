@@ -97,6 +97,10 @@ impl RuleStore for NotifyingRuleStore {
         Ok(())
     }
 
+    fn increment_surface_count(&self, id: &str) -> Result<()> {
+        self.inner.increment_surface_count(id)
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.inner.delete(id)
     }

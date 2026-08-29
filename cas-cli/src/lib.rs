@@ -61,7 +61,6 @@ pub mod otel;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub mod retrieval_parity;
-pub mod rules;
 pub mod sentry;
 pub mod store;
 pub mod sync;

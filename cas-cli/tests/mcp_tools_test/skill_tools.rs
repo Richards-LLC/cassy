@@ -44,6 +44,7 @@ async fn test_skill_create() {
         invocation: "test-skill".to_string(),
         skill_type: "command".to_string(),
         tags: Some("test,skill".to_string()),
+        source_ids: None,
         summary: None,
         example: None,
         preconditions: None,
@@ -80,6 +81,7 @@ async fn test_skill_show() {
         invocation: "show-skill".to_string(),
         skill_type: "command".to_string(),
         tags: None,
+        source_ids: Some("learning-1, learning-2".to_string()),
         summary: None,
         example: None,
         preconditions: None,
@@ -112,6 +114,7 @@ async fn test_skill_show() {
 
     let text = extract_text(result);
     assert!(text.contains("Show Skill") || text.contains("show-skill"));
+    assert!(text.contains("learning-1, learning-2"));
 }
 
 #[tokio::test]
@@ -189,6 +192,7 @@ async fn test_skill_list() {
             invocation: format!("list-skill-{i}"),
             skill_type: "command".to_string(),
             tags: None,
+            source_ids: None,
             summary: None,
             example: None,
             preconditions: None,
@@ -238,6 +242,7 @@ async fn test_skill_update() {
         invocation: "update-skill".to_string(),
         skill_type: "command".to_string(),
         tags: None,
+        source_ids: None,
         summary: None,
         example: None,
         preconditions: None,
@@ -295,6 +300,7 @@ async fn test_skill_enable_disable() {
         invocation: "enable-skill".to_string(),
         skill_type: "command".to_string(),
         tags: None,
+        source_ids: None,
         summary: None,
         example: None,
         preconditions: None,
@@ -351,6 +357,7 @@ async fn test_skill_delete() {
         invocation: "delete-skill".to_string(),
         skill_type: "command".to_string(),
         tags: None,
+        source_ids: None,
         summary: None,
         example: None,
         preconditions: None,
@@ -397,6 +404,7 @@ async fn test_skill_use() {
         invocation: "use-skill".to_string(),
         skill_type: "command".to_string(),
         tags: None,
+        source_ids: None,
         summary: None,
         example: None,
         preconditions: None,

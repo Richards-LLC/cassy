@@ -59,6 +59,8 @@ impl MarkdownStore {
             last_accessed: Option<DateTime<Utc>>,
             #[serde(default)]
             title: Option<String>,
+            #[serde(default)]
+            source_ids: Vec<String>,
         }
 
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
@@ -84,6 +86,7 @@ impl MarkdownStore {
             archived: false,
             session_id: None,
             source_tool: None,
+            source_ids: fm.source_ids,
             pending_extraction: false,
             pending_embedding: true, // Default true for entries from markdown store
             stability: 0.5,
@@ -113,6 +116,7 @@ impl MarkdownStore {
              created: {}\n\
              helpful_count: {}\n\
              harmful_count: {}\n\
+             source_ids: {}\n\
              {}{}\
              ---\n\n\
              {}",
@@ -122,6 +126,7 @@ impl MarkdownStore {
             entry.created.to_rfc3339(),
             entry.helpful_count,
             entry.harmful_count,
+            serde_json::to_string(&entry.source_ids).unwrap_or_else(|_| "[]".to_string()),
             entry
                 .last_accessed
                 .map(|t| format!("last_accessed: {}\n", t.to_rfc3339()))
@@ -481,6 +486,7 @@ impl MarkdownRuleStore {
              priority: {}\n\
              helpful_count: {}\n\
              harmful_count: {}\n\
+             surface_count: {}\n\
              tags: [{}]\n\
              paths: \"{}\"\n\
              {}{}{}{}{}\
@@ -494,6 +500,7 @@ impl MarkdownRuleStore {
             rule.priority,
             rule.helpful_count,
             rule.harmful_count,
+            rule.surface_count,
             rule.tags.join(", "),
             rule.paths,
             rule.last_accessed
@@ -617,5 +624,24 @@ impl RuleStore for MarkdownRuleStore {
 
     fn close(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn rule_surface_count_round_trips_through_markdown_store() {
+        let temp = TempDir::new().unwrap();
+        let store = MarkdownRuleStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let rule = Rule::new("rule-surface".to_string(), "Surface me".to_string());
+        store.add(&rule).unwrap();
+        store.increment_surface_count(&rule.id).unwrap();
+
+        assert_eq!(store.get(&rule.id).unwrap().surface_count, 1);
     }
 }

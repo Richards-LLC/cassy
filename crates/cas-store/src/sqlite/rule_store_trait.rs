@@ -365,6 +365,42 @@ impl RuleStore for SqliteRuleStore {
         self.update_recorded(rule, changed_by, change_note)
     }
 
+    fn increment_surface_count(&self, id: &str) -> Result<()> {
+        let timer = TraceTimer::new();
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let result = conn.execute(
+            "UPDATE rules
+             SET surface_count = CASE
+                 WHEN surface_count < 2147483647 THEN surface_count + 1
+                 ELSE surface_count
+             END
+             WHERE id = ?1",
+            params![id],
+        );
+
+        if let Some(tracer) = DevTracer::get() {
+            let (success, error) = match &result {
+                Ok(rows) => (*rows > 0, None),
+                Err(e) => (false, Some(e.to_string())),
+            };
+            let _ = tracer.record_store_op(
+                "increment_rule_surface_count",
+                "sqlite",
+                &[id],
+                result.as_ref().copied().unwrap_or(0),
+                timer.elapsed_ms(),
+                success,
+                error.as_deref(),
+            );
+        }
+
+        let rows = result?;
+        if rows == 0 {
+            return Err(StoreError::RuleNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         let timer = TraceTimer::new();
         let result = self.delete_recorded(id, None, None);

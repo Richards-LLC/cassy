@@ -10,7 +10,8 @@ use crate::hooks::types::HookInput;
 use crate::truncate;
 use cas_store::KnowledgeStore;
 use cas_types::{
-    AgentRole, AgentStatus, Entry, EntryType, Rule, RuleStatus, Skill, SkillStatus, TaskStatus,
+    AgentRole, AgentStatus, Entry, EntryType, Rule, RuleStatus, Scope, Skill, SkillStatus,
+    TaskStatus,
 };
 use std::collections::HashSet;
 
@@ -23,6 +24,19 @@ const KNOWLEDGE_SECTION_TOKEN_BUDGET: usize = 600;
 
 /// Longest snippet rendered per page before truncation.
 const KNOWLEDGE_SNIPPET_CHARS: usize = 120;
+
+/// Persist one impact sample for a rule that made it into the injected
+/// context. Store failures are intentionally best-effort: a metrics write
+/// must not make SessionStart fail after the context itself was built.
+fn increment_rule_surface_count(stores: &ContextStores, rule: &Rule) {
+    let store = match rule.scope {
+        Scope::Global => stores.global_rule_store.or(stores.project_rule_store),
+        Scope::Project => stores.project_rule_store.or(stores.global_rule_store),
+    };
+    if let Some(store) = store {
+        let _ = store.increment_surface_count(&rule.id);
+    }
+}
 
 /// Render the distilled-knowledge index: one line per page, no bodies.
 ///
@@ -475,6 +489,7 @@ pub fn build_context_with_stores(
                 total_tokens += item.tokens;
                 stats.rules_included += 1;
 
+                increment_rule_surface_count(stores, rule);
                 if let Some(callback) = on_surfaced {
                     callback(&item.id, "rule", Some(&item.summary));
                 }
@@ -556,6 +571,7 @@ pub fn build_context_with_stores(
                     }
                     stats.rules_included += 1;
 
+                    increment_rule_surface_count(stores, rule);
                     if let Some(callback) = on_surfaced {
                         callback(&item.id, "rule", Some(&item.summary));
                     }

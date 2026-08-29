@@ -31,6 +31,9 @@ Use `cas__rule action=history id=<id>` to inspect prior versions and
 `cas__rule action=restore id=<id> version=<n>` to roll back or un-retire a
 rule. Never describe a tombstoned rule as permanently deleted.
 
+When promoting or rewriting a rule, preserve its existing source entry IDs. When merging,
+carry forward the source entry IDs from every contributing rule into the surviving rule.
+
 ## Quality Bar for Promotion
 
 A rule deserves proven status when it:
@@ -47,4 +50,5 @@ A rule deserves proven status when it:
 - Archive aggressively — unused rules add noise, and they cost context tokens
 - Flag conflicts for human review, don't auto-resolve
 - Check `helpful_count` — helpful rules deserve promotion
+- Compare `surface_count` (actual context injections) with `helpful_count` and `harmful_count` (feedback outcomes). High surfacing with little positive feedback is a reason to archive or rewrite rather than promote. Skill `usage_count` is self-reported action usage and is a separate metric.
 - Rules from verification rejections (`from_verification` tag) are high-signal — they caught real issues

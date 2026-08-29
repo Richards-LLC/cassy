@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS entries (
     share TEXT,
     -- Incremental indexing tracking
     updated_at TEXT,
-    indexed_at TEXT
+    indexed_at TEXT,
+    -- Entry provenance (JSON array of source entry IDs)
+    source_ids TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created DESC);
@@ -214,15 +216,35 @@ impl SqliteStore {
         }
     }
 
+    fn parse_source_ids(s: Option<String>) -> Vec<String> {
+        s.map(|ids| {
+            if ids.is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&ids)
+                    .unwrap_or_else(|_| ids.split(',').map(|id| id.trim().to_string()).collect())
+            }
+        })
+        .unwrap_or_default()
+    }
+
+    fn source_ids_to_string(ids: &[String]) -> String {
+        if ids.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(ids).unwrap_or_default()
+        }
+    }
+
     /// Construct an `Entry` from a row selected with the standard 32-column projection.
     ///
-    /// Expected column order (indices 0–31):
+    /// Expected column order (indices 0–32):
     ///   id, type, tags, created, content, title, helpful_count,
     ///   harmful_count, last_accessed, archived, session_id, source_tool,
     ///   pending_extraction, observation_type, stability, access_count,
     ///   raw_content, compressed, memory_tier, importance, valid_from, valid_until,
     ///   review_after, last_reviewed, pending_embedding, belief_type, confidence,
-    ///   domain, branch, scope, team_id, share
+    ///   domain, branch, scope, team_id, share, source_ids
     fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<Entry> {
         Ok(Entry {
             id: row.get(0)?,
@@ -246,6 +268,7 @@ impl SqliteStore {
             archived: row.get::<_, i32>(9)? != 0,
             session_id: row.get(10)?,
             source_tool: row.get(11)?,
+            source_ids: Self::parse_source_ids(row.get(32)?),
             pending_extraction: row.get::<_, i32>(12).unwrap_or(0) != 0,
             stability: row.get::<_, f32>(14).unwrap_or(0.5),
             access_count: row.get::<_, i32>(15).unwrap_or(0),

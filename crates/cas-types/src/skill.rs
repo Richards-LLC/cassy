@@ -293,6 +293,10 @@ pub struct Skill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
 
+    /// Entry IDs this skill was derived from.
+    #[serde(default)]
+    pub source_ids: Vec<String>,
+
     /// Per-skill team-promotion override (T5). See `Rule.share` for
     /// semantics. Dormant — no CLI currently writes this field for
     /// skills — but present to match Entry's shape end-to-end.
@@ -337,6 +341,7 @@ impl Skill {
             updated_at: now,
             last_used: None,
             team_id: None,
+            source_ids: Vec::new(),
             share: None,
         }
     }

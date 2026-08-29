@@ -57,6 +57,11 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            "sync.demotion_threshold" => {
+                self.sync.demotion_threshold = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
             "sync.promotion_evidence" => {
                 self.sync.promotion_evidence =
                     parse_promotion_evidence(value).map_err(MemError::Parse)?;

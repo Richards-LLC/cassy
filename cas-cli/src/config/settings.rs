@@ -53,6 +53,12 @@ pub struct SyncConfig {
     #[serde(default = "default_promotion_threshold")]
     pub promotion_threshold: i32,
 
+    /// Minimum negative evidence events before a Proven rule becomes Stale.
+    /// Existing Proven rules are not evaluated until new negative evidence is
+    /// observed or an explicit sync reads retrieval outcomes.
+    #[serde(default = "default_demotion_threshold")]
+    pub demotion_threshold: i32,
+
     /// Evidence sources eligible to satisfy `promotion_threshold`. Supported
     /// values are `helpful` (explicit rule feedback) and `retrieval`
     /// (privacy-safe retrieval outcome aggregates).
@@ -968,6 +974,10 @@ fn default_promotion_threshold() -> i32 {
     2
 }
 
+fn default_demotion_threshold() -> i32 {
+    2
+}
+
 fn default_promotion_evidence() -> Vec<String> {
     vec!["helpful".to_string()]
 }
@@ -1003,6 +1013,7 @@ impl Default for SyncConfig {
             target: ".claude/rules/cas".to_string(),
             min_helpful: 1,
             promotion_threshold: default_promotion_threshold(),
+            demotion_threshold: default_demotion_threshold(),
             promotion_evidence: default_promotion_evidence(),
         }
     }

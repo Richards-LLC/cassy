@@ -16,6 +16,7 @@ impl Config {
             "sync.target" => Some(self.sync.target.clone()),
             "sync.min_helpful" => Some(self.sync.min_helpful.to_string()),
             "sync.promotion_threshold" => Some(self.sync.promotion_threshold.to_string()),
+            "sync.demotion_threshold" => Some(self.sync.demotion_threshold.to_string()),
             "sync.promotion_evidence" => Some(self.sync.promotion_evidence.join(",")),
             // Cloud section
             "cloud.auto_sync" => Some(cloud.auto_sync.to_string()),

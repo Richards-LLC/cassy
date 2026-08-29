@@ -302,6 +302,7 @@ impl WizardConfig {
             target: ".claude/rules/cas".to_string(),
             min_helpful: 1,
             promotion_threshold: 2,
+            demotion_threshold: 2,
             promotion_evidence: vec!["helpful".to_string()],
         };
 

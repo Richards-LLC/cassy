@@ -60,7 +60,7 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
             key: "sync.promotion_threshold",
             section: "sync",
             name: "Rule Promotion Threshold",
-            description: "Minimum number of outcome-evidence events required before an unproven rule becomes Proven. Existing Proven rules are grandfathered and are not mass-demoted when this changes. The minimum accepted value is 2 so one self-reported call can never promote a rule.",
+            description: "Minimum number of outcome-evidence events required before an unproven rule becomes Proven. Existing Proven rules are grandfathered and are not mass-demoted when this changes. The minimum accepted value is 2 so one self-reported call can never promote a rule; retrieval evidence also requires outcomes from at least two distinct privacy-preserving sessions.",
             value_type: ConfigType::Int,
             default: "2",
             constraint: Constraint::Min(2),
@@ -77,7 +77,7 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
             key: "sync.promotion_evidence",
             section: "sync",
             name: "Rule Promotion Evidence",
-            description: "Comma-separated evidence sources that may satisfy the promotion threshold: helpful uses explicit rule feedback; retrieval uses per-rule retrieval outcome aggregates and requires useful, uncorrected evidence. Any configured source may satisfy the threshold.",
+            description: "Comma-separated evidence sources that may satisfy the promotion threshold: helpful uses explicit rule feedback; retrieval uses per-rule retrieval outcome aggregates and requires useful, uncorrected evidence from at least two distinct privacy-preserving sessions. Any configured source may satisfy the threshold.",
             value_type: ConfigType::StringList,
             default: "helpful",
             constraint: Constraint::None,
@@ -88,6 +88,23 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
                 "Use helpful for explicit rule feedback",
                 "Use retrieval to require measured retrieval outcomes",
                 "List both sources when either configured signal may qualify",
+            ],
+        });
+
+    registry.register(ConfigMeta {
+            key: "sync.demotion_threshold",
+            section: "sync",
+            name: "Rule Demotion Threshold",
+            description: "Minimum number of harmful or corrected outcome events required before a Proven rule becomes Stale. Retrieval evidence also requires outcomes from at least two distinct privacy-preserving sessions. Existing Proven rules are grandfathered until new negative evidence reaches this threshold.",
+            value_type: ConfigType::Int,
+            default: "2",
+            constraint: Constraint::Min(2),
+            advanced: false,
+            requires_feature: None,
+            keywords: &["rules", "demotion", "threshold", "evidence", "harmful", "corrected"],
+            use_cases: &[
+                "Raise to require more negative evidence before demotion",
+                "Keep the default of 2 to avoid one self-reported negative event removing a rule",
             ],
         });
 

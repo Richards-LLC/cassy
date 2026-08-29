@@ -23,6 +23,10 @@ impl Config {
                 self.sync.promotion_threshold.to_string(),
             ),
             (
+                "sync.demotion_threshold".to_string(),
+                self.sync.demotion_threshold.to_string(),
+            ),
+            (
                 "sync.promotion_evidence".to_string(),
                 self.sync.promotion_evidence.join(","),
             ),

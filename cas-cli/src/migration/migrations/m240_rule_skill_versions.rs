@@ -42,12 +42,22 @@ mod tests {
             1
         );
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM pragma_table_info('rule_versions')", [], |row| row.get::<_, i64>(0)).unwrap(),
-            9
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('rule_versions')",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            10
         );
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM pragma_table_info('skill_versions')", [], |row| row.get::<_, i64>(0)).unwrap(),
-            10
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_versions')",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            11
         );
     }
 }

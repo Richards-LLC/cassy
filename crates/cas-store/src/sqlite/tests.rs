@@ -283,7 +283,10 @@ fn test_rule_history_and_tombstone_delete() {
     let store = SqliteRuleStore::open(temp.path()).unwrap();
     store.init().unwrap();
 
-    let rule = Rule::new("rule-history-01".to_string(), "original content".to_string());
+    let rule = Rule::new(
+        "rule-history-01".to_string(),
+        "original content".to_string(),
+    );
     store.add(&rule).unwrap();
     let mut updated = rule.clone();
     updated.content = "updated content".to_string();
@@ -292,8 +295,9 @@ fn test_rule_history_and_tombstone_delete() {
         .unwrap();
 
     let versions = store.list_versions("rule-history-01").unwrap();
-    assert_eq!(versions.len(), 1);
+    assert_eq!(versions.len(), 2);
     assert_eq!(versions[0].content, "original content");
+    assert_eq!(versions[0].operation, "update");
     assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
     assert_eq!(versions[0].change_note, "revise wording");
 
@@ -317,7 +321,15 @@ fn test_rule_history_and_tombstone_delete() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version_count, 2);
+    assert_eq!(version_count, 3);
+    let operation: String = conn
+        .query_row(
+            "SELECT operation FROM rule_versions WHERE rule_id = 'rule-history-01' AND version = 3",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(operation, "delete");
 
     store
         .restore_version("rule-history-01", Some(1), Some("restorer"), None)
@@ -325,6 +337,37 @@ fn test_rule_history_and_tombstone_delete() {
     let restored = store.get("rule-history-01").unwrap();
     assert_eq!(restored.content, "original content");
     assert_eq!(restored.status, cas_types::RuleStatus::Draft);
+}
+
+/// cas-ef20: creating a rule is an auditable lifecycle mutation too. The
+/// initial snapshot must be restorable and identify the create operation.
+#[test]
+fn test_rule_create_is_versioned() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let rule = Rule::new(
+        "rule-create-history-01".to_string(),
+        "created content".to_string(),
+    );
+    store.add(&rule).unwrap();
+
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, 1);
+    assert_eq!(versions[0].content, rule.content);
+    assert_eq!(versions[0].status, rule.status);
+
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    let operation: String = conn
+        .query_row(
+            "SELECT operation FROM rule_versions WHERE rule_id = ?1",
+            [&rule.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(operation, "create");
 }
 
 /// T5 cas-07d7: Skill.share must round-trip. First code-review round

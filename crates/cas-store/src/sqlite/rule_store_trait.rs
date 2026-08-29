@@ -7,19 +7,56 @@ use crate::version_store::{
 use crate::{Result, RuleStore};
 use cas_types::{Rule, RuleStatus};
 use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 impl SqliteRuleStore {
+    fn insert_version(
+        tx: &Transaction<'_>,
+        rule_id: &str,
+        snapshot_json: &str,
+        content: &str,
+        status: RuleStatus,
+        changed_by: &Option<String>,
+        changed_at: &str,
+        change_note: &str,
+        operation: &str,
+    ) -> Result<()> {
+        let next_version: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM rule_versions WHERE rule_id = ?1",
+            params![rule_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO rule_versions
+             (rule_id, version, snapshot_json, content, status, changed_by, changed_at, change_note, operation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                rule_id,
+                next_version,
+                snapshot_json,
+                content,
+                status.to_string(),
+                changed_by,
+                changed_at,
+                change_note,
+                operation,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn update_recorded(
         &self,
         rule: &Rule,
         changed_by: Option<&str>,
         change_note: Option<&str>,
+        operation: &str,
     ) -> Result<()> {
         let timer = TraceTimer::new();
         let previous = self.get(&rule.id)?;
-        let snapshot_json = serde_json::to_string(&previous)
-            .map_err(|error| StoreError::Parse(format!("failed to serialize rule history: {error}")))?;
+        let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
+            StoreError::Parse(format!("failed to serialize rule history: {error}"))
+        })?;
         let changed_by = changed_by
             .map(ToOwned::to_owned)
             .or_else(default_changed_by);
@@ -29,25 +66,16 @@ impl SqliteRuleStore {
         let result = (|| -> Result<()> {
             let mut conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = conn.transaction()?;
-            let next_version: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM rule_versions WHERE rule_id = ?1",
-                params![&rule.id],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO rule_versions
-                 (rule_id, version, snapshot_json, content, status, changed_by, changed_at, change_note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    &rule.id,
-                    next_version,
-                    snapshot_json,
-                    previous.content,
-                    previous.status.to_string(),
-                    changed_by,
-                    changed_at,
-                    change_note,
-                ],
+            Self::insert_version(
+                &tx,
+                &rule.id,
+                &snapshot_json,
+                &previous.content,
+                previous.status,
+                &changed_by,
+                &changed_at,
+                change_note,
+                operation,
             )?;
             let rows = tx.execute(
                 "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
@@ -118,6 +146,7 @@ impl SqliteRuleStore {
             &retired,
             changed_by,
             Some(change_note.unwrap_or("tombstone delete")),
+            "delete",
         )
     }
 
@@ -125,7 +154,7 @@ impl SqliteRuleStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, rule_id, version, snapshot_json, content, status,
-                    changed_by, changed_at, change_note
+                    changed_by, changed_at, change_note, operation
              FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC",
         )?;
         let versions = stmt
@@ -143,6 +172,7 @@ impl SqliteRuleStore {
                     changed_by: row.get(6)?,
                     changed_at: parse_datetime(&row.get::<_, String>(7)?),
                     change_note: row.get(8)?,
+                    operation: row.get(9)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -181,7 +211,9 @@ impl SqliteRuleStore {
             StoreError::Parse(format!("invalid rule history for {id}: {error}"))
         })?;
         if restored.id != id {
-            return Err(StoreError::Parse(format!("rule history ID mismatch for: {id}")));
+            return Err(StoreError::Parse(format!(
+                "rule history ID mismatch for: {id}"
+            )));
         }
         let default_note;
         let note = match (change_note, version) {
@@ -192,7 +224,7 @@ impl SqliteRuleStore {
             }
             (None, None) => Some("restore latest version"),
         };
-        self.update_recorded(&restored, changed_by, note)
+        self.update_recorded(&restored, changed_by, note, "restore")
     }
 }
 
@@ -248,35 +280,56 @@ impl RuleStore for SqliteRuleStore {
 
     fn add(&self, rule: &Rule) -> Result<()> {
         let timer = TraceTimer::new();
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let result = conn.execute(
-            "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
-             tags, paths, content, status, last_accessed, review_after, hook_command,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-            params![
-                rule.id,
-                rule.created.to_rfc3339(),
-                Self::source_ids_to_string(&rule.source_ids),
-                rule.helpful_count,
-                rule.harmful_count,
-                Self::tags_to_string(&rule.tags),
-                rule.paths,
-                rule.content,
-                rule.status.to_string(),
-                rule.last_accessed.map(|t| t.to_rfc3339()),
-                rule.review_after.map(|t| t.to_rfc3339()),
-                rule.hook_command.as_ref(),
-                rule.category.to_string(),
-                rule.priority,
-                rule.surface_count,
-                rule.scope.to_string(),
-                rule.auto_approve_tools.as_ref(),
-                rule.auto_approve_paths.as_ref(),
-                rule.team_id.as_ref(),
-                rule.share.as_ref().map(|s| s.to_string()),
-            ],
-        );
+        let snapshot_json = serde_json::to_string(rule).map_err(|error| {
+            StoreError::Parse(format!("failed to serialize rule history: {error}"))
+        });
+        let result = snapshot_json.and_then(|snapshot_json| {
+            let changed_by = default_changed_by();
+            let changed_at = Utc::now().to_rfc3339();
+            let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
+                 tags, paths, content, status, last_accessed, review_after, hook_command,
+                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                params![
+                    rule.id,
+                    rule.created.to_rfc3339(),
+                    Self::source_ids_to_string(&rule.source_ids),
+                    rule.helpful_count,
+                    rule.harmful_count,
+                    Self::tags_to_string(&rule.tags),
+                    rule.paths,
+                    rule.content,
+                    rule.status.to_string(),
+                    rule.last_accessed.map(|t| t.to_rfc3339()),
+                    rule.review_after.map(|t| t.to_rfc3339()),
+                    rule.hook_command.as_ref(),
+                    rule.category.to_string(),
+                    rule.priority,
+                    rule.surface_count,
+                    rule.scope.to_string(),
+                    rule.auto_approve_tools.as_ref(),
+                    rule.auto_approve_paths.as_ref(),
+                    rule.team_id.as_ref(),
+                    rule.share.as_ref().map(|s| s.to_string()),
+                ],
+            )?;
+            Self::insert_version(
+                &tx,
+                &rule.id,
+                &snapshot_json,
+                &rule.content,
+                rule.status,
+                &changed_by,
+                &changed_at,
+                "create",
+                "create",
+            )?;
+            tx.commit()?;
+            Ok(())
+        });
 
         // Record trace
         if let Some(tracer) = DevTracer::get() {
@@ -353,7 +406,7 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {
-        self.update_recorded(rule, None, None)
+        self.update_recorded(rule, None, None, "update")
     }
 
     fn update_with_metadata(
@@ -362,7 +415,7 @@ impl RuleStore for SqliteRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.update_recorded(rule, changed_by, change_note)
+        self.update_recorded(rule, changed_by, change_note, "update")
     }
 
     fn increment_surface_count(&self, id: &str) -> Result<()> {

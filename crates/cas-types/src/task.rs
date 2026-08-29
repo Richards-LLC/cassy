@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 use std::str::FromStr;
 
@@ -370,6 +371,165 @@ pub struct TaskDeliverables {
     /// used to be indistinguishable in task status output.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_conflicted: bool,
+}
+
+/// Maximum serialized size of the structured task execution state. The state
+/// is a bounded resume surface, not an append-only transcript.
+pub const TASK_EXECUTION_STATE_MAX_BYTES: usize = 16 * 1024;
+const TASK_EXECUTION_STATE_MAX_STRING_BYTES: usize = 2 * 1024;
+const TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS: usize = 256;
+
+const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
+    "phase",
+    "receipts",
+    "files_touched",
+    "decisions",
+    "next_step",
+];
+
+/// Apply and validate one structured task execution-state merge patch.
+///
+/// The state is deliberately sparse: omitted fields stay omitted and a null
+/// patch value deletes that field. Arrays are replaced as a unit, which keeps
+/// patch semantics deterministic and bounded while allowing workers to report
+/// their complete current receipt/file/decision set at a milestone.
+pub fn merge_task_execution_state_patch(current: &Value, patch: &Value) -> Result<Value, String> {
+    validate_task_execution_state(current)?;
+    let patch_object = patch
+        .as_object()
+        .ok_or_else(|| "execution state patch must be a JSON object".to_string())?;
+    let mut merged = current
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "stored execution state must be a JSON object".to_string())?;
+
+    for (field, value) in patch_object {
+        if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
+            return Err(format!(
+                "unknown execution state field '{field}'; allowed fields: {}",
+                TASK_EXECUTION_STATE_FIELDS.join(", ")
+            ));
+        }
+        if value.is_null() {
+            merged.remove(field);
+        } else {
+            validate_task_execution_state_field(field, value)?;
+            merged.insert(field.clone(), value.clone());
+        }
+    }
+
+    let result = Value::Object(merged);
+    validate_task_execution_state(&result)?;
+    let encoded = serde_json::to_vec(&result)
+        .map_err(|error| format!("failed to encode execution state: {error}"))?;
+    if encoded.len() > TASK_EXECUTION_STATE_MAX_BYTES {
+        return Err(format!(
+            "execution state exceeds the {}-byte limit",
+            TASK_EXECUTION_STATE_MAX_BYTES
+        ));
+    }
+    Ok(result)
+}
+
+/// Validate a stored execution-state JSON object without changing it.
+pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
+    let object = state
+        .as_object()
+        .ok_or_else(|| "execution state must be a JSON object".to_string())?;
+    for (field, value) in object {
+        if value.is_null() {
+            return Err(format!(
+                "execution state field '{field}' must be deleted, not stored as null"
+            ));
+        }
+        if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
+            return Err(format!(
+                "unknown execution state field '{field}'; allowed fields: {}",
+                TASK_EXECUTION_STATE_FIELDS.join(", ")
+            ));
+        }
+        validate_task_execution_state_field(field, value)?;
+    }
+    let encoded = serde_json::to_vec(state)
+        .map_err(|error| format!("failed to encode execution state: {error}"))?;
+    if encoded.len() > TASK_EXECUTION_STATE_MAX_BYTES {
+        return Err(format!(
+            "execution state exceeds the {}-byte limit",
+            TASK_EXECUTION_STATE_MAX_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "phase" | "next_step" => validate_state_string(field, value),
+        "files_touched" | "decisions" => validate_state_string_array(field, value),
+        "receipts" => {
+            let receipts = value
+                .as_array()
+                .ok_or_else(|| format!("execution state field '{field}' must be an array"))?;
+            if receipts.len() > TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS {
+                return Err(format!(
+                    "execution state field '{field}' has too many items (maximum {})",
+                    TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS
+                ));
+            }
+            for (index, receipt) in receipts.iter().enumerate() {
+                let object = receipt
+                    .as_object()
+                    .ok_or_else(|| format!("execution state receipt {index} must be an object"))?;
+                let command = object
+                    .get("command")
+                    .ok_or_else(|| format!("execution state receipt {index} requires command"))?;
+                validate_state_string(&format!("receipt {index} command"), command)?;
+                let exit_status = object.get("exit_status").ok_or_else(|| {
+                    format!("execution state receipt {index} requires exit_status")
+                })?;
+                if !exit_status.is_i64() && !exit_status.is_u64() {
+                    return Err(format!(
+                        "execution state receipt {index} exit_status must be an integer"
+                    ));
+                }
+                if object.len() != 2 {
+                    return Err(format!(
+                        "execution state receipt {index} only allows command and exit_status"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => unreachable!("field checked against TASK_EXECUTION_STATE_FIELDS"),
+    }
+}
+
+fn validate_state_string(field: &str, value: &Value) -> Result<(), String> {
+    let string = value
+        .as_str()
+        .ok_or_else(|| format!("execution state field '{field}' must be a string"))?;
+    if string.len() > TASK_EXECUTION_STATE_MAX_STRING_BYTES {
+        return Err(format!(
+            "execution state field '{field}' exceeds the {}-byte limit",
+            TASK_EXECUTION_STATE_MAX_STRING_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn validate_state_string_array(field: &str, value: &Value) -> Result<(), String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("execution state field '{field}' must be an array"))?;
+    if values.len() > TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS {
+        return Err(format!(
+            "execution state field '{field}' has too many items (maximum {})",
+            TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS
+        ));
+    }
+    for (index, value) in values.iter().enumerate() {
+        validate_state_string(&format!("{field}[{index}]"), value)?;
+    }
+    Ok(())
 }
 
 impl TaskDeliverables {

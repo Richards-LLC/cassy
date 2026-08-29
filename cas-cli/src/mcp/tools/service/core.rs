@@ -370,6 +370,7 @@ impl CasService {
         }
         let target_repo = req.target_repo.clone();
         let target_branch = req.target_branch.clone();
+        let state_patch = req.state_patch.clone();
         let inner_req = TaskUpdateRequest {
             id: req
                 .id
@@ -399,6 +400,7 @@ impl CasService {
                 target_branch.as_deref(),
                 req.proof_scope_fix.unwrap_or(false),
                 req.reason.as_deref(),
+                state_patch,
             )
             .await
     }

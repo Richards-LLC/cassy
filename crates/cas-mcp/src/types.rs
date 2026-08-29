@@ -226,6 +226,15 @@ pub struct TaskRequest {
     #[serde(default)]
     pub notes: Option<String>,
 
+    /// Merge patch for the compact structured task resume state. The patch is
+    /// validated and applied atomically by the task store; null removes a
+    /// field. Prose notes remain the human/audit surface.
+    #[schemars(
+        description = "For update: JSON merge patch for structured execution state (phase, receipts, files_touched, decisions, next_step); null deletes a field"
+    )]
+    #[serde(default)]
+    pub state_patch: Option<serde_json::Value>,
+
     /// Note type (for notes action): progress, blocker, decision, discovery, question
     #[schemars(
         description = "Note type: 'progress', 'blocker', 'decision', 'discovery', 'question'"

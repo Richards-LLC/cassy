@@ -1,4 +1,6 @@
+use crate::TaskStore;
 use crate::task_store::*;
+use serde_json::json;
 use tempfile::TempDir;
 
 fn create_test_store() -> (TempDir, SqliteTaskStore) {
@@ -45,6 +47,84 @@ fn test_task_crud() {
     // Delete task
     store.delete(&id).unwrap();
     assert!(store.get(&id).is_err());
+}
+
+#[test]
+fn task_execution_state_patch_merges_and_deletes_fields() {
+    let (_temp, store) = create_test_store();
+    let id = store.generate_id().unwrap();
+    store
+        .add(&Task::new(id.clone(), "Execution state".to_string()))
+        .unwrap();
+
+    assert_eq!(store.get_execution_state(&id).unwrap(), None);
+    let first = store
+        .patch_execution_state(
+            &id,
+            &json!({
+                "phase": "implement",
+                "files_touched": ["src/lib.rs"],
+                "receipts": [{"command": "cargo check", "exit_status": 0}]
+            }),
+        )
+        .unwrap();
+    assert_eq!(first["phase"], "implement");
+
+    let merged = store
+        .patch_execution_state(
+            &id,
+            &json!({
+                "phase": "verify",
+                "next_step": "run focused tests",
+                "decisions": ["keep the state sparse"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(merged["phase"], "verify");
+    assert_eq!(merged["files_touched"], json!(["src/lib.rs"]));
+    assert_eq!(merged["next_step"], "run focused tests");
+
+    let without_phase = store
+        .patch_execution_state(&id, &json!({"phase": null}))
+        .unwrap();
+    assert!(without_phase.get("phase").is_none());
+    assert_eq!(store.get_execution_state(&id).unwrap(), Some(without_phase));
+}
+
+#[test]
+fn malformed_task_execution_state_patch_is_rejected_atomically() {
+    let (_temp, store) = create_test_store();
+    let id = store.generate_id().unwrap();
+    store
+        .add(&Task::new(
+            id.clone(),
+            "Execution state rejection".to_string(),
+        ))
+        .unwrap();
+    let before = store
+        .patch_execution_state(&id, &json!({"phase": "implement"}))
+        .unwrap();
+
+    for invalid in [
+        json!({"files_touched": "not-an-array"}),
+        json!({"unknown": true}),
+        json!({"receipts": [{"command": "cargo check"}]}),
+        json!("not-an-object"),
+    ] {
+        assert!(
+            store.patch_execution_state(&id, &invalid).is_err(),
+            "invalid patch should be rejected: {invalid}"
+        );
+        assert_eq!(
+            store.get_execution_state(&id).unwrap(),
+            Some(before.clone())
+        );
+    }
+
+    store
+        .patch_execution_state(&id, &json!({"phase": null}))
+        .unwrap();
+    assert_eq!(store.get_execution_state(&id).unwrap(), None);
 }
 
 #[test]

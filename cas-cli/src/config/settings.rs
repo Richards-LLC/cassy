@@ -47,6 +47,17 @@ pub struct SyncConfig {
     /// Minimum helpful votes before syncing
     #[serde(default = "default_min_helpful")]
     pub min_helpful: i32,
+
+    /// Minimum evidence events before a Draft or Stale rule can become Proven.
+    /// Existing Proven rules keep their status when this setting changes.
+    #[serde(default = "default_promotion_threshold")]
+    pub promotion_threshold: i32,
+
+    /// Evidence sources eligible to satisfy `promotion_threshold`. Supported
+    /// values are `helpful` (explicit rule feedback) and `retrieval`
+    /// (privacy-safe retrieval outcome aggregates).
+    #[serde(default = "default_promotion_evidence")]
+    pub promotion_evidence: Vec<String>,
 }
 
 /// Task configuration
@@ -943,12 +954,46 @@ fn default_min_helpful() -> i32 {
     1
 }
 
+fn default_promotion_threshold() -> i32 {
+    2
+}
+
+fn default_promotion_evidence() -> Vec<String> {
+    vec!["helpful".to_string()]
+}
+
+/// Normalize and validate the configurable rule-promotion evidence sources.
+pub(crate) fn parse_promotion_evidence(value: &str) -> Result<Vec<String>, String> {
+    let sources: Vec<String> = value
+        .split(',')
+        .map(|source| source.trim().to_ascii_lowercase())
+        .filter(|source| !source.is_empty())
+        .collect();
+
+    if sources.is_empty() {
+        return Err("promotion_evidence must name at least one source".to_string());
+    }
+
+    if let Some(unknown) = sources
+        .iter()
+        .find(|source| !matches!(source.as_str(), "helpful" | "retrieval"))
+    {
+        return Err(format!(
+            "unknown promotion evidence source '{unknown}'; expected helpful or retrieval"
+        ));
+    }
+
+    Ok(sources)
+}
+
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             target: ".claude/rules/cas".to_string(),
             min_helpful: 1,
+            promotion_threshold: default_promotion_threshold(),
+            promotion_evidence: default_promotion_evidence(),
         }
     }
 }

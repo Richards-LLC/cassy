@@ -28,6 +28,23 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
    - **MERGE REQUIRED:** run the [close-gate freshness handshake](cas-worker/references/close-gate.md), including `inbox_poll` for unread supervisor messages, before any corrective commit; if a merge is still needed, send the current factory-branch tip SHA. Never bypass with `status=closed`.
    - **task-scoped verification:** forward the exact guidance once and trust the DB.
 
+## Structured execution state
+
+Use the task's compact structured execution state as the machine resume surface at
+each meaningful milestone. Patch it in the same task update round-trip as any
+ordinary task-field update when possible; `null` deletes a field. The schema is
+bounded to `phase`, `receipts` (each `{command, exit_status}`), `files_touched`,
+`decisions`, and `next_step`:
+
+```
+mcp__cas__task action=update id=<task-id> \
+  state_patch='{"phase":"verify","receipts":[{"command":"cargo test -p cas","exit_status":0}],"files_touched":["src/lib.rs"],"next_step":"push branch"}'
+```
+
+Read it first after a context clear with `action=start brief=true` or `action=show`.
+Keep prose progress notes as the human/audit trail; structured state supplements
+notes and never replaces them.
+
 ## Task Types
 
 - **Spike** — record its decision with `note_type=decision`; its criteria are question-based.

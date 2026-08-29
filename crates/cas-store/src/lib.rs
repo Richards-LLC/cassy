@@ -69,6 +69,7 @@ mod sqlite;
 mod sqlite_code_store;
 mod supervisor_queue_store;
 mod task_store;
+pub mod trace_archive;
 pub mod tracing;
 mod verification_store;
 mod viktor_inbound_store;
@@ -87,6 +88,11 @@ mod worktree_lease_test;
 
 // Re-export error types
 pub use error::{Result, StoreError};
+
+pub use trace_archive::{
+    RecordingArchive, RecordingFtsEntry, TraceArchiveStats, prune_trace_archives,
+    trace_archive_stats, write_jsonl_archive,
+};
 
 // Agent store for multi-agent coordination
 pub use agent_store::{AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};

@@ -365,7 +365,11 @@ fn test_maintenance_cycle_runs_pruning_and_checkpoint() {
 #[test]
 fn test_maintenance_archives_old_events_and_recordings() {
     use crate::store::{init_cas_dir, open_event_store, open_recording_store};
-    use cas_types::{Event, EventEntityType, EventType, Recording};
+    use cas_types::{
+        Event, EventEntityType, EventType, Recording, RecordingAgent, RecordingEvent,
+        RecordingEventType,
+    };
+    use std::io::Read;
     use tempfile::TempDir;
 
     let temp = TempDir::new().unwrap();
@@ -387,6 +391,24 @@ fn test_maintenance_archives_old_events_and_recordings() {
     recording.created_at = old;
     let recording_id = recording.id.clone();
     recording_store.add(&recording).unwrap();
+    recording_store
+        .add_agent(&RecordingAgent::new(
+            recording_id.clone(),
+            "old-worker".to_string(),
+            "worker".to_string(),
+            "/tmp/old-worker.trace".to_string(),
+        ))
+        .unwrap();
+    recording_store
+        .add_event(&RecordingEvent::new(
+            recording_id.clone(),
+            42,
+            RecordingEventType::TaskStarted,
+        ))
+        .unwrap();
+    recording_store
+        .add_fts_content(&recording_id, "old transcript", "output", 42)
+        .unwrap();
 
     let config = DaemonConfig {
         cas_root: cas_root.clone(),
@@ -418,6 +440,27 @@ fn test_maintenance_archives_old_events_and_recordings() {
     assert!(archive_names
         .iter()
         .any(|name| name.starts_with("recordings-")));
+
+    let read_archive = |prefix: &str| {
+        let name = archive_names
+            .iter()
+            .find(|name| name.starts_with(prefix))
+            .unwrap();
+        let file = std::fs::File::open(cas_root.join("archive").join(name)).unwrap();
+        let mut decoded = String::new();
+        zstd::stream::read::Decoder::new(file)
+            .unwrap()
+            .read_to_string(&mut decoded)
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(decoded.trim()).unwrap()
+    };
+    let event_archive = read_archive("events-");
+    assert_eq!(event_archive["summary"], "old event");
+    let recording_archive = read_archive("recordings-");
+    assert_eq!(recording_archive["recording"]["id"], recording_id);
+    assert_eq!(recording_archive["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(recording_archive["events"].as_array().unwrap().len(), 1);
+    assert_eq!(recording_archive["fts"][0]["content"], "old transcript");
 }
 
 // ===== cas-499c: symbol index revival =====

@@ -4376,6 +4376,8 @@ impl CasService {
             .collect();
 
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+        let trace_archive =
+            cas_store::trace_archive_stats(&self.inner.cas_root).unwrap_or_default();
         let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
             .ok()
             .and_then(|store| store.list(Some(cas_types::TaskStatus::Closed)).ok())
@@ -4434,6 +4436,10 @@ impl CasService {
             orphan_processes.processes.len(),
             orphan_processes.servers.len(),
             orphan_processes.reapable_count(),
+        ));
+        out.push_str(&format!(
+            "\nTrace archive: {} files, {} bytes\n",
+            trace_archive.files, trace_archive.bytes
         ));
         if !dangling_node_modules.is_empty() {
             out.push_str(

@@ -233,6 +233,13 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            // Daemon section
+            "daemon.archive_retention_days" => {
+                let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
+                daemon.archive_retention_days = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
             // Code section
             "code.enabled" => {
                 let code = self.code.get_or_insert_with(CodeConfig::default);

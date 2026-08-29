@@ -327,6 +327,7 @@ impl WizardConfig {
                 block_exit_on_open: true,
             }),
             dev: None,
+            daemon: None,
             code: None,
             cloud: None,
             notifications: None,

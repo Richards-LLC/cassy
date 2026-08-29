@@ -32,6 +32,9 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         .insert("dev", "Development and tracing options");
     registry
         .section_descriptions
+        .insert("daemon", "Background maintenance and trace archives");
+    registry
+        .section_descriptions
         .insert("code", "Background code indexing for semantic search");
     registry
         .section_descriptions

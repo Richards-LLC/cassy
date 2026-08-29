@@ -26,12 +26,14 @@ fn test_daemon_config_conversion() {
     let config = EmbeddedDaemonConfig {
         cas_root: PathBuf::from("/tmp/cas"),
         maintenance_interval_secs: 1800,
+        archive_retention_days: 90,
         ..Default::default()
     };
 
     let daemon_config = config.to_daemon_config();
     assert_eq!(daemon_config.interval_minutes, 30);
     assert_eq!(daemon_config.cas_root, PathBuf::from("/tmp/cas"));
+    assert_eq!(daemon_config.archive_retention_days, 90);
 }
 
 #[test]

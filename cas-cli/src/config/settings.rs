@@ -715,6 +715,23 @@ impl Default for DevConfig {
     }
 }
 
+/// Daemon maintenance configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonSettings {
+    /// Days to retain compressed event/recording archives. Zero keeps them
+    /// forever (the default).
+    #[serde(default)]
+    pub archive_retention_days: u64,
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            archive_retention_days: 0,
+        }
+    }
+}
+
 /// Telemetry configuration for anonymous usage tracking
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {

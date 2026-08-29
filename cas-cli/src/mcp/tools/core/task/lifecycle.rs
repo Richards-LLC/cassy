@@ -1396,6 +1396,30 @@ impl CasCore {
             // fixed header/claim/warning/push text remains small, while own
             // notes are capped to 4 KiB and sibling/epic/workflow payloads are
             // omitted entirely.
+            let execution_state = task_store
+                .get_execution_state(&task.id)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Task {} has unreadable structured execution state: {error}",
+                            task.id
+                        ),
+                    )
+                })?
+                .map(|state| {
+                    let encoded = serde_json::to_string(&state).map_err(|error| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "Task {} structured execution state could not be encoded: {error}",
+                                task.id
+                            ),
+                        )
+                    })?;
+                    Ok::<String, McpError>(format!("\n\nStructured execution state:\n{encoded}"))
+                })
+                .transpose()?;
             let own_notes = if task.notes.is_empty() {
                 String::new()
             } else {
@@ -1405,11 +1429,12 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}{}{}{}{}{}",
+                "Started task: {} - {}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 claim_info.unwrap_or_default(),
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
+                execution_state.unwrap_or_default(),
                 own_notes,
                 no_code_external_ref_guidance(&task),
                 push_note,

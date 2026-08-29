@@ -9,6 +9,7 @@ use crate::config::NotificationConfig;
 use crate::notifications::{NotificationEvent, get_global_notifier};
 use crate::store::{Result, TaskStore};
 use crate::types::{Dependency, DependencyType, Task, TaskStatus};
+use serde_json::Value;
 
 /// A task store wrapper that emits notification events
 pub struct NotifyingTaskStore {
@@ -95,6 +96,14 @@ impl TaskStore for NotifyingTaskStore {
 
     fn get(&self, id: &str) -> Result<Task> {
         self.inner.get(id)
+    }
+
+    fn get_execution_state(&self, task_id: &str) -> Result<Option<Value>> {
+        self.inner.get_execution_state(task_id)
+    }
+
+    fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value> {
+        self.inner.patch_execution_state(task_id, patch)
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {

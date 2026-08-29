@@ -50,6 +50,7 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     let mut events_pruned = 0;
     let mut lease_history_pruned = 0;
     let mut recordings_pruned = 0;
+    let mut trace_archives_evicted = 0;
 
     let store = open_store(&config.cas_root)?;
 
@@ -250,9 +251,9 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     }
 
     if config.auto_prune {
-        match cas_store::prune_trace_archives(&config.cas_root, config.archive_retention_days) {
-            Ok(_) => {}
-            Err(error) => errors.push(format!("Trace archive retention failed: {error}")),
+        match cas_store::enforce_trace_archive_size(&config.cas_root, config.archive_max_bytes) {
+            Ok(eviction) => trace_archives_evicted = eviction.files_evicted,
+            Err(error) => errors.push(format!("Trace archive size cap failed: {error}")),
         }
     }
 
@@ -297,6 +298,7 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         events_pruned,
         lease_history_pruned,
         recordings_pruned,
+        trace_archives_evicted,
         agents_cleaned,
         agents_purged,
         tasks_interrupted,

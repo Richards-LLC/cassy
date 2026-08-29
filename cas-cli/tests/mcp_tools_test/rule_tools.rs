@@ -216,6 +216,7 @@ async fn test_rule_update() {
         .await
         .expect("rule_history should succeed");
     let history_text = extract_text(history);
+    assert!(history_text.contains("create"));
     assert!(history_text.contains("revise wording"));
     assert!(history_text.contains("Original rule content"));
 

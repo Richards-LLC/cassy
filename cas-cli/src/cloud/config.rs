@@ -839,19 +839,14 @@ fn path_is_under_system_temp(path: &Path) -> bool {
     let Ok(canonical_temp_dir) = temp_dir.canonicalize() else {
         return false;
     };
-    let canonical_path = if absolute_path.exists() {
-        absolute_path.canonicalize().ok()
-    } else {
-        absolute_path
+    let canonical_path = match fs::symlink_metadata(&absolute_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => None,
+        Ok(_) => absolute_path.canonicalize().ok(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => absolute_path
             .parent()
             .and_then(|parent| parent.canonicalize().ok())
-            .map(|parent| {
-                parent.join(
-                    absolute_path
-                        .file_name()
-                        .expect("a path with a missing file must have a file name"),
-                )
-            })
+            .and_then(|parent| absolute_path.file_name().map(|name| parent.join(name))),
+        Err(_) => None,
     };
 
     canonical_path.is_some_and(|candidate| candidate.starts_with(canonical_temp_dir))
@@ -1456,9 +1451,8 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
-        let _guard = TestEnvGuard::new();
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("cloud.json");
+        let guard = TestEnvGuard::temp_home();
+        let path = guard.home().join("cloud.json");
 
         let config = CloudConfig {
             token: Some("test_token".to_string()),
@@ -1478,13 +1472,17 @@ mod tests {
     /// `CAS_USER_CLOUD_JSON` seam) and a project `.cas/` (via `CAS_ROOT`).
     /// Returns the guard plus both paths.
     fn machine_fixture() -> (TestEnvGuard, TempDir, PathBuf, PathBuf) {
-        let temp = TempDir::new().unwrap();
+        let guard = TestEnvGuard::temp_home();
+        let temp = tempfile::Builder::new()
+            .prefix("cas-cloud-fixture-")
+            .tempdir_in(guard.home())
+            .unwrap();
         let user_path = temp.path().join("home-cas").join("cloud.json");
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
         let project_cas = temp.path().join("project-b").join(".cas");
         std::fs::create_dir_all(&project_cas).unwrap();
 
-        let mut guard = TestEnvGuard::new();
+        let mut guard = guard;
         guard.set("CAS_USER_CLOUD_JSON", &user_path);
         guard.set("CAS_ROOT", &project_cas);
         let project_path = project_cas.join("cloud.json");
@@ -1644,9 +1642,9 @@ mod tests {
     fn test_fixture_login_does_not_write_cache_to_cas_root_project() {
         // Reproduce the incident's shape without touching a real project:
         // CAS_ROOT points at a project outside the system temp directory while
-        // the user-level path is safely injected into TempDir.
-        let temp = TempDir::new().unwrap();
-        let user_path = temp.path().join("home-cas").join("cloud.json");
+        // the user-level path is safely injected into TestEnvGuard's temp HOME.
+        let mut guard = TestEnvGuard::temp_home();
+        let user_path = guard.home().join(".cas/cloud.json");
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
 
         let project = project_fixture_outside_system_temp();
@@ -1656,7 +1654,6 @@ mod tests {
         std::fs::write(&project_cloud, b"{\"token\":\"real-project-token\"}\n").unwrap();
         let before = std::fs::read(&project_cloud).unwrap();
 
-        let mut guard = TestEnvGuard::new();
         guard.set("CAS_USER_CLOUD_JSON", &user_path);
         guard.set("CAS_ROOT", &project_cas);
 
@@ -1709,17 +1706,47 @@ mod tests {
         assert!(!cloud_path.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_fixture_cloud_write_rejects_dangling_symlink_outside_temp_directory() {
+        use std::os::unix::fs::symlink;
+
+        let project = project_fixture_outside_system_temp();
+        let external_cloud = project.path().join(".cas/cloud.json");
+        std::fs::create_dir_all(external_cloud.parent().unwrap()).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let link = temp.path().join("cloud.json");
+        symlink(&external_cloud, &link).unwrap();
+
+        let config = CloudConfig {
+            token: Some(TEST_FIXTURE_TOKEN.to_string()),
+            ..Default::default()
+        };
+
+        let error = config.save_to(&link).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("outside the system temp directory")
+        );
+        assert!(
+            !external_cloud.exists(),
+            "a fixture write must not follow a dangling symlink outside temp"
+        );
+    }
+
     #[test]
     fn store_login_credentials_works_outside_a_project() {
         // Ben #4 (cas-046d): `cas login --token` from $HOME died with
         // "Cassy not initialized — run cas init".
-        let temp = TempDir::new().unwrap();
-        let user_path = temp.path().join("home-cas").join("cloud.json");
+        let mut guard = TestEnvGuard::temp_home();
+        let user_path = guard.home().join(".cas/cloud.json");
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
-        let outside = temp.path().join("not-a-cas-project");
+        let outside = guard.home().join("not-a-cas-project");
         std::fs::create_dir_all(&outside).unwrap();
 
-        let mut guard = TestEnvGuard::new();
         guard.set("CAS_USER_CLOUD_JSON", &user_path);
         guard.remove("CAS_ROOT");
         guard.set_current_dir(&outside);

@@ -9,6 +9,10 @@ fn test_config_defaults() {
     assert!(config.sync.enabled);
     assert_eq!(config.sync.target, ".claude/rules/cas");
     assert_eq!(config.sync.min_helpful, 1);
+    assert_eq!(
+        config.daemon().archive_max_bytes,
+        cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES
+    );
     assert_eq!(config.daemon().archive_retention_days, 0);
     assert_eq!(config.sync.promotion_threshold, 2);
     assert_eq!(config.sync.promotion_evidence, vec!["helpful"]);
@@ -38,6 +42,30 @@ fn daemon_archive_retention_is_configurable_and_round_trips() {
     config.save(temp.path()).unwrap();
     let loaded = Config::load(temp.path()).unwrap();
     assert_eq!(loaded.daemon().archive_retention_days, 90);
+}
+
+#[test]
+fn daemon_archive_size_cap_is_configurable_and_rejects_zero() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(
+        config.get("daemon.archive_max_bytes"),
+        Some(cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES.to_string())
+    );
+    config.set("daemon.archive_max_bytes", "4096").unwrap();
+    assert_eq!(config.daemon().archive_max_bytes, 4096);
+    assert!(
+        config
+            .list()
+            .contains(&("daemon.archive_max_bytes".to_string(), "4096".to_string()))
+    );
+    assert!(meta::registry().get("daemon.archive_max_bytes").is_some());
+    assert!(config.set("daemon.archive_max_bytes", "0").is_err());
+
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.daemon().archive_max_bytes, 4096);
 }
 
 #[test]

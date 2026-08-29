@@ -132,9 +132,12 @@ pub use cas_store::{
     // Prompt store helpers
     add_prompt_with_conn,
     get_current_prompt_for_session,
+    list_archived_traces,
     layered,
     // Modules
     markdown,
+    sample_archived_traces,
+    trace_archive_stats,
 };
 
 // Local modules (not in cas-store)

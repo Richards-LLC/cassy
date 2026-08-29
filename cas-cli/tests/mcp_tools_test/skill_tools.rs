@@ -314,6 +314,7 @@ async fn test_skill_update() {
         .await
         .expect("skill_history should succeed");
     let history_text = extract_text(history);
+    assert!(history_text.contains("create"));
     assert!(history_text.contains("revise description"));
     assert!(history_text.contains("Original description"));
 
@@ -587,5 +588,7 @@ async fn test_skill_update_validation_failure_is_atomic() {
     let skill_store = open_skill_store(&temp.path().join(".cas")).unwrap();
     let stored = skill_store.get(&id).unwrap();
     assert_eq!(stored.description, "Original description");
-    assert!(skill_store.list_versions(&id).unwrap().is_empty());
+    let versions = skill_store.list_versions(&id).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].operation, "create");
 }

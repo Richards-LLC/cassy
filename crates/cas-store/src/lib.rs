@@ -92,8 +92,10 @@ mod worktree_lease_test;
 pub use error::{Result, StoreError};
 
 pub use trace_archive::{
-    RecordingArchive, RecordingFtsEntry, TraceArchiveStats, prune_trace_archives,
-    trace_archive_stats, write_jsonl_archive,
+    ArchivedTrace, ArchivedTraceRecord, DEFAULT_TRACE_ARCHIVE_MAX_BYTES, RecordingArchive,
+    RecordingFtsEntry, TraceArchiveEviction, TraceArchiveStats, enforce_trace_archive_size,
+    list_archived_traces, prune_trace_archives, sample_archived_traces, trace_archive_stats,
+    write_jsonl_archive,
 };
 
 // Agent store for multi-agent coordination

@@ -243,6 +243,12 @@ impl Config {
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
             // Daemon section
+            "daemon.archive_max_bytes" => {
+                let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
+                daemon.archive_max_bytes = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
             "daemon.archive_retention_days" => {
                 let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
                 daemon.archive_retention_days = value

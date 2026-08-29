@@ -54,6 +54,7 @@ impl Config {
             "dev.trace_claude_api" => Some(dev.trace_claude_api.to_string()),
             "dev.trace_hooks" => Some(dev.trace_hooks.to_string()),
             "dev.trace_retention_days" => Some(dev.trace_retention_days.to_string()),
+            "daemon.archive_max_bytes" => Some(daemon.archive_max_bytes.to_string()),
             "daemon.archive_retention_days" => Some(daemon.archive_retention_days.to_string()),
             // Code section
             "code.enabled" => Some(self.code.clone().unwrap_or_default().enabled.to_string()),

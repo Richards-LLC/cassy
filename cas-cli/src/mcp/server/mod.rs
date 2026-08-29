@@ -388,8 +388,11 @@ impl CasCore {
                 data: None,
             })?;
             Ok(format!(
-                "Maintenance completed in {:.2}s:\n- Observations: {}\n- Decay applied: {}",
-                result.duration_secs, result.observations_processed, result.decay_applied
+                "Maintenance completed in {:.2}s:\n- Observations: {}\n- Decay applied: {}\n- Trace archives evicted: {}",
+                result.duration_secs,
+                result.observations_processed,
+                result.decay_applied,
+                result.trace_archives_evicted
             ))
         } else {
             Err(McpError {

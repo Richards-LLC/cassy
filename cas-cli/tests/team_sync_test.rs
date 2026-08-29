@@ -472,6 +472,57 @@ async fn team_delete_uses_singular_entity_path() {
     assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
 }
 
+/// Legacy queued tasks may predate the stored `scope` field. Team pushes must
+/// repair that wire identity before sending: the cloud accepts the batch with
+/// HTTP 200 but skips task rows whose explicit scope is absent.
+#[tokio::test]
+async fn team_task_upsert_includes_explicit_project_scope() {
+    let server = MockServer::start().await;
+    let expected_project_id =
+        get_project_canonical_id().expect("team task push test must resolve project identity");
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "tasks": { "inserted": 1, "updated": 0, "skipped": 0 }
+            },
+            "canonical_id": expected_project_id,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "legacy-team-task",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"legacy-team-task","title":"legacy payload"}"#),
+            TEST_TEAM,
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+    tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .expect("team task push should succeed");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let payload = decode_gzip_json(&requests[0].body);
+    assert_eq!(payload["project_canonical_id"], expected_project_id);
+    assert_eq!(payload["tasks"][0]["scope"], "project");
+    assert_eq!(payload["tasks"][0]["origin_project"], expected_project_id);
+}
+
 /// Terminally parked rows are intentionally excluded from normal syncs. The
 /// existing `cas cloud queue --retry` recovery path requeues them so a fixed
 /// team-delete endpoint can flush the retained tombstone.

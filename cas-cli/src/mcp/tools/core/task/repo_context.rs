@@ -838,6 +838,33 @@ pub(crate) fn resolve_repo_context(
     }
 }
 
+/// Resolve a work target from the explicitly supplied project root only.
+///
+/// Informational paths such as merge-request revalidation may already hold the
+/// authoritative project root, but the general resolver also consults the
+/// host-wide known-repository registry so cross-repository lifecycle mutations
+/// can resolve portable selectors. That registry is ambient state: a stale or
+/// concurrently registered checkout can make an otherwise local selector look
+/// ambiguous. Callers that have an explicit local root should use this helper
+/// first and fall back to [`resolve_repo_context`] only for cross-repository
+/// targets.
+pub(crate) fn resolve_repo_context_from_local_root(
+    cas_root: &Path,
+    target: &WorkTarget,
+) -> Result<RepoContext, String> {
+    let (repo_root, git_common_dir) = git_layout(cas_root)?;
+    if !repo_answers_to(&repo_root, &target.repo_selector) {
+        return Err("explicit project root does not match work target selector".to_string());
+    }
+    let target_branch = validate_target_branch(&repo_root, &target.target_branch)?;
+    Ok(RepoContext {
+        repo_selector: target.repo_selector.clone(),
+        repo_root,
+        git_common_dir,
+        target_branch,
+    })
+}
+
 pub(crate) fn resolve_repo_context_bounded(
     cas_root: &Path,
     target: &WorkTarget,

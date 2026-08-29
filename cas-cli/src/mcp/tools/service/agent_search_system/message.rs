@@ -730,7 +730,9 @@ impl CasService {
         // eligible for revalidation and suppression.
         if role == "worker" && req.merge_request.unwrap_or(false) {
             use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha;
-            use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+            use crate::mcp::tools::core::task::repo_context::{
+                resolve_repo_context, resolve_repo_context_from_local_root,
+            };
             use crate::prompt_revalidation::{
                 MergeRequestDecision, MergeRequestEnvelope, attach_merge_request_envelope,
                 merge_landed_guidance, revalidate_merge_request, select_unambiguous_merge_task,
@@ -748,7 +750,9 @@ impl CasService {
 
             if let Some(task) = merge_task
                 && let Some(work_target) = task.deliverables.work_target.as_ref()
-                && let Ok(repo) = resolve_repo_context(&self.inner.cas_root, work_target)
+                && let Ok(repo) =
+                    resolve_repo_context_from_local_root(&self.inner.cas_root, work_target)
+                        .or_else(|_| resolve_repo_context(&self.inner.cas_root, work_target))
             {
                 let branch = task
                     .deliverables
@@ -2503,6 +2507,7 @@ mod cas99d2_redelivery_tests {
 #[cfg(test)]
 mod cas_89e1_post_merge_message_type_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, Task, TaskStatus, WorkTarget};
     use rmcp::model::RawContent;
     use std::path::Path;
@@ -2513,6 +2518,8 @@ mod cas_89e1_post_merge_message_type_tests {
             .arg("-C")
             .arg(repo)
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()
             .expect("git command");
         assert!(
@@ -2552,6 +2559,20 @@ mod cas_89e1_post_merge_message_type_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("host repo schema");
+        let host_collision = tempfile::tempdir().expect("host collision repo");
+        let collision_repo = host_collision.path();
+        git(collision_repo, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir(collision_repo.join(".cas")).expect("collision Cassy directory");
+        std::fs::write(
+            collision_repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-89e1-message-test\"\n",
+        )
+        .expect("collision Cassy config");
+        crate::store::known_repos::register_repo_strict(collision_repo)
+            .expect("register host collision");
+
         let project = tempfile::tempdir().expect("temporary project");
         let repo = project.path();
         git(repo, &["init", "-q", "-b", "main"]);

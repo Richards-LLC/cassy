@@ -68,17 +68,23 @@ impl CasCore {
             Ok(result) => Ok(Self::success(result)),
             Err(e) => {
                 // Fallback: run maintenance directly if daemon not available
+                let archive_max_bytes = crate::config::Config::load(&self.cas_root)
+                    .unwrap_or_default()
+                    .daemon()
+                    .archive_max_bytes;
                 let daemon_config = crate::daemon::DaemonConfig {
                     cas_root: self.cas_root.clone(),
+                    archive_max_bytes,
                     ..Default::default()
                 };
 
                 match crate::daemon::run_maintenance(&daemon_config) {
                     Ok(result) => Ok(Self::success(format!(
-                        "Maintenance completed in {:.2}s:\n- Observations: {}\n- Decay applied: {}\n- Errors: {}",
+                        "Maintenance completed in {:.2}s:\n- Observations: {}\n- Decay applied: {}\n- Trace archives evicted: {}\n- Errors: {}",
                         result.duration_secs,
                         result.observations_processed,
                         result.decay_applied,
+                        result.trace_archives_evicted,
                         result.errors.len()
                     ))),
                     Err(run_err) => Err(Self::error(

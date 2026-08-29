@@ -312,6 +312,7 @@ Doctor reports which cloud bucket the project resolves to and why, warns when tw
 ├── cas.db          # SQLite — memories, tasks, rules, skills, entities, agents
 ├── config.toml     # project configuration
 ├── knowledge/      # distilled wiki pages (markdown)
+├── archive/        # compressed, write-once event/recording trace archives
 ├── index/          # tantivy/ (BM25), code/ (symbols), knowledge-vectors/
 ├── logs/           # daily rolling logs
 └── worktrees/      # factory worker checkouts
@@ -342,6 +343,10 @@ One binary crate (`cas-cli`) plus 16 libraries under `crates/`:
 Built with Rust, SQLite, Tantivy, Ratatui, Ghostty VT and rmcp.
 
 Deeper material: [ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md) (crates, stores, hook scoring, search reality check) · [CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md) (adding commands, MCP tools, migrations, tests) · [CODEMAP.md](.claude/CODEMAP.md) (module-level navigation) · [CHANGELOG.md](CHANGELOG.md).
+
+Trace retention: [TRACE-ARCHIVES.md](docs/TRACE-ARCHIVES.md) describes the
+30-day live window, compressed archive format, finite byte cap, read API, and
+upgrade behavior for traces removed by older versions.
 
 ## Cloud (optional)
 

@@ -725,6 +725,37 @@ mod tests {
         assert_eq!(restored.status, SkillStatus::Enabled);
     }
 
+    /// cas-ef20: creating a skill is an auditable lifecycle mutation too. The
+    /// initial snapshot must be restorable and identify the create operation.
+    #[test]
+    fn test_skill_create_is_versioned() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteSkillStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let skill = Skill::new(
+            "skill-create-history-01".to_string(),
+            "Created Skill".to_string(),
+        );
+        store.add(&skill).unwrap();
+
+        let versions = store.list_versions(&skill.id).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, 1);
+        assert_eq!(versions[0].name, skill.name);
+        assert_eq!(versions[0].status, skill.status);
+
+        let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+        let operation: String = conn
+            .query_row(
+                "SELECT operation FROM skill_versions WHERE skill_id = ?1",
+                [&skill.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(operation, "create");
+    }
+
     #[test]
     fn test_skill_invokable() {
         let (_temp, store) = create_test_store();

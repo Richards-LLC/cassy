@@ -327,6 +327,34 @@ fn test_rule_history_and_tombstone_delete() {
     assert_eq!(restored.status, cas_types::RuleStatus::Draft);
 }
 
+/// cas-ef20: creating a rule is an auditable lifecycle mutation too. The
+/// initial snapshot must be restorable and identify the create operation.
+#[test]
+fn test_rule_create_is_versioned() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let rule = Rule::new("rule-create-history-01".to_string(), "created content".to_string());
+    store.add(&rule).unwrap();
+
+    let versions = store.list_versions(&rule.id).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, 1);
+    assert_eq!(versions[0].content, rule.content);
+    assert_eq!(versions[0].status, rule.status);
+
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    let operation: String = conn
+        .query_row(
+            "SELECT operation FROM rule_versions WHERE rule_id = ?1",
+            [&rule.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(operation, "create");
+}
+
 /// T5 cas-07d7: Skill.share must round-trip. First code-review round
 /// found the skill SELECT/INSERT/UPDATE had silently skipped the
 /// `share` column; this test exists to catch that regression class.

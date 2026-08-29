@@ -10,6 +10,14 @@ use chrono::Utc;
 
 fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
     if let Some(task) = value.as_object_mut() {
+        // Team task rows are project-scoped. Legacy queue payloads may have
+        // been serialized before Task::scope existed, but the cloud contract
+        // requires the explicit field or it may accept the batch while
+        // silently skipping the row.
+        task.insert(
+            "scope".to_string(),
+            serde_json::Value::String("project".to_string()),
+        );
         task.insert(
             "origin_project".to_string(),
             serde_json::Value::String(project_id.to_string()),
@@ -778,6 +786,10 @@ mod tests {
     fn queued_task_payloads_receive_current_project_identity() {
         let mut value = serde_json::json!({"id": "cas-legacy", "title": "old payload"});
         super::stamp_task_origin_project(&mut value, "acme/accounting");
+        assert_eq!(
+            value.get("scope").and_then(|value| value.as_str()),
+            Some("project")
+        );
         assert_eq!(
             value.get("origin_project").and_then(|value| value.as_str()),
             Some("acme/accounting")

@@ -8,6 +8,12 @@ enum PromotionEvidence {
     Retrieval,
 }
 
+// Verification verdicts are intentionally not guessed into this enum: the
+// verification store currently keys verdicts by task_id and has no stable
+// rule_id join. A future evidence source must use an explicit rule_id (or
+// immutable source ID), otherwise a verdict could be attributed to the wrong
+// rule. Retrieval outcomes are the available third-party signal today.
+
 fn configured_promotion_evidence(config: &Config) -> Result<Vec<PromotionEvidence>, McpError> {
     parse_promotion_evidence(&config.sync.promotion_evidence.join(","))
         .map(|sources| {
@@ -33,6 +39,13 @@ fn promotion_threshold(config: &Config) -> i32 {
     // invariant true even for such configs; the supported setting rejects
     // values below two at the config surface.
     config.sync.promotion_threshold.max(2)
+}
+
+fn demotion_threshold(config: &Config) -> i32 {
+    // Keep the one-event safety floor even when a raw TOML edit bypasses the
+    // Config registry. A single self-reported negative event is not enough to
+    // remove a rule that may already be relied upon by future sessions.
+    config.sync.demotion_threshold.max(2)
 }
 
 impl CasCore {
@@ -78,10 +91,32 @@ impl CasCore {
                 return false;
             }
             let useful = aggregate.used.saturating_add(aggregate.helpful);
+            // Session diversity is a cheap, privacy-preserving proxy for
+            // independent validation. Same-session self-report can be gamed,
+            // so third-party retrieval outcomes must come from multiple
+            // sessions before they outweigh a single caller's feedback.
             useful >= threshold
+                && aggregate.distinct_sessions >= 2
                 && aggregate.usefulness_rate >= 0.5
                 && aggregate.correction_rate == 0.0
                 && aggregate.harmful == 0
+        })
+    }
+
+    fn retrieval_meets_demotion_threshold(
+        aggregates: &[RetrievalAggregate],
+        threshold: i32,
+    ) -> bool {
+        let threshold = threshold as u64;
+        aggregates.iter().any(|aggregate| {
+            if aggregate.document_type != "rule" {
+                return false;
+            }
+            // Negative retrieval evidence follows the same independent-session
+            // guard as positive evidence. Repeated self-report from one
+            // session is too easy to game to demote a Proven rule by itself.
+            aggregate.distinct_sessions >= 2
+                && aggregate.corrected.saturating_add(aggregate.harmful) >= threshold
         })
     }
 
@@ -89,6 +124,8 @@ impl CasCore {
     /// retrieval store remains append-only and observational; only this rule
     /// decision path changes Rule state.
     fn refresh_retrieval_demotions(&self) -> Result<usize, McpError> {
+        let config = self.load_config();
+        let threshold = demotion_threshold(&config);
         let retrieval_store =
             SqliteRetrievalStore::open(&self.cas_root).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -114,13 +151,19 @@ impl CasCore {
                     message: Cow::from(format!("Failed to read retrieval feedback: {error}")),
                     data: None,
                 })?;
-            if Self::retrieval_is_negative(&aggregates) {
+            if Self::retrieval_meets_demotion_threshold(&aggregates, threshold) {
                 rule.status = RuleStatus::Stale;
-                rule_store.update(&rule).map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to demote rule: {error}")),
-                    data: None,
-                })?;
+                rule_store
+                    .update_with_metadata(
+                        &rule,
+                        None,
+                        Some("demoted after retrieval evidence threshold"),
+                    )
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to demote rule: {error}")),
+                        data: None,
+                    })?;
                 demoted += 1;
             }
         }
@@ -184,6 +227,10 @@ impl CasCore {
             Vec::new()
         };
         let retrieval_negative = Self::retrieval_is_negative(&retrieval_aggregates);
+        let retrieval_demotion = Self::retrieval_meets_demotion_threshold(
+            &retrieval_aggregates,
+            demotion_threshold(&config),
+        );
 
         rule.helpful_count += 1;
         rule.last_accessed = Some(chrono::Utc::now());
@@ -196,7 +243,7 @@ impl CasCore {
             PromotionEvidence::Helpful => helpful_evidence,
             PromotionEvidence::Retrieval => retrieval_evidence,
         });
-        let demoted = rule.status == RuleStatus::Proven && retrieval_negative;
+        let demoted = rule.status == RuleStatus::Proven && retrieval_demotion;
         if demoted {
             rule.status = RuleStatus::Stale;
         }
@@ -209,7 +256,11 @@ impl CasCore {
         }
 
         rule_store
-            .update_with_metadata(&rule, None, None)
+            .update_with_metadata(
+                &rule,
+                None,
+                demoted.then_some("demoted after retrieval evidence threshold"),
+            )
             .map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to update: {e}")),
@@ -373,6 +424,7 @@ impl CasCore {
         Parameters(req): Parameters<IdRequest>,
     ) -> Result<CallToolResult, McpError> {
         let rule_store = self.open_rule_store()?;
+        let config = self.load_config();
 
         let mut rule = rule_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
@@ -381,16 +433,23 @@ impl CasCore {
         })?;
 
         rule.harmful_count += 1;
-        let demoted = rule.status == RuleStatus::Proven;
+        let demoted = rule.status == RuleStatus::Proven
+            && rule.harmful_count >= demotion_threshold(&config);
         if demoted {
             rule.status = RuleStatus::Stale;
         }
 
-        rule_store.update(&rule).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to update: {e}")),
-            data: None,
-        })?;
+        rule_store
+            .update_with_metadata(
+                &rule,
+                None,
+                demoted.then_some("demoted after harmful evidence threshold"),
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to update: {e}")),
+                data: None,
+            })?;
 
         if demoted {
             let _ = self.sync_rules();
@@ -399,7 +458,7 @@ impl CasCore {
         let suffix = if demoted {
             "; demoted to Stale and removed from Claude Code"
         } else {
-            ""
+            " (negative evidence below demotion threshold)"
         };
         Ok(Self::success(format!(
             "Marked {} as harmful (score: {}){}",

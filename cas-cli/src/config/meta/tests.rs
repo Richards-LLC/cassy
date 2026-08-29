@@ -45,6 +45,8 @@ fn test_validate_bool() {
     assert!(reg.validate("sync.enabled", "invalid").is_err());
     assert!(reg.validate("sync.promotion_threshold", "2").is_ok());
     assert!(reg.validate("sync.promotion_threshold", "1").is_err());
+    assert!(reg.validate("sync.demotion_threshold", "2").is_ok());
+    assert!(reg.validate("sync.demotion_threshold", "1").is_err());
 }
 
 #[test]
@@ -79,6 +81,7 @@ fn test_section_keys() {
     assert!(sync_keys.contains(&"sync.target"));
     assert!(sync_keys.contains(&"sync.min_helpful"));
     assert!(sync_keys.contains(&"sync.promotion_threshold"));
+    assert!(sync_keys.contains(&"sync.demotion_threshold"));
     assert!(sync_keys.contains(&"sync.promotion_evidence"));
 }
 

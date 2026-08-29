@@ -15,6 +15,7 @@ fn test_config_defaults() {
     );
     assert_eq!(config.daemon().archive_retention_days, 0);
     assert_eq!(config.sync.promotion_threshold, 2);
+    assert_eq!(config.sync.demotion_threshold, 2);
     assert_eq!(config.sync.promotion_evidence, vec!["helpful"]);
 }
 
@@ -74,6 +75,7 @@ fn test_config_save_load() {
     let mut config = Config::default();
     config.sync.min_helpful = 5;
     config.sync.promotion_threshold = 4;
+    config.sync.demotion_threshold = 3;
     config.sync.promotion_evidence = vec!["retrieval".to_string()];
 
     config.save(temp.path()).unwrap();
@@ -81,6 +83,7 @@ fn test_config_save_load() {
 
     assert_eq!(loaded.sync.min_helpful, 5);
     assert_eq!(loaded.sync.promotion_threshold, 4);
+    assert_eq!(loaded.sync.demotion_threshold, 3);
     assert_eq!(loaded.sync.promotion_evidence, vec!["retrieval"]);
 }
 
@@ -286,6 +289,9 @@ fn test_config_get_set() {
         config.get("sync.promotion_threshold"),
         Some("4".to_string())
     );
+
+    config.set("sync.demotion_threshold", "3").unwrap();
+    assert_eq!(config.get("sync.demotion_threshold"), Some("3".to_string()));
 
     config
         .set("sync.promotion_evidence", "retrieval, helpful")

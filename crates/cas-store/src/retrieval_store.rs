@@ -187,6 +187,9 @@ pub struct RetrievalAggregate {
     pub query_family: String,
     pub ranking_policy: String,
     pub total: u64,
+    /// Number of distinct privacy-preserving sessions contributing outcomes.
+    /// Consumers can require independent sessions without storing raw IDs.
+    pub distinct_sessions: u64,
     pub used: u64,
     pub helpful: u64,
     pub ignored: u64,
@@ -273,17 +276,19 @@ impl SqliteRetrievalStore {
 
     fn parse_aggregate(row: &Row<'_>) -> rusqlite::Result<RetrievalAggregate> {
         let total = row.get::<_, i64>(3)?.max(0) as u64;
-        let used = row.get::<_, i64>(4)?.max(0) as u64;
-        let helpful = row.get::<_, i64>(5)?.max(0) as u64;
-        let ignored = row.get::<_, i64>(6)?.max(0) as u64;
-        let corrected = row.get::<_, i64>(7)?.max(0) as u64;
-        let harmful = row.get::<_, i64>(8)?.max(0) as u64;
+        let distinct_sessions = row.get::<_, i64>(4)?.max(0) as u64;
+        let used = row.get::<_, i64>(5)?.max(0) as u64;
+        let helpful = row.get::<_, i64>(6)?.max(0) as u64;
+        let ignored = row.get::<_, i64>(7)?.max(0) as u64;
+        let corrected = row.get::<_, i64>(8)?.max(0) as u64;
+        let harmful = row.get::<_, i64>(9)?.max(0) as u64;
         let denominator = total.max(1) as f64;
         Ok(RetrievalAggregate {
             document_type: row.get(0)?,
             query_family: row.get(1)?,
             ranking_policy: row.get(2)?,
             total,
+            distinct_sessions,
             used,
             helpful,
             ignored,
@@ -328,6 +333,7 @@ impl SqliteRetrievalStore {
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(*) AS total,
+                    COUNT(DISTINCT o.session_hash) AS distinct_sessions,
                     SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
@@ -477,6 +483,7 @@ impl RetrievalStore for SqliteRetrievalStore {
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(*) AS total,
+                    COUNT(DISTINCT o.session_hash) AS distinct_sessions,
                     SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
@@ -654,6 +661,7 @@ mod tests {
         let aggregate = &aggregates[0];
         assert_eq!(aggregate.ranking_policy, DEFAULT_RETRIEVAL_POLICY);
         assert_eq!(aggregate.total, 4);
+        assert_eq!(aggregate.distinct_sessions, 1);
         assert_eq!(aggregate.used, 1);
         assert_eq!(aggregate.helpful, 1);
         assert_eq!(aggregate.ignored, 1);
@@ -661,5 +669,42 @@ mod tests {
         assert_eq!(aggregate.usefulness_rate, 0.5);
         assert_eq!(aggregate.ignore_rate, 0.25);
         assert_eq!(aggregate.correction_rate, 0.25);
+    }
+
+    #[test]
+    fn aggregates_count_distinct_privacy_preserving_sessions() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteRetrievalStore::open(temp.path()).unwrap();
+        for (query_id, outcome_id, session_id) in [
+            ("qry-session-1", "out-session-1", "session-one"),
+            ("qry-session-2", "out-session-2", "session-two"),
+        ] {
+            store
+                .record_query(
+                    query_id,
+                    "query",
+                    "keyword",
+                    DEFAULT_RETRIEVAL_POLICY,
+                    Some(session_id),
+                    &[hit("rule-1", "rule", 0)],
+                )
+                .unwrap();
+            store
+                .record_outcome(
+                    outcome_id,
+                    query_id,
+                    "rule-1",
+                    RetrievalOutcome::Helpful,
+                    "actor",
+                    session_id,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let aggregates = store.aggregate_for_result("rule-1").unwrap();
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].distinct_sessions, 2);
+        assert_eq!(aggregates[0].helpful, 2);
     }
 }

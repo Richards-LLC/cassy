@@ -437,8 +437,79 @@ async fn test_rule_helpful_accepts_configured_retrieval_evidence() {
 }
 
 #[tokio::test]
+async fn test_rule_retrieval_evidence_requires_distinct_sessions() {
+    let (temp, service) = setup_cas();
+    std::fs::write(
+        temp.path().join(".cas/config.toml"),
+        "[sync]\npromotion_threshold = 2\npromotion_evidence = [\"retrieval\"]\n",
+    )
+    .unwrap();
+
+    let result = service
+        .cas_rule_create(Parameters(RuleCreateRequest {
+            scope: "project".to_string(),
+            content: "Require independent retrieval evidence".to_string(),
+            paths: None,
+            tags: None,
+            source_ids: None,
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+        }))
+        .await
+        .unwrap();
+    let id = extract_rule_id(&extract_text(result)).expect("rule ID");
+
+    let retrieval = SqliteRetrievalStore::open(&temp.path().join(".cas")).unwrap();
+    for (query_id, outcome_id, actor_id) in [
+        ("query-same-session-1", "outcome-same-session-1", "actor-1"),
+        ("query-same-session-2", "outcome-same-session-2", "actor-2"),
+    ] {
+        retrieval
+            .record_query(
+                query_id,
+                "same session evidence",
+                "rule_validation",
+                "test-policy",
+                Some("session-only-one"),
+                &[RetrievalHitIdentity {
+                    result_id: id.clone(),
+                    document_type: "rule".to_string(),
+                    rank: 0,
+                }],
+            )
+            .unwrap();
+        retrieval
+            .record_outcome(
+                outcome_id,
+                query_id,
+                &id,
+                RetrievalOutcome::Helpful,
+                actor_id,
+                "session-only-one",
+                None,
+            )
+            .unwrap();
+    }
+
+    service
+        .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .unwrap();
+    let rule = open_rule_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
+    assert_eq!(rule.status, RuleStatus::Draft);
+}
+
+#[tokio::test]
 async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
     let (temp, service) = setup_cas();
+    std::fs::write(
+        temp.path().join(".cas/config.toml"),
+        "[sync]\ndemotion_threshold = 3\n",
+    )
+    .unwrap();
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
@@ -474,13 +545,50 @@ async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
         .unwrap()
         .get(&id)
         .unwrap();
+    assert_eq!(rule.status, RuleStatus::Proven);
+
+    service
+        .cas_rule_harmful(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .unwrap();
+    let rule = open_rule_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
+    assert_eq!(rule.status, RuleStatus::Proven);
+
+    service
+        .cas_rule_harmful(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .unwrap();
+    let rule = open_rule_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
     assert_eq!(rule.status, RuleStatus::Stale);
     assert!(!injected.exists(), "stale rule must stop being injected");
+
+    let history = service
+        .cas_rule_history(Parameters(VersionRequest {
+            id,
+            version: None,
+            version_id: None,
+            changed_by: None,
+            change_note: None,
+        }))
+        .await
+        .unwrap();
+    assert!(extract_text(history).contains("demoted after harmful evidence threshold"));
 }
 
 #[tokio::test]
 async fn test_corrected_retrieval_evidence_demotes_on_sync() {
     let (temp, service) = setup_cas();
+    std::fs::write(
+        temp.path().join(".cas/config.toml"),
+        "[sync]\ndemotion_threshold = 2\n",
+    )
+    .unwrap();
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
@@ -540,8 +648,54 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
         .unwrap()
         .get(&id)
         .unwrap();
+    assert_eq!(rule.status, RuleStatus::Proven);
+    assert!(injected.is_file(), "one correction must not remove the rule");
+
+    retrieval
+        .record_query(
+            "query-rule-correction-2",
+            "rule correction",
+            "rule_validation",
+            "test-policy",
+            Some("session-correction-2"),
+            &[RetrievalHitIdentity {
+                result_id: id.clone(),
+                document_type: "rule".to_string(),
+                rank: 0,
+            }],
+        )
+        .unwrap();
+    retrieval
+        .record_outcome(
+            "outcome-rule-correction-2",
+            "query-rule-correction-2",
+            &id,
+            RetrievalOutcome::Corrected,
+            "actor-correction-2",
+            "session-correction-2",
+            Some("correction-2"),
+        )
+        .unwrap();
+
+    service.cas_rule_sync().await.unwrap();
+    let rule = open_rule_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(&id)
+        .unwrap();
     assert_eq!(rule.status, RuleStatus::Stale);
     assert!(!injected.exists(), "corrected rule must stop being injected");
+
+    let history = service
+        .cas_rule_history(Parameters(VersionRequest {
+            id,
+            version: None,
+            version_id: None,
+            changed_by: None,
+            change_note: None,
+        }))
+        .await
+        .unwrap();
+    assert!(extract_text(history).contains("demoted after retrieval evidence threshold"));
 }
 
 #[tokio::test]

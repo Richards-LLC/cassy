@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use url::Url;
 
 use crate::error::CasError;
 use crate::store::find_cas_root;
@@ -783,6 +784,79 @@ pub fn store_login_credentials(
     }
 }
 
+const TEST_FIXTURE_TOKEN: &str = "test-token";
+const EPHEMERAL_PORT_START: u16 = 32_768;
+
+/// Test fixtures must never be able to overwrite a real project's cloud cache.
+///
+/// `CAS_ROOT` is intentionally supported as a test seam, but it can point at
+/// an unrelated checkout when a test inherits the worker's environment. The
+/// fixture values below are distinctive enough to identify that accidental
+/// write while leaving normal production credentials untouched. Temp
+/// directories remain valid destinations for integration-test fixtures.
+fn reject_fixture_cloud_write(path: &Path, config: &CloudConfig) -> Result<(), CasError> {
+    let is_cloud_json = path.file_name().is_some_and(|name| name == "cloud.json");
+    let is_fixture = config.token.as_deref() == Some(TEST_FIXTURE_TOKEN)
+        || is_loopback_ephemeral_endpoint(&config.endpoint);
+
+    if is_cloud_json && is_fixture && !path_is_under_system_temp(path) {
+        return Err(CasError::Other(format!(
+            "refusing to write test-fixture cloud.json outside the system temp directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn is_loopback_ephemeral_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let Some(port) = url.port() else {
+        return false;
+    };
+
+    is_loopback && (port == 0 || port >= EPHEMERAL_PORT_START)
+}
+
+fn path_is_under_system_temp(path: &Path) -> bool {
+    let Ok(current_dir) = std::env::current_dir() else {
+        return false;
+    };
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.join(path)
+    };
+    let temp_dir = std::env::temp_dir();
+    let Ok(canonical_temp_dir) = temp_dir.canonicalize() else {
+        return false;
+    };
+    let canonical_path = if absolute_path.exists() {
+        absolute_path.canonicalize().ok()
+    } else {
+        absolute_path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .map(|parent| {
+                parent.join(
+                    absolute_path
+                        .file_name()
+                        .expect("a path with a missing file must have a file name"),
+                )
+            })
+    };
+
+    canonical_path.is_some_and(|candidate| candidate.starts_with(canonical_temp_dir))
+}
+
 /// Clear credentials from `~/.cas/cloud.json` and, when inside a project, from
 /// that project's cached copy. Non-credential state (teams, sync timestamps)
 /// is preserved.
@@ -1165,6 +1239,7 @@ impl CloudConfig {
 
     /// Save cloud config to a specific path
     pub fn save_to(&self, path: &Path) -> Result<(), CasError> {
+        reject_fixture_cloud_write(path, self)?;
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| CasError::Other(format!("Failed to serialize cloud config: {e}")))?;
         fs::write(path, content)?;
@@ -1547,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn characterization_test_fixture_login_writes_cache_to_cas_root_project() {
+    fn test_fixture_login_does_not_write_cache_to_cas_root_project() {
         // Reproduce the incident's shape without touching a real project:
         // CAS_ROOT points at a project outside the system temp directory while
         // the user-level path is safely injected into TempDir.
@@ -1563,21 +1638,71 @@ mod tests {
             .unwrap();
         let project_cas = project.path().join(".cas");
         std::fs::create_dir_all(&project_cas).unwrap();
+        let project_cloud = project_cas.join("cloud.json");
+        std::fs::write(&project_cloud, b"{\"token\":\"real-project-token\"}\n").unwrap();
+        let before = std::fs::read(&project_cloud).unwrap();
 
         let mut guard = TestEnvGuard::new();
         guard.set("CAS_USER_CLOUD_JSON", &user_path);
         guard.set("CAS_ROOT", &project_cas);
 
-        let cached = store_login_credentials(
-            "http://127.0.0.1:33749",
-            "test-token",
-            None,
-            None,
-        )
-        .unwrap();
+        let cached =
+            store_login_credentials("http://127.0.0.1:33749", "test-token", None, None).unwrap();
 
-        assert_eq!(cached.as_deref(), Some(project_cas.join("cloud.json").as_path()));
-        assert!(project_cas.join("cloud.json").is_file());
+        assert!(cached.is_none(), "fixture cache writes must be rejected");
+        assert_eq!(std::fs::read(&project_cloud).unwrap(), before);
+    }
+
+    #[test]
+    fn test_fixture_cloud_write_is_rejected_outside_temp_directory() {
+        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let project = tempfile::Builder::new()
+            .prefix("cas-11f9-project-")
+            .tempdir_in(target_dir)
+            .unwrap();
+        let cloud_path = project.path().join(".cas/cloud.json");
+        std::fs::create_dir_all(cloud_path.parent().unwrap()).unwrap();
+        let config = CloudConfig {
+            endpoint: "https://petra-stella-cloud.vercel.app".to_string(),
+            token: Some(TEST_FIXTURE_TOKEN.to_string()),
+            ..Default::default()
+        };
+
+        let error = config.save_to(&cloud_path).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("outside the system temp directory")
+        );
+        assert!(!cloud_path.exists());
+    }
+
+    #[test]
+    fn loopback_ephemeral_fixture_cloud_write_is_rejected_outside_temp_directory() {
+        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let project = tempfile::Builder::new()
+            .prefix("cas-11f9-project-")
+            .tempdir_in(target_dir)
+            .unwrap();
+        let cloud_path = project.path().join(".cas/cloud.json");
+        std::fs::create_dir_all(cloud_path.parent().unwrap()).unwrap();
+        let config = CloudConfig {
+            endpoint: "http://127.0.0.1:33749".to_string(),
+            token: Some("non-fixture-token".to_string()),
+            ..Default::default()
+        };
+
+        let error = config.save_to(&cloud_path).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("outside the system temp directory")
+        );
+        assert!(!cloud_path.exists());
     }
 
     #[test]

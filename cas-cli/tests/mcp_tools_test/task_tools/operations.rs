@@ -559,6 +559,7 @@ async fn test_execution_note_update_sets_value() {
             assignee: None,
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -612,6 +613,7 @@ async fn test_execution_note_update_empty_string_clears() {
             assignee: None,
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -679,6 +681,7 @@ async fn test_task_update() {
         assignee: None,
         status: None,
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
     };
 
@@ -740,6 +743,7 @@ async fn test_task_update_design_and_acceptance_criteria() {
         assignee: None,
         status: None,
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
     };
 
@@ -1089,6 +1093,64 @@ async fn test_task_ready() {
 
     let text = extract_text(result);
     assert!(text.contains("Ready task") || text.contains("ready") || text.contains("Tasks"));
+}
+
+#[tokio::test]
+async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
+    let (temp, service) = setup_cas();
+
+    let local = service
+        .cas_task_create(Parameters(basic_create("Local origin task", None)))
+        .await
+        .expect("create local task");
+    let local_id = extract_task_id(&extract_text(local))
+        .expect("local task id")
+        .to_string();
+    let foreign = service
+        .cas_task_create(Parameters(basic_create("Foreign origin task", None)))
+        .await
+        .expect("create foreign fixture");
+    let foreign_id = extract_task_id(&extract_text(foreign))
+        .expect("foreign task id")
+        .to_string();
+
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+    let mut foreign_task = task_store.get(&foreign_id).expect("foreign task row");
+    foreign_task.origin_project = Some("acme/other".to_string());
+    task_store.update(&foreign_task).expect("mark foreign task");
+
+    let text = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: Some(20),
+                sort: None,
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_ready should succeed"),
+    );
+    assert!(
+        text.contains(&local_id),
+        "local task must remain visible: {text}"
+    );
+    assert!(
+        !text.contains(&foreign_id),
+        "foreign task must be excluded from ready: {text}"
+    );
+
+    let shown = service
+        .cas_task_show(Parameters(TaskShowRequest {
+            id: foreign_id,
+            with_deps: false,
+        }))
+        .await
+        .expect("show foreign task");
+    assert!(
+        extract_text(shown).contains("Origin project: acme/other"),
+        "show must expose foreign origin for diagnosis"
+    );
 }
 
 /// cas-06f9 (GH #104): `ready` capped at 10 with a header that printed only
@@ -2355,6 +2417,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             assignee: None,
             status: Some("blocked".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -2486,6 +2549,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
             assignee: None,
             status: None,
             epic: Some("cas-does-not-exist".to_string()),
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await;
@@ -2597,6 +2661,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
             assignee: None,
             status: None,
             epic: Some(String::new()),
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await;
@@ -3031,6 +3096,7 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
         assignee: Some(worker_name.to_string()),
         status: None,
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
     };
     service
@@ -3212,6 +3278,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
             assignee: None,
             status: Some("in_progress".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -3340,6 +3407,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
             assignee: None,
             status: Some("in_progress".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -3423,6 +3491,7 @@ async fn test_reset_refuses_closed_task() {
             assignee: None,
             status: Some("closed".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -3490,6 +3559,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
             assignee: None,
             status: Some("in_progress".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -3527,6 +3597,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
             assignee: Some("new-worker".to_string()),
             status: Some("open".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -3600,6 +3671,7 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
         assignee: Some("  TEST-Agent  ".to_string()),
         status: None,
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
     };
     service
@@ -4493,6 +4565,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
             assignee: Some("stale-worker".to_string()),
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -4569,6 +4642,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
             assignee: Some(WORKER_SESSION.to_string()),
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -4662,6 +4736,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             assignee: Some(PRIOR_ASSIGNEE.to_string()),
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -4692,6 +4767,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             assignee: Some(String::new()),
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -4745,6 +4821,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             assignee: Some(PRIOR_ASSIGNEE.to_string()),
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await
@@ -4769,6 +4846,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
             assignee: Some("   \t  ".to_string()),
             status: None,
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
         }))
         .await

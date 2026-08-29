@@ -1050,6 +1050,7 @@ fn task_status_update(id: &str, status: Option<&str>, notes: Option<&str>) -> Ta
         assignee: None,
         status: status.map(str::to_string),
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
     }
 }

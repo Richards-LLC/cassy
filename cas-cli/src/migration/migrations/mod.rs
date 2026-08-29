@@ -216,6 +216,7 @@ mod m237_entries_add_source_ids;
 mod m238_skills_add_source_ids;
 mod m239_task_execution_states_create_table;
 mod m240_rule_skill_versions;
+mod m241_tasks_add_origin_project;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -465,6 +466,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m238_skills_add_source_ids::MIGRATION,
     m239_task_execution_states_create_table::MIGRATION,
     m240_rule_skill_versions::MIGRATION,
+    m241_tasks_add_origin_project::MIGRATION,
 ];
 
 #[cfg(test)]

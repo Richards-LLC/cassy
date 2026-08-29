@@ -16,6 +16,8 @@ impl CasCore {
             data: None,
         })?;
 
+        super::super::task::ensure_task_origin(&task, &self.cas_root, "claim")?;
+
         if task.is_terminal() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -594,8 +596,10 @@ impl CasCore {
             active_leases.iter().map(|l| l.task_id.as_str()).collect();
 
         // Filter to unclaimed tasks
+        let project_id = super::super::task::current_project_id(&self.cas_root);
         let mut available: Vec<_> = ready_tasks
             .iter()
+            .filter(|t| super::super::task::task_belongs_to_project(t, project_id.as_deref()))
             .filter(|t| !claimed_ids.contains(t.id.as_str()))
             .collect();
 
@@ -918,10 +922,12 @@ impl CasCore {
         }
 
         let leases = agent_store.list_agent_leases(&agent_id).unwrap_or_default();
+        let project_id = super::super::task::current_project_id(&self.cas_root);
         let mut assigned: Vec<Task> = task_store
             .list(None)
             .unwrap_or_default()
             .into_iter()
+            .filter(|t| super::super::task::task_belongs_to_project(t, project_id.as_deref()))
             .filter(|t| {
                 if t.is_terminal() {
                     return false;

@@ -6,6 +6,64 @@ mod query;
 pub(crate) mod repo_context;
 mod update;
 
+/// Return the canonical identity of the project represented by a Cassy root.
+/// Task surfaces must fail closed when the identity cannot be derived: an
+/// unassigned legacy row cannot safely be ranked as local in that case.
+pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
+    crate::cloud::resolve_canonical_id(cas_root)
+}
+
+pub(crate) fn task_belongs_to_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
+    project_id.is_some_and(|project_id| task.origin_project.as_deref() == Some(project_id))
+}
+
+#[cfg(test)]
+mod origin_project_tests {
+    use super::task_belongs_to_project;
+    use cas_types::Task;
+
+    #[test]
+    fn ownership_filter_accepts_only_exact_current_project() {
+        let mut local = Task::new("local".to_string(), "Local".to_string());
+        local.origin_project = Some("acme/accounting".to_string());
+        assert!(task_belongs_to_project(&local, Some("acme/accounting")));
+
+        local.origin_project = Some("acme/other".to_string());
+        assert!(!task_belongs_to_project(&local, Some("acme/accounting")));
+
+        local.origin_project = None;
+        assert!(!task_belongs_to_project(&local, Some("acme/accounting")));
+        assert!(!task_belongs_to_project(&local, None));
+    }
+}
+
+pub(crate) fn ensure_task_origin(
+    task: &cas_types::Task,
+    cas_root: &std::path::Path,
+    action: &str,
+) -> Result<(), rmcp::ErrorData> {
+    let project_id = current_project_id(cas_root);
+    if task_belongs_to_project(task, project_id.as_deref()) {
+        return Ok(());
+    }
+
+    let origin = task
+        .origin_project
+        .as_deref()
+        .unwrap_or("unassigned legacy row");
+    let current = project_id
+        .as_deref()
+        .unwrap_or("unresolved current project");
+    Err(rmcp::ErrorData {
+        code: rmcp::model::ErrorCode::INVALID_PARAMS,
+        message: std::borrow::Cow::from(format!(
+            "Cannot {action} task {}: origin project `{origin}` does not match current project `{current}`. Foreign or unassigned legacy tasks are excluded from this project; use an authorized supervisor task update to reassign the origin explicitly.",
+            task.id
+        )),
+        data: None,
+    })
+}
+
 /// Reject lifecycle actions while a task still has open `blocks` dependencies.
 ///
 /// `TaskStore::get_blockers` deliberately filters to `dep_type = 'blocks'`, so

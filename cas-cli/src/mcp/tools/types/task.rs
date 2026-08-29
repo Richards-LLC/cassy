@@ -398,6 +398,14 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub assignee: Option<String>,
 
+    /// Reassign the owning project identity. Only a live registered
+    /// supervisor may use this field; omit it to leave the origin unchanged.
+    #[schemars(
+        description = "Canonical origin project identity for this task; supervisor-only reassignment of a foreign or legacy row"
+    )]
+    #[serde(default)]
+    pub origin_project: Option<String>,
+
     /// Update status
     #[schemars(description = "New status: 'open', 'in_progress', 'closed', 'blocked'")]
     #[serde(default)]

@@ -584,13 +584,17 @@ impl CloudSyncer {
             // timestamp-gated upsert.
             let web_close = is_web_close_tombstone(&raw_task);
             render_task_proposal_provenance(&mut raw_task);
-            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     result.errors.push(e);
                     continue;
                 }
             };
+            // The scoped response proves which project supplied the row; use
+            // that same resolved identity as the local ownership stamp rather
+            // than trusting an optional payload field from an older server.
+            remote_task.origin_project = Some(current_project_id.to_string());
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             let task_outcome = if web_close {
                 reconcile_web_close(
@@ -1402,13 +1406,17 @@ impl CloudSyncer {
                 continue;
             }
             render_task_proposal_provenance(&mut raw_task);
-            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     result.errors.push(e);
                     continue;
                 }
             };
+            // Team pulls are already filtered by the scoped project ID; stamp
+            // the accepted row explicitly so subsequent local surfaces cannot
+            // mistake an unscoped legacy payload for a local task.
+            remote_task.origin_project = Some(current_project_id.to_string());
             let previous_status = task_store.get(&remote_task.id).ok().map(|task| task.status);
             match self.upsert_task_with_strategy(
                 task_store,

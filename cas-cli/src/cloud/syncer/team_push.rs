@@ -8,6 +8,15 @@ use crate::cloud::{EntityType, QueuedSync, SyncOperation, get_project_canonical_
 use crate::error::CasError;
 use chrono::Utc;
 
+fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
+    if let Some(task) = value.as_object_mut() {
+        task.insert(
+            "origin_project".to_string(),
+            serde_json::Value::String(project_id.to_string()),
+        );
+    }
+}
+
 impl CloudSyncer {
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
@@ -186,7 +195,16 @@ impl CloudSyncer {
         }) {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
-                    Ok(value) => upserts.push((item, value)),
+                    Ok(mut value) => {
+                        // Rows queued before origin_project existed still need
+                        // the current scoped identity when they are retried.
+                        // The outer project_canonical_id is not a substitute:
+                        // task consumers also rely on the row-level field.
+                        if entity_type == EntityType::Task {
+                            stamp_task_origin_project(&mut value, project_id);
+                        }
+                        upserts.push((item, value));
+                    }
                     Err(_) => {
                         let _ = self
                             .queue
@@ -751,5 +769,18 @@ impl CloudSyncer {
             }
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn queued_task_payloads_receive_current_project_identity() {
+        let mut value = serde_json::json!({"id": "cas-legacy", "title": "old payload"});
+        super::stamp_task_origin_project(&mut value, "acme/accounting");
+        assert_eq!(
+            value.get("origin_project").and_then(|value| value.as_str()),
+            Some("acme/accounting")
+        );
     }
 }

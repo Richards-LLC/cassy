@@ -21,7 +21,7 @@ impl CasCore {
             .unwrap_or_else(|| "(none — trunk fallback)".to_string());
 
         let mut output = format!(
-            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\nTarget: {}\n",
+            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\nOrigin project: {}\nTarget: {}\n",
             task.id,
             "=".repeat(task.id.len() + 6),
             task.title,
@@ -29,6 +29,9 @@ impl CasCore {
             task.priority.0,
             task.task_type,
             task.depth,
+            task.origin_project
+                .as_deref()
+                .unwrap_or("unassigned legacy row"),
             target
         );
 
@@ -437,6 +440,9 @@ impl CasCore {
             })?
         };
 
+        let project_id = super::current_project_id(&self.cas_root);
+        blocked.retain(|(task, _)| super::task_belongs_to_project(task, project_id.as_deref()));
+
         // Apply sorting to the task field of each tuple. cas-06f9 (GH #104):
         // same defaulting as `ready` — this is the same triage surface, and it
         // carried the identical silent cap.
@@ -509,8 +515,7 @@ impl CasCore {
                 "Task scope must be `project` or `all`; global tasks are unsupported.",
             ));
         }
-        let project_id = crate::cloud::get_project_canonical_id()
-            .unwrap_or_else(|| "(unresolved current project)".to_string());
+        let project_id = super::current_project_id(&self.cas_root);
 
         let task_store = self.open_task_store()?;
 
@@ -532,6 +537,7 @@ impl CasCore {
         // Apply filters
         let mut filtered: Vec<_> = tasks
             .into_iter()
+            .filter(|task| super::task_belongs_to_project(task, project_id.as_deref()))
             .filter(|task| {
                 // Status filter — use Display (snake_case) for matching so
                 // "pending_supervisor_review", "in_progress", etc. all round-trip
@@ -578,10 +584,18 @@ impl CasCore {
 
         let scope_note = if scope == "all" {
             format!(
-                "Scope: all (currently equivalent to the current project database `{project_id}`; no multi-project aggregator exists)"
+                "Scope: all (currently equivalent to the current project database `{}`; no multi-project aggregator exists)",
+                project_id
+                    .as_deref()
+                    .unwrap_or("unresolved current project")
             )
         } else {
-            format!("Scope: project `{project_id}` (current Cassy database)")
+            format!(
+                "Scope: project `{}` (current Cassy database)",
+                project_id
+                    .as_deref()
+                    .unwrap_or("unresolved current project")
+            )
         };
         if filtered.is_empty() {
             return Ok(Self::success(format!(

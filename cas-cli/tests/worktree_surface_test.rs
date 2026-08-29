@@ -300,6 +300,7 @@ fn close_update_request(id: String) -> TaskUpdateRequest {
         assignee: None,
         status: Some("closed".to_string()),
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
         depth: None,
     }

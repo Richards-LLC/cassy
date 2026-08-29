@@ -29,7 +29,7 @@
 //!
 //! # Sync Behavior
 //!
-//! - Rules must be "proven" (helpful_count >= min_helpful, not retired)
+//! - Rules must be "proven" (status = proven and helpful_count >= min_helpful)
 //! - Stale files are automatically removed when rules become unproven
 //! - Skills are synced when enabled, removed when disabled
 
@@ -115,7 +115,7 @@ impl Syncer {
 
     /// Check if a rule should be synced to Claude Code
     pub fn is_proven(&self, rule: &Rule) -> bool {
-        rule.status != RuleStatus::Retired && rule.helpful_count >= self.min_helpful
+        rule.status == RuleStatus::Proven && rule.helpful_count >= self.min_helpful
     }
 
     /// Sync a single rule to target directory
@@ -428,10 +428,15 @@ mod tests {
 
         // Now proven (helpful_count = 2)
         rule.helpful_count = 2;
+        rule.status = RuleStatus::Proven;
         assert!(syncer.is_proven(&rule));
 
         // Retired rules are never proven
         rule.status = RuleStatus::Retired;
+        assert!(!syncer.is_proven(&rule));
+
+        // Stale rules are no longer injected after a harmful/corrected outcome
+        rule.status = RuleStatus::Stale;
         assert!(!syncer.is_proven(&rule));
     }
 

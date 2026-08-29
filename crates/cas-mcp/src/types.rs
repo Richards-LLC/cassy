@@ -574,6 +574,11 @@ pub struct RuleRequest {
     #[serde(default)]
     pub tags: Option<String>,
 
+    /// Source entry IDs (comma-separated, for create)
+    #[schemars(description = "Source entry IDs this rule was derived from (comma-separated)")]
+    #[serde(default)]
+    pub source_ids: Option<String>,
+
     /// Limit for list operations
     #[schemars(description = "Maximum items to return")]
     #[serde(default, deserialize_with = "deser::option_usize")]
@@ -642,6 +647,11 @@ pub struct SkillRequest {
     #[schemars(description = "Comma-separated tags")]
     #[serde(default)]
     pub tags: Option<String>,
+
+    /// Source entry IDs (comma-separated, for create)
+    #[schemars(description = "Source entry IDs this skill was derived from (comma-separated)")]
+    #[serde(default)]
+    pub source_ids: Option<String>,
 
     /// Limit for list operations
     #[schemars(description = "Maximum items to return")]

@@ -3,7 +3,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 237,
+    id: 239,
     name: "task_execution_states_create_table",
     subsystem: Subsystem::Tasks,
     description: "Add sparse structured execution state for task resume (cas-4adb)",

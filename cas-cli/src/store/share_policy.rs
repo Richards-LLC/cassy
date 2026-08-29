@@ -102,6 +102,7 @@ mod tests {
 
     fn entry_with(scope: Scope, entry_type: EntryType, share: Option<ShareScope>) -> Entry {
         Entry {
+            source_ids: Vec::new(),
             id: "p-test-001".to_string(),
             scope,
             entry_type,

@@ -669,6 +669,26 @@ fn is_db_initialized(conn: &Connection) -> bool {
     count >= 3
 }
 
+/// Assign the current project's canonical identity to legacy task rows that
+/// predate m241. A nullable column is intentional: a caller may have a
+/// database without enough project configuration to derive an identity, and
+/// such rows must remain excluded from project-scoped task surfaces until an
+/// operator resolves them.
+fn backfill_task_origin_project(conn: &Connection, cas_dir: &Path) -> Result<()> {
+    if !cas_store::shared_db::column_exists(conn, "tasks", "origin_project") {
+        return Ok(());
+    }
+    let Some(project_id) = crate::cloud::resolve_canonical_id(cas_dir) else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE tasks SET origin_project = ?1
+         WHERE origin_project IS NULL OR trim(origin_project) = ''",
+        [project_id],
+    )?;
+    Ok(())
+}
+
 /// Run all pending migrations
 ///
 /// If `dry_run` is true, returns what would be done without applying.
@@ -822,6 +842,8 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
         }
     }
 
+    backfill_task_origin_project(&conn, cas_dir)?;
+
     Ok(result)
 }
 
@@ -972,7 +994,7 @@ mod tests {
 
     fn assert_repaired_v225_knowledge_gap(cas_dir: &Path, expected_m226_ledger: &str) {
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240] {
+        for id in [225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
@@ -1039,7 +1061,7 @@ mod tests {
         assert_eq!(pages[0].origin_project_id, None);
 
         let status = check_migrations(cas_dir).unwrap();
-        assert_eq!(status.current_version, 240);
+        assert_eq!(status.current_version, 241);
         assert!(status.pending.is_empty());
         let second = run_migrations(cas_dir, false).unwrap();
         assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
@@ -1061,7 +1083,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240],
+                vec![225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241],
                 "recorded m225 and missing m226 must order all later work behind them"
             );
 
@@ -1145,7 +1167,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 226, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240]
+                vec![225, 226, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
@@ -1184,7 +1206,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.id)
                     .collect::<Vec<_>>(),
-                vec![225, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240]
+                vec![225, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241]
             );
 
             let first = run_migrations(&cas_dir, false).unwrap();
@@ -1296,6 +1318,48 @@ mod tests {
             )
             .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn m241_backfills_blank_task_origins_from_current_project() {
+        let home = TempDir::new().unwrap();
+        let project = home.path().join("accounting");
+        let cas_dir = project.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                 id TEXT PRIMARY KEY,
+                 origin_project TEXT
+             );
+             INSERT INTO tasks (id, origin_project) VALUES
+                 ('legacy-null', NULL),
+                 ('legacy-blank', '  '),
+                 ('already-assigned', 'acme/other');
+             CREATE INDEX idx_tasks_origin_project ON tasks(origin_project);",
+        )
+        .unwrap();
+
+        let expected = crate::cloud::resolve_canonical_id(&cas_dir).unwrap();
+        super::backfill_task_origin_project(&conn, &cas_dir).unwrap();
+        let origins = conn
+            .prepare("SELECT id, origin_project FROM tasks ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            origins,
+            vec![
+                ("already-assigned".to_string(), "acme/other".to_string()),
+                ("legacy-blank".to_string(), expected.clone()),
+                ("legacy-null".to_string(), expected),
+            ]
         );
     }
 

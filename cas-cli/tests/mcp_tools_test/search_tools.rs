@@ -464,6 +464,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         assignee: None,
         status: Some("blocked".to_string()),
         epic: None,
+        origin_project: None,
         epic_verification_owner: None,
     }))
     .await

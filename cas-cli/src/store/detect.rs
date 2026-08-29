@@ -371,7 +371,8 @@ pub fn open_store_local(cas_dir: &Path) -> Result<Arc<dyn Store>> {
 fn open_task_store_base(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     let config = Config::load(cas_dir).unwrap_or_default();
 
-    let store = SqliteTaskStore::open(cas_dir)?;
+    let origin_project = crate::cloud::resolve_canonical_id(cas_dir);
+    let store = SqliteTaskStore::open_with_origin_project(cas_dir, origin_project.as_deref())?;
     store.init()?;
     let base_store: Arc<dyn TaskStore> = Arc::new(store);
 

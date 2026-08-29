@@ -29,6 +29,7 @@ fn requested_update_fields(
     supplied!(execution_note);
     supplied!(external_ref);
     supplied!(assignee);
+    supplied!(origin_project);
     supplied!(status);
     supplied!(epic);
     supplied!(epic_verification_owner);
@@ -305,6 +306,32 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let origin_project = req
+            .origin_project
+            .as_deref()
+            .map(|raw| {
+                crate::cloud::normalize_project_canonical_id(raw).ok_or_else(|| {
+                    McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "TASK UPDATE REJECTED: origin_project must be a non-empty canonical project identity.",
+                        ),
+                        data: None,
+                    }
+                })
+            })
+            .transpose()?;
+        if req.origin_project.is_some() {
+            self.resolve_live_supervisor_authority().map_err(|error| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "TASK UPDATE REJECTED: origin_project reassignment requires a live registered supervisor: {error:?}"
+                    )),
+                    data: None,
+                }
+            })?;
+        }
         // Validate before applying any ordinary task fields. The store repeats
         // this validation while holding its write lock, so a malformed patch
         // cannot corrupt an existing state even if another writer races us.
@@ -371,6 +398,7 @@ impl CasCore {
                     "epic_verification_owner",
                     req.epic_verification_owner.is_some(),
                 ),
+                ("origin_project", req.origin_project.is_some()),
                 ("depth", req.depth.is_some()),
                 ("state_patch", state_patch.is_some()),
             ]
@@ -671,6 +699,27 @@ impl CasCore {
         let prior_assignee = task.assignee.clone();
 
         let mut changes = Vec::new();
+        if let Some(origin_project) = origin_project {
+            if task.origin_project.as_deref() != Some(origin_project.as_str()) {
+                let previous = task
+                    .origin_project
+                    .as_deref()
+                    .unwrap_or("unassigned legacy row");
+                let audit = format!(
+                    "[{}] DECISION: origin_project reassigned {} → {} by live supervisor (cas-e0c5)",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    previous,
+                    origin_project,
+                );
+                task.notes = if task.notes.is_empty() {
+                    audit
+                } else {
+                    format!("{}\n\n{}", task.notes, audit)
+                };
+                task.origin_project = Some(origin_project);
+                changes.push("origin_project");
+            }
+        }
         if let Some(title) = req.title {
             task.title = title;
             changes.push("title");

@@ -97,7 +97,8 @@ impl TaskStore for SyncingTaskStore {
 
     fn add(&self, task: &Task) -> Result<()> {
         self.inner.add(task)?;
-        self.queue_upsert(task);
+        let persisted = self.inner.get(&task.id)?;
+        self.queue_upsert(&persisted);
         Ok(())
     }
 
@@ -110,7 +111,8 @@ impl TaskStore for SyncingTaskStore {
     ) -> Result<()> {
         self.inner
             .create_atomic(task, blocked_by, epic_id, created_by)?;
-        self.queue_upsert(task);
+        let persisted = self.inner.get(&task.id)?;
+        self.queue_upsert(&persisted);
         Ok(())
     }
 

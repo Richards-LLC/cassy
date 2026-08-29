@@ -388,6 +388,7 @@ impl CasService {
             execution_note: req.execution_note,
             external_ref: req.external_ref,
             assignee: req.assignee,
+            origin_project: req.origin_project,
             status: req.status,
             epic: req.epic,
             epic_verification_owner: req.epic_verification_owner,

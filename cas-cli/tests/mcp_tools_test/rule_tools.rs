@@ -81,6 +81,50 @@ async fn test_rule_show() {
 }
 
 #[tokio::test]
+async fn test_rule_impact_metrics_are_visible_in_list_and_show() {
+    let (_temp, service) = setup_cas();
+    let store = open_rule_store(&_temp.path().join(".cas")).unwrap();
+    let mut rule = Rule::new(
+        "rule-impact".to_string(),
+        "Rule with impact metrics".to_string(),
+    );
+    rule.status = RuleStatus::Proven;
+    rule.surface_count = 7;
+    rule.helpful_count = 3;
+    rule.harmful_count = 1;
+    store.add(&rule).unwrap();
+
+    let show = service
+        .cas_rule_show(Parameters(IdRequest {
+            id: rule.id.clone(),
+        }))
+        .await
+        .unwrap();
+    let show_text = extract_text(show);
+    assert!(show_text.contains("Impact: surfaced 7"));
+    assert!(show_text.contains("+3 helpful, -1 harmful"));
+
+    let list = service.cas_rules_list().await.unwrap();
+    let list_text = extract_text(list);
+    assert!(list_text.contains("Impact: surfaced 7"));
+    assert!(list_text.contains("+3 helpful, -1 harmful"));
+
+    let all = service
+        .cas_rule_list_all(Parameters(LimitRequest {
+            scope: "all".to_string(),
+            limit: Some(10),
+            sort: None,
+            sort_order: None,
+            team_id: None,
+        }))
+        .await
+        .unwrap();
+    let all_text = extract_text(all);
+    assert!(all_text.contains("surfaced: 7"));
+    assert!(all_text.contains("feedback: +3 -1"));
+}
+
+#[tokio::test]
 async fn test_rule_list() {
     let (_temp, service) = setup_cas();
 
@@ -226,6 +270,7 @@ async fn test_rule_helpful_requires_evidence_threshold() {
             content: "Threshold test rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -261,6 +306,7 @@ async fn test_rule_helpful_promotes_at_configured_threshold() {
             content: "Configured threshold rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -296,6 +342,7 @@ async fn test_rule_helpful_accepts_configured_retrieval_evidence() {
             content: "Retrieval evidence rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -366,6 +413,7 @@ async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
             content: "Demotion test rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))
@@ -407,6 +455,7 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
             content: "Corrected retrieval rule".to_string(),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         }))

@@ -335,6 +335,13 @@ impl LayeredRuleStore {
         store.update(rule)
     }
 
+    /// Increment a rule's injection count in its owning tier.
+    pub fn increment_surface_count(&self, id: &str) -> Result<()> {
+        let rule = self.get(id)?;
+        self.store_for_scope(rule.scope)
+            .increment_surface_count(id)
+    }
+
     /// Delete rule
     pub fn delete(&self, id: &str) -> Result<()> {
         if let Some(scope) = Scope::from_id(id) {
@@ -588,6 +595,11 @@ mod tests {
         // List all
         let all = layered.list(ScopeFilter::All).unwrap();
         assert_eq!(all.len(), 2);
+
+        layered.increment_surface_count(&g_rule.id).unwrap();
+        layered.increment_surface_count(&p_rule.id).unwrap();
+        assert_eq!(global.get(&g_rule.id).unwrap().surface_count, 1);
+        assert_eq!(project.get(&p_rule.id).unwrap().surface_count, 1);
     }
 
     #[test]

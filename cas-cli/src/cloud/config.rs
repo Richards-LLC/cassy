@@ -1547,6 +1547,40 @@ mod tests {
     }
 
     #[test]
+    fn characterization_test_fixture_login_writes_cache_to_cas_root_project() {
+        // Reproduce the incident's shape without touching a real project:
+        // CAS_ROOT points at a project outside the system temp directory while
+        // the user-level path is safely injected into TempDir.
+        let temp = TempDir::new().unwrap();
+        let user_path = temp.path().join("home-cas").join("cloud.json");
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+
+        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let project = tempfile::Builder::new()
+            .prefix("cas-11f9-project-")
+            .tempdir_in(target_dir)
+            .unwrap();
+        let project_cas = project.path().join(".cas");
+        std::fs::create_dir_all(&project_cas).unwrap();
+
+        let mut guard = TestEnvGuard::new();
+        guard.set("CAS_USER_CLOUD_JSON", &user_path);
+        guard.set("CAS_ROOT", &project_cas);
+
+        let cached = store_login_credentials(
+            "http://127.0.0.1:33749",
+            "test-token",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(cached.as_deref(), Some(project_cas.join("cloud.json").as_path()));
+        assert!(project_cas.join("cloud.json").is_file());
+    }
+
+    #[test]
     fn store_login_credentials_works_outside_a_project() {
         // Ben #4 (cas-046d): `cas login --token` from $HOME died with
         // "Cassy not initialized — run cas init".

@@ -433,8 +433,8 @@ async fn team_delete_for_live_task_is_neutralized_without_http() {
 #[tokio::test]
 async fn team_delete_uses_singular_entity_path() {
     let server = MockServer::start().await;
-    let expected_project_id = get_project_canonical_id()
-        .expect("team delete test must resolve the canonical project id");
+    let expected_project_id =
+        get_project_canonical_id().expect("team delete test must resolve the canonical project id");
     Mock::given(method("DELETE"))
         .and(path(format!(
             "/api/teams/{TEST_TEAM}/sync/task/absent-team-task"
@@ -469,6 +469,66 @@ async fn team_delete_uses_singular_entity_path() {
         .unwrap()
         .unwrap();
 
+    assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
+}
+
+/// Terminally parked rows are intentionally excluded from normal syncs. The
+/// existing `cas cloud queue --retry` recovery path requeues them so a fixed
+/// team-delete endpoint can flush the retained tombstone.
+#[tokio::test]
+async fn parked_team_delete_can_be_requeued_and_flushed_after_scope_fix() {
+    let server = MockServer::start().await;
+    let expected_project_id =
+        get_project_canonical_id().expect("team delete test must resolve the canonical project id");
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/api/teams/{TEST_TEAM}/sync/task/parked-team-task"
+        )))
+        .and(query_param("project_id", expected_project_id))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    open_task_store_local(tmp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "parked-team-task",
+            SyncOperation::Delete,
+            None,
+            TEST_TEAM,
+        )
+        .unwrap();
+    let parked_id = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap()[0].id;
+    queue
+        .park_failed(
+            parked_id,
+            "permanent cloud rejection: reason=project_mismatch; entity=tasks; id=parked-team-task; existing_project=other",
+            5,
+        )
+        .unwrap();
+
+    assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
+    assert_eq!(queue.retry_failed(5).unwrap(), 1);
+
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        result.errors.is_empty(),
+        "requeued delete should flush: {result:?}"
+    );
     assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
 }
 

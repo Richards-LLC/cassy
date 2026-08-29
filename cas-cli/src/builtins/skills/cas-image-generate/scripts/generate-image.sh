@@ -93,7 +93,7 @@ for reference in "${references[@]}"; do
     fi
 done
 
-mime_type() {
+reference_mime_type() {
     case "${1,,}" in
         *.png) printf 'image/png' ;;
         *.webp) printf 'image/webp' ;;
@@ -106,30 +106,58 @@ mime_type() {
     esac
 }
 
-parts="$(jq -n --arg prompt "$prompt" '[{text: $prompt}]')"
+output_extension_for_mime() {
+    case "${1,,}" in
+        image/png) printf 'png' ;;
+        image/jpeg|image/jpg) printf 'jpg' ;;
+        image/webp) printf 'webp' ;;
+        image/gif) printf 'gif' ;;
+        *) return 1 ;;
+    esac
+}
+
+extension_matches_mime() {
+    case "${1,,}:${2,,}" in
+        image/png:png|image/jpeg:jpg|image/jpeg:jpeg|image/jpg:jpg|image/jpg:jpeg|image/webp:webp|image/gif:gif)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+printf '%s' "$prompt" > "$work/prompt.txt"
+jq -n --rawfile prompt "$work/prompt.txt" '[{text: $prompt}]' > "$work/parts.json"
+reference_index=0
 for reference in "${references[@]}"; do
-    encoded="$(base64 --wrap=0 "$reference")"
-    reference_mime="$(mime_type "$reference")"
-    parts="$(jq --arg mime "$reference_mime" --arg data "$encoded" \
-        '. + [{inlineData: {mimeType: $mime, data: $data}}]' <<<"$parts")"
+    base64 --wrap=0 "$reference" | tr -d '\r\n' > "$work/reference-$reference_index.b64"
+    reference_mime="$(reference_mime_type "$reference")"
+    jq --arg mime "$reference_mime" --rawfile data "$work/reference-$reference_index.b64" \
+        '. + [{inlineData: {mimeType: $mime, data: $data}}]' \
+        "$work/parts.json" > "$work/parts.next.json"
+    mv "$work/parts.next.json" "$work/parts.json"
+    reference_index=$((reference_index + 1))
 done
 
-payload="$(jq -n --argjson parts "$parts" '{contents: [{parts: $parts}]}')"
+jq '{contents: [{parts: .}]}' "$work/parts.json" > "$work/payload.json"
 endpoint="https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent"
-response=""
-if ! response="$(curl -sS --connect-timeout 15 --max-time 180 \
+if ! curl -sS --connect-timeout 15 --max-time 180 \
     -H "x-goog-api-key: $GEMINI_API_KEY" \
     -H 'Content-Type: application/json' \
-    -d "$payload" "$endpoint")"; then
+    --data-binary "@$work/payload.json" "$endpoint" > "$work/response.json"; then
     echo "error: Nano Banana request failed; check network access and Google AI Studio credentials" >&2
     exit 1
 fi
 
 image_data="$(jq -r '
     first(.candidates[]?.content.parts[]? | (.inlineData // .inline_data) | .data) // empty
-' <<<"$response")"
+' "$work/response.json")"
 if [[ -z "$image_data" ]]; then
-    api_error="$(jq -r '.error.message // empty' <<<"$response" 2>/dev/null || true)"
+    api_error="$(jq -r '.error.message // empty' "$work/response.json" 2>/dev/null || true)"
     if [[ -n "$api_error" ]]; then
         echo "error: Nano Banana returned an API error: $api_error" >&2
     else
@@ -138,6 +166,39 @@ if [[ -z "$image_data" ]]; then
     exit 1
 fi
 
-mkdir -p "$(dirname "$output")"
-printf '%s' "$image_data" | base64 --decode > "$output"
-printf 'wrote=%s\nmodel=%s\n' "$output" "$model"
+returned_mime="$(jq -r '
+    first(.candidates[]?.content.parts[]? | (.inlineData // .inline_data) |
+        (.mimeType // .mime_type)) // empty
+' "$work/response.json")"
+final_output="$output"
+if [[ -n "$returned_mime" ]]; then
+    returned_mime="${returned_mime%%;*}"
+    if actual_extension="$(output_extension_for_mime "$returned_mime")"; then
+        output_name="$(basename "$output")"
+        requested_extension=""
+        if [[ "$output_name" == *.* ]]; then
+            requested_extension="${output_name##*.}"
+        fi
+        if ! extension_matches_mime "$returned_mime" "$requested_extension"; then
+            output_stem="${output_name%.*}"
+            if [[ "$output_name" != *.* ]]; then
+                output_stem="$output_name"
+            fi
+            output_dir="$(dirname "$output")"
+            if [[ "$output_dir" == "." ]]; then
+                final_output="$output_stem.$actual_extension"
+            else
+                final_output="$output_dir/$output_stem.$actual_extension"
+            fi
+            echo "warning: MIME mismatch: API returned $returned_mime but requested output '$output'; writing '$final_output'" >&2
+        fi
+    else
+        echo "warning: API returned unsupported image MIME '$returned_mime'; writing requested output '$output'" >&2
+    fi
+else
+    echo "warning: API response omitted image MIME type; writing requested output '$output'" >&2
+fi
+
+mkdir -p "$(dirname "$final_output")"
+printf '%s' "$image_data" | base64 --decode > "$final_output"
+printf 'wrote=%s\nmodel=%s\n' "$final_output" "$model"

@@ -275,8 +275,8 @@ async fn test_skill_update() {
         tags: None,
         summary: None,
         disable_model_invocation: None,
-        changed_by: None,
-        change_note: None,
+        changed_by: Some("test-actor".to_string()),
+        change_note: Some("revise description".to_string()),
     };
 
     let result = service
@@ -286,6 +286,36 @@ async fn test_skill_update() {
 
     let text = extract_text(result);
     assert!(text.contains("Updated") || text.contains("updated"));
+
+    let history = service
+        .cas_skill_history(Parameters(VersionRequest {
+            id: id.clone(),
+            version: None,
+            version_id: None,
+            changed_by: None,
+            change_note: None,
+        }))
+        .await
+        .expect("skill_history should succeed");
+    let history_text = extract_text(history);
+    assert!(history_text.contains("revise description"));
+    assert!(history_text.contains("Original description"));
+
+    service
+        .cas_skill_restore(Parameters(VersionRequest {
+            id: id.clone(),
+            version: Some(1),
+            version_id: None,
+            changed_by: Some("restorer".to_string()),
+            change_note: Some("restore baseline".to_string()),
+        }))
+        .await
+        .expect("skill_restore should succeed");
+    let restored = service
+        .cas_skill_show(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("restored skill should exist");
+    assert!(extract_text(restored).contains("Original description"));
 }
 
 #[tokio::test]

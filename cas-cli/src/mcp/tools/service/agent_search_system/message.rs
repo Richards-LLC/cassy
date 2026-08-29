@@ -384,9 +384,15 @@ impl CasService {
                 .ok()
                 .and_then(|store| store.get(&source).ok())
         };
-        let role = std::env::var("CAS_AGENT_ROLE")
-            .ok()
-            .or_else(|| agent_from_store.as_ref().map(|a| a.role.to_string()))
+        // The registered row is the explicit identity for this MCP caller.
+        // CAS_AGENT_ROLE is only a bootstrap fallback when no row can be
+        // resolved; letting it win here can relabel a registered worker as a
+        // supervisor when a supervisor-launched test or server shares a
+        // process environment.
+        let role = agent_from_store
+            .as_ref()
+            .map(|a| a.role.to_string())
+            .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
         let factory_session = std::env::var("CAS_FACTORY_SESSION")
             .ok()
@@ -730,7 +736,9 @@ impl CasService {
         // eligible for revalidation and suppression.
         if role == "worker" && req.merge_request.unwrap_or(false) {
             use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha;
-            use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+            use crate::mcp::tools::core::task::repo_context::{
+                resolve_repo_context, resolve_repo_context_from_local_root,
+            };
             use crate::prompt_revalidation::{
                 MergeRequestDecision, MergeRequestEnvelope, attach_merge_request_envelope,
                 merge_landed_guidance, revalidate_merge_request, select_unambiguous_merge_task,
@@ -748,7 +756,49 @@ impl CasService {
 
             if let Some(task) = merge_task
                 && let Some(work_target) = task.deliverables.work_target.as_ref()
-                && let Ok(repo) = resolve_repo_context(&self.inner.cas_root, work_target)
+                && let Ok(repo) = {
+                    match resolve_repo_context_from_local_root(&self.inner.cas_root, work_target) {
+                        Ok(repo) => {
+                            tracing::debug!(
+                                task_id = %task.id,
+                                resolution = "local_checkout",
+                                repo_root = %repo.repo_root.display(),
+                                git_common_dir = %repo.git_common_dir.display(),
+                                "merge request revalidation selected explicit local checkout"
+                            );
+                            Ok(repo)
+                        }
+                        Err(local_error) => {
+                            tracing::debug!(
+                                task_id = %task.id,
+                                resolution = "local_checkout_miss",
+                                error = %local_error,
+                                "merge request revalidation falling back to host registry"
+                            );
+                            match resolve_repo_context(&self.inner.cas_root, work_target) {
+                                Ok(repo) => {
+                                    tracing::debug!(
+                                        task_id = %task.id,
+                                        resolution = "host_registry_fallback",
+                                        repo_root = %repo.repo_root.display(),
+                                        git_common_dir = %repo.git_common_dir.display(),
+                                        "merge request revalidation selected host registry checkout"
+                                    );
+                                    Ok(repo)
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        task_id = %task.id,
+                                        resolution = "host_registry_miss",
+                                        error = %error,
+                                        "merge request revalidation could not resolve checkout"
+                                    );
+                                    Err(error)
+                                }
+                            }
+                        }
+                    }
+                }
             {
                 let branch = task
                     .deliverables
@@ -2503,6 +2553,7 @@ mod cas99d2_redelivery_tests {
 #[cfg(test)]
 mod cas_89e1_post_merge_message_type_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, Task, TaskStatus, WorkTarget};
     use rmcp::model::RawContent;
     use std::path::Path;
@@ -2513,6 +2564,8 @@ mod cas_89e1_post_merge_message_type_tests {
             .arg("-C")
             .arg(repo)
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()
             .expect("git command");
         assert!(
@@ -2552,6 +2605,20 @@ mod cas_89e1_post_merge_message_type_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
+        let mut env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("host repo schema");
+        let host_collision = tempfile::tempdir().expect("host collision repo");
+        let collision_repo = host_collision.path();
+        git(collision_repo, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir(collision_repo.join(".cas")).expect("collision Cassy directory");
+        std::fs::write(
+            collision_repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-89e1-message-test\"\n",
+        )
+        .expect("collision Cassy config");
+        crate::store::known_repos::register_repo_strict(collision_repo)
+            .expect("register host collision");
+
         let project = tempfile::tempdir().expect("temporary project");
         let repo = project.path();
         git(repo, &["init", "-q", "-b", "main"]);
@@ -2600,6 +2667,13 @@ mod cas_89e1_post_merge_message_type_tests {
         });
         task.deliverables.parked_branch = Some("factory/worker-a".to_string());
         tasks.add(&task).expect("add parked task");
+
+        // The fixture starts hermetic even when the test binary was launched
+        // by a supervisor. Re-introduce a conflicting ambient role only after
+        // registration to prove the persisted worker role wins at the MCP
+        // message boundary.
+        assert!(std::env::var_os("CAS_AGENT_ROLE").is_none());
+        env.set("CAS_AGENT_ROLE", "supervisor");
 
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core.clone(), None);

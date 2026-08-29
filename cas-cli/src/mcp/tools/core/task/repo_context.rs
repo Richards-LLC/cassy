@@ -126,6 +126,28 @@ fn git_layout(path: &Path) -> Result<(PathBuf, PathBuf), String> {
     Ok((canonical(repo_root), common_dir))
 }
 
+/// Resolve the actual checkout root and shared Git common directory for a
+/// caller that supplied a local project root.
+///
+/// [`git_layout`] deliberately collapses linked worktrees to the primary
+/// checkout so host-repository discovery and binding identity remain stable.
+/// That is wrong for local config lookup: an ignored `.cas/` directory may
+/// exist only in the linked checkout. Keep the checkout root here so its
+/// project selector is checked before falling back to the host registry.
+fn git_checkout_layout(path: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let checkout_root = canonical(PathBuf::from(git_output(
+        path,
+        &["rev-parse", "--show-toplevel"],
+    )?));
+    let common_raw = PathBuf::from(git_output(path, &["rev-parse", "--git-common-dir"])?);
+    let common_dir = canonical(if common_raw.is_absolute() {
+        common_raw
+    } else {
+        path.join(common_raw)
+    });
+    Ok((checkout_root, common_dir))
+}
+
 fn bounded_git_layout(
     path: &Path,
     probe: &BoundedRepoProbe,
@@ -838,6 +860,63 @@ pub(crate) fn resolve_repo_context(
     }
 }
 
+/// Resolve a work target from the explicitly supplied project root only.
+///
+/// Informational paths such as merge-request revalidation may already hold the
+/// authoritative project root, but the general resolver also consults the
+/// host-wide known-repository registry so cross-repository lifecycle mutations
+/// can resolve portable selectors. That registry is ambient state: a stale or
+/// concurrently registered checkout can make an otherwise local selector look
+/// ambiguous. Callers that have an explicit local root should use this helper
+/// first and fall back to [`resolve_repo_context`] only for cross-repository
+/// targets.
+pub(crate) fn resolve_repo_context_from_local_root(
+    cas_root: &Path,
+    target: &WorkTarget,
+) -> Result<RepoContext, String> {
+    let (repo_root, git_common_dir) = match git_checkout_layout(cas_root) {
+        Ok(layout) => layout,
+        Err(error) => {
+            tracing::debug!(
+                resolution = "local_layout_error",
+                cas_root = %cas_root.display(),
+                target_selector = %target.repo_selector,
+                error = %error,
+                "merge revalidation local-root resolver could not inspect checkout"
+            );
+            return Err(error);
+        }
+    };
+    if !repo_answers_to(&repo_root, &target.repo_selector) {
+        tracing::debug!(
+            resolution = "local_selector_mismatch",
+            cas_root = %cas_root.display(),
+            checkout_root = %repo_root.display(),
+            git_common_dir = %git_common_dir.display(),
+            target_selector = %target.repo_selector,
+            identities = ?repo_identities(&repo_root),
+            "merge revalidation local-root resolver rejected checkout identity"
+        );
+        return Err("explicit project root does not match work target selector".to_string());
+    }
+    let target_branch = validate_target_branch(&repo_root, &target.target_branch)?;
+    tracing::debug!(
+        resolution = "local_checkout",
+        cas_root = %cas_root.display(),
+        checkout_root = %repo_root.display(),
+        git_common_dir = %git_common_dir.display(),
+        target_selector = %target.repo_selector,
+        target_branch = %target_branch,
+        "merge revalidation resolved from explicit checkout root"
+    );
+    Ok(RepoContext {
+        repo_selector: target.repo_selector.clone(),
+        repo_root,
+        git_common_dir,
+        target_branch,
+    })
+}
+
 pub(crate) fn resolve_repo_context_bounded(
     cas_root: &Path,
     target: &WorkTarget,
@@ -1066,6 +1145,59 @@ mod tests {
             let c = resolve_path_context(&dir.path().join("alias"), "master").unwrap();
             assert_eq!(a.git_common_dir, c.git_common_dir);
         }
+    }
+
+    #[test]
+    fn local_root_resolver_uses_linked_checkout_root_for_identity() {
+        TestEnvGuard::run_with_temp_home(|_| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let main = dir.path().join("main");
+            std::fs::create_dir(&main).unwrap();
+            git(&main, &["init", "-q", "-b", "main"]);
+            std::fs::write(main.join("base.txt"), "base\n").unwrap();
+            git(&main, &["add", "base.txt"]);
+            git(
+                &main,
+                &[
+                    "-c",
+                    "user.name=Cassy",
+                    "-c",
+                    "user.email=cas@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "base",
+                ],
+            );
+
+            let linked = dir.path().join("linked");
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "factory/local",
+                    linked.to_str().unwrap(),
+                ],
+            );
+            std::fs::create_dir(linked.join(".cas")).unwrap();
+            std::fs::write(
+                linked.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"linked-project\"\n",
+            )
+            .unwrap();
+
+            let target = WorkTarget {
+                repo_selector: "project:linked-project".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let resolved = resolve_repo_context_from_local_root(&linked.join(".cas"), &target)
+                .expect("linked checkout-local config must resolve before registry fallback");
+            assert_eq!(resolved.repo_root, canonical(linked));
+            assert_eq!(resolved.git_common_dir, canonical(main.join(".git")));
+        });
     }
 
     #[test]

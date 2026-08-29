@@ -702,7 +702,9 @@ impl CasCore {
         );
         let configured_role = match source {
             AgentIdentitySource::ServerInternal => role_hint.or(environment_role),
-            AgentIdentitySource::PublicRegistration => environment_role.or(role_hint),
+            // A typed registration request is explicit caller input. Ambient
+            // role is only a bootstrap fallback when no role was requested.
+            AgentIdentitySource::PublicRegistration => role_hint.or(environment_role),
         };
         if let Some(role) = configured_role {
             agent.role = role;

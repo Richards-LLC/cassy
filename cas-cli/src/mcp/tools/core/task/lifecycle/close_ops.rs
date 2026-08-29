@@ -19175,28 +19175,107 @@ mod merge_state_gate_tests {
         ));
     }
 
-    /// GH #597: the historical union merge that exposed the close-gate bug.
-    /// Keep the real merge shape in the regression so changes to the
-    /// content-proof predicate cannot silently lose coverage for a delivery
-    /// that is a non-first parent of a manual conflict resolution.
+    /// GH #597: reproduce the historical union merge without depending on the
+    /// cassy repository's own history. The worker delivery is the non-first
+    /// parent of a manual conflict resolution, and the supervisor follows the
+    /// merge with a fixup that removes a duplicate import while retaining the
+    /// delivery's tree effect.
     #[test]
     fn historical_union_merge_keeps_delivery_content_gh_597() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        assert!(git_commit_is_ancestor(repo, "65bcfa0c", "fa249048"));
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    Alpha, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("doctor.rs"), "use crate::factory::Doctor;\n").unwrap();
+        git(p, &["add", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: seed shared files"]);
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+
+        std::fs::write(
+            p.join("capability.rs"),
+            "pub struct CapabilitySnapshot;\npub struct DeliveryProbe;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    CapabilitySnapshot,\n    Alpha, DeliveryProbe, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::{CapabilitySnapshot, DeliveryProbe};\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "capability.rs", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: add capability delivery"]);
+        let delivery = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "-b", "factory/sibling", "main"]);
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    Alpha, SiblingProbe, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::CapabilitySnapshot;\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: add parallel delivery"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling"]);
+        let conflict = git_command(p, &["merge", "--no-ff", "factory/worker"])
+            .status()
+            .expect("start supervisor union merge");
+        assert!(!conflict.success(), "fixture must produce a merge conflict");
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    CapabilitySnapshot,\n    Alpha, DeliveryProbe, SiblingProbe, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::CapabilitySnapshot;\nuse crate::capability::{CapabilitySnapshot, DeliveryProbe};\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "merge: union parallel deliveries"]);
+
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::{CapabilitySnapshot, DeliveryProbe};\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: remove duplicate capability import"]);
+        let supervisor_fixup = rev_parse_local(p, "HEAD");
+
+        assert!(git_commit_is_ancestor(p, &delivery, &supervisor_fixup));
         assert_eq!(
-            delivery_content_presence_on_target(repo, "65bcfa0c", "fa249048"),
+            delivery_content_presence_on_target(p, &delivery, &supervisor_fixup),
             DeliveryContentPresence::Present {
                 paths: vec![
-                    "cas-cli/src/capability.rs".to_string(),
-                    "cas-cli/src/cli/factory/doctor.rs".to_string(),
-                    "cas-cli/src/factory_preflight.rs".to_string(),
-                    "cas-cli/src/lib.rs".to_string(),
-                    "crates/cas-factory/src/lib.rs".to_string(),
-                    "crates/cas-factory/src/routing.rs".to_string(),
-                    "crates/cas-mux/src/harness.rs".to_string(),
+                    "capability.rs".to_string(),
+                    "doctor.rs".to_string(),
+                    "exports.rs".to_string(),
                 ]
             }
         );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery);
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &req, "main", p),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// GH #597: two parallel lanes edit the same export-list line. The

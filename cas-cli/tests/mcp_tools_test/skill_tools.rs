@@ -2,7 +2,6 @@ use crate::support::*;
 use cas::mcp::tools::*;
 use cas::store::open_skill_store;
 use rmcp::handler::server::wrapper::Parameters;
-use rusqlite::Connection;
 use std::process::Command;
 
 fn git(root: &std::path::Path, args: &[&str]) {
@@ -554,16 +553,27 @@ async fn test_skill_update_validation_failure_is_atomic() {
         .expect("passing validation should admit create");
     let id = extract_skill_id(&extract_text(result)).expect("create should return skill ID");
 
-    // Model a pre-existing skill whose validation script was configured before
-    // the create/update gate existed; this keeps the update red test focused
-    // on the update seam rather than on request-field plumbing.
-    let connection = Connection::open(temp.path().join(".cas/cas.db")).unwrap();
-    connection
-        .execute(
-            "UPDATE skills SET validation_script = ?1 WHERE id = ?2",
-            rusqlite::params!["printf update-validation-failed >&2; exit 29", id],
-        )
-        .unwrap();
+    service
+        .cas_skill_update(Parameters(SkillUpdateRequest {
+            id: id.to_string(),
+            name: None,
+            description: Some("Revised description".to_string()),
+            invocation: None,
+            tags: None,
+            preconditions: None,
+            postconditions: None,
+            validation_script: Some("true".to_string()),
+            summary: None,
+            disable_model_invocation: None,
+            changed_by: Some("test-actor".to_string()),
+            change_note: Some("revise before rejected update".to_string()),
+        }))
+        .await
+        .expect("a passing update should create the prior version");
+
+    let skill_store = open_skill_store(&temp.path().join(".cas")).unwrap();
+    let versions_before_rejected_update = skill_store.list_versions(&id).unwrap();
+    assert_eq!(versions_before_rejected_update.len(), 2);
 
     let result = service
         .cas_skill_update(Parameters(SkillUpdateRequest {
@@ -574,7 +584,7 @@ async fn test_skill_update_validation_failure_is_atomic() {
             tags: None,
             preconditions: None,
             postconditions: None,
-            validation_script: None,
+            validation_script: Some("printf update-validation-failed >&2; exit 29".to_string()),
             summary: None,
             disable_model_invocation: None,
             changed_by: None,
@@ -585,10 +595,13 @@ async fn test_skill_update_validation_failure_is_atomic() {
     let error = result.expect_err("the existing failing validation script must reject update");
     assert!(error.message.contains("validation"));
 
-    let skill_store = open_skill_store(&temp.path().join(".cas")).unwrap();
     let stored = skill_store.get(&id).unwrap();
-    assert_eq!(stored.description, "Original description");
-    let versions = skill_store.list_versions(&id).unwrap();
-    assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].operation, "create");
+    assert_eq!(stored.description, "Revised description");
+    assert_eq!(stored.validation_script, "true");
+    let versions_after_rejected_update = skill_store.list_versions(&id).unwrap();
+    assert_eq!(versions_after_rejected_update.len(), 2);
+    assert_eq!(versions_after_rejected_update[0].operation, "update");
+    assert!(versions_after_rejected_update[0]
+        .snapshot_json
+        .contains("Original description"));
 }

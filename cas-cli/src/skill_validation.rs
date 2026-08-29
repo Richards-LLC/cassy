@@ -1,5 +1,6 @@
 //! Bounded validation for opt-in skill availability checks.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -15,10 +16,11 @@ const MAX_VALIDATION_OUTPUT_BYTES: usize = 8 * 1024;
 /// Run a skill's optional validation script before it is persisted.
 ///
 /// The probe runs from a fresh temporary directory with a scrubbed environment
-/// (only PATH is retained for executable lookup). This keeps relative writes
-/// out of the project and avoids leaking CAS credentials. The process boundary
-/// does not promise network isolation, so validation scripts must be local,
-/// deterministic availability checks that do not require network access.
+/// (only PATH is retained for executable lookup). On Linux, bubblewrap adds a
+/// network namespace with no routes and the gate fails closed if bubblewrap is
+/// unavailable. This keeps relative writes out of the project and avoids
+/// leaking CAS credentials. Validation scripts must be local, deterministic
+/// availability checks that do not require network access.
 pub(crate) fn validate_skill(skill: &Skill) -> Result<(), String> {
     if skill.validation_script.trim().is_empty() {
         return Ok(());
@@ -27,18 +29,7 @@ pub(crate) fn validate_skill(skill: &Skill) -> Result<(), String> {
     let cwd = tempfile::tempdir()
         .map_err(|error| format!("could not create validation sandbox: {error}"))?;
 
-    #[cfg(unix)]
-    let mut command = {
-        let mut command = Command::new("sh");
-        command.args(["-c", &skill.validation_script]);
-        command
-    };
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", &skill.validation_script]);
-        command
-    };
+    let mut command = validation_command(&skill.validation_script, cwd.path())?;
 
     command.current_dir(cwd.path()).env_clear();
     if let Some(path) = std::env::var_os("PATH") {
@@ -79,6 +70,66 @@ pub(crate) fn validate_skill(skill: &Skill) -> Result<(), String> {
         |code| code.to_string(),
     );
     Err(format!("validation script failed (exit {status}){details}"))
+}
+
+fn validation_command(script: &str, cwd: &Path) -> Result<Command, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let bubblewrap = find_executable("bwrap").ok_or_else(|| {
+            "validation sandbox unavailable: install bubblewrap to run validation scripts"
+                .to_string()
+        })?;
+
+        let mut command = Command::new(bubblewrap);
+        command.args(["--unshare-net", "--die-with-parent", "--new-session"]);
+        for system_path in ["/usr", "/bin", "/lib", "/lib64", "/etc"] {
+            if Path::new(system_path).exists() {
+                command.args(["--ro-bind", system_path, system_path]);
+            }
+        }
+        command.args([
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind",
+        ]);
+        command.arg(cwd);
+        command.arg(cwd);
+        command.args(["--chdir"]);
+        command.arg(cwd);
+        command.args(["--clearenv"]);
+        if let Some(path) = std::env::var_os("PATH") {
+            command.args(["--setenv", "PATH"]);
+            command.arg(path);
+        }
+        command.args(["--", "/bin/sh", "-c"]);
+        command.arg(script);
+        return Ok(command);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command.current_dir(cwd);
+        return Ok(command);
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/C", script]);
+        command.current_dir(cwd);
+        return Ok(command);
+    }
+
+    #[allow(unreachable_code)]
+    Err("validation sandbox unsupported on this platform".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn bounded_output(bytes: &[u8]) -> String {

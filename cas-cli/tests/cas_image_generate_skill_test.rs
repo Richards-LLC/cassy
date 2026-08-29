@@ -97,7 +97,8 @@ fn svg_web_assets_reference_is_mirrored_and_covers_the_pipeline() {
             "output-checklist.md",
         ] {
             assert!(
-                body.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()),
+                body.to_ascii_lowercase()
+                    .contains(&marker.to_ascii_lowercase()),
                 "{path} missing SVG/web-asset marker {marker:?}"
             );
         }
@@ -106,11 +107,14 @@ fn svg_web_assets_reference_is_mirrored_and_covers_the_pipeline() {
 
 #[test]
 fn worked_svg_examples_are_well_formed_and_use_palette_tokens() {
-    let reference = load(
-        "cas-cli/src/builtins/skills/cas-image-generate/references/svg-web-assets.md",
-    );
+    let reference =
+        load("cas-cli/src/builtins/skills/cas-image-generate/references/svg-web-assets.md");
     let examples = fenced_svg_examples(&reference);
-    assert_eq!(examples.len(), 3, "expected icon, divider, and favicon examples");
+    assert_eq!(
+        examples.len(),
+        3,
+        "expected icon, divider, and favicon examples"
+    );
 
     for (index, example) in examples.iter().enumerate() {
         let mut reader = Reader::from_str(example);
@@ -122,7 +126,10 @@ fn worked_svg_examples_are_well_formed_and_use_palette_tokens() {
                 Err(error) => panic!("worked SVG example {index} is not XML: {error}"),
             }
         }
-        assert!(example.contains("viewBox"), "example {index} needs a viewBox");
+        assert!(
+            example.contains("viewBox"),
+            "example {index} needs a viewBox"
+        );
         assert!(
             example.contains("--color-") || example.contains("currentColor"),
             "example {index} needs a palette token"
@@ -183,7 +190,9 @@ fn references_document_research_and_unwired_provider_boundaries() {
         "raster-to-vector",
     ] {
         assert!(
-            playbook.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()),
+            playbook
+                .to_ascii_lowercase()
+                .contains(&marker.to_ascii_lowercase()),
             "asset playbook missing vector routing marker {marker:?}"
         );
     }

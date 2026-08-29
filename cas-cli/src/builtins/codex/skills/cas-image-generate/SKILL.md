@@ -7,8 +7,8 @@ managed_by: cas
 # Style-aware image generation
 
 Use this skill when an image should belong to an existing product, site, or
-report rather than look like an unrelated stock asset. It covers logos, icon
-sets, heroes, backgrounds, textures, OG/social cards, report art, illustrations,
+report rather than look like an unrelated stock asset. It covers logos, icon sets,
+heroes, backgrounds, textures, OG/social cards, report art, illustrations,
 and favicons. Read the relevant
 references before generating; keep the style decision reusable and inspect the
 result at its intended size.
@@ -56,11 +56,16 @@ the request shape and the unwired alternatives.
    review checklist. Record model, tier, prompt, references, and any seed or
    style identifier in the project's asset note.
 
-Nano Banana produces raster output, not editable SVG. For logos, favicons, and
-icon sets, request a flat, high-contrast raster master with generous padding so
-manual vectorization is practical; do not promise production SVG paths or
-perfect small-size legibility. Derive favicon sizes from one approved master
-rather than regenerating each size.
+Choose the asset medium before invoking Nano Banana. For geometric, flat,
+limited-palette icons, marks, dividers, patterns, and favicons, write
+agent-authored SVG directly; the standards, worked examples, and routing table
+are in [svg-web-assets.md](references/svg-web-assets.md). Use Nano Banana for
+photographic, painterly, or complex illustration work. For an organic mark such
+as a ribbon-C, generate an approved raster first and follow the raster-to-vector bridge
+in that reference when a vector deliverable is required. If no local
+vectorizer is installed, follow its manual vectorization fallback. Nano Banana
+still produces raster output, not editable SVG, so do not promise production
+SVG paths or perfect small-size legibility from a generated raster.
 
 Do not use Imagen: Google retired that image path on 2026-08-17. Recraft,
 OpenAI, Ideogram, and hosted FLUX remain documented but unwired optional

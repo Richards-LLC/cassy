@@ -39,6 +39,23 @@ fn increment_rule_surface_count(stores: &ContextStores, rule: &Rule) {
     }
 }
 
+/// Report a surfaced rule through the caller-owned callback when available.
+/// The callback lets the CLI batch its durable counter and audit-row writes;
+/// the direct store update remains as a compatibility fallback for callers
+/// that use the core builder without a callback.
+fn report_rule_surface(
+    stores: &ContextStores,
+    rule: &Rule,
+    on_surfaced: Option<&SurfacedItemCallback>,
+    preview: &str,
+) {
+    if let Some(callback) = on_surfaced {
+        callback(&rule.id, "rule", Some(preview));
+    } else {
+        increment_rule_surface_count(stores, rule);
+    }
+}
+
 /// Render the distilled-knowledge index: one line per page, no bodies.
 ///
 /// This is the "inject the index, toolize the body" shape. Every line carries
@@ -490,10 +507,7 @@ pub fn build_context_with_stores(
                 total_tokens += item.tokens;
                 stats.rules_included += 1;
 
-                increment_rule_surface_count(stores, rule);
-                if let Some(callback) = on_surfaced {
-                    callback(&item.id, "rule", Some(&item.summary));
-                }
+                report_rule_surface(stores, rule, on_surfaced, &item.summary);
             }
         }
 
@@ -572,10 +586,7 @@ pub fn build_context_with_stores(
                     }
                     stats.rules_included += 1;
 
-                    increment_rule_surface_count(stores, rule);
-                    if let Some(callback) = on_surfaced {
-                        callback(&item.id, "rule", Some(&item.summary));
-                    }
+                    report_rule_surface(stores, rule, on_surfaced, &item.summary);
                 }
                 stats.items_omitted += regular_rules
                     .len()
@@ -658,6 +669,9 @@ pub fn build_context_with_stores(
                     ));
                     total_tokens += estimate_tokens(&item.summary) + 20;
                     stats.skills_included += 1;
+                    if let Some(callback) = on_surfaced {
+                        callback(&item.id, "skill", Some(&item.summary));
+                    }
                 }
                 stats.items_omitted += enabled_skills
                     .len()

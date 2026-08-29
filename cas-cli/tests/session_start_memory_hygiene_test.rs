@@ -1,9 +1,14 @@
 use assert_cmd::Command;
+use cas::hooks::build_context_with_token_budget;
 use cas::types::{Entry, EntryType};
 use cas_core::hooks::context::{ContextStores, build_context_with_stores};
 use cas_core::hooks::{DefaultHooksConfig, HookInput};
 use cas_core::memory::{contamination_patterns, find_contaminated_entries};
-use cas_store::{SqliteStore, Store};
+use cas_store::{
+    RuleStore, SkillStore, SqliteRuleStore, SqliteSkillStore, SqliteStore,
+    SqliteSurfacedArtifactStore, Store,
+};
+use cas_types::{Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
 use std::fs;
 
 fn session_start_input() -> HookInput {
@@ -12,6 +17,62 @@ fn session_start_input() -> HookInput {
         hook_event_name: "SessionStart".to_string(),
         ..Default::default()
     }
+}
+
+#[test]
+fn cli_session_start_persists_surface_ledger_for_injected_rules_and_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    fs::create_dir_all(&cas_root).unwrap();
+
+    let entry_store = SqliteStore::open(&cas_root).unwrap();
+    entry_store.init().unwrap();
+    let session = Session::new("surface-session".to_string(), "/project".to_string(), None);
+    entry_store.start_session(&session).unwrap();
+
+    let rule_store = SqliteRuleStore::open(&cas_root).unwrap();
+    rule_store.init().unwrap();
+    let mut rule = Rule::new("surface-rule".to_string(), "Surface this rule".to_string());
+    rule.status = RuleStatus::Proven;
+    rule_store.add(&rule).unwrap();
+
+    let skill_store = SqliteSkillStore::open(&cas_root).unwrap();
+    skill_store.init().unwrap();
+    let mut skill = Skill::new(
+        "surface-skill".to_string(),
+        "Surface this skill".to_string(),
+    );
+    skill.status = SkillStatus::Enabled;
+    skill_store.add(&skill).unwrap();
+
+    let input = HookInput {
+        session_id: "surface-session".to_string(),
+        cwd: "/project".to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    let context = build_context_with_token_budget(&input, 10, &cas_root, None).unwrap();
+    assert!(context.contains("Surface this rule"));
+    assert!(context.contains("Surface this skill"));
+
+    let surface_store = SqliteSurfacedArtifactStore::open(&cas_root).unwrap();
+    assert_eq!(
+        surface_store.count_for_session("surface-session").unwrap(),
+        2
+    );
+    assert_eq!(rule_store.get("surface-rule").unwrap().surface_count, 1);
+    entry_store
+        .update_session_outcome("surface-session", SessionOutcome::TasksCompleted)
+        .unwrap();
+    let impacts = surface_store.aggregate(10).unwrap();
+    assert_eq!(
+        impacts
+            .iter()
+            .find(|impact| impact.artifact_id == "surface-rule")
+            .unwrap()
+            .outcome_counts["tasks_completed"],
+        1
+    );
 }
 
 #[test]

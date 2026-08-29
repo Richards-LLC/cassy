@@ -217,6 +217,7 @@ mod m238_skills_add_source_ids;
 mod m239_task_execution_states_create_table;
 mod m240_rule_skill_versions;
 mod m241_tasks_add_origin_project;
+mod m243_surfaced_artifacts_create_table;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -467,6 +468,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m239_task_execution_states_create_table::MIGRATION,
     m240_rule_skill_versions::MIGRATION,
     m241_tasks_add_origin_project::MIGRATION,
+    m243_surfaced_artifacts_create_table::MIGRATION,
 ];
 
 #[cfg(test)]

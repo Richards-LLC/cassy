@@ -139,6 +139,84 @@ async fn test_search_with_content() {
 }
 
 #[tokio::test]
+async fn skill_impact_reports_surface_rows_and_session_outcomes() {
+    use cas_store::{RuleStore, SkillStore, SqliteRuleStore, SqliteSkillStore, SqliteStore};
+    use cas_types::{Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
+
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+
+    let rule_store = SqliteRuleStore::open(&cas_dir).unwrap();
+    let mut rule = Rule::new("rule-impact".to_string(), "Impact rule".to_string());
+    rule.status = RuleStatus::Proven;
+    rule.helpful_count = 2;
+    rule.harmful_count = 1;
+    rule_store.add(&rule).unwrap();
+
+    let skill_store = SqliteSkillStore::open(&cas_dir).unwrap();
+    let mut skill = Skill::new("skill-impact".to_string(), "Impact skill".to_string());
+    skill.status = SkillStatus::Enabled;
+    skill.usage_count = 4;
+    skill_store.add(&skill).unwrap();
+
+    let session_store = SqliteStore::open(&cas_dir).unwrap();
+    let session = Session::new("impact-session".to_string(), "/repo".to_string(), None);
+    session_store.start_session(&session).unwrap();
+    session_store
+        .update_session_outcome("impact-session", SessionOutcome::TasksCompleted)
+        .unwrap();
+
+    let surface_store = cas_store::SqliteSurfacedArtifactStore::open(&cas_dir).unwrap();
+    surface_store
+        .record_batch(
+            "impact-session",
+            &[
+                cas_store::SurfacedArtifact {
+                    artifact_id: "rule-impact".to_string(),
+                    artifact_type: "rule".to_string(),
+                    preview: Some("Impact rule".to_string()),
+                },
+                cas_store::SurfacedArtifact {
+                    artifact_id: "skill-impact".to_string(),
+                    artifact_type: "skill".to_string(),
+                    preview: Some("Impact skill".to_string()),
+                },
+            ],
+        )
+        .unwrap();
+
+    let service = CasService::new(core, None);
+    let request: SearchContextRequest = serde_json::from_value(serde_json::json!({
+        "action": "skill_impact",
+        "limit": 10
+    }))
+    .unwrap();
+    let response = service
+        .search(Parameters(request))
+        .await
+        .expect("skill impact report should succeed");
+    let report: serde_json::Value =
+        serde_json::from_str(&extract_text(response)).expect("impact response should be JSON");
+
+    assert_eq!(report["version"], 1);
+    let artifacts = report["artifacts"].as_array().unwrap();
+    let rule_impact = artifacts
+        .iter()
+        .find(|artifact| artifact["artifact_id"] == "rule-impact")
+        .unwrap();
+    assert_eq!(rule_impact["surfaced_count"], 1);
+    assert_eq!(rule_impact["outcome_counts"]["tasks_completed"], 1);
+    assert_eq!(rule_impact["helpful_count"], 2);
+    assert_eq!(rule_impact["harmful_count"], 1);
+    let skill_impact = artifacts
+        .iter()
+        .find(|artifact| artifact["artifact_id"] == "skill-impact")
+        .unwrap();
+    assert_eq!(skill_impact["usage_count"], 4);
+    assert_eq!(skill_impact["outcome_counts"]["tasks_completed"], 1);
+}
+
+#[tokio::test]
 async fn cas_57e5_colon_bearing_free_text_queries_return_results() {
     let (_temp, service) = setup_cas();
     service

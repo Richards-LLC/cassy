@@ -68,11 +68,12 @@ mod spec_store;
 mod sqlite;
 mod sqlite_code_store;
 mod supervisor_queue_store;
+mod surfaced_artifact_store;
 mod task_store;
 pub mod trace_archive;
-mod version_store;
 pub mod tracing;
 mod verification_store;
+mod version_store;
 mod viktor_inbound_store;
 mod viktor_watch_store;
 mod worktree_store;
@@ -221,6 +222,11 @@ pub use supervisor_queue_store::{
     SupervisorNotification, SupervisorQueueStore,
 };
 
+pub use surfaced_artifact_store::{
+    SURFACED_ARTIFACT_SCHEMA, SURFACED_ARTIFACT_SCHEMA_STATEMENTS, SqliteSurfacedArtifactStore,
+    SurfacedArtifact, SurfacedArtifactImpact,
+};
+
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
@@ -279,13 +285,13 @@ pub use recording_text_store::{
 pub use layered::{LayeredEntryStore, LayeredRuleStore, LayeredSkillStore};
 pub use markdown::{MarkdownRuleStore, MarkdownStore};
 pub use skill_store::{SKILL_SCHEMA, SqliteSkillStore};
+pub use spec_store::{SpecStore, SqliteSpecStore};
+pub use sqlite::{ENTRIES_RULES_SCHEMA, SqliteRuleStore, SqliteStore};
+pub use task_store::{SqliteTaskStore, TASK_SCHEMA, clear_pending_verification_with_conn};
 pub use version_store::{
     RULE_AND_SKILL_VERSIONS_SCHEMA_STATEMENTS, RULE_VERSIONS_SCHEMA_STATEMENTS, RuleVersion,
     SKILL_VERSIONS_SCHEMA_STATEMENTS, SkillVersion,
 };
-pub use spec_store::{SpecStore, SqliteSpecStore};
-pub use sqlite::{ENTRIES_RULES_SCHEMA, SqliteRuleStore, SqliteStore};
-pub use task_store::{SqliteTaskStore, TASK_SCHEMA, clear_pending_verification_with_conn};
 
 use cas_types::{
     Dependency, DependencyType, Entity, EntityMention, EntityType, Entry, RelationType,

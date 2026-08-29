@@ -796,7 +796,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline outcome aggregation), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame, history (search indexed git commits by text/path/time; every response carries an index_status block stating freshness and what is not yet supported)."
+        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline outcome aggregation), skill_impact (surface and session-outcome impact report; impact_report alias), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame, history (search indexed git commits by text/path/time; every response carries an index_status block stating freshness and what is not yet supported)."
     )]
     pub async fn search(
         &self,
@@ -809,6 +809,7 @@ impl CasService {
                 "search" => this.search_impl(req).await,
                 "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
                 "retrieval_metrics" => this.retrieval_metrics_impl().await,
+                "skill_impact" | "impact_report" => this.skill_impact_impl(req).await,
                 "context" => this.context_impl(req).await,
                 "context_for_subagent" => this.context_for_subagent_impl(req).await,
                 "observe" => this.observe_impl(req).await,
@@ -823,7 +824,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown search action: {}. Valid: search, retrieval_feedback, retrieval_metrics, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame, history",
+                        "Unknown search action: {}. Valid: search, retrieval_feedback, retrieval_metrics, skill_impact, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame, history",
                         req.action
                     ),
                 )),

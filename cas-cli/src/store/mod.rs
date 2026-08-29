@@ -59,6 +59,9 @@ pub use cas_store::{
     EntityStore,
     EventStore,
     FileChangeStore,
+    // Known-repo registry (host-scoped cross-repo discovery, EPIC cas-7c88)
+    KnownRepo,
+    KnownRepoStore,
     LayeredEntryStore,
     LayeredRuleStore,
     LayeredSkillStore,
@@ -93,6 +96,7 @@ pub use cas_store::{
     SqliteEntityStore,
     SqliteEventStore,
     SqliteFileChangeStore,
+    SqliteKnownRepoStore,
     SqliteLoopStore,
     SqlitePromptQueueStore,
     SqlitePromptStore,
@@ -105,13 +109,10 @@ pub use cas_store::{
     // SQLite implementations
     SqliteStore,
     SqliteSupervisorQueueStore,
+    SqliteSurfacedArtifactStore,
     SqliteTaskStore,
     SqliteVerificationStore,
     SqliteWorktreeStore,
-    // Known-repo registry (host-scoped cross-repo discovery, EPIC cas-7c88)
-    KnownRepo,
-    KnownRepoStore,
-    SqliteKnownRepoStore,
     // Traits
     Store,
     // Error types
@@ -119,6 +120,8 @@ pub use cas_store::{
     // Supervisor queue types
     SupervisorNotification,
     SupervisorQueueStore,
+    SurfacedArtifact,
+    SurfacedArtifactImpact,
     TaskStore,
     VerificationStore,
     WorktreeStore,

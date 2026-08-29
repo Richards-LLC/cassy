@@ -629,7 +629,11 @@ pub struct ContextStats {
     pub items_omitted: usize,
 }
 
-/// Optional callback for surfaced items (for feedback tracking)
+/// Optional callback for surfaced items (for feedback tracking).
+///
+/// Rule stores are updated directly when this is `None`. When a callback is
+/// supplied, the caller owns durable recording of surfaced rules; this lets
+/// the CLI batch rule counters with per-session audit rows.
 pub type SurfacedItemCallback = Box<dyn Fn(&str, &str, Option<&str>)>;
 
 mod build_start;

@@ -17,6 +17,14 @@ impl Config {
                 "sync.min_helpful".to_string(),
                 self.sync.min_helpful.to_string(),
             ),
+            (
+                "sync.promotion_threshold".to_string(),
+                self.sync.promotion_threshold.to_string(),
+            ),
+            (
+                "sync.promotion_evidence".to_string(),
+                self.sync.promotion_evidence.join(","),
+            ),
             // Cloud section
             ("cloud.auto_sync".to_string(), cloud.auto_sync.to_string()),
             (

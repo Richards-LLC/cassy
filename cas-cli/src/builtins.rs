@@ -508,6 +508,12 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
 ];
 
 /// Built-in Workflow scripts shipped to `.claude/workflows/` on `cas update --sync`.
@@ -905,6 +911,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/codex/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/codex/skills/cas-image-generate/scripts/generate-image.sh") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1345,6 +1357,12 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/grok/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/grok/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/grok/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/grok/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/grok/skills/cas-image-generate/scripts/generate-image.sh") },
 ];
 
 /// OpenCode does not load a filesystem skill/agent home for its generated

@@ -1,13 +1,6 @@
 <div align="center">
 
-<pre>
-  ██████╗ █████╗ ███████╗
- ██╔════╝██╔══██╗██╔════╝
- ██║     ███████║███████╗
- ██║     ██╔══██║╚════██║
- ╚██████╗██║  ██║███████║
-  ╚═════╝╚═╝  ╚═╝╚══════╝
-</pre>
+<img src="docs/assets/cassy-logo.png" alt="Cassy" width="420" />
 
 **Multi-agent coding factory with persistent memory.**
 
@@ -135,14 +128,16 @@ mcp__cas__rule action=create content="Always validate input at API boundaries"
 
 | Surface | What it is |
 |---|---|
-| **Memory** | Learnings, preferences, context and observations that survive sessions, with tiers and importance |
-| **Tasks** | Work items with dependencies, leases, structured notes, verification and merge-state close gates |
-| **Rules** | Normative constraints that earn trust through use; proven rules sync to `.claude/rules/cas/` |
-| **Skills** | Procedural playbooks synced to `.claude/skills/`, shipped in Claude / Codex / Grok flavors |
+| **Memory** | Learnings, preferences, context and observations that survive sessions, with tiers and importance; derived entries carry `source_ids` back to what they came from, and aged events/recordings compress into an append-only archive instead of being deleted |
+| **Tasks** | Work items with dependencies, leases, structured notes, verification and merge-state close gates; each task carries a patchable execution state so a resuming worker gets a compact briefing instead of replaying history, and an `origin_project` identity keeps foreign tasks out of your ready queue |
+| **Rules** | Normative constraints that earn trust through measured use — promotion to proven requires accumulated helpful evidence, harmful evidence demotes, and injection impact is counted per rule; every change is versioned, deletes are restorable tombstones; proven rules sync to `.claude/rules/cas/` |
+| **Skills** | Procedural playbooks synced to `.claude/skills/`, shipped in Claude / Codex / Grok flavors; a skill can declare a `validation_script` that gates its own create/update, and edits are versioned with restore |
 | **Search** | BM25 full-text over entries, tasks, rules, skills, specs and indexed code symbols |
 | **Coordination** | Agent registry, messaging, worker spawn/shutdown, worktree operations — the factory's control plane |
 
 **Search, honestly.** Local search is BM25 only (Tantivy), and the knowledge surface uses SQLite FTS5. There is no local embedder: semantic ranking exists only when you are logged in to the cloud, and the ranker redistributes a dead channel's weight instead of silently scaling every result down. See [ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md) for the full accounting.
+
+**Assets, in your project's style.** The built-in `cas-image-generate` skill harvests a project's design context — palette, motifs, typography feel — into style tokens and prompts Google's Nano Banana image models with them: logos, backgrounds, heroes, icon sheets, OG cards, report art. It supports reference images for style consistency, has a `--dry-run`, and degrades with explicit setup guidance when no key is present. Bring a Google AI Studio key as `GEMINI_API_KEY`; no other paid service is wired. The logo at the top of this page was generated with it.
 
 ## Knowledge
 

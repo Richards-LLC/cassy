@@ -14,7 +14,7 @@ use cas::store::{open_store_local, open_task_store_local};
 use cas::types::{Entry, Task};
 use flate2::read::GzDecoder;
 use tempfile::TempDir;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn seed_project(root: &TempDir, endpoint: &str, canonical_id: &str) {
@@ -91,12 +91,14 @@ async fn personal_deletes_use_singular_task_and_entry_paths() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/api/sync/task/absent-task"))
+        .and(query_param("project_id", "delete-project"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("DELETE"))
         .and(path("/api/sync/entry/absent-entry"))
+        .and(query_param("project_id", "delete-project"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)

@@ -208,7 +208,9 @@ impl CasCore {
             rule.status = RuleStatus::Proven;
         }
 
-        rule_store.update(&rule).map_err(|e| McpError {
+        rule_store
+            .update_with_metadata(&rule, None, None)
+            .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
@@ -420,7 +422,10 @@ impl CasCore {
             data: None,
         })?;
 
-        Ok(Self::success(format!("Deleted rule: {}", req.id)))
+        Ok(Self::success(format!(
+            "Retired rule: {} (history retained)",
+            req.id
+        )))
     }
 
     /// Sync rules to Claude Code
@@ -502,7 +507,13 @@ impl CasCore {
             return Ok(Self::success("No changes specified"));
         }
 
-        rule_store.update(&rule).map_err(|e| McpError {
+        rule_store
+            .update_with_metadata(
+                &rule,
+                req.changed_by.as_deref(),
+                req.change_note.as_deref(),
+            )
+            .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
@@ -517,6 +528,70 @@ impl CasCore {
             "Updated rule {}: {}",
             req.id,
             changes.join(", ")
+        )))
+    }
+
+    /// List prior rule states, newest first.
+    pub async fn cas_rule_history(
+        &self,
+        Parameters(req): Parameters<VersionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let rule_store = self.open_rule_store()?;
+        let versions = rule_store.list_versions(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to list rule history: {e}")),
+            data: None,
+        })?;
+        if versions.is_empty() {
+            return Ok(Self::success(format!("No history for rule {}", req.id)));
+        }
+
+        let mut output = format!("Rule history for {} ({} versions):\n\n", req.id, versions.len());
+        for version in versions {
+            let preview: String = version.content.chars().take(120).collect();
+            output.push_str(&format!(
+                "- v{} [{}] {} by {} at {}\n  {}\n",
+                version.version,
+                version.status,
+                version.change_note,
+                version.changed_by.as_deref().unwrap_or("unknown actor"),
+                version.changed_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                preview,
+            ));
+        }
+        Ok(Self::success(output))
+    }
+
+    /// Restore a prior rule state, or un-retire to the newest prior state.
+    pub async fn cas_rule_restore(
+        &self,
+        Parameters(req): Parameters<VersionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let rule_store = self.open_rule_store()?;
+        let version = req.version.or(req.version_id);
+        rule_store
+            .restore_version(
+                &req.id,
+                version,
+                req.changed_by.as_deref(),
+                req.change_note.as_deref(),
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Failed to restore rule: {e}")),
+                data: None,
+            })?;
+        let restored = rule_store.get(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to read restored rule: {e}")),
+            data: None,
+        })?;
+        let _ = self.sync_rules();
+        Ok(Self::success(format!(
+            "Restored rule {}{} (status: {})",
+            req.id,
+            version.map(|v| format!(" to version {v}")).unwrap_or_default(),
+            restored.status
         )))
     }
 

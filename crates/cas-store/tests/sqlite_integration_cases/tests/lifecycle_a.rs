@@ -143,7 +143,7 @@ fn test_sqlite_rule_store_full_lifecycle() {
 
     // Delete
     store.delete(&id).expect("Failed to delete rule");
-    assert!(store.get(&id).is_err());
+    assert_eq!(store.get(&id).unwrap().status, RuleStatus::Retired);
 
     store.close().expect("Failed to close store");
 }

@@ -193,6 +193,8 @@ async fn test_rule_update() {
         tags: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
+        changed_by: Some("test-actor".to_string()),
+        change_note: Some("revise wording".to_string()),
     };
 
     let result = service
@@ -202,6 +204,36 @@ async fn test_rule_update() {
 
     let text = extract_text(result);
     assert!(text.contains("Updated") || text.contains("updated"));
+
+    let history = service
+        .cas_rule_history(Parameters(VersionRequest {
+            id: id.clone(),
+            version: None,
+            version_id: None,
+            changed_by: None,
+            change_note: None,
+        }))
+        .await
+        .expect("rule_history should succeed");
+    let history_text = extract_text(history);
+    assert!(history_text.contains("revise wording"));
+    assert!(history_text.contains("Original rule content"));
+
+    service
+        .cas_rule_restore(Parameters(VersionRequest {
+            id: id.clone(),
+            version: Some(1),
+            version_id: None,
+            changed_by: Some("restorer".to_string()),
+            change_note: Some("restore baseline".to_string()),
+        }))
+        .await
+        .expect("rule_restore should succeed");
+    let restored = open_rule_store(&_temp.path().join(".cas"))
+        .expect("rule store should open")
+        .get(&id)
+        .expect("restored rule should exist");
+    assert_eq!(restored.content, "Original rule content");
 }
 
 #[tokio::test]
@@ -581,5 +613,5 @@ async fn test_rule_delete() {
         .expect("rule_delete should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Deleted"));
+    assert!(text.contains("Retired") && text.contains("history retained"));
 }

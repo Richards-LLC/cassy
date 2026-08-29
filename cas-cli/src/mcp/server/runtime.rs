@@ -253,6 +253,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
             code_exclude_patterns: code_config.exclude_patterns.clone(),
             code_index_interval_secs: code_config.index_interval_secs,
             code_debounce_ms: code_config.debounce_ms,
+            archive_max_bytes: daemon_config.archive_max_bytes,
             archive_retention_days: daemon_config.archive_retention_days,
             ..Default::default()
         };

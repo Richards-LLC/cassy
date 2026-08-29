@@ -729,15 +729,25 @@ impl Default for DevConfig {
 /// Daemon maintenance configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonSettings {
+    /// Maximum total bytes for compressed event/recording archives. Oldest
+    /// archive files are evicted first when this cap is exceeded.
+    #[serde(default = "default_archive_max_bytes")]
+    pub archive_max_bytes: u64,
+
     /// Days to retain compressed event/recording archives. Zero keeps them
-    /// forever (the default).
+    /// forever (legacy compatibility; maintenance now uses archive_max_bytes).
     #[serde(default)]
     pub archive_retention_days: u64,
+}
+
+fn default_archive_max_bytes() -> u64 {
+    cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES
 }
 
 impl Default for DaemonSettings {
     fn default() -> Self {
         Self {
+            archive_max_bytes: default_archive_max_bytes(),
             archive_retention_days: 0,
         }
     }

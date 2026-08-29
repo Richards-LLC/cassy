@@ -33,7 +33,10 @@ pub struct DaemonConfig {
     pub code_index_interval_secs: u64,
     /// Age (in hours) after which stale/shutdown agents are deleted (0 = never delete)
     pub agent_purge_age_hours: u64,
+    /// Maximum compressed bytes retained by immutable event/recording archives.
+    pub archive_max_bytes: u64,
     /// Days to retain immutable event/recording archives (0 = keep forever)
+    /// (legacy compatibility; size cap is the active retention policy).
     pub archive_retention_days: u64,
     /// Enable incremental BM25 indexing
     pub index_bm25: bool,
@@ -62,6 +65,7 @@ impl Default for DaemonConfig {
             code_watch_paths: vec![],
             code_index_interval_secs: 30,
             agent_purge_age_hours: 24,
+            archive_max_bytes: cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES,
             archive_retention_days: 0,
             index_bm25: true,
             index_batch_size: 32,
@@ -121,6 +125,8 @@ pub struct DaemonRunResult {
     pub lease_history_pruned: usize,
     /// Recordings pruned (older than retention period)
     pub recordings_pruned: usize,
+    /// Immutable trace archive files evicted to enforce the size cap.
+    pub trace_archives_evicted: usize,
     /// Stale agents cleaned (marked dead and leases reclaimed)
     pub agents_cleaned: usize,
     /// Old stale/shutdown agents permanently deleted

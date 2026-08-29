@@ -137,6 +137,10 @@ impl Config {
                 dev.trace_retention_days.to_string(),
             ),
             (
+                "daemon.archive_max_bytes".to_string(),
+                daemon.archive_max_bytes.to_string(),
+            ),
+            (
                 "daemon.archive_retention_days".to_string(),
                 daemon.archive_retention_days.to_string(),
             ),

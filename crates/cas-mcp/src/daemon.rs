@@ -109,7 +109,10 @@ pub struct EmbeddedDaemonConfig {
     pub cloud_sync_enabled: bool,
     /// Batch size for operations
     pub batch_size: usize,
+    /// Maximum compressed bytes retained by immutable event/recording archives.
+    pub archive_max_bytes: u64,
     /// Days to retain immutable event/recording archives (0 = keep forever)
+    /// (legacy compatibility; size cap is the active retention policy).
     pub archive_retention_days: u64,
     // === Code indexing configuration ===
     /// Enable background code indexing
@@ -156,6 +159,7 @@ impl Default for EmbeddedDaemonConfig {
             process_observations: true,
             cloud_sync_enabled: true, // Auto-sync enabled by default
             batch_size: 20,
+            archive_max_bytes: cas_store::DEFAULT_TRACE_ARCHIVE_MAX_BYTES,
             archive_retention_days: 0,
             // Code indexing defaults
             index_code: false, // Disabled by default (opt-in)

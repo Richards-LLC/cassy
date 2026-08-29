@@ -441,6 +441,16 @@ fn test_maintenance_archives_old_events_and_recordings() {
         .iter()
         .any(|name| name.starts_with("recordings-")));
 
+    let listed =
+        crate::store::list_archived_traces(&cas_root, old - Duration::seconds(1), Utc::now())
+            .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().all(|trace| trace.archive_path.exists()));
+    let sample =
+        crate::store::sample_archived_traces(&cas_root, old - Duration::seconds(1), Utc::now(), 1)
+            .unwrap();
+    assert_eq!(sample.len(), 1);
+
     let read_archive = |prefix: &str| {
         let name = archive_names
             .iter()
@@ -461,6 +471,47 @@ fn test_maintenance_archives_old_events_and_recordings() {
     assert_eq!(recording_archive["agents"].as_array().unwrap().len(), 1);
     assert_eq!(recording_archive["events"].as_array().unwrap().len(), 1);
     assert_eq!(recording_archive["fts"][0]["content"], "old transcript");
+}
+
+#[test]
+fn test_maintenance_enforces_trace_archive_size_cap() {
+    use crate::store::{init_cas_dir, open_event_store};
+    use cas_types::{Event, EventEntityType, EventType};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = init_cas_dir(temp.path()).unwrap();
+    let event_store = open_event_store(&cas_root).unwrap();
+    let mut event = Event::new(
+        EventType::TaskStarted,
+        EventEntityType::Task,
+        "cas-2b42",
+        "size-capped event",
+    );
+    event.created_at = Utc::now() - Duration::days(31);
+    event_store.record(&event).unwrap();
+
+    let result = run_once(&DaemonConfig {
+        cas_root: cas_root.clone(),
+        auto_prune: true,
+        archive_max_bytes: 1,
+        process_observations: false,
+        consolidate_memories: false,
+        apply_decay: false,
+        index_bm25: false,
+        update_entity_summaries: false,
+        agent_purge_age_hours: 0,
+        ..DaemonConfig::default()
+    })
+    .expect("maintenance cycle should succeed");
+
+    assert_eq!(result.events_pruned, 1);
+    assert_eq!(result.trace_archives_evicted, 1);
+    assert_eq!(
+        crate::store::trace_archive_stats(&cas_root).unwrap().bytes,
+        0
+    );
+    assert!(event_store.list_recent(10).unwrap().is_empty());
 }
 
 // ===== cas-499c: symbol index revival =====

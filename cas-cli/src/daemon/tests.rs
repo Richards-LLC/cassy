@@ -2,7 +2,7 @@ use chrono::{Duration, Utc};
 use std::sync::Arc;
 
 use crate::daemon::decay::apply_memory_decay;
-use crate::daemon::{CodeIndexResult, DaemonConfig, DaemonStatus, WatchEvent};
+use crate::daemon::{CodeIndexResult, DaemonConfig, DaemonStatus, WatchEvent, run_once};
 use crate::store::Store;
 use crate::store::mock::MockStore;
 use crate::types::{Entry, EntryType, MemoryTier};
@@ -360,6 +360,64 @@ fn test_maintenance_cycle_runs_pruning_and_checkpoint() {
         "unexpected errors: {:?}",
         result.errors
     );
+}
+
+#[test]
+fn test_maintenance_archives_old_events_and_recordings() {
+    use crate::store::{init_cas_dir, open_event_store, open_recording_store};
+    use cas_types::{Event, EventEntityType, EventType, Recording};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = init_cas_dir(temp.path()).unwrap();
+    let event_store = open_event_store(&cas_root).unwrap();
+    let recording_store = open_recording_store(&cas_root).unwrap();
+    let old = Utc::now() - Duration::days(31);
+
+    let mut event = Event::new(
+        EventType::TaskStarted,
+        EventEntityType::Task,
+        "cas-62a6",
+        "old event",
+    );
+    event.created_at = old;
+    event_store.record(&event).unwrap();
+
+    let mut recording = Recording::new("/tmp/cas-62a6.trace".to_string());
+    recording.created_at = old;
+    let recording_id = recording.id.clone();
+    recording_store.add(&recording).unwrap();
+
+    let config = DaemonConfig {
+        cas_root: cas_root.clone(),
+        auto_prune: true,
+        process_observations: false,
+        consolidate_memories: false,
+        apply_decay: false,
+        index_bm25: false,
+        update_entity_summaries: false,
+        agent_purge_age_hours: 0,
+        ..DaemonConfig::default()
+    };
+
+    let result = run_once(&config).expect("maintenance cycle should succeed");
+    assert_eq!(result.events_pruned, 1);
+    assert_eq!(result.recordings_pruned, 1);
+    assert!(event_store.list_recent(10).unwrap().is_empty());
+    assert!(recording_store.get(&recording_id).is_err());
+
+    let archive_dir = cas_root.join("archive");
+    let archive_names: Vec<String> = std::fs::read_dir(archive_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(archive_names.iter().any(|name| name.starts_with("events-")));
+    assert!(archive_names
+        .iter()
+        .any(|name| name.starts_with("recordings-")));
 }
 
 // ===== cas-499c: symbol index revival =====

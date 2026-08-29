@@ -350,6 +350,7 @@ mod tests {
             execution_note: None,
             external_ref: None,
             assignee: None,
+            origin_project: None,
             status: None,
             epic: None,
             epic_verification_owner: None,

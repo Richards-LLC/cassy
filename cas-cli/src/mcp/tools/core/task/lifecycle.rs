@@ -438,6 +438,7 @@ impl CasCore {
         let task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
+            origin_project: crate::cloud::resolve_canonical_id(&self.cas_root),
             title: req.title,
             description: req.description.unwrap_or_default(),
             design: req.design.unwrap_or_default(),
@@ -709,6 +710,9 @@ impl CasCore {
             })?
         };
 
+        let project_id = super::current_project_id(&self.cas_root);
+        tasks.retain(|task| super::task_belongs_to_project(task, project_id.as_deref()));
+
         // Apply sorting. cas-06f9 (GH #104): unspecified means priority order
         // here, not creation order — this is the "what should I pick up next"
         // surface, and incidental ordering combined with the cap below is what
@@ -772,6 +776,8 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        super::ensure_task_origin(&task, &self.cas_root, "start")?;
 
         if task.is_terminal() {
             // cas-3c23: this message used to tell EVERY caller "Use reopen

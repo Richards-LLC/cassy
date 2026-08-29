@@ -50,6 +50,35 @@ fn test_task_crud() {
 }
 
 #[test]
+fn task_origin_project_round_trips_and_store_identity_stamps_new_rows() {
+    let temp = TempDir::new().unwrap();
+    let store =
+        SqliteTaskStore::open_with_origin_project(temp.path(), Some("acme/accounting")).unwrap();
+    store.init().unwrap();
+
+    let local_id = store.generate_id().unwrap();
+    store
+        .add(&Task::new(
+            local_id.clone(),
+            "Stamped local task".to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        store.get(&local_id).unwrap().origin_project.as_deref(),
+        Some("acme/accounting")
+    );
+
+    let foreign_id = store.generate_id().unwrap();
+    let mut foreign = Task::new(foreign_id.clone(), "Explicit foreign task".to_string());
+    foreign.origin_project = Some("acme/other".to_string());
+    store.add(&foreign).unwrap();
+    assert_eq!(
+        store.get(&foreign_id).unwrap().origin_project.as_deref(),
+        Some("acme/other")
+    );
+}
+
+#[test]
 fn task_execution_state_patch_merges_and_deletes_fields() {
     let (_temp, store) = create_test_store();
     let id = store.generate_id().unwrap();

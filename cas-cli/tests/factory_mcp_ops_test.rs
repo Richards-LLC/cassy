@@ -6521,6 +6521,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
             assignee: None,
             status: Some("blocked".to_string()),
             epic: None,
+            origin_project: None,
             epic_verification_owner: None,
             depth: None,
         }))

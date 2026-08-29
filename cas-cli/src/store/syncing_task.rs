@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
 use crate::store::{Result, TaskStore};
-use crate::types::{Dependency, DependencyType, Task, TaskStatus};
+use crate::types::{Dependency, DependencyType, Scope, Task, TaskStatus};
 use serde_json::Value;
 
 /// A task store wrapper that queues changes for cloud sync
@@ -67,6 +67,23 @@ impl SyncingTaskStore {
         }
     }
 
+    fn persisted_for_queue(&self, task: &Task) -> Result<Task> {
+        let mut persisted = self.inner.get(&task.id)?;
+
+        // The task table is project-scoped storage and therefore does not
+        // persist the wire-level scope field. Keep the caller's scope for the
+        // queue decision: a Global task must remain personal-only after the
+        // round trip through the inner store. Global tasks also have no
+        // project identity, so do not attach the inner store's identity to
+        // their queued payload.
+        persisted.scope = task.scope;
+        if task.scope == Scope::Global {
+            persisted.origin_project = None;
+        }
+
+        Ok(persisted)
+    }
+
     fn queue_delete(&self, id: &str) {
         let _ = self
             .queue
@@ -97,7 +114,8 @@ impl TaskStore for SyncingTaskStore {
 
     fn add(&self, task: &Task) -> Result<()> {
         self.inner.add(task)?;
-        self.queue_upsert(task);
+        let persisted = self.persisted_for_queue(task)?;
+        self.queue_upsert(&persisted);
         Ok(())
     }
 
@@ -110,7 +128,8 @@ impl TaskStore for SyncingTaskStore {
     ) -> Result<()> {
         self.inner
             .create_atomic(task, blocked_by, epic_id, created_by)?;
-        self.queue_upsert(task);
+        let persisted = self.persisted_for_queue(task)?;
+        self.queue_upsert(&persisted);
         Ok(())
     }
 
@@ -132,7 +151,11 @@ impl TaskStore for SyncingTaskStore {
         // (for example, clearing a prior close-cycle branch anchor when a
         // Closed task returns to work). Queue the canonical stored row so a
         // stale caller-owned value cannot be synced back over that invariant.
-        let persisted = self.inner.get(&task.id)?;
+        let mut persisted = self.inner.get(&task.id)?;
+        persisted.scope = task.scope;
+        if task.scope == Scope::Global {
+            persisted.origin_project = None;
+        }
         self.queue_upsert(&persisted);
         Ok(persisted_at)
     }

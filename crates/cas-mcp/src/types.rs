@@ -173,6 +173,15 @@ pub struct TaskRequest {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// Canonical owning project identity for a local task update. Unlike
+    /// `project`, this does not select a cross-project proposal; it is an
+    /// explicit supervisor-authorized origin reassignment.
+    #[schemars(
+        description = "For update: canonical origin project identity; only a live registered supervisor may reassign it"
+    )]
+    #[serde(default)]
+    pub origin_project: Option<String>,
+
     /// Cloud proposal ID for accept/reject.
     #[schemars(description = "Cloud proposal ID for proposal_accept or proposal_reject")]
     #[serde(default)]

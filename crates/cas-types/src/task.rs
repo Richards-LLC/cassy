@@ -558,6 +558,11 @@ pub struct Task {
     #[serde(default)]
     pub scope: Scope,
 
+    /// Canonical project identity that owns this task. Legacy rows may be
+    /// `None` until the origin-project migration has been run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_project: Option<String>,
+
     /// Task title
     pub title: String,
 
@@ -688,6 +693,7 @@ impl Task {
         Self {
             id,
             scope: Scope::default(), // Project scope by default
+            origin_project: None,
             title,
             description: String::new(),
             design: String::new(),
@@ -800,6 +806,7 @@ impl Default for Task {
         Self {
             id: String::new(),
             scope: Scope::default(),
+            origin_project: None,
             title: String::new(),
             description: String::new(),
             design: String::new(),
@@ -841,6 +848,18 @@ mod tests {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(deliverables.work_target.is_none());
         assert!(deliverables.pre_close_hook.is_none());
+    }
+
+    #[test]
+    fn task_origin_project_is_optional_for_legacy_json() {
+        let task = Task::new("cas-origin".to_string(), "Origin test".to_string());
+        assert_eq!(task.origin_project, None);
+
+        let encoded = serde_json::to_value(&task).unwrap();
+        assert!(encoded.get("origin_project").is_none());
+
+        let decoded: Task = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.origin_project, None);
     }
 
     #[test]

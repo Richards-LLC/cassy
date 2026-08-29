@@ -510,6 +510,7 @@ async fn test_task_update_depth_to_light() {
                 assignee: None,
                 status: None,
                 epic: None,
+                origin_project: None,
                 epic_verification_owner: None,
                 depth: Some("light".to_string()),
             }))

@@ -65,14 +65,16 @@ impl TestEnvGuard {
         // constructor can then fail immediately instead of blocking forever
         // on the non-reentrant mutex already held by this thread.
         let nesting = TestEnvGuardNesting::enter();
-        Self {
+        let mut guard = Self {
             _lock: test_env_lock(),
             _nesting: nesting,
             saved: Vec::new(),
             temp_home: None,
             temp_home_path: None,
             saved_cwd: None,
-        }
+        };
+        guard.scrub_ambient_cas_environment();
+        guard
     }
 
     pub(crate) fn temp_home() -> Self {
@@ -144,6 +146,32 @@ impl TestEnvGuard {
     fn capture(&mut self, key: &OsStr) {
         if !self.saved.iter().any(|(saved, _)| saved == key) {
             self.saved.push((key.to_os_string(), std::env::var_os(key)));
+        }
+    }
+
+    /// Keep test fixtures independent from the factory process that launched
+    /// the test binary. Every `CAS_*` variable is ambient Cassy state, and the
+    /// account-home variables are the non-CAS part of the factory contract.
+    /// Tests that need one of these values set it explicitly after constructing
+    /// the guard; Drop restores the caller's environment.
+    fn scrub_ambient_cas_environment(&mut self) {
+        let keys = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| {
+                key.to_str().is_some_and(|key| {
+                    key.starts_with("CAS_")
+                        || matches!(
+                            key,
+                            "CLAUDE_CONFIG_DIR"
+                                | "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+                                | "CODEX_HOME"
+                                | "GROK_HOME"
+                        )
+                })
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.remove(key);
         }
     }
 }

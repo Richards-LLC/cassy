@@ -384,9 +384,15 @@ impl CasService {
                 .ok()
                 .and_then(|store| store.get(&source).ok())
         };
-        let role = std::env::var("CAS_AGENT_ROLE")
-            .ok()
-            .or_else(|| agent_from_store.as_ref().map(|a| a.role.to_string()))
+        // The registered row is the explicit identity for this MCP caller.
+        // CAS_AGENT_ROLE is only a bootstrap fallback when no row can be
+        // resolved; letting it win here can relabel a registered worker as a
+        // supervisor when a supervisor-launched test or server shares a
+        // process environment.
+        let role = agent_from_store
+            .as_ref()
+            .map(|a| a.role.to_string())
+            .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
         let factory_session = std::env::var("CAS_FACTORY_SESSION")
             .ok()
@@ -2599,7 +2605,7 @@ mod cas_89e1_post_merge_message_type_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("host repo schema");
         let host_collision = tempfile::tempdir().expect("host collision repo");
         let collision_repo = host_collision.path();
@@ -2661,6 +2667,13 @@ mod cas_89e1_post_merge_message_type_tests {
         });
         task.deliverables.parked_branch = Some("factory/worker-a".to_string());
         tasks.add(&task).expect("add parked task");
+
+        // The fixture starts hermetic even when the test binary was launched
+        // by a supervisor. Re-introduce a conflicting ambient role only after
+        // registration to prove the persisted worker role wins at the MCP
+        // message boundary.
+        assert!(std::env::var_os("CAS_AGENT_ROLE").is_none());
+        env.set("CAS_AGENT_ROLE", "supervisor");
 
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core.clone(), None);

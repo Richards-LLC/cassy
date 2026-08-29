@@ -26,11 +26,56 @@ fn public_registration_hints(
         });
     }
     let requested_type = agent_type.and_then(|value| value.parse().ok());
-    let safe_role = environment_role.or_else(|| {
-        (requested_type == Some(crate::types::AgentType::Worker))
-            .then_some(crate::types::AgentRole::Worker)
+    // An explicit role/type in the registration request wins over ambient
+    // bootstrap state. The environment remains a fallback for callers that
+    // omit a role, preserving factory-launched primary registrations.
+    let safe_role = requested_role.or_else(|| {
+        environment_role.or_else(|| {
+            (requested_type == Some(crate::types::AgentType::Worker))
+                .then_some(crate::types::AgentRole::Worker)
+        })
     });
     Ok((requested_type, safe_role))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_registration_hints;
+    use crate::mcp::tools::AgentRegisterRequest;
+    use crate::test_support::TestEnvGuard;
+    use crate::types::AgentRole;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    #[test]
+    fn explicit_worker_registration_role_wins_over_ambient_supervisor() {
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+
+        let (_, role) = public_registration_hints(Some("worker")).unwrap();
+
+        assert_eq!(role, Some(AgentRole::Worker));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_registration_persists_explicit_worker_role_over_ambient_supervisor() {
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+
+        core.cas_agent_register(Parameters(AgentRegisterRequest {
+            name: "worker".to_string(),
+            agent_type: "worker".to_string(),
+            session_id: Some("explicit-worker".to_string()),
+            parent_id: None,
+        }))
+        .await
+        .unwrap();
+
+        let agent = core.open_agent_store().unwrap().get("explicit-worker").unwrap();
+        assert_eq!(agent.role, AgentRole::Worker);
+    }
 }
 
 impl CasCore {

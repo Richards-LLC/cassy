@@ -139,6 +139,27 @@ pub(crate) mod test_support {
     }
 
     #[test]
+    fn test_env_guard_scrubs_ambient_cas_and_factory_environment() {
+        let _guard = TestEnvGuard::temp_home();
+        assert!(
+            std::env::vars_os().all(|(key, _)| {
+                let Some(key) = key.to_str() else {
+                    return true;
+                };
+                !key.starts_with("CAS_")
+                    && !matches!(
+                        key,
+                        "CLAUDE_CONFIG_DIR"
+                            | "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+                            | "CODEX_HOME"
+                            | "GROK_HOME"
+                    )
+            }),
+            "TestEnvGuard must not inherit ambient CAS/factory environment"
+        );
+    }
+
+    #[test]
     fn lib_test_process_env_mutation_is_isolated() {
         fn visit(dir: &Path, hits: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("read source directory") {

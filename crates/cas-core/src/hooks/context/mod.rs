@@ -27,6 +27,8 @@ use cas_store::KnowledgeStore;
 use cas_store::{AgentStore, RuleStore, SkillStore, Store, TaskStore};
 use cas_types::{Entry, EntryType, Rule, RuleCategory, Skill, Task};
 
+use crate::memory::session_memory_preview;
+
 // ============================================================================
 // Context Scoring System
 // ============================================================================
@@ -426,7 +428,7 @@ impl ContextItem {
     pub fn from_entry(entry: &Entry) -> Self {
         Self {
             id: entry.id.clone(),
-            summary: entry.preview(60),
+            summary: session_memory_preview(entry),
             tokens: estimate_tokens(&entry.content),
             item_type: ContextItemType::Memory,
         }

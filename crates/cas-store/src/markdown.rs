@@ -481,6 +481,7 @@ impl MarkdownRuleStore {
              priority: {}\n\
              helpful_count: {}\n\
              harmful_count: {}\n\
+             surface_count: {}\n\
              tags: [{}]\n\
              paths: \"{}\"\n\
              {}{}{}{}{}\
@@ -494,6 +495,7 @@ impl MarkdownRuleStore {
             rule.priority,
             rule.helpful_count,
             rule.harmful_count,
+            rule.surface_count,
             rule.tags.join(", "),
             rule.paths,
             rule.last_accessed
@@ -617,5 +619,24 @@ impl RuleStore for MarkdownRuleStore {
 
     fn close(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn rule_surface_count_round_trips_through_markdown_store() {
+        let temp = TempDir::new().unwrap();
+        let store = MarkdownRuleStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let rule = Rule::new("rule-surface".to_string(), "Surface me".to_string());
+        store.add(&rule).unwrap();
+        store.increment_surface_count(&rule.id).unwrap();
+
+        assert_eq!(store.get(&rule.id).unwrap().surface_count, 1);
     }
 }

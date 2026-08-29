@@ -152,6 +152,10 @@ impl CasCore {
             if !rule.paths.is_empty() {
                 output.push_str(&format!("  Paths: {}\n", rule.paths));
             }
+            output.push_str(&format!(
+                "  Impact: surfaced {} | feedback: +{} helpful, -{} harmful\n",
+                rule.surface_count, rule.helpful_count, rule.harmful_count
+            ));
         }
 
         Ok(Self::success(output))
@@ -247,7 +251,7 @@ impl CasCore {
         })?;
 
         let output = format!(
-            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nFeedback: +{} -{}\nCreated: {}\n\nContent:\n{}",
+            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nImpact: surfaced {} | feedback: +{} helpful, -{} harmful\nCreated: {}\n\nContent:\n{}",
             rule.id,
             "=".repeat(rule.id.len() + 6),
             rule.status,
@@ -261,6 +265,7 @@ impl CasCore {
             } else {
                 rule.tags.join(", ")
             },
+            rule.surface_count,
             rule.helpful_count,
             rule.harmful_count,
             rule.created.format("%Y-%m-%d %H:%M"),
@@ -526,9 +531,10 @@ impl CasCore {
         );
         for rule in rules.iter().take(limit) {
             output.push_str(&format!(
-                "- [{}] {:?} (+{} -{}) {}\n",
+                "- [{}] {:?} (surfaced: {}, feedback: +{} -{}) {}\n",
                 rule.id,
                 rule.status,
+                rule.surface_count,
                 rule.helpful_count,
                 rule.harmful_count,
                 rule.preview(60)

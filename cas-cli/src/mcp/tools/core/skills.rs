@@ -77,7 +77,7 @@ impl CasCore {
             "database"
         };
         let output = format!(
-            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nSource entries: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
+            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nSource entries: {}\nPreconditions: {}\nPostconditions: {}\nValidation script: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
             skill.name,
             skill.id,
             "=".repeat(skill.name.len() + skill.id.len() + 4),
@@ -94,6 +94,21 @@ impl CasCore {
                 "none".to_string()
             } else {
                 skill.source_ids.join(", ")
+            },
+            if skill.preconditions.is_empty() {
+                "none".to_string()
+            } else {
+                skill.preconditions.join(", ")
+            },
+            if skill.postconditions.is_empty() {
+                "none".to_string()
+            } else {
+                skill.postconditions.join(", ")
+            },
+            if skill.validation_script.is_empty() {
+                "not configured".to_string()
+            } else {
+                skill.validation_script.clone()
             },
             skill.created_at.format("%Y-%m-%d %H:%M"),
             skill.description,
@@ -219,6 +234,12 @@ impl CasCore {
                 .unwrap_or_default(),
             share: None,
         };
+
+        crate::skill_validation::validate_skill(&skill).map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Skill validation rejected create: {error}")),
+            data: None,
+        })?;
 
         skill_store.add(&skill).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -436,6 +457,29 @@ impl CasCore {
             changes.push("tags");
         }
 
+        if let Some(preconditions) = req.preconditions {
+            skill.preconditions = preconditions
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            changes.push("preconditions");
+        }
+
+        if let Some(postconditions) = req.postconditions {
+            skill.postconditions = postconditions
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            changes.push("postconditions");
+        }
+
+        if let Some(validation_script) = req.validation_script {
+            skill.validation_script = validation_script;
+            changes.push("validation_script");
+        }
+
         if let Some(summary) = req.summary {
             skill.summary = summary;
             changes.push("summary");
@@ -451,6 +495,12 @@ impl CasCore {
         }
 
         skill.updated_at = chrono::Utc::now();
+
+        crate::skill_validation::validate_skill(&skill).map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Skill validation rejected update: {error}")),
+            data: None,
+        })?;
 
         if is_file_skill {
             // File-based skill: write back to file

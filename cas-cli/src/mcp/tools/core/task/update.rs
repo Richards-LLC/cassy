@@ -305,6 +305,30 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        // Validate before applying any ordinary task fields. The store repeats
+        // this validation while holding its write lock, so a malformed patch
+        // cannot corrupt an existing state even if another writer races us.
+        if let Some(patch) = state_patch.as_ref() {
+            let current = task_store
+                .get_execution_state(&req.id)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to read structured execution state: {error}"
+                    )),
+                    data: None,
+                })?
+                .unwrap_or_else(|| serde_json::json!({}));
+            cas_types::merge_task_execution_state_patch(&current, patch).map_err(|error| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "TASK EXECUTION STATE REJECTED: {error}. No state was changed."
+                    )),
+                    data: None,
+                }
+            })?;
+        }
         let original_updated_at = task.updated_at;
         if proof_scope_fix {
             let reason = proof_scope_fix_reason.map(str::trim).unwrap_or_default();
@@ -348,6 +372,7 @@ impl CasCore {
                     req.epic_verification_owner.is_some(),
                 ),
                 ("depth", req.depth.is_some()),
+                ("state_patch", state_patch.is_some()),
             ]
             .into_iter()
             .filter_map(|(name, supplied)| supplied.then_some(name))
@@ -1451,6 +1476,10 @@ impl CasCore {
             }
         }
 
+        if state_patch.is_some() {
+            changes.push("execution_state");
+        }
+
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));
         }
@@ -1479,6 +1508,18 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        if let Some(patch) = state_patch.as_ref() {
+            task_store
+                .patch_execution_state(&req.id, patch)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Task fields updated, but structured execution state was not persisted: {error}"
+                    )),
+                    data: None,
+                })?;
+        }
 
         // cas-062d: push blocked / ready-reopened transitions.
         if let Some((old_st, new_st)) = lifecycle_status_change {

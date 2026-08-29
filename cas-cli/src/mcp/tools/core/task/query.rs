@@ -32,6 +32,33 @@ impl CasCore {
             target
         );
 
+        // Structured execution state is the compact machine resume surface.
+        // Prose notes remain below for human/audit history, but are not needed
+        // to reconstruct the current worker position.
+        if let Some(state) = task_store
+            .get_execution_state(&task.id)
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Task {} has unreadable structured execution state: {error}",
+                    task.id
+                )),
+                data: None,
+            })?
+        {
+            let encoded = serde_json::to_string(&state).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Task {} structured execution state could not be encoded: {error}",
+                    task.id
+                )),
+                data: None,
+            })?;
+            output.push_str("\nStructured execution state:\n");
+            output.push_str(&encoded);
+            output.push('\n');
+        }
+
         match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id) {
             Ok(Some((receipt, transaction))) => {
                 let next_action = match transaction.state {

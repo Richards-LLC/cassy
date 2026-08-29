@@ -6,11 +6,13 @@ use crate::store::mock::id_counter::IdCounter;
 use crate::types::{Dependency, DependencyType, Task, TaskStatus, TaskType};
 use cas_store::{Result, StoreError};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 /// In-memory mock implementation of the TaskStore trait.
 #[derive(Debug)]
 pub struct MockTaskStore {
     tasks: RwLock<HashMap<String, Task>>,
+    execution_states: RwLock<HashMap<String, Value>>,
     dependencies: RwLock<Vec<Dependency>>,
     id_counter: IdCounter,
     error_on_next: RwLock<Option<StoreError>>,
@@ -27,6 +29,7 @@ impl MockTaskStore {
     pub fn new() -> Self {
         Self {
             tasks: RwLock::new(HashMap::new()),
+            execution_states: RwLock::new(HashMap::new()),
             dependencies: RwLock::new(Vec::new()),
             id_counter: IdCounter::default(),
             error_on_next: RwLock::new(None),
@@ -99,6 +102,34 @@ impl TaskStore for MockTaskStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))
     }
 
+    fn get_execution_state(&self, task_id: &str) -> Result<Option<Value>> {
+        self.check_error()?;
+        Ok(self.execution_states.read().unwrap().get(task_id).cloned())
+    }
+
+    fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value> {
+        self.check_error()?;
+        if !self.tasks.read().unwrap().contains_key(task_id) {
+            return Err(StoreError::NotFound(task_id.to_string()));
+        }
+        let current = self
+            .execution_states
+            .read()
+            .unwrap()
+            .get(task_id)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        let next = cas_types::merge_task_execution_state_patch(&current, patch)
+            .map_err(StoreError::Parse)?;
+        let mut states = self.execution_states.write().unwrap();
+        if next.as_object().is_some_and(|object| object.is_empty()) {
+            states.remove(task_id);
+        } else {
+            states.insert(task_id.to_string(), next.clone());
+        }
+        Ok(next)
+    }
+
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();
@@ -125,6 +156,7 @@ impl TaskStore for MockTaskStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         let mut deps = self.dependencies.write().unwrap();
         deps.retain(|dependency| dependency.from_id != id && dependency.to_id != id);
+        self.execution_states.write().unwrap().remove(id);
         Ok(())
     }
 
@@ -214,13 +246,21 @@ impl TaskStore for MockTaskStore {
     fn list_pending_verification(&self) -> Result<Vec<Task>> {
         self.check_error()?;
         let tasks = self.tasks.read().unwrap();
-        Ok(tasks.values().filter(|t| t.pending_verification).cloned().collect())
+        Ok(tasks
+            .values()
+            .filter(|t| t.pending_verification)
+            .cloned()
+            .collect())
     }
 
     fn list_pending_worktree_merge(&self) -> Result<Vec<Task>> {
         self.check_error()?;
         let tasks = self.tasks.read().unwrap();
-        Ok(tasks.values().filter(|t| t.pending_worktree_merge).cloned().collect())
+        Ok(tasks
+            .values()
+            .filter(|t| t.pending_worktree_merge)
+            .cloned()
+            .collect())
     }
 
     fn close(&self) -> Result<()> {

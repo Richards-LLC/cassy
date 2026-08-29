@@ -47,6 +47,14 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
         .expect("target id")
         .to_string();
 
+    open_task_store(&temp.path().join(".cas"))
+        .expect("task store")
+        .patch_execution_state(
+            &target_id,
+            &serde_json::json!({"phase": "resume", "next_step": "continue implementation"}),
+        )
+        .expect("persist structured execution state");
+
     // Exercise the public unified MCP boundary, including JSON bool
     // deserialization and TaskRequest -> TaskStartRequest forwarding.
     let service = CasService::new(service, None);
@@ -56,13 +64,14 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
         "brief": true,
     }))
     .expect("deserialize brief start request");
-    let response = service
-        .task(Parameters(start))
-        .await
-        .expect("brief start");
+    let response = service.task(Parameters(start)).await.expect("brief start");
     let text = extract_text(response);
 
     assert!(text.contains(own_marker), "own notes missing: {text}");
+    assert!(
+        text.contains("Structured execution state:") && text.contains("continue implementation"),
+        "brief start missing structured execution state: {text}"
+    );
     assert!(
         !text.contains(sibling_marker),
         "brief start leaked sibling notes: {} bytes",
@@ -101,7 +110,9 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
     let session_id = format!("test-session-{}", std::process::id());
     let mut supervisor = agent_store.get(&session_id).expect("registered caller");
     supervisor.role = cas::types::AgentRole::Supervisor;
-    agent_store.update(&supervisor).expect("make caller supervisor");
+    agent_store
+        .update(&supervisor)
+        .expect("make caller supervisor");
 
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
@@ -169,7 +180,9 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         let mut stored_child = task_store.get(&child_id).expect("stored child");
         stored_child.status = cas::types::TaskStatus::Closed;
         stored_child.assignee = Some(worker);
-        task_store.update(&stored_child).expect("close child fixture");
+        task_store
+            .update(&stored_child)
+            .expect("close child fixture");
     }
 
     let narrative = format!(
@@ -336,7 +349,10 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
         }
     }))
     .expect("deserialize state patch");
-    service.task(Parameters(update)).await.expect("state update");
+    service
+        .task(Parameters(update))
+        .await
+        .expect("state update");
 
     let show: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "show",
@@ -862,7 +878,11 @@ async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
     assert!(first_read.contains(initial_note), "{first_read}");
     assert!(!first_read.contains(description_marker), "{first_read}");
     assert!(!first_read.contains(acceptance_marker), "{first_read}");
-    assert!(first_read.len() < 1_024, "notes read was {} bytes", first_read.len());
+    assert!(
+        first_read.len() < 1_024,
+        "notes read was {} bytes",
+        first_read.len()
+    );
 
     let append_request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "notes",
@@ -881,7 +901,10 @@ async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
     .unwrap();
     let second_read = extract_text(service.task(Parameters(second_read)).await.unwrap());
     assert!(second_read.contains(initial_note), "{second_read}");
-    assert!(second_read.contains("✅ DECISION Supervisor-visible decision"), "{second_read}");
+    assert!(
+        second_read.contains("✅ DECISION Supervisor-visible decision"),
+        "{second_read}"
+    );
     assert!(!second_read.contains(description_marker), "{second_read}");
 
     let persisted = open_task_store(&temp.path().join(".cas"))
@@ -889,7 +912,13 @@ async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
         .get(&id)
         .unwrap();
     assert_eq!(persisted.notes.matches(initial_note).count(), 1);
-    assert_eq!(persisted.notes.matches("Supervisor-visible decision").count(), 1);
+    assert_eq!(
+        persisted
+            .notes
+            .matches("Supervisor-visible decision")
+            .count(),
+        1
+    );
     assert!(
         !persisted.notes.contains("🚫 BLOCKER"),
         "read with note_type must not append: {}",

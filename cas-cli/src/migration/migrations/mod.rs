@@ -214,6 +214,7 @@ mod m235_external_task_dependency_suppressions;
 mod m236_delegation_receipts_create_table;
 mod m237_entries_add_source_ids;
 mod m238_skills_add_source_ids;
+mod m239_task_execution_states_create_table;
 mod m240_rule_skill_versions;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -462,6 +463,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m236_delegation_receipts_create_table::MIGRATION,
     m237_entries_add_source_ids::MIGRATION,
     m238_skills_add_source_ids::MIGRATION,
+    m239_task_execution_states_create_table::MIGRATION,
     m240_rule_skill_versions::MIGRATION,
 ];
 

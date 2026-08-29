@@ -11,6 +11,7 @@ use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
 use crate::store::{Result, TaskStore};
 use crate::types::{Dependency, DependencyType, Task, TaskStatus};
+use serde_json::Value;
 
 /// A task store wrapper that queues changes for cloud sync
 pub struct SyncingTaskStore {
@@ -115,6 +116,14 @@ impl TaskStore for SyncingTaskStore {
 
     fn get(&self, id: &str) -> Result<Task> {
         self.inner.get(id)
+    }
+
+    fn get_execution_state(&self, task_id: &str) -> Result<Option<Value>> {
+        self.inner.get_execution_state(task_id)
+    }
+
+    fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value> {
+        self.inner.patch_execution_state(task_id, patch)
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {

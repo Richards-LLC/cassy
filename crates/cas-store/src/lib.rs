@@ -285,6 +285,7 @@ use cas_types::{
     Dependency, DependencyType, Entity, EntityMention, EntityType, Entry, RelationType,
     Relationship, Rule, Scope, Skill, SkillStatus, Task, TaskStatus, TaskType,
 };
+use serde_json::Value;
 
 /// Trait for entry storage operations
 pub trait Store: Send + Sync {
@@ -574,6 +575,14 @@ pub trait TaskStore: Send + Sync {
 
     /// Get a task by ID
     fn get(&self, id: &str) -> Result<Task>;
+
+    /// Read the compact structured execution state for a task. `None` is the
+    /// backward-compatible result for tasks that have never received state.
+    fn get_execution_state(&self, task_id: &str) -> Result<Option<Value>>;
+
+    /// Apply one validated JSON merge patch to a task's execution state and
+    /// return the resulting sparse object. Null fields are deleted.
+    fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value>;
 
     /// Update an existing task.
     ///

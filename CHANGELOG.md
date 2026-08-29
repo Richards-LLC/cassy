@@ -7,6 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-08-29
+
+### Fixed
+- Team sync deletes now send the project-scoped identity (`project_id`), unparking
+  deletions that older servers' project-aware DELETE contract had permanently
+  rejected; parked rejections requeue and flush after upgrade.
+- Close-gate tree-effect check honors its "present or explicitly evolved" contract:
+  union-merged parallel deliveries pass via token-level per-added-line containment,
+  and the rejection message names the supervisor merge-receipt recovery path (GH #597).
+
+### Added
+- Skill persistence gated on `validation_script` execution at create/update.
+- Measured rule promotion: Draft→Proven driven by outcome evidence instead of a
+  single call; real rule impact tracking increments `surface_count` at injection.
+- Provenance end-to-end: `Entry.source_ids` populated through `Rule.source_ids`.
+- Version history with tombstone deletes for rules and skills (rollback capability).
+- Append-only trace archive: events/recordings past 30 days compress instead of
+  hard-deleting.
+- Structured task execution state: schema'd patchable state blob on tasks.
+- SessionStart memory injection carries the full first line for high-importance
+  memories; hardened session memory hygiene.
+
 ## [3.4.2] - 2026-08-27
 
 ### Added

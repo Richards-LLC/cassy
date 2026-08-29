@@ -96,6 +96,8 @@ pub enum SkillStatus {
     Disabled,
     /// Skill is experimental/draft
     Draft,
+    /// Skill is retained for history but must not be invoked or synced
+    Retired,
 }
 
 impl fmt::Display for SkillStatus {
@@ -104,6 +106,7 @@ impl fmt::Display for SkillStatus {
             SkillStatus::Enabled => write!(f, "enabled"),
             SkillStatus::Disabled => write!(f, "disabled"),
             SkillStatus::Draft => write!(f, "draft"),
+            SkillStatus::Retired => write!(f, "retired"),
         }
     }
 }
@@ -116,6 +119,7 @@ impl FromStr for SkillStatus {
             "enabled" | "active" => Ok(SkillStatus::Enabled),
             "disabled" | "inactive" => Ok(SkillStatus::Disabled),
             "draft" | "experimental" => Ok(SkillStatus::Draft),
+            "retired" | "archived" => Ok(SkillStatus::Retired),
             _ => Err(TypeError::Parse(format!("invalid skill status: {s}"))),
         }
     }

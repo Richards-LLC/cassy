@@ -144,6 +144,8 @@ async fn test_rule_update() {
         tags: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
+        changed_by: None,
+        change_note: None,
     };
 
     let result = service
@@ -525,5 +527,5 @@ async fn test_rule_delete() {
         .expect("rule_delete should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Deleted"));
+    assert!(text.contains("Retired") && text.contains("history retained"));
 }

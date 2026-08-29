@@ -270,6 +270,8 @@ async fn test_skill_update() {
         tags: None,
         summary: None,
         disable_model_invocation: None,
+        changed_by: None,
+        change_note: None,
     };
 
     let result = service
@@ -380,7 +382,7 @@ async fn test_skill_delete() {
         .expect("skill_delete should succeed");
 
     let text = extract_text(result);
-    assert!(text.contains("Deleted"));
+    assert!(text.contains("Retired") && text.contains("history retained"));
 }
 
 #[tokio::test]

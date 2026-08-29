@@ -541,7 +541,7 @@ pub struct TaskRequest {
 pub struct RuleRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'list_all', 'helpful', 'harmful', 'sync', 'check_similar'"
+        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'list_all', 'history', 'restore', 'helpful', 'harmful', 'sync', 'check_similar'"
     )]
     pub action: String,
 
@@ -589,6 +589,22 @@ pub struct RuleRequest {
     #[schemars(description = "Similarity threshold for check_similar (0.0-1.0, default: 0.75)")]
     #[serde(default)]
     pub threshold: Option<f32>,
+
+    /// Version number to restore; omitted restores the newest prior state.
+    #[serde(default)]
+    pub version: Option<i64>,
+
+    /// Compatibility field for clients that call this version_id.
+    #[serde(default)]
+    pub version_id: Option<i64>,
+
+    /// Actor recorded in rule history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+
+    /// Reason recorded in rule history.
+    #[serde(default)]
+    pub change_note: Option<String>,
 }
 
 /// Unified skill operations request
@@ -596,7 +612,7 @@ pub struct RuleRequest {
 pub struct SkillRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'list_all', 'enable', 'disable', 'sync', 'use'"
+        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'list_all', 'history', 'restore', 'enable', 'disable', 'sync', 'use'"
     )]
     pub action: String,
 
@@ -712,6 +728,22 @@ pub struct SkillRequest {
     #[schemars(description = "Prevent skill from invoking the model (for command-only skills)")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub disable_model_invocation: Option<bool>,
+
+    /// Version number to restore; omitted restores the newest prior state.
+    #[serde(default)]
+    pub version: Option<i64>,
+
+    /// Compatibility field for clients that call this version_id.
+    #[serde(default)]
+    pub version_id: Option<i64>,
+
+    /// Actor recorded in skill history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+
+    /// Reason recorded in skill history.
+    #[serde(default)]
+    pub change_note: Option<String>,
 }
 
 /// Unified spec operations request

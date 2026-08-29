@@ -738,6 +738,8 @@ impl CasService {
             tags: req.tags,
             auto_approve_tools: req.auto_approve_tools,
             auto_approve_paths: req.auto_approve_paths,
+            changed_by: req.changed_by,
+            change_note: req.change_note,
         };
         self.inner.cas_rule_update(Parameters(inner_req)).await
     }
@@ -750,6 +752,34 @@ impl CasService {
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
         };
         self.inner.cas_rule_delete(Parameters(inner_req)).await
+    }
+
+    pub(super) async fn rule_history(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::VersionRequest;
+        let inner_req = VersionRequest {
+            id: req
+                .id
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for history"))?,
+            version: req.version,
+            version_id: req.version_id,
+            changed_by: req.changed_by,
+            change_note: req.change_note,
+        };
+        self.inner.cas_rule_history(Parameters(inner_req)).await
+    }
+
+    pub(super) async fn rule_restore(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::VersionRequest;
+        let inner_req = VersionRequest {
+            id: req
+                .id
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for restore"))?,
+            version: req.version,
+            version_id: req.version_id,
+            changed_by: req.changed_by,
+            change_note: req.change_note,
+        };
+        self.inner.cas_rule_restore(Parameters(inner_req)).await
     }
 
     pub(super) async fn rule_list(&self, _req: RuleRequest) -> Result<CallToolResult, McpError> {
@@ -928,6 +958,8 @@ impl CasService {
             tags: req.tags,
             summary: req.summary,
             disable_model_invocation: req.disable_model_invocation,
+            changed_by: req.changed_by,
+            change_note: req.change_note,
         };
         self.inner.cas_skill_update(Parameters(inner_req)).await
     }
@@ -940,6 +972,34 @@ impl CasService {
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
         };
         self.inner.cas_skill_delete(Parameters(inner_req)).await
+    }
+
+    pub(super) async fn skill_history(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::VersionRequest;
+        let inner_req = VersionRequest {
+            id: req
+                .id
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for history"))?,
+            version: req.version,
+            version_id: req.version_id,
+            changed_by: req.changed_by,
+            change_note: req.change_note,
+        };
+        self.inner.cas_skill_history(Parameters(inner_req)).await
+    }
+
+    pub(super) async fn skill_restore(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::VersionRequest;
+        let inner_req = VersionRequest {
+            id: req
+                .id
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for restore"))?,
+            version: req.version,
+            version_id: req.version_id,
+            changed_by: req.changed_by,
+            change_note: req.change_note,
+        };
+        self.inner.cas_skill_restore(Parameters(inner_req)).await
     }
 
     pub(super) async fn skill_list(&self, _req: SkillRequest) -> Result<CallToolResult, McpError> {

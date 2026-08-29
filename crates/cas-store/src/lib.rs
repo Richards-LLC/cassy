@@ -69,6 +69,7 @@ mod sqlite;
 mod sqlite_code_store;
 mod supervisor_queue_store;
 mod task_store;
+mod version_store;
 pub mod tracing;
 mod verification_store;
 mod viktor_inbound_store;
@@ -272,6 +273,10 @@ pub use recording_text_store::{
 pub use layered::{LayeredEntryStore, LayeredRuleStore, LayeredSkillStore};
 pub use markdown::{MarkdownRuleStore, MarkdownStore};
 pub use skill_store::{SKILL_SCHEMA, SqliteSkillStore};
+pub use version_store::{
+    RULE_AND_SKILL_VERSIONS_SCHEMA_STATEMENTS, RULE_VERSIONS_SCHEMA_STATEMENTS, RuleVersion,
+    SKILL_VERSIONS_SCHEMA_STATEMENTS, SkillVersion,
+};
 pub use spec_store::{SpecStore, SqliteSpecStore};
 pub use sqlite::{ENTRIES_RULES_SCHEMA, SqliteRuleStore, SqliteStore};
 pub use task_store::{SqliteTaskStore, TASK_SCHEMA, clear_pending_verification_with_conn};
@@ -436,8 +441,50 @@ pub trait RuleStore: Send + Sync {
     /// Update an existing rule
     fn update(&self, rule: &Rule) -> Result<()>;
 
+    /// Update a rule while recording optional actor and reason metadata.
+    fn update_with_metadata(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.update(rule)
+    }
+
     /// Delete a rule
     fn delete(&self, id: &str) -> Result<()>;
+
+    /// Delete a rule as a lifecycle transition while recording metadata.
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.delete(id)
+    }
+
+    /// List prior rule states, newest first.
+    fn list_versions(&self, _id: &str) -> Result<Vec<RuleVersion>> {
+        Err(StoreError::Parse(
+            "rule version history is unavailable for this store".to_string(),
+        ))
+    }
+
+    /// Restore a prior rule state, or the latest prior state when version is None.
+    fn restore_version(
+        &self,
+        _id: &str,
+        _version: Option<i64>,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse(
+            "rule version restore is unavailable for this store".to_string(),
+        ))
+    }
 
     /// List all rules
     fn list(&self) -> Result<Vec<Rule>>;
@@ -624,8 +671,50 @@ pub trait SkillStore: Send + Sync {
     /// Update an existing skill
     fn update(&self, skill: &Skill) -> Result<()>;
 
+    /// Update a skill while recording optional actor and reason metadata.
+    fn update_with_metadata(
+        &self,
+        skill: &Skill,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.update(skill)
+    }
+
     /// Delete a skill
     fn delete(&self, id: &str) -> Result<()>;
+
+    /// Delete a skill as a lifecycle transition while recording metadata.
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.delete(id)
+    }
+
+    /// List prior skill states, newest first.
+    fn list_versions(&self, _id: &str) -> Result<Vec<SkillVersion>> {
+        Err(StoreError::Parse(
+            "skill version history is unavailable for this store".to_string(),
+        ))
+    }
+
+    /// Restore a prior skill state, or the latest prior state when version is None.
+    fn restore_version(
+        &self,
+        _id: &str,
+        _version: Option<i64>,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse(
+            "skill version restore is unavailable for this store".to_string(),
+        ))
+    }
 
     /// List skills with optional status filter
     fn list(&self, status: Option<SkillStatus>) -> Result<Vec<Skill>>;

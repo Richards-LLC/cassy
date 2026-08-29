@@ -45,7 +45,7 @@ fn test_sqlite_skill_store_full_lifecycle() {
 
     // Delete
     store.delete(&id).expect("Failed to delete skill");
-    assert!(store.get(&id).is_err());
+    assert_eq!(store.get(&id).unwrap().status, SkillStatus::Retired);
 
     store.close().expect("Failed to close store");
 }

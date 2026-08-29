@@ -287,7 +287,15 @@ fn test_rule_history_and_tombstone_delete() {
     store.add(&rule).unwrap();
     let mut updated = rule.clone();
     updated.content = "updated content".to_string();
-    store.update(&updated).unwrap();
+    store
+        .update_with_metadata(&updated, Some("test-actor"), Some("revise wording"))
+        .unwrap();
+
+    let versions = store.list_versions("rule-history-01").unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].content, "original content");
+    assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
+    assert_eq!(versions[0].change_note, "revise wording");
 
     let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
     let prior_content: String = conn
@@ -310,6 +318,13 @@ fn test_rule_history_and_tombstone_delete() {
         )
         .unwrap();
     assert_eq!(version_count, 2);
+
+    store
+        .restore_version("rule-history-01", Some(1), Some("restorer"), None)
+        .unwrap();
+    let restored = store.get("rule-history-01").unwrap();
+    assert_eq!(restored.content, "original content");
+    assert_eq!(restored.status, cas_types::RuleStatus::Draft);
 }
 
 /// T5 cas-07d7: Skill.share must round-trip. First code-review round

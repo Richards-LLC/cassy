@@ -8,6 +8,7 @@ use crate::config::NotificationConfig;
 use crate::notifications::{NotificationEvent, get_global_notifier};
 use crate::store::{Result, RuleStore};
 use crate::types::{Rule, RuleStatus};
+use cas_store::RuleVersion;
 
 /// A rule store wrapper that emits notification events
 pub struct NotifyingRuleStore {
@@ -83,8 +84,49 @@ impl RuleStore for NotifyingRuleStore {
         Ok(())
     }
 
+    fn update_with_metadata(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let old_status = self.inner.get(&rule.id).ok().map(|r| r.status);
+        self.inner
+            .update_with_metadata(rule, changed_by, change_note)?;
+        self.notify_status_change(rule, old_status);
+        Ok(())
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.inner.delete(id)
+    }
+
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner.delete_with_metadata(id, changed_by, change_note)
+    }
+
+    fn list_versions(&self, id: &str) -> Result<Vec<RuleVersion>> {
+        self.inner.list_versions(id)
+    }
+
+    fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let old_status = self.inner.get(id).ok().map(|r| r.status);
+        self.inner
+            .restore_version(id, version, changed_by, change_note)?;
+        let restored = self.inner.get(id)?;
+        self.notify_status_change(&restored, old_status);
+        Ok(())
     }
 
     fn list(&self) -> Result<Vec<Rule>> {
@@ -144,6 +186,6 @@ mod tests {
 
         // Test delete
         store.delete("rule-001").unwrap();
-        assert!(store.get("rule-001").is_err());
+        assert_eq!(store.get("rule-001").unwrap().status, RuleStatus::Retired);
     }
 }

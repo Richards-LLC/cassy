@@ -1,15 +1,208 @@
 use crate::error::StoreError;
 use crate::sqlite::{ENTRIES_RULES_SCHEMA, SqliteRuleStore};
 use crate::tracing::{DevTracer, TraceTimer};
+use crate::version_store::{
+    RULE_VERSIONS_SCHEMA_STATEMENTS, RuleVersion, default_changed_by, parse_datetime,
+};
 use crate::{Result, RuleStore};
 use cas_types::{Rule, RuleStatus};
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 
+impl SqliteRuleStore {
+    fn update_recorded(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let timer = TraceTimer::new();
+        let previous = self.get(&rule.id)?;
+        let snapshot_json = serde_json::to_string(&previous)
+            .map_err(|error| StoreError::Parse(format!("failed to serialize rule history: {error}")))?;
+        let changed_by = changed_by
+            .map(ToOwned::to_owned)
+            .or_else(default_changed_by);
+        let change_note = change_note.unwrap_or("update");
+        let changed_at = Utc::now().to_rfc3339();
+
+        let result = (|| -> Result<()> {
+            let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = conn.transaction()?;
+            let next_version: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM rule_versions WHERE rule_id = ?1",
+                params![&rule.id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO rule_versions
+                 (rule_id, version, snapshot_json, content, status, changed_by, changed_at, change_note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    &rule.id,
+                    next_version,
+                    snapshot_json,
+                    previous.content,
+                    previous.status.to_string(),
+                    changed_by,
+                    changed_at,
+                    change_note,
+                ],
+            )?;
+            let rows = tx.execute(
+                "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
+                 tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
+                 review_after = ?9, hook_command = ?10, category = ?11, priority = ?12,
+                 surface_count = ?13, scope = ?14, auto_approve_tools = ?15, auto_approve_paths = ?16, team_id = ?17, share = ?18
+                 WHERE id = ?19",
+                params![
+                    Self::source_ids_to_string(&rule.source_ids),
+                    rule.helpful_count,
+                    rule.harmful_count,
+                    Self::tags_to_string(&rule.tags),
+                    rule.paths,
+                    rule.content,
+                    rule.status.to_string(),
+                    rule.last_accessed.map(|t| t.to_rfc3339()),
+                    rule.review_after.map(|t| t.to_rfc3339()),
+                    rule.hook_command.as_ref(),
+                    rule.category.to_string(),
+                    rule.priority,
+                    rule.surface_count,
+                    rule.scope.to_string(),
+                    rule.auto_approve_tools.as_ref(),
+                    rule.auto_approve_paths.as_ref(),
+                    rule.team_id.as_ref(),
+                    rule.share.as_ref().map(|s| s.to_string()),
+                    rule.id,
+                ],
+            )?;
+            if rows == 0 {
+                return Err(StoreError::RuleNotFound(rule.id.clone()).into());
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+
+        if let Some(tracer) = DevTracer::get() {
+            let (success, error) = match &result {
+                Ok(_) => (true, None),
+                Err(error) => (false, Some(error.to_string())),
+            };
+            let _ = tracer.record_store_op(
+                "update_rule",
+                "sqlite",
+                &[rule.id.as_str()],
+                if success { 1 } else { 0 },
+                timer.elapsed_ms(),
+                success,
+                error.as_deref(),
+            );
+        }
+        result
+    }
+
+    fn delete_recorded(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let previous = self.get(id)?;
+        if previous.status == RuleStatus::Retired {
+            return Ok(());
+        }
+        let mut retired = previous;
+        retired.status = RuleStatus::Retired;
+        self.update_recorded(
+            &retired,
+            changed_by,
+            Some(change_note.unwrap_or("tombstone delete")),
+        )
+    }
+
+    pub fn list_versions(&self, id: &str) -> Result<Vec<RuleVersion>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, rule_id, version, snapshot_json, content, status,
+                    changed_by, changed_at, change_note
+             FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC",
+        )?;
+        let versions = stmt
+            .query_map(params![id], |row| {
+                Ok(RuleVersion {
+                    id: row.get(0)?,
+                    rule_id: row.get(1)?,
+                    version: row.get(2)?,
+                    snapshot_json: row.get(3)?,
+                    content: row.get(4)?,
+                    status: row
+                        .get::<_, String>(5)?
+                        .parse()
+                        .unwrap_or(RuleStatus::Draft),
+                    changed_by: row.get(6)?,
+                    changed_at: parse_datetime(&row.get::<_, String>(7)?),
+                    change_note: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(versions)
+    }
+
+    pub fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let snapshot_json: String = match version {
+            Some(version) => conn
+                .query_row(
+                    "SELECT snapshot_json FROM rule_versions WHERE rule_id = ?1 AND version = ?2",
+                    params![id, version],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::Parse(format!("rule version not found: {id} v{version}")))?,
+            None => conn
+                .query_row(
+                    "SELECT snapshot_json FROM rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::Parse(format!("no rule history for: {id}")))?,
+        };
+        drop(conn);
+
+        let restored: Rule = serde_json::from_str(&snapshot_json).map_err(|error| {
+            StoreError::Parse(format!("invalid rule history for {id}: {error}"))
+        })?;
+        if restored.id != id {
+            return Err(StoreError::Parse(format!("rule history ID mismatch for: {id}")));
+        }
+        let default_note;
+        let note = match (change_note, version) {
+            (Some(note), _) => Some(note),
+            (None, Some(version)) => {
+                default_note = format!("restore version {version}");
+                Some(default_note.as_str())
+            }
+            (None, None) => Some("restore latest version"),
+        };
+        self.update_recorded(&restored, changed_by, note)
+    }
+}
+
 impl RuleStore for SqliteRuleStore {
     fn init(&self) -> Result<()> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(ENTRIES_RULES_SCHEMA)?;
+        for statement in RULE_VERSIONS_SCHEMA_STATEMENTS {
+            conn.execute(statement, [])?;
+        }
         // NOTE: Column migrations are handled by `cas update --schema-only`
         // See cas-cli/src/migration/migrations.rs for migration definitions (IDs 51-56)
         Ok(())
@@ -160,88 +353,63 @@ impl RuleStore for SqliteRuleStore {
     }
 
     fn update(&self, rule: &Rule) -> Result<()> {
-        let timer = TraceTimer::new();
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let result = conn.execute(
-            "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
-             tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
-             review_after = ?9, hook_command = ?10, category = ?11, priority = ?12,
-             surface_count = ?13, scope = ?14, auto_approve_tools = ?15, auto_approve_paths = ?16, team_id = ?17, share = ?18
-             WHERE id = ?19",
-            params![
-                Self::source_ids_to_string(&rule.source_ids),
-                rule.helpful_count,
-                rule.harmful_count,
-                Self::tags_to_string(&rule.tags),
-                rule.paths,
-                rule.content,
-                rule.status.to_string(),
-                rule.last_accessed.map(|t| t.to_rfc3339()),
-                rule.review_after.map(|t| t.to_rfc3339()),
-                rule.hook_command.as_ref(),
-                rule.category.to_string(),
-                rule.priority,
-                rule.surface_count,
-                rule.scope.to_string(),
-                rule.auto_approve_tools.as_ref(),
-                rule.auto_approve_paths.as_ref(),
-                rule.team_id.as_ref(),
-                rule.share.as_ref().map(|s| s.to_string()),
-                rule.id,
-            ],
-        );
+        self.update_recorded(rule, None, None)
+    }
 
-        // Record trace
-        if let Some(tracer) = DevTracer::get() {
-            let (success, error) = match &result {
-                Ok(rows) => (*rows > 0, None),
-                Err(e) => (false, Some(e.to_string())),
-            };
-            let _ = tracer.record_store_op(
-                "update_rule",
-                "sqlite",
-                &[rule.id.as_str()],
-                result.as_ref().copied().unwrap_or(0),
-                timer.elapsed_ms(),
-                success,
-                error.as_deref(),
-            );
-        }
-
-        let rows = result?;
-        if rows == 0 {
-            return Err(StoreError::RuleNotFound(rule.id.clone()));
-        }
-        Ok(())
+    fn update_with_metadata(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.update_recorded(rule, changed_by, change_note)
     }
 
     fn delete(&self, id: &str) -> Result<()> {
         let timer = TraceTimer::new();
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let result = conn.execute("DELETE FROM rules WHERE id = ?", params![id]);
+        let result = self.delete_recorded(id, None, None);
 
         // Record trace
         if let Some(tracer) = DevTracer::get() {
             let (success, error) = match &result {
-                Ok(rows) => (*rows > 0, None),
+                Ok(_) => (true, None),
                 Err(e) => (false, Some(e.to_string())),
             };
             let _ = tracer.record_store_op(
                 "delete_rule",
                 "sqlite",
                 &[id],
-                result.as_ref().copied().unwrap_or(0),
+                if result.is_ok() { 1 } else { 0 },
                 timer.elapsed_ms(),
                 success,
                 error.as_deref(),
             );
         }
 
-        let rows = result?;
-        if rows == 0 {
-            return Err(StoreError::RuleNotFound(id.to_string()));
-        }
-        Ok(())
+        result
+    }
+
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.delete_recorded(id, changed_by, change_note)
+    }
+
+    fn list_versions(&self, id: &str) -> Result<Vec<RuleVersion>> {
+        SqliteRuleStore::list_versions(self, id)
+    }
+
+    fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        SqliteRuleStore::restore_version(self, id, version, changed_by, change_note)
     }
 
     fn list(&self) -> Result<Vec<Rule>> {

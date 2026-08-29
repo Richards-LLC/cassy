@@ -14,7 +14,7 @@ returned image but does not silently resize it.
 
 | Asset | Tier | Suggested output | Prompt emphasis |
 |---|---|---|---|
-| Logo / logomark | NB2 → NB Pro | square PNG, 1024px or larger | flat, simple mark, correct quoted wordmark, high contrast, generous clear space; manual vectorization required |
+| Logo / logomark | NB2 → NB Pro | square PNG, 1024px or larger | flat, simple mark, the wordmark TEXT (spelled exactly, no quotation marks), high contrast, generous clear space; manual vectorization required |
 | Icon set | NB2 → NB Pro | one square grid sheet, 1024–2048px | one locked 24px-grid spec sentence, uniform stroke, padding, one color; manually trace approved glyphs |
 | Hero image | NB2 → NB Pro | 16:9, up to 1920px wide | focal subject, camera, lighting, and negative space for copy |
 | Background / texture | NB2 | 16:9 or tileable square, 2K | low contrast, no focal object, exact palette, usable behind text |
@@ -45,7 +45,7 @@ unrequested text. Preserve the supplied reference relationships: {references}.
 Create the final {asset_type} for {project}.
 Use these exact style tokens: {style_tokens}.
 Subject and action: {subject_action}. Context: {context}.
-Composition and safe area: {composition}. Exact displayed copy: "{copy}".
+Composition and safe area: {composition}. Exact displayed copy: {copy} (spelled exactly; no quotation marks unless explicitly requested).
 References and what must stay unchanged: {references_and_invariants}.
 Return a polished raster asset with correct spelling, deliberate edges, and no
 extra lettering or decorative objects.
@@ -57,7 +57,7 @@ extra lettering or decorative objects.
 Create a flat, high-contrast raster master for manual vectorization: {subject}.
 Use {style_tokens}; two colors maximum, simple geometric paths, centered on a
 plain background, generous clear space, no gradients, no shadows, and no extra
-lettering. If a wordmark is required, render exactly "{copy}".
+lettering. If a wordmark is required, render the wordmark TEXT (spelled {copy}, no quotation marks).
 ```
 
 ### Locked icon-set sentence

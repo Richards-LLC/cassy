@@ -500,6 +500,43 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
+    /// cas-30af: skill updates retain prior snapshots and deletes are
+    /// tombstones so a retired skill remains restorable in the database.
+    #[test]
+    fn test_skill_history_and_tombstone_delete() {
+        let temp = TempDir::new().unwrap();
+        let store = SqliteSkillStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let skill = Skill::new("skill-history-01".to_string(), "History Skill".to_string());
+        store.add(&skill).unwrap();
+        let mut updated = skill.clone();
+        updated.description = "updated description".to_string();
+        store.update(&updated).unwrap();
+
+        let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+        let prior_description: String = conn
+            .query_row(
+                "SELECT description FROM skill_versions WHERE skill_id = 'skill-history-01' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prior_description, "");
+
+        store.delete("skill-history-01").unwrap();
+        let retired = store.get("skill-history-01").unwrap();
+        assert_eq!(retired.status.to_string(), "retired");
+        let version_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM skill_versions WHERE skill_id = 'skill-history-01'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_count, 2);
+    }
+
     #[test]
     fn test_skill_invokable() {
         let (_temp, store) = create_test_store();

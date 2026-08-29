@@ -19056,6 +19056,22 @@ mod merge_state_gate_tests {
         ));
     }
 
+    /// GH #597: the historical union merge that exposed the close-gate bug.
+    /// Keep the real merge shape in the regression so changes to the
+    /// content-proof predicate cannot silently lose coverage for a delivery
+    /// that is a non-first parent of a manual conflict resolution.
+    #[test]
+    fn historical_union_merge_keeps_delivery_content_gh_597() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        assert!(git_commit_is_ancestor(repo, "65bcfa0c", "fa249048"));
+        assert_eq!(
+            delivery_content_presence_on_target(repo, "65bcfa0c", "fa249048"),
+            DeliveryContentPresence::Present {
+                paths: vec!["crates/cas-factory/src/lib.rs".to_string()]
+            }
+        );
+    }
+
     /// cas-b278 review amendment: reverse-apply failure after an ordinary
     /// first-parent commit is intentional evolution, not evidence that a
     /// merge resolution discarded the delivery. The close gate must proceed

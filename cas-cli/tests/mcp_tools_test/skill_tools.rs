@@ -1,6 +1,8 @@
 use crate::support::*;
 use cas::mcp::tools::*;
+use cas::store::open_skill_store;
 use rmcp::handler::server::wrapper::Parameters;
+use rusqlite::Connection;
 use std::process::Command;
 
 fn git(root: &std::path::Path, args: &[&str]) {
@@ -49,7 +51,7 @@ async fn test_skill_create() {
         example: None,
         preconditions: None,
         postconditions: None,
-        validation_script: None,
+        validation_script: Some("true".to_string()),
         invokable: false,
         argument_hint: None,
         context_mode: None,
@@ -84,8 +86,8 @@ async fn test_skill_show() {
         source_ids: Some("learning-1, learning-2".to_string()),
         summary: None,
         example: None,
-        preconditions: None,
-        postconditions: None,
+        preconditions: Some("git is installed, working tree is clean".to_string()),
+        postconditions: Some("files are formatted".to_string()),
         validation_script: None,
         invokable: false,
         argument_hint: None,
@@ -115,6 +117,8 @@ async fn test_skill_show() {
     let text = extract_text(result);
     assert!(text.contains("Show Skill") || text.contains("show-skill"));
     assert!(text.contains("learning-1, learning-2"));
+    assert!(text.contains("git is installed, working tree is clean"));
+    assert!(text.contains("files are formatted"));
 }
 
 #[tokio::test]
@@ -247,7 +251,7 @@ async fn test_skill_update() {
         example: None,
         preconditions: None,
         postconditions: None,
-        validation_script: None,
+        validation_script: Some("true".to_string()),
         invokable: false,
         argument_hint: None,
         context_mode: None,
@@ -273,6 +277,9 @@ async fn test_skill_update() {
         description: Some("Updated description".to_string()),
         invocation: None,
         tags: None,
+        preconditions: Some("git is installed".to_string()),
+        postconditions: Some("files are formatted".to_string()),
+        validation_script: Some("true".to_string()),
         summary: None,
         disable_model_invocation: None,
         changed_by: Some("test-actor".to_string()),
@@ -286,6 +293,15 @@ async fn test_skill_update() {
 
     let text = extract_text(result);
     assert!(text.contains("Updated") || text.contains("updated"));
+
+    let updated = service
+        .cas_skill_show(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("updated skill should be readable");
+    let updated_text = extract_text(updated);
+    assert!(updated_text.contains("git is installed"));
+    assert!(updated_text.contains("files are formatted"));
+    assert!(updated_text.contains("Validation script: true"));
 
     let history = service
         .cas_skill_history(Parameters(VersionRequest {
@@ -467,4 +483,109 @@ async fn test_skill_use() {
 
     let text = extract_text(result);
     assert!(text.contains("usage") || text.contains("Used") || text.contains("1"));
+}
+
+#[tokio::test]
+async fn test_skill_create_validation_failure_is_reported_without_writing() {
+    let (temp, service) = setup_cas();
+
+    let result = service
+        .cas_skill_create(Parameters(SkillCreateRequest {
+            scope: "global".to_string(),
+            name: "Rejected Validation Skill".to_string(),
+            description: "Must not be stored when validation fails".to_string(),
+            invocation: "rejected-validation".to_string(),
+            skill_type: "command".to_string(),
+            tags: None,
+            source_ids: None,
+            summary: None,
+            example: None,
+            preconditions: None,
+            postconditions: None,
+            validation_script: Some("printf validation-failed >&2; exit 23".to_string()),
+            invokable: false,
+            argument_hint: None,
+            context_mode: None,
+            agent_type: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            draft: false,
+            disable_model_invocation: false,
+        }))
+        .await;
+
+    let error = result.expect_err("a failing validation script must reject create");
+    assert!(error.message.contains("validation"));
+    assert!(error.message.contains("validation-failed"));
+
+    let skill_store = open_skill_store(&temp.path().join(".cas")).unwrap();
+    assert!(skill_store.list(None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_skill_update_validation_failure_is_atomic() {
+    let (temp, service) = setup_cas();
+
+    let result = service
+        .cas_skill_create(Parameters(SkillCreateRequest {
+            scope: "global".to_string(),
+            name: "Update Validation Skill".to_string(),
+            description: "Original description".to_string(),
+            invocation: "update-validation".to_string(),
+            skill_type: "command".to_string(),
+            tags: None,
+            source_ids: None,
+            summary: None,
+            example: None,
+            preconditions: None,
+            postconditions: None,
+            validation_script: Some("true".to_string()),
+            invokable: false,
+            argument_hint: None,
+            context_mode: None,
+            agent_type: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            draft: false,
+            disable_model_invocation: false,
+        }))
+        .await
+        .expect("passing validation should admit create");
+    let id = extract_skill_id(&extract_text(result)).expect("create should return skill ID");
+
+    // Model a pre-existing skill whose validation script was configured before
+    // the create/update gate existed; this keeps the update red test focused
+    // on the update seam rather than on request-field plumbing.
+    let connection = Connection::open(temp.path().join(".cas/cas.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE skills SET validation_script = ?1 WHERE id = ?2",
+            rusqlite::params!["printf update-validation-failed >&2; exit 29", id],
+        )
+        .unwrap();
+
+    let result = service
+        .cas_skill_update(Parameters(SkillUpdateRequest {
+            id: id.to_string(),
+            name: None,
+            description: Some("Rejected description".to_string()),
+            invocation: None,
+            tags: None,
+            preconditions: None,
+            postconditions: None,
+            validation_script: None,
+            summary: None,
+            disable_model_invocation: None,
+            changed_by: None,
+            change_note: None,
+        }))
+        .await;
+
+    let error = result.expect_err("the existing failing validation script must reject update");
+    assert!(error.message.contains("validation"));
+
+    let skill_store = open_skill_store(&temp.path().join(".cas")).unwrap();
+    let stored = skill_store.get(&id).unwrap();
+    assert_eq!(stored.description, "Original description");
+    assert!(skill_store.list_versions(&id).unwrap().is_empty());
 }

@@ -95,6 +95,21 @@ pub struct SkillUpdateRequest {
     #[serde(default)]
     pub tags: Option<String>,
 
+    /// Preconditions (comma-separated; replaces existing)
+    #[schemars(description = "Preconditions required before using the skill")]
+    #[serde(default)]
+    pub preconditions: Option<String>,
+
+    /// Postconditions (comma-separated; replaces existing)
+    #[schemars(description = "Expected postconditions after using the skill")]
+    #[serde(default)]
+    pub postconditions: Option<String>,
+
+    /// Validation script (empty string clears the gate)
+    #[schemars(description = "Local availability-check script run before persistence")]
+    #[serde(default)]
+    pub validation_script: Option<String>,
+
     /// New summary (optional) - short trigger description for frontmatter
     #[schemars(
         description = "Short trigger description (1-2 lines) for SKILL.md frontmatter. Describes WHEN to use the skill."

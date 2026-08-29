@@ -93,6 +93,22 @@ Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking),
 
 Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. Harmful feedback and negative retrieval outcomes demote Proven rules to Stale and remove their synced files.
 
+### Skill validation contract
+
+`validation_script` is an opt-in create/update gate. When present, Cassy runs it
+before writing the skill to SQLite or syncing its `SKILL.md`; a zero exit status
+admits the change and a non-zero status (or timeout) rejects it without creating
+a version row. The probe runs through the platform shell from a fresh temporary
+directory, with a scrubbed environment that retains only `PATH` for executable
+lookup. The five-second timeout and process-group cleanup bound the MCP request.
+Scripts are local, deterministic availability checks: they must not depend on
+network access, inherited CAS credentials, project files, or persistent
+relative writes. Validation output is included in rejection errors and capped
+to keep responses bounded.
+
+Skill `preconditions` and `postconditions` are surfaced in `cas skill show` and
+in generated `SKILL.md` sections so those fields remain visible to consumers.
+
 ### Builtin skill references
 
 Files under `cas-cli/src/builtins/**/references/` are owned by their skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version Cassy has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions Cassy has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`.

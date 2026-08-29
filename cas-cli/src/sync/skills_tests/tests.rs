@@ -225,6 +225,11 @@ fn test_sync_skill_with_all_frontmatter_fields() {
     skill.context_mode = Some("fork".to_string());
     skill.agent_type = Some("Explore".to_string());
     skill.allowed_tools = vec!["Read".to_string(), "Bash".to_string()];
+    skill.preconditions = vec![
+        "git is installed".to_string(),
+        "working tree is clean".to_string(),
+    ];
+    skill.postconditions = vec!["the requested files are formatted".to_string()];
 
     syncer.sync_skill(&skill).unwrap();
 
@@ -237,6 +242,10 @@ fn test_sync_skill_with_all_frontmatter_fields() {
     assert!(content.contains("allowed-tools:"));
     assert!(content.contains("  - Read"));
     assert!(content.contains("  - Bash"));
+    assert!(content.contains("## Preconditions"));
+    assert!(content.contains("- git is installed"));
+    assert!(content.contains("## Postconditions"));
+    assert!(content.contains("- the requested files are formatted"));
     // Should NOT have user-invocable: false since it IS invokable
     assert!(!content.contains("user-invocable: false"));
 }

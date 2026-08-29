@@ -91,7 +91,7 @@ Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking),
 
 ## Skill & Rule Sync
 
-Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion: Draft -> Proven via `mcp__cas__rule action=helpful`.
+Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. Harmful feedback and negative retrieval outcomes demote Proven rules to Stale and remove their synced files.
 
 ### Builtin skill references
 

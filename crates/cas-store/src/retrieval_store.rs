@@ -9,7 +9,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -271,6 +271,30 @@ impl SqliteRetrievalStore {
         Ok(())
     }
 
+    fn parse_aggregate(row: &Row<'_>) -> rusqlite::Result<RetrievalAggregate> {
+        let total = row.get::<_, i64>(3)?.max(0) as u64;
+        let used = row.get::<_, i64>(4)?.max(0) as u64;
+        let helpful = row.get::<_, i64>(5)?.max(0) as u64;
+        let ignored = row.get::<_, i64>(6)?.max(0) as u64;
+        let corrected = row.get::<_, i64>(7)?.max(0) as u64;
+        let harmful = row.get::<_, i64>(8)?.max(0) as u64;
+        let denominator = total.max(1) as f64;
+        Ok(RetrievalAggregate {
+            document_type: row.get(0)?,
+            query_family: row.get(1)?,
+            ranking_policy: row.get(2)?,
+            total,
+            used,
+            helpful,
+            ignored,
+            corrected,
+            harmful,
+            usefulness_rate: (used + helpful) as f64 / denominator,
+            ignore_rate: ignored as f64 / denominator,
+            correction_rate: corrected as f64 / denominator,
+        })
+    }
+
     #[cfg(test)]
     fn get_query(&self, id: &str) -> Result<Option<RetrievalQuery>> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -294,6 +318,32 @@ impl SqliteRetrievalStore {
         )
         .optional()
         .map_err(StoreError::Database)
+    }
+
+    /// Aggregate outcomes for one result without changing the observational
+    /// retrieval store contract. Consumers use this scoped read to avoid
+    /// treating another rule's outcomes as evidence for the current rule.
+    pub fn aggregate_for_result(&self, result_id: &str) -> Result<Vec<RetrievalAggregate>> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT r.document_type, q.query_family, q.ranking_policy,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END)
+             FROM retrieval_outcomes o
+             JOIN retrieval_queries q ON q.id = o.query_id
+             JOIN retrieval_query_results r
+               ON r.query_id = o.query_id AND r.result_id = o.result_id
+             WHERE o.result_id = ?1
+             GROUP BY r.document_type, q.query_family, q.ranking_policy
+             ORDER BY r.document_type, q.query_family, q.ranking_policy",
+        )?;
+        let rows = stmt.query_map([result_id], Self::parse_aggregate)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 }
 
@@ -439,29 +489,7 @@ impl RetrievalStore for SqliteRetrievalStore {
              GROUP BY r.document_type, q.query_family, q.ranking_policy
              ORDER BY r.document_type, q.query_family, q.ranking_policy",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let total = row.get::<_, i64>(3)?.max(0) as u64;
-            let used = row.get::<_, i64>(4)?.max(0) as u64;
-            let helpful = row.get::<_, i64>(5)?.max(0) as u64;
-            let ignored = row.get::<_, i64>(6)?.max(0) as u64;
-            let corrected = row.get::<_, i64>(7)?.max(0) as u64;
-            let harmful = row.get::<_, i64>(8)?.max(0) as u64;
-            let denominator = total.max(1) as f64;
-            Ok(RetrievalAggregate {
-                document_type: row.get(0)?,
-                query_family: row.get(1)?,
-                ranking_policy: row.get(2)?,
-                total,
-                used,
-                helpful,
-                ignored,
-                corrected,
-                harmful,
-                usefulness_rate: (used + helpful) as f64 / denominator,
-                ignore_rate: ignored as f64 / denominator,
-                correction_rate: corrected as f64 / denominator,
-            })
-        })?;
+        let rows = stmt.query_map([], Self::parse_aggregate)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::Database)
     }

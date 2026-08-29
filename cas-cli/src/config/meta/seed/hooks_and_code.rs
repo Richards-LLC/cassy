@@ -56,6 +56,41 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
             ],
         });
 
+    registry.register(ConfigMeta {
+            key: "sync.promotion_threshold",
+            section: "sync",
+            name: "Rule Promotion Threshold",
+            description: "Minimum number of outcome-evidence events required before an unproven rule becomes Proven. Existing Proven rules are grandfathered and are not mass-demoted when this changes. The minimum accepted value is 2 so one self-reported call can never promote a rule.",
+            value_type: ConfigType::Int,
+            default: "2",
+            constraint: Constraint::Min(2),
+            advanced: false,
+            requires_feature: None,
+            keywords: &["rules", "promotion", "threshold", "evidence", "validation", "quality"],
+            use_cases: &[
+                "Raise to require more independent outcome evidence before promotion",
+                "Keep the default of 2 to prevent one-call promotions",
+            ],
+        });
+
+    registry.register(ConfigMeta {
+            key: "sync.promotion_evidence",
+            section: "sync",
+            name: "Rule Promotion Evidence",
+            description: "Comma-separated evidence sources that may satisfy the promotion threshold: helpful uses explicit rule feedback; retrieval uses per-rule retrieval outcome aggregates and requires useful, uncorrected evidence. Any configured source may satisfy the threshold.",
+            value_type: ConfigType::StringList,
+            default: "helpful",
+            constraint: Constraint::None,
+            advanced: false,
+            requires_feature: None,
+            keywords: &["rules", "promotion", "evidence", "retrieval", "feedback", "validation"],
+            use_cases: &[
+                "Use helpful for explicit rule feedback",
+                "Use retrieval to require measured retrieval outcomes",
+                "List both sources when either configured signal may qualify",
+            ],
+        });
+
     // ============================================================
     // CLOUD SECTION
     // ============================================================

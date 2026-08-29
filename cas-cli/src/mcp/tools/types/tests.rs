@@ -177,6 +177,22 @@ fn test_rule_create_request() {
     assert_eq!(req.content, "Use async/await");
     assert_eq!(req.paths, Some("src/**/*.rs".to_string()));
     assert_eq!(req.tags, Some("rust".to_string()));
+    assert!(req.source_ids.is_none());
+}
+
+#[test]
+fn test_rule_and_skill_create_request_source_ids() {
+    let rule: RuleCreateRequest = serde_json::from_str(
+        r#"{"content":"Use async/await","source_ids":"entry-1,entry-2"}"#,
+    )
+    .unwrap();
+    assert_eq!(rule.source_ids.as_deref(), Some("entry-1,entry-2"));
+
+    let skill: SkillCreateRequest = serde_json::from_str(
+        r#"{"name":"Format","description":"Run fmt","invocation":"cargo fmt","source_ids":"entry-3"}"#,
+    )
+    .unwrap();
+    assert_eq!(skill.source_ids.as_deref(), Some("entry-3"));
 }
 
 #[test]
@@ -191,6 +207,7 @@ fn test_skill_create_request_defaults() {
     assert_eq!(req.skill_type, "command");
     assert_eq!(req.scope, "global"); // Default scope for skills
     assert!(req.tags.is_none());
+    assert!(req.source_ids.is_none());
 }
 
 #[test]

@@ -14,6 +14,7 @@ async fn test_rule_create() {
         content: "Always use snake_case for function names".to_string(),
         paths: Some("**/*.rs".to_string()),
         tags: Some("style,naming".to_string()),
+        source_ids: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
     };
@@ -37,6 +38,7 @@ async fn test_rule_show() {
         content: "Test rule for show".to_string(),
         paths: None,
         tags: None,
+        source_ids: Some("learning-1, learning-2".to_string()),
         auto_approve_tools: None,
         auto_approve_paths: None,
     };
@@ -75,6 +77,7 @@ async fn test_rule_show() {
 
     let text = extract_text(result);
     assert!(text.contains("Test rule for show") || text.contains(&rule_id));
+    assert!(text.contains("learning-1, learning-2"));
 }
 
 #[tokio::test]
@@ -88,6 +91,7 @@ async fn test_rule_list() {
             content: format!("List rule {i}"),
             paths: None,
             tags: None,
+            source_ids: None,
             auto_approve_tools: None,
             auto_approve_paths: None,
         };
@@ -124,6 +128,7 @@ async fn test_rule_update() {
         content: "Original rule content".to_string(),
         paths: None,
         tags: None,
+        source_ids: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
     };
@@ -165,6 +170,7 @@ async fn test_rule_helpful_and_harmful() {
         content: "Feedback test rule".to_string(),
         paths: None,
         tags: None,
+        source_ids: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
     };
@@ -493,6 +499,7 @@ async fn test_rule_delete() {
         content: "Delete test rule".to_string(),
         paths: None,
         tags: None,
+        source_ids: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
     };

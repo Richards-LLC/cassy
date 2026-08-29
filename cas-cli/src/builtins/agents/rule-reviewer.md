@@ -27,6 +27,9 @@ Review draft rules: promote, merge, or archive. Keep the rule set lean and high-
    - Rewrite: `mcp__cas__rule action=update id=<id> content="<improved>"`
    - Archive: `mcp__cas__rule action=delete id=<id>`
 
+When promoting or rewriting a rule, preserve its existing source entry IDs. When merging,
+carry forward the source entry IDs from every contributing rule into the surviving rule.
+
 ## Quality Bar for Promotion
 
 A rule deserves proven status when it:

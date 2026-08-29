@@ -132,6 +132,7 @@ pub(crate) fn run_consolidation(
                 scope: Scope::default(),
                 entry_type: EntryType::Learning,
                 observation_type: None,
+                source_ids: suggestion.source_ids.clone(),
                 tags: suggestion.merged_tags,
                 created: Utc::now(),
                 content: suggestion.merged_content,

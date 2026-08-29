@@ -88,7 +88,7 @@ impl CasCore {
         })?;
 
         let output = format!(
-            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nFeedback: +{} -{}\nCreated: {}\n\nContent:\n{}",
+            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nSource entries: {}\nFeedback: +{} -{}\nCreated: {}\n\nContent:\n{}",
             rule.id,
             "=".repeat(rule.id.len() + 6),
             rule.status,
@@ -101,6 +101,11 @@ impl CasCore {
                 "none".to_string()
             } else {
                 rule.tags.join(", ")
+            },
+            if rule.source_ids.is_empty() {
+                "none".to_string()
+            } else {
+                rule.source_ids.join(", ")
             },
             rule.helpful_count,
             rule.harmful_count,
@@ -166,7 +171,16 @@ impl CasCore {
             harmful_count: 0,
             created: chrono::Utc::now(),
             last_accessed: None,
-            source_ids: Vec::new(),
+            source_ids: req
+                .source_ids
+                .map(|ids| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
             review_after: None,
             hook_command: None,
             category: crate::types::RuleCategory::default(),

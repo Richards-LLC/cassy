@@ -212,6 +212,8 @@ mod m233_tasks_add_terminal_outcome;
 mod m234_external_task_dependencies;
 mod m235_external_task_dependency_suppressions;
 mod m236_delegation_receipts_create_table;
+mod m237_entries_add_source_ids;
+mod m238_skills_add_source_ids;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -457,6 +459,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m234_external_task_dependencies::MIGRATION,
     m235_external_task_dependency_suppressions::MIGRATION,
     m236_delegation_receipts_create_table::MIGRATION,
+    m237_entries_add_source_ids::MIGRATION,
+    m238_skills_add_source_ids::MIGRATION,
 ];
 
 #[cfg(test)]

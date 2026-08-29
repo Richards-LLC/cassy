@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS skills (
     -- Team collaboration
     team_id TEXT,
     -- Team-promotion share override (private | team)
-    share TEXT
+    share TEXT,
+    -- Skill provenance (JSON array of source entry IDs)
+    source_ids TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
@@ -211,6 +213,8 @@ impl SqliteSkillStore {
                 .and_then(|s| s.parse().ok()),
             // Disallowed tools (26) - Claude Code 2.1.152+, cas-5be8
             disallowed_tools: Self::parse_tags(&row.get::<_, String>(26).unwrap_or_default()),
+            // Source entry IDs (27)
+            source_ids: Self::parse_tags(&row.get::<_, String>(27).unwrap_or_default()),
         })
     }
 }
@@ -234,8 +238,8 @@ impl SkillStore for SqliteSkillStore {
              example, preconditions, postconditions, validation_script, status, tags, summary,
              usage_count, created_at, updated_at, last_used, invokable, argument_hint,
              context_mode, agent_type, allowed_tools, hooks, disable_model_invocation, team_id, share,
-             disallowed_tools)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+             disallowed_tools, source_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
             params![
                 skill.id,
                 skill.name,
@@ -264,6 +268,7 @@ impl SkillStore for SqliteSkillStore {
                 skill.team_id,
                 skill.share.as_ref().map(|s| s.to_string()),
                 Self::tags_to_string(&skill.disallowed_tools),
+                Self::tags_to_string(&skill.source_ids),
             ],
         )?;
         Ok(())
@@ -276,7 +281,7 @@ impl SkillStore for SqliteSkillStore {
              example, preconditions, postconditions, validation_script, status, tags, summary,
              usage_count, created_at, updated_at, last_used, invokable, argument_hint,
              context_mode, agent_type, allowed_tools, hooks, disable_model_invocation, team_id, share,
-             disallowed_tools
+             disallowed_tools, source_ids
              FROM skills WHERE id = ?",
             params![id],
             Self::skill_from_row,
@@ -295,8 +300,8 @@ impl SkillStore for SqliteSkillStore {
              updated_at = ?14, last_used = ?15, invokable = ?16, argument_hint = ?17,
              context_mode = ?18, agent_type = ?19, allowed_tools = ?20, hooks = ?21,
              disable_model_invocation = ?22, team_id = ?23, share = ?24,
-             disallowed_tools = ?25
-             WHERE id = ?26",
+             disallowed_tools = ?25, source_ids = ?26
+             WHERE id = ?27",
             params![
                 skill.name,
                 skill.description,
@@ -323,6 +328,7 @@ impl SkillStore for SqliteSkillStore {
                 skill.team_id,
                 skill.share.as_ref().map(|s| s.to_string()),
                 Self::tags_to_string(&skill.disallowed_tools),
+                Self::tags_to_string(&skill.source_ids),
                 skill.id,
             ],
         )?;
@@ -353,7 +359,7 @@ impl SkillStore for SqliteSkillStore {
                  example, preconditions, postconditions, validation_script, status, tags, summary,
                  usage_count, created_at, updated_at, last_used, invokable, argument_hint,
                  context_mode, agent_type, allowed_tools, hooks, disable_model_invocation, team_id, share,
-                 disallowed_tools
+                 disallowed_tools, source_ids
                  FROM skills WHERE status = ? ORDER BY name",
                 vec![s.to_string()],
             ),
@@ -362,7 +368,7 @@ impl SkillStore for SqliteSkillStore {
                  example, preconditions, postconditions, validation_script, status, tags, summary,
                  usage_count, created_at, updated_at, last_used, invokable, argument_hint,
                  context_mode, agent_type, allowed_tools, hooks, disable_model_invocation, team_id, share,
-                 disallowed_tools
+                 disallowed_tools, source_ids
                  FROM skills ORDER BY name",
                 vec![],
             ),
@@ -393,7 +399,7 @@ impl SkillStore for SqliteSkillStore {
              example, preconditions, postconditions, validation_script, status, tags, summary,
              usage_count, created_at, updated_at, last_used, invokable, argument_hint,
              context_mode, agent_type, allowed_tools, hooks, disable_model_invocation, team_id, share,
-             disallowed_tools
+             disallowed_tools, source_ids
              FROM skills
              WHERE name LIKE ?1 OR description LIKE ?1 OR tags LIKE ?1 OR summary LIKE ?1
              ORDER BY usage_count DESC, name",

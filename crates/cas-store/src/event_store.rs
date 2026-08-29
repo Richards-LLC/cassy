@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::Result;
 use crate::error::StoreError;
+use crate::write_jsonl_archive;
 use cas_types::{Event, EventEntityType, EventType};
 
 /// Helper to convert mutex poison error to StoreError
@@ -68,6 +69,10 @@ pub trait EventStore: Send + Sync {
 
     /// Prune old events (keep last N days)
     fn prune(&self, days: i64) -> Result<usize>;
+
+    /// Archive old events to immutable compressed JSONL, then remove them from
+    /// the live table.
+    fn archive_old(&self, archive_dir: &Path, days: i64) -> Result<usize>;
 
     /// Close the store
     fn close(&self) -> Result<()>;
@@ -291,6 +296,34 @@ impl EventStore for SqliteEventStore {
         )?;
 
         Ok(deleted)
+    }
+
+    fn archive_old(&self, archive_dir: &Path, days: i64) -> Result<usize> {
+        let cutoff = Utc::now() - chrono::Duration::days(days);
+        let events = {
+            let conn = self.conn.lock().map_err(lock_error)?;
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
+                 FROM events WHERE created_at < ?1 ORDER BY id",
+            )?;
+            stmt.query_map(params![cutoff.to_rfc3339()], Self::row_to_event)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        if events.is_empty() {
+            return Ok(0);
+        }
+
+        let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
+        write_jsonl_archive(archive_dir, "events", &events)?;
+
+        let conn = self.conn.lock().map_err(lock_error)?;
+        let tx = conn.unchecked_transaction()?;
+        for id in ids {
+            tx.execute("DELETE FROM events WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(events.len())
     }
 
     fn close(&self) -> Result<()> {

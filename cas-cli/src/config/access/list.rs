@@ -6,6 +6,7 @@ impl Config {
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
         let dev = self.dev.clone().unwrap_or_default();
+        let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
@@ -134,6 +135,10 @@ impl Config {
             (
                 "dev.trace_retention_days".to_string(),
                 dev.trace_retention_days.to_string(),
+            ),
+            (
+                "daemon.archive_retention_days".to_string(),
+                daemon.archive_retention_days.to_string(),
             ),
             // Code section
             (

@@ -9,8 +9,35 @@ fn test_config_defaults() {
     assert!(config.sync.enabled);
     assert_eq!(config.sync.target, ".claude/rules/cas");
     assert_eq!(config.sync.min_helpful, 1);
+    assert_eq!(config.daemon().archive_retention_days, 0);
     assert_eq!(config.sync.promotion_threshold, 2);
     assert_eq!(config.sync.promotion_evidence, vec!["helpful"]);
+}
+
+#[test]
+fn daemon_archive_retention_is_configurable_and_round_trips() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(
+        config.get("daemon.archive_retention_days"),
+        Some("0".to_string())
+    );
+    config.set("daemon.archive_retention_days", "90").unwrap();
+    assert_eq!(config.daemon().archive_retention_days, 90);
+    assert!(config.list().contains(&(
+        "daemon.archive_retention_days".to_string(),
+        "90".to_string()
+    )));
+    assert!(
+        meta::registry()
+            .get("daemon.archive_retention_days")
+            .is_some()
+    );
+
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(loaded.daemon().archive_retention_days, 90);
 }
 
 #[test]

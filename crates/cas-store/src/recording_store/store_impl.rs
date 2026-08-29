@@ -1,6 +1,7 @@
 use crate::Result;
 use crate::error::StoreError;
 use crate::recording_store::{RecordingStore, SqliteRecordingStore};
+use crate::{RecordingArchive, RecordingFtsEntry, write_jsonl_archive};
 use cas_types::{Recording, RecordingAgent, RecordingEvent, RecordingQuery};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -422,7 +423,127 @@ impl RecordingStore for SqliteRecordingStore {
         Ok(deleted)
     }
 
+    fn archive_old(&self, archive_dir: &std::path::Path, older_than_days: i64) -> Result<usize> {
+        let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
+        let (archives, ids) = {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            if !table_exists(&conn, "recordings")? {
+                return Ok(0);
+            }
+
+            let recordings = {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, session_id, started_at, ended_at, duration_ms,
+                     file_path, file_size, title, description, created_at
+                     FROM recordings WHERE created_at < ?1 ORDER BY id",
+                )?;
+                stmt.query_map(params![cutoff], Self::recording_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+
+            let has_agents = table_exists(&conn, "recording_agents")?;
+            let has_events = table_exists(&conn, "recording_events")?;
+            let has_fts = table_exists(&conn, "recordings_fts")?;
+            let mut archives = Vec::with_capacity(recordings.len());
+            for recording in recordings {
+                let agents = if has_agents {
+                    let mut stmt = conn.prepare_cached(
+                        "SELECT id, recording_id, agent_name, agent_type, file_path, created_at
+                         FROM recording_agents WHERE recording_id = ?1 ORDER BY id",
+                    )?;
+                    stmt.query_map(params![recording.id], Self::recording_agent_from_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    Vec::new()
+                };
+                let events = if has_events {
+                    let mut stmt = conn.prepare_cached(
+                        "SELECT id, recording_id, timestamp_ms, event_type, entity_type,
+                         entity_id, metadata FROM recording_events
+                         WHERE recording_id = ?1 ORDER BY timestamp_ms, id",
+                    )?;
+                    stmt.query_map(params![recording.id], Self::recording_event_from_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    Vec::new()
+                };
+                let fts = if has_fts {
+                    let mut stmt = conn.prepare_cached(
+                        "SELECT recording_id, content, content_type,
+                         CAST(timestamp_ms AS INTEGER) FROM recordings_fts
+                         WHERE recording_id = ?1 ORDER BY CAST(timestamp_ms AS INTEGER)",
+                    )?;
+                    stmt.query_map(params![recording.id], |row| {
+                        Ok(RecordingFtsEntry {
+                            recording_id: row.get(0)?,
+                            content: row.get(1)?,
+                            content_type: row.get(2)?,
+                            timestamp_ms: row.get(3)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    Vec::new()
+                };
+                archives.push(RecordingArchive {
+                    recording,
+                    agents,
+                    events,
+                    fts,
+                });
+            }
+            let ids = archives
+                .iter()
+                .map(|archive| archive.recording.id.clone())
+                .collect::<Vec<_>>();
+            (archives, ids)
+        };
+
+        if archives.is_empty() {
+            return Ok(0);
+        }
+
+        write_jsonl_archive(archive_dir, "recordings", &archives)?;
+
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let has_fts = table_exists(&conn, "recordings_fts")?;
+        let has_agents = table_exists(&conn, "recording_agents")?;
+        let has_events = table_exists(&conn, "recording_events")?;
+        let tx = conn.unchecked_transaction()?;
+        for id in &ids {
+            if has_fts {
+                tx.execute(
+                    "DELETE FROM recordings_fts WHERE recording_id = ?1",
+                    params![id],
+                )?;
+            }
+            if has_agents {
+                tx.execute(
+                    "DELETE FROM recording_agents WHERE recording_id = ?1",
+                    params![id],
+                )?;
+            }
+            if has_events {
+                tx.execute(
+                    "DELETE FROM recording_events WHERE recording_id = ?1",
+                    params![id],
+                )?;
+            }
+            tx.execute("DELETE FROM recordings WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     fn close(&self) -> Result<()> {
         Ok(())
     }
+}
+
+fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get::<_, i32>(0),
+    )? > 0)
 }

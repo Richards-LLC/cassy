@@ -33,6 +33,8 @@ pub struct DaemonConfig {
     pub code_index_interval_secs: u64,
     /// Age (in hours) after which stale/shutdown agents are deleted (0 = never delete)
     pub agent_purge_age_hours: u64,
+    /// Days to retain immutable event/recording archives (0 = keep forever)
+    pub archive_retention_days: u64,
     /// Enable incremental BM25 indexing
     pub index_bm25: bool,
     /// Batch size for BM25 indexing
@@ -60,6 +62,7 @@ impl Default for DaemonConfig {
             code_watch_paths: vec![],
             code_index_interval_secs: 30,
             agent_purge_age_hours: 24,
+            archive_retention_days: 0,
             index_bm25: true,
             index_batch_size: 32,
             index_max_per_run: 200,

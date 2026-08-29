@@ -14,10 +14,12 @@ use clap::{Parser, Subcommand};
 
 use crate::cli::Cli;
 use crate::cloud::CloudConfig;
-use crate::store::open_store;
+use crate::store::{open_store, open_store_local};
 
 #[derive(Subcommand)]
 pub enum MemoryCommands {
+    /// Report stored memories containing tool-call/XML artifacts (read-only)
+    Hygiene,
     /// Share personal memories with your team (retroactive backfill)
     ///
     /// Sets `share = Team` on selected entries and enqueues them for
@@ -71,9 +73,34 @@ pub struct UnshareArgs {
 
 pub fn execute(cmd: &MemoryCommands, _cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
+        MemoryCommands::Hygiene => execute_hygiene(cas_root),
         MemoryCommands::Share(args) => execute_share(args, cas_root),
         MemoryCommands::Unshare(args) => execute_unshare(args, cas_root),
     }
+}
+
+/// Scan stored memories and report likely tool-call/XML contamination.
+///
+/// This command is intentionally report-only. It never rewrites or deletes an
+/// entry; operators decide how a finding should be corrected.
+pub fn execute_hygiene(cas_root: &Path) -> anyhow::Result<()> {
+    let store = open_store_local(cas_root).context("failed to open entry store")?;
+    let entries = store.list()?;
+    let findings = cas_core::memory::find_contaminated_entries(&entries);
+    if findings.is_empty() {
+        println!("memory hygiene: no tool-call/XML artifacts found");
+        return Ok(());
+    }
+
+    println!(
+        "memory hygiene: {} contaminated entr{} found (report only)",
+        findings.len(),
+        if findings.len() == 1 { "y" } else { "ies" }
+    );
+    for finding in findings {
+        println!("  {}: {}", finding.id, finding.patterns.join(", "));
+    }
+    Ok(())
 }
 
 /// Public for integration tests only. Not a stable API.

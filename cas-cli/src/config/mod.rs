@@ -42,6 +42,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev: Option<DevConfig>,
 
+    /// Daemon maintenance configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonSettings>,
+
     /// Code indexing configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<CodeConfig>,
@@ -149,6 +153,7 @@ impl Config {
         merge_option!(hooks);
         merge_option!(tasks);
         merge_option!(dev);
+        merge_option!(daemon);
         merge_option!(code);
         merge_option!(notifications);
         merge_option!(agent);
@@ -168,6 +173,11 @@ impl Config {
         merge_option!(issues);
         merge_option!(project);
         changed
+    }
+
+    /// Get daemon maintenance config with defaults.
+    pub fn daemon(&self) -> DaemonSettings {
+        self.daemon.clone().unwrap_or_default()
     }
 }
 

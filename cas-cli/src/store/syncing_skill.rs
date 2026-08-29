@@ -10,6 +10,7 @@ use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::share_policy::{eligible_for_team_skill, resolve_team_id};
 use crate::store::{Result, SkillStore};
 use crate::types::{Skill, SkillStatus};
+use cas_store::SkillVersion;
 
 /// A skill store wrapper that queues changes for cloud sync
 pub struct SyncingSkillStore {
@@ -108,9 +109,50 @@ impl SkillStore for SyncingSkillStore {
         Ok(())
     }
 
+    fn update_with_metadata(
+        &self,
+        skill: &Skill,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .update_with_metadata(skill, changed_by, change_note)?;
+        self.queue_upsert(skill);
+        Ok(())
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.inner.delete(id)?;
         self.queue_delete(id);
+        Ok(())
+    }
+
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner.delete_with_metadata(id, changed_by, change_note)?;
+        self.queue_delete(id);
+        Ok(())
+    }
+
+    fn list_versions(&self, id: &str) -> Result<Vec<SkillVersion>> {
+        self.inner.list_versions(id)
+    }
+
+    fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .restore_version(id, version, changed_by, change_note)?;
+        let restored = self.inner.get(id)?;
+        self.queue_upsert(&restored);
         Ok(())
     }
 

@@ -214,17 +214,16 @@ fn test_rule_delete() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify deleted
+    // Tombstone delete retains the rule for history and restore.
     let output = cas
         .cas_cmd()
         .args(["rules", "show", &rule_id])
         .output()
         .expect("show command");
 
-    // Should fail or show not found
-    assert!(
-        !output.status.success() || String::from_utf8_lossy(&output.stderr).contains("not found")
-    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("retired") || stdout.contains("Retired"));
 }
 
 /// Test sync creates correct directory structure

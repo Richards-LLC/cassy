@@ -8,6 +8,7 @@ use crate::config::NotificationConfig;
 use crate::notifications::{NotificationEvent, get_global_notifier};
 use crate::store::{Result, SkillStore};
 use crate::types::{Skill, SkillStatus};
+use cas_store::SkillVersion;
 
 /// A skill store wrapper that emits notification events
 pub struct NotifyingSkillStore {
@@ -83,8 +84,49 @@ impl SkillStore for NotifyingSkillStore {
         Ok(())
     }
 
+    fn update_with_metadata(
+        &self,
+        skill: &Skill,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let old_status = self.inner.get(&skill.id).ok().map(|s| s.status);
+        self.inner
+            .update_with_metadata(skill, changed_by, change_note)?;
+        self.notify_status_change(skill, old_status);
+        Ok(())
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.inner.delete(id)
+    }
+
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner.delete_with_metadata(id, changed_by, change_note)
+    }
+
+    fn list_versions(&self, id: &str) -> Result<Vec<SkillVersion>> {
+        self.inner.list_versions(id)
+    }
+
+    fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let old_status = self.inner.get(id).ok().map(|s| s.status);
+        self.inner
+            .restore_version(id, version, changed_by, change_note)?;
+        let restored = self.inner.get(id)?;
+        self.notify_status_change(&restored, old_status);
+        Ok(())
     }
 
     fn list(&self, status: Option<SkillStatus>) -> Result<Vec<Skill>> {
@@ -149,6 +191,6 @@ mod tests {
 
         // Test delete
         store.delete("skill-001").unwrap();
-        assert!(store.get("skill-001").is_err());
+        assert_eq!(store.get("skill-001").unwrap().status, SkillStatus::Retired);
     }
 }

@@ -275,6 +275,58 @@ fn test_rule_share_roundtrip() {
     assert_eq!(store.get("rule-001").unwrap().share, None);
 }
 
+/// cas-30af: updates must retain the prior rule snapshot and deletes must
+/// leave a queryable retired row instead of destroying it.
+#[test]
+fn test_rule_history_and_tombstone_delete() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteRuleStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let rule = Rule::new("rule-history-01".to_string(), "original content".to_string());
+    store.add(&rule).unwrap();
+    let mut updated = rule.clone();
+    updated.content = "updated content".to_string();
+    store
+        .update_with_metadata(&updated, Some("test-actor"), Some("revise wording"))
+        .unwrap();
+
+    let versions = store.list_versions("rule-history-01").unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].content, "original content");
+    assert_eq!(versions[0].changed_by.as_deref(), Some("test-actor"));
+    assert_eq!(versions[0].change_note, "revise wording");
+
+    let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    let prior_content: String = conn
+        .query_row(
+            "SELECT content FROM rule_versions WHERE rule_id = 'rule-history-01' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(prior_content, "original content");
+
+    store.delete("rule-history-01").unwrap();
+    let retired = store.get("rule-history-01").unwrap();
+    assert_eq!(retired.status.to_string(), "retired");
+    let version_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rule_versions WHERE rule_id = 'rule-history-01'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 2);
+
+    store
+        .restore_version("rule-history-01", Some(1), Some("restorer"), None)
+        .unwrap();
+    let restored = store.get("rule-history-01").unwrap();
+    assert_eq!(restored.content, "original content");
+    assert_eq!(restored.status, cas_types::RuleStatus::Draft);
+}
+
 /// T5 cas-07d7: Skill.share must round-trip. First code-review round
 /// found the skill SELECT/INSERT/UPDATE had silently skipped the
 /// `share` column; this test exists to catch that regression class.

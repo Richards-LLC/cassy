@@ -106,6 +106,10 @@ pub trait RecordingStore: Send + Sync {
     /// Delete recordings older than the given number of days (cascades to agents/events)
     fn prune(&self, older_than_days: i64) -> Result<usize>;
 
+    /// Archive old recordings and their entity-correlating children to
+    /// immutable compressed JSONL, then remove them from live tables.
+    fn archive_old(&self, archive_dir: &Path, older_than_days: i64) -> Result<usize>;
+
     /// Close connection
     fn close(&self) -> Result<()>;
 }

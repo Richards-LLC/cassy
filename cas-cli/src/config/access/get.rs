@@ -6,6 +6,7 @@ impl Config {
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
         let dev = self.dev.clone().unwrap_or_default();
+        let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
@@ -14,6 +15,8 @@ impl Config {
             "sync.enabled" => Some(self.sync.enabled.to_string()),
             "sync.target" => Some(self.sync.target.clone()),
             "sync.min_helpful" => Some(self.sync.min_helpful.to_string()),
+            "sync.promotion_threshold" => Some(self.sync.promotion_threshold.to_string()),
+            "sync.promotion_evidence" => Some(self.sync.promotion_evidence.join(",")),
             // Cloud section
             "cloud.auto_sync" => Some(cloud.auto_sync.to_string()),
             "cloud.interval_secs" => Some(cloud.interval_secs.to_string()),
@@ -51,6 +54,7 @@ impl Config {
             "dev.trace_claude_api" => Some(dev.trace_claude_api.to_string()),
             "dev.trace_hooks" => Some(dev.trace_hooks.to_string()),
             "dev.trace_retention_days" => Some(dev.trace_retention_days.to_string()),
+            "daemon.archive_retention_days" => Some(daemon.archive_retention_days.to_string()),
             // Code section
             "code.enabled" => Some(self.code.clone().unwrap_or_default().enabled.to_string()),
             "code.watch_paths" => Some(self.code.clone().unwrap_or_default().watch_paths.join(",")),

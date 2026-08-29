@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -65,6 +66,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     share TEXT,
     depth TEXT,
     terminal_outcome TEXT
+);
+
+-- cas-4adb: sparse, bounded machine resume state. Keeping this separate from
+-- task JSON preserves legacy task serialization and cloud sync payloads.
+CREATE TABLE IF NOT EXISTS task_execution_states (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -616,6 +625,62 @@ impl TaskStore for SqliteTaskStore {
         .ok_or_else(|| StoreError::TaskNotFound(id.to_string()))
     }
 
+    fn get_execution_state(&self, task_id: &str) -> Result<Option<Value>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let encoded: Option<String> = conn
+            .query_row(
+                "SELECT state FROM task_execution_states WHERE task_id = ?",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        encoded
+            .map(|encoded| {
+                let state: Value = serde_json::from_str(&encoded)?;
+                cas_types::validate_task_execution_state(&state)
+                    .map_err(StoreError::Parse)
+                    .map(|()| state)
+            })
+            .transpose()
+    }
+
+    fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            Self::validate_task_exists_with_conn(&conn, task_id)?;
+
+            let current = conn
+                .query_row(
+                    "SELECT state FROM task_execution_states WHERE task_id = ?",
+                    params![task_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|encoded| serde_json::from_str::<Value>(&encoded))
+                .transpose()?;
+            let current = current.unwrap_or_else(|| Value::Object(Default::default()));
+            let next = cas_types::merge_task_execution_state_patch(&current, patch)
+                .map_err(StoreError::Parse)?;
+            let now = Utc::now().to_rfc3339();
+            if next.as_object().is_some_and(|object| object.is_empty()) {
+                conn.execute(
+                    "DELETE FROM task_execution_states WHERE task_id = ?",
+                    params![task_id],
+                )?;
+            } else {
+                let encoded = serde_json::to_string(&next)?;
+                conn.execute(
+                    "INSERT INTO task_execution_states (task_id, state, updated_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(task_id) DO UPDATE SET state = excluded.state,
+                     updated_at = excluded.updated_at",
+                    params![task_id, encoded, now],
+                )?;
+            }
+            Ok(next)
+        })
+    }
+
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -787,6 +852,12 @@ impl TaskStore for SqliteTaskStore {
             )?;
             // Delete associated task leases
             tx.execute("DELETE FROM task_leases WHERE task_id = ?", params![id])?;
+            // Delete the optional machine resume state explicitly so this
+            // remains correct on databases that do not enable FK cascades.
+            tx.execute(
+                "DELETE FROM task_execution_states WHERE task_id = ?",
+                params![id],
+            )?;
             let rows = tx.execute("DELETE FROM tasks WHERE id = ?", params![id])?;
             if rows == 0 {
                 return Err(StoreError::TaskNotFound(id.to_string()));

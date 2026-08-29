@@ -7,10 +7,12 @@ use crate::hooks::context::{
     render_normal_coordination, rule_matches_path, token_display,
 };
 use crate::hooks::types::HookInput;
+use crate::memory::{is_high_importance_preference, session_memory_preview};
 use crate::truncate;
 use cas_store::KnowledgeStore;
 use cas_types::{
-    AgentRole, AgentStatus, Entry, EntryType, Rule, RuleStatus, Skill, SkillStatus, TaskStatus,
+    AgentRole, AgentStatus, Entry, EntryType, Rule, RuleStatus, Scope, Skill, SkillStatus,
+    TaskStatus,
 };
 use std::collections::HashSet;
 
@@ -23,6 +25,19 @@ const KNOWLEDGE_SECTION_TOKEN_BUDGET: usize = 600;
 
 /// Longest snippet rendered per page before truncation.
 const KNOWLEDGE_SNIPPET_CHARS: usize = 120;
+
+/// Persist one impact sample for a rule that made it into the injected
+/// context. Store failures are intentionally best-effort: a metrics write
+/// must not make SessionStart fail after the context itself was built.
+fn increment_rule_surface_count(stores: &ContextStores, rule: &Rule) {
+    let store = match rule.scope {
+        Scope::Global => stores.global_rule_store.or(stores.project_rule_store),
+        Scope::Project => stores.project_rule_store.or(stores.global_rule_store),
+    };
+    if let Some(store) = store {
+        let _ = store.increment_surface_count(&rule.id);
+    }
+}
 
 /// Render the distilled-knowledge index: one line per page, no bodies.
 ///
@@ -475,6 +490,7 @@ pub fn build_context_with_stores(
                 total_tokens += item.tokens;
                 stats.rules_included += 1;
 
+                increment_rule_surface_count(stores, rule);
                 if let Some(callback) = on_surfaced {
                     callback(&item.id, "rule", Some(&item.summary));
                 }
@@ -556,6 +572,7 @@ pub fn build_context_with_stores(
                     }
                     stats.rules_included += 1;
 
+                    increment_rule_surface_count(stores, rule);
                     if let Some(callback) = on_surfaced {
                         callback(&item.id, "rule", Some(&item.summary));
                     }
@@ -682,7 +699,19 @@ pub fn build_context_with_stores(
         let scorer: &dyn ContextScorer = stores.entry_scorer.unwrap_or(&basic_scorer);
 
         // Score entries using the scorer
-        let scored_entries = scorer.score_entries(&filtered_entries, &context_query);
+        let mut scored_entries = scorer.score_entries(&filtered_entries, &context_query);
+        // Standing preferences at the high-importance threshold are operative
+        // constraints. Keep them ahead of compact learnings when the memory
+        // section has to omit entries for the hook budget.
+        scored_entries.sort_by(|(a, a_score), (b, b_score)| {
+            is_high_importance_preference(b)
+                .cmp(&is_high_importance_preference(a))
+                .then_with(|| {
+                    b_score
+                        .partial_cmp(a_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
 
         // Track availability for minimal mode summary
         available_memories = scored_entries.len().min(limit);
@@ -695,7 +724,7 @@ pub fn build_context_with_stores(
         let mut entries_to_show: Vec<&Entry> = Vec::new();
         let mut section_tokens = 0;
         for (entry, _score) in scored_entries.iter().take(limit) {
-            let item_tokens = estimate_tokens(&entry.preview(60)) + 30;
+            let item_tokens = estimate_tokens(&session_memory_preview(entry)) + 30;
             if section_tokens + item_tokens < budget_remaining(total_tokens) - 50 {
                 entries_to_show.push(entry);
                 section_tokens += item_tokens;
@@ -718,9 +747,10 @@ pub fn build_context_with_stores(
             let omitted = total_available.saturating_sub(entries_to_show.len());
             let header = if omitted > 0 {
                 format!(
-                    "## Helpful Memories ({}/{} shown, {} if expanded)",
+                    "## Helpful Memories ({}/{} shown, +{} more, {} if expanded)",
                     entries_to_show.len(),
                     total_available,
+                    omitted,
                     token_display(full_section_tokens)
                 )
             } else {

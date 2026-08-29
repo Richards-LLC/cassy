@@ -21,6 +21,11 @@ pub struct RuleCreateRequest {
     #[serde(default)]
     pub tags: Option<String>,
 
+    /// Source entry IDs
+    #[schemars(description = "Comma-separated source entry IDs this rule was derived from")]
+    #[serde(default)]
+    pub source_ids: Option<String>,
+
     /// Storage scope
     #[schemars(
         description = "Scope: 'global' (user style) or 'project' (default, project conventions)"
@@ -70,6 +75,11 @@ pub struct SkillCreateRequest {
     #[schemars(description = "Comma-separated tags")]
     #[serde(default)]
     pub tags: Option<String>,
+
+    /// Source entry IDs
+    #[schemars(description = "Comma-separated source entry IDs this skill was derived from")]
+    #[serde(default)]
+    pub source_ids: Option<String>,
 
     /// Storage scope
     #[schemars(description = "Scope: 'global' (default) or 'project'")]

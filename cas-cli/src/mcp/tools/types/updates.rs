@@ -55,6 +55,14 @@ pub struct RuleUpdateRequest {
     #[schemars(description = "Path patterns for auto-approval (comma-separated globs)")]
     #[serde(default)]
     pub auto_approve_paths: Option<String>,
+
+    /// Actor recorded in rule history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+
+    /// Reason recorded in rule history.
+    #[serde(default)]
+    pub change_note: Option<String>,
 }
 
 // ============================================================================
@@ -87,6 +95,21 @@ pub struct SkillUpdateRequest {
     #[serde(default)]
     pub tags: Option<String>,
 
+    /// Preconditions (comma-separated; replaces existing)
+    #[schemars(description = "Preconditions required before using the skill")]
+    #[serde(default)]
+    pub preconditions: Option<String>,
+
+    /// Postconditions (comma-separated; replaces existing)
+    #[schemars(description = "Expected postconditions after using the skill")]
+    #[serde(default)]
+    pub postconditions: Option<String>,
+
+    /// Validation script (empty string clears the gate)
+    #[schemars(description = "Local availability-check script run before persistence")]
+    #[serde(default)]
+    pub validation_script: Option<String>,
+
     /// New summary (optional) - short trigger description for frontmatter
     #[schemars(
         description = "Short trigger description (1-2 lines) for SKILL.md frontmatter. Describes WHEN to use the skill."
@@ -98,4 +121,12 @@ pub struct SkillUpdateRequest {
     #[schemars(description = "Prevent skill from invoking the model (for command-only skills)")]
     #[serde(default)]
     pub disable_model_invocation: Option<bool>,
+
+    /// Actor recorded in skill history.
+    #[serde(default)]
+    pub changed_by: Option<String>,
+
+    /// Reason recorded in skill history.
+    #[serde(default)]
+    pub change_note: Option<String>,
 }

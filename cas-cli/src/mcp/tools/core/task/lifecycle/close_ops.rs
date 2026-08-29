@@ -8972,6 +8972,7 @@ pub(crate) fn check_commit_claim_integrity(
         if let Some(receipt) = commit_receipt {
             let Some(window) = commit_receipt_window else {
                 return CommitClaimGateOutcome::Reject(commit_receipt_rejection(
+                    worker_worktree_path,
                     receipt,
                     parent_branch,
                     "task attribution window is unavailable; ask the supervisor for an audited bypass",
@@ -8985,6 +8986,7 @@ pub(crate) fn check_commit_claim_integrity(
             ) {
                 Ok(note) => CommitClaimGateOutcome::ProceedWithReceipt(note),
                 Err(reason) => CommitClaimGateOutcome::Reject(commit_receipt_rejection(
+                    worker_worktree_path,
                     receipt,
                     parent_branch,
                     &reason,
@@ -9707,7 +9709,72 @@ fn append_close_decision_note_detached(
     });
 }
 
-fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) -> String {
+fn supervisor_merge_commit_for_receipt(
+    repo_path: &std::path::Path,
+    receipt: &str,
+    parent_branch: &str,
+) -> Option<String> {
+    if !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+    let receipt = resolve_task_commit_receipt_sha(repo_path, receipt).ok()?;
+    let mut targets = vec![parent_branch.to_string()];
+    targets.insert(0, format!("origin/{parent_branch}"));
+    let mut ancestor_candidate = None;
+    for target in targets {
+        if !git_ref_exists(repo_path, &target)
+            || !git_commit_is_ancestor(repo_path, &receipt, &target)
+        {
+            continue;
+        }
+        let output = std::process::Command::new("git")
+            .args(["rev-list", "--parents", &target])
+            .current_dir(repo_path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 3 {
+                continue;
+            }
+            if fields[2..].contains(&receipt.as_str()) {
+                return Some(fields[0].to_string());
+            }
+            if ancestor_candidate.is_none()
+                && fields[2..]
+                    .iter()
+                    .any(|parent| git_commit_is_ancestor(repo_path, &receipt, parent))
+            {
+                ancestor_candidate = Some(fields[0].to_string());
+            }
+        }
+    }
+    ancestor_candidate
+}
+
+fn commit_receipt_rejection(
+    repo_path: &std::path::Path,
+    receipt: &str,
+    parent_branch: &str,
+    reason: &str,
+) -> String {
+    let merge_recovery = supervisor_merge_commit_for_receipt(repo_path, receipt, parent_branch)
+        .map(|merge| {
+            format!(
+                "4. A supervisor merge commit `{merge}` carries this delivery as a merge parent. \
+                 Ask the supervisor to audit that merge and retry with \
+                 `commit_receipt={merge}`."
+            )
+        })
+        .unwrap_or_else(|| {
+            "4. If no commit from this task's current work cycle is available, \
+             ask the supervisor to audit the merge and close with \
+             `bypass_code_review=true`."
+                .to_string()
+        });
     format!(
         "⚠️ INVALID TASK COMMIT RECEIPT\n\n\
          task close rejected: commit_receipt `{receipt}` is not valid merge \
@@ -9723,9 +9790,7 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
             `git merge-base --is-ancestor <sha> {parent_branch}`, and inspect \
             the current target files named by the commit.\n\
          3. Retry close with `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
-         4. If no commit from this task's current work cycle is available, \
-            ask the supervisor to audit the merge and close with \
-            `bypass_code_review=true`."
+         {merge_recovery}"
     )
 }
 
@@ -9759,6 +9824,7 @@ fn resolve_merge_evidence(
     let Some(window) = commit_receipt_window else {
         return Some(ZeroCommitCloseOutcome::AmbiguousCodeTask(
             commit_receipt_rejection(
+                worker_worktree_path,
                 receipt,
                 parent_branch,
                 "task attribution window is unavailable; ask the supervisor for an audited bypass",
@@ -9769,6 +9835,7 @@ fn resolve_merge_evidence(
         match validate_task_commit_receipt(worker_worktree_path, receipt, parent_branch, window) {
             Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
             Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
+                worker_worktree_path,
                 receipt,
                 parent_branch,
                 &reason,
@@ -13370,7 +13437,10 @@ fn reverse_delivery_path_applies_to_tree(
 /// context while leaving the delivery's own lines intact. Generated shared
 /// files can also reorder otherwise byte-identical delivery blocks while
 /// producing a strict superset, so after the contiguous-hunk proof fails we
-/// accept a multiset containment proof for every non-blank added line.
+/// accept a multiset containment proof for every non-blank added line. A
+/// conflict-resolution union can also insert symbols into one added line, so
+/// the final fallback proves each added line's lexical tokens survive in
+/// order somewhere in the target file (GH #597).
 fn delivery_added_hunks_survive_on_tree(
     repo_path: &std::path::Path,
     delivery_parent: &str,
@@ -13443,24 +13513,73 @@ fn delivery_added_hunks_survive_on_tree(
     // contiguous. Count duplicate lines so repeated field declarations still
     // need to be present as many times as the delivery added them.
     let mut target_line_counts = std::collections::HashMap::<&str, u32>::new();
-    for line in target_lines {
-        *target_line_counts.entry(line).or_default() += 1;
+    for line in &target_lines {
+        *target_line_counts.entry(*line).or_default() += 1;
     }
-    for line in hunks
+    let multiset_survives = hunks
         .iter()
         .flatten()
         .copied()
         .filter(|line| !line.trim().is_empty())
-    {
-        let Some(count) = target_line_counts.get_mut(line) else {
-            return Ok(false);
-        };
-        if *count == 0 {
-            return Ok(false);
-        }
-        *count -= 1;
+        .all(|line| {
+            let Some(count) = target_line_counts.get_mut(line) else {
+                return false;
+            };
+            if *count == 0 {
+                return false;
+            }
+            *count -= 1;
+            true
+        });
+    if multiset_survives {
+        return Ok(true);
     }
-    Ok(true)
+    let target_tokens = target_lines
+        .iter()
+        .flat_map(|target_line| {
+            target_line
+                .split(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '_'
+                })
+                .filter(|token| !token.is_empty())
+        })
+        .collect::<Vec<_>>();
+    if hunks
+        .iter()
+        .flatten()
+        .filter(|line| !line.trim().is_empty())
+        .all(|line| {
+            let added_tokens = line
+                .split(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '_'
+                })
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>();
+            if added_tokens.is_empty() {
+                return true;
+            }
+            target_tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| **candidate == added_tokens[0])
+                .any(|(start, _)| {
+                    let mut cursor = start + 1;
+                    added_tokens[1..].iter().all(|token| {
+                        let Some(offset) = target_tokens[cursor..]
+                            .iter()
+                            .position(|candidate| candidate == token)
+                        else {
+                            return false;
+                        };
+                        cursor += offset + 1;
+                        true
+                    })
+                })
+        })
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn delivery_path_effect_survives_on_tree(
@@ -19056,6 +19175,164 @@ mod merge_state_gate_tests {
         ));
     }
 
+    /// GH #597: reproduce the historical union merge without depending on the
+    /// cassy repository's own history. The worker delivery is the non-first
+    /// parent of a manual conflict resolution, and the supervisor follows the
+    /// merge with a fixup that removes a duplicate import while retaining the
+    /// delivery's tree effect.
+    #[test]
+    fn historical_union_merge_keeps_delivery_content_gh_597() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    Alpha, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("doctor.rs"), "use crate::factory::Doctor;\n").unwrap();
+        git(p, &["add", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: seed shared files"]);
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+
+        std::fs::write(
+            p.join("capability.rs"),
+            "pub struct CapabilitySnapshot;\npub struct DeliveryProbe;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    CapabilitySnapshot,\n    Alpha, DeliveryProbe, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::{CapabilitySnapshot, DeliveryProbe};\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "capability.rs", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: add capability delivery"]);
+        let delivery = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "-b", "factory/sibling", "main"]);
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    Alpha, SiblingProbe, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::CapabilitySnapshot;\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: add parallel delivery"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling"]);
+        let conflict = git_command(p, &["merge", "--no-ff", "factory/worker"])
+            .status()
+            .expect("start supervisor union merge");
+        assert!(!conflict.success(), "fixture must produce a merge conflict");
+        std::fs::write(
+            p.join("exports.rs"),
+            "pub use routing::{\n    CapabilitySnapshot,\n    Alpha, DeliveryProbe, SiblingProbe, Beta,\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::CapabilitySnapshot;\nuse crate::capability::{CapabilitySnapshot, DeliveryProbe};\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "exports.rs", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "merge: union parallel deliveries"]);
+
+        std::fs::write(
+            p.join("doctor.rs"),
+            "use crate::capability::{CapabilitySnapshot, DeliveryProbe};\nuse crate::factory::Doctor;\n",
+        )
+        .unwrap();
+        git(p, &["add", "doctor.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: remove duplicate capability import"]);
+        let supervisor_fixup = rev_parse_local(p, "HEAD");
+
+        assert!(git_commit_is_ancestor(p, &delivery, &supervisor_fixup));
+        assert_eq!(
+            delivery_content_presence_on_target(p, &delivery, &supervisor_fixup),
+            DeliveryContentPresence::Present {
+                paths: vec![
+                    "capability.rs".to_string(),
+                    "doctor.rs".to_string(),
+                    "exports.rs".to_string(),
+                ]
+            }
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery);
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &req, "main", p),
+            MergeStateGateOutcome::Proceed
+        ));
+    }
+
+    /// GH #597: two parallel lanes edit the same export-list line. The
+    /// supervisor resolves the merge by retaining both markers, which makes
+    /// the delivery line non-contiguous without dropping its symbols. The
+    /// close gate must accept the resulting union without an override.
+    #[test]
+    fn union_merged_parallel_delivery_proceeds_without_override_gh_597() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let base = "pub use routing::{\n    Alpha, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
+        let delivery = "pub use routing::{\n    CAPABILITY_A, CAPABILITY_B,\n    Alpha, DeliveryMarker, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
+        let sibling = "pub use routing::{\n    Alpha, OtherMarker, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
+        let union = "pub use routing::{\n    CAPABILITY_A, CAPABILITY_B,\n    Alpha, DeliveryMarker, OtherMarker, Beta,\n    Gamma, Delta,\n    Epsilon, Zeta,\n};\n";
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("exports.rs"), base).unwrap();
+        git(p, &["add", "exports.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: seed export list"]);
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+
+        std::fs::write(p.join("exports.rs"), delivery).unwrap();
+        git(p, &["add", "exports.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: add delivery export"]);
+        let delivery_commit = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "-b", "factory/sibling", "main"]);
+        std::fs::write(p.join("exports.rs"), sibling).unwrap();
+        git(p, &["add", "exports.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: add sibling export"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling"]);
+        let conflict = git_command(p, &["merge", "--no-ff", "factory/worker"])
+            .status()
+            .expect("start union merge");
+        assert!(!conflict.success(), "fixture must produce a merge conflict");
+        std::fs::write(p.join("exports.rs"), union).unwrap();
+        git(p, &["add", "exports.rs"]);
+        git(p, &["commit", "-q", "-m", "merge: union parallel exports"]);
+
+        assert_eq!(
+            delivery_content_presence_on_target(p, &delivery_commit, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["exports.rs".to_string()]
+            }
+        );
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery_commit);
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &req, "main", p),
+            MergeStateGateOutcome::Proceed
+        ));
+    }
+
     /// cas-b278 review amendment: reverse-apply failure after an ordinary
     /// first-parent commit is intentional evolution, not evidence that a
     /// merge resolution discarded the delivery. The close gate must proceed
@@ -24639,10 +24916,45 @@ mod zero_change_close_tests {
         assert!(reason.contains("not an ancestor of main"), "{reason}");
         assert!(!reason.contains("40- or 64-character"), "{reason}");
 
-        let message = commit_receipt_rejection(short_receipt, "main", &reason);
+        let message = commit_receipt_rejection(dir.path(), short_receipt, "main", &reason);
         assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
         assert!(!message.contains("MERGE REQUIRED"), "{message}");
         assert!(message.contains("not an ancestor of main"), "{message}");
+    }
+
+    /// GH #597: when a receipt is a parent of an already-landed supervisor
+    /// merge, an invalid content proof must identify that merge as the
+    /// sanctioned recovery receipt instead of dead-ending the worker.
+    #[test]
+    fn gh597_rejected_receipt_names_supervisor_merge_recovery() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(dir.path(), &["add", "delivery.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "feat: delivered work"]);
+        let receipt = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge delivered work",
+                "factory/test-worker",
+            ],
+        );
+        let merge = head_sha(dir.path());
+        let message = commit_receipt_rejection(
+            dir.path(),
+            &receipt,
+            "main",
+            "the commit is reachable, but its delivery content is absent",
+        );
+
+        assert!(message.contains("supervisor merge commit"), "{message}");
+        assert!(message.contains(&merge), "merge receipt must be named: {message}");
+        assert!(message.contains(&format!("commit_receipt={merge}")), "{message}");
     }
 
     #[test]

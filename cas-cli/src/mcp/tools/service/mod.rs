@@ -394,7 +394,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Rule operations. Actions: create, show, update, delete, list (proven only), list_all, helpful (promotes to proven), harmful, sync (to .claude/rules/), check_similar (find similar existing rules)."
+        description = "Rule operations. Actions: create, show, update, delete (tombstone), list (proven only), list_all, history, restore, helpful (promotes to proven), harmful, sync (to .claude/rules/), check_similar (find similar existing rules)."
     )]
     pub async fn rule(
         &self,
@@ -405,7 +405,7 @@ impl CasService {
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
-                "create" | "update" | "delete" | "helpful" | "harmful" | "sync"
+                "create" | "update" | "delete" | "restore" | "helpful" | "harmful" | "sync"
             );
 
             let result = match req.action.as_str() {
@@ -413,6 +413,8 @@ impl CasService {
                 "show" => this.rule_show(req).await,
                 "update" => this.rule_update(req).await,
                 "delete" => this.rule_delete(req).await,
+                "history" => this.rule_history(req).await,
+                "restore" => this.rule_restore(req).await,
                 "list" => this.rule_list(req).await,
                 "list_all" => this.rule_list_all(req).await,
                 "helpful" => this.rule_helpful(req).await,
@@ -422,7 +424,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, helpful, harmful, sync, check_similar",
+                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, harmful, sync, check_similar",
                         req.action
                     ),
                 )),
@@ -446,7 +448,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Skill operations. Actions: create, show, update, delete, list (enabled), list_all, enable, disable, sync (to .claude/skills/), use (record usage)."
+        description = "Skill operations. Actions: create, show, update, delete (tombstone), list (enabled), list_all, history, restore, enable, disable, sync (to .claude/skills/), use (record usage)."
     )]
     pub async fn skill(
         &self,
@@ -457,7 +459,7 @@ impl CasService {
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
-                "create" | "update" | "delete" | "enable" | "disable" | "sync" | "use"
+                "create" | "update" | "delete" | "restore" | "enable" | "disable" | "sync" | "use"
             );
 
             let result = match req.action.as_str() {
@@ -465,6 +467,8 @@ impl CasService {
                 "show" => this.skill_show(req).await,
                 "update" => this.skill_update(req).await,
                 "delete" => this.skill_delete(req).await,
+                "history" => this.skill_history(req).await,
+                "restore" => this.skill_restore(req).await,
                 "list" => this.skill_list(req).await,
                 "list_all" => this.skill_list_all(req).await,
                 "enable" => this.skill_enable(req).await,
@@ -474,7 +478,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown skill action: {}. Valid: create, show, update, delete, list, list_all, enable, disable, sync, use",
+                        "Unknown skill action: {}. Valid: create, show, update, delete, list, list_all, history, restore, enable, disable, sync, use",
                         req.action
                     ),
                 )),

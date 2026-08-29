@@ -52,6 +52,15 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            "sync.promotion_threshold" => {
+                self.sync.promotion_threshold = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
+            "sync.promotion_evidence" => {
+                self.sync.promotion_evidence =
+                    parse_promotion_evidence(value).map_err(MemError::Parse)?;
+            }
             // Cloud section
             "cloud.auto_sync" => {
                 let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);
@@ -230,6 +239,13 @@ impl Config {
             "dev.trace_retention_days" => {
                 let dev = self.dev.get_or_insert_with(DevConfig::default);
                 dev.trace_retention_days = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
+            // Daemon section
+            "daemon.archive_retention_days" => {
+                let daemon = self.daemon.get_or_insert_with(DaemonSettings::default);
+                daemon.archive_retention_days = value
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }

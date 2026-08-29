@@ -1,9 +1,131 @@
+use crate::config::{Config, parse_promotion_evidence};
 use crate::mcp::tools::core::imports::*;
+use cas_store::{RetrievalAggregate, SqliteRetrievalStore};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromotionEvidence {
+    Helpful,
+    Retrieval,
+}
+
+fn configured_promotion_evidence(config: &Config) -> Result<Vec<PromotionEvidence>, McpError> {
+    parse_promotion_evidence(&config.sync.promotion_evidence.join(","))
+        .map(|sources| {
+            sources
+                .into_iter()
+                .map(|source| match source.as_str() {
+                    "helpful" => PromotionEvidence::Helpful,
+                    "retrieval" => PromotionEvidence::Retrieval,
+                    // `parse_promotion_evidence` validates this list above.
+                    _ => unreachable!("validated promotion evidence source"),
+                })
+                .collect()
+        })
+        .map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Invalid rule promotion configuration: {error}")),
+            data: None,
+        })
+}
+
+fn promotion_threshold(config: &Config) -> i32 {
+    // A raw TOML edit can bypass Config::set validation. Keep the one-call
+    // invariant true even for such configs; the supported setting rejects
+    // values below two at the config surface.
+    config.sync.promotion_threshold.max(2)
+}
 
 impl CasCore {
     // ========================================================================
     // Rule Tools (10)
     // ========================================================================
+
+    fn retrieval_aggregates_for_rule(
+        &self,
+        rule_id: &str,
+    ) -> Result<Vec<RetrievalAggregate>, McpError> {
+        let retrieval_store =
+            SqliteRetrievalStore::open(&self.cas_root).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to open retrieval feedback: {error}")),
+                data: None,
+            })?;
+        retrieval_store
+            .aggregate_for_result(rule_id)
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to read retrieval feedback: {error}")),
+                data: None,
+            })
+    }
+
+    fn retrieval_is_negative(aggregates: &[RetrievalAggregate]) -> bool {
+        aggregates.iter().any(|aggregate| {
+            aggregate.document_type == "rule"
+                && (aggregate.corrected > 0
+                    || aggregate.harmful > 0
+                    || aggregate.correction_rate > 0.0)
+        })
+    }
+
+    fn retrieval_meets_promotion_threshold(
+        aggregates: &[RetrievalAggregate],
+        threshold: i32,
+    ) -> bool {
+        let threshold = threshold as u64;
+        aggregates.iter().any(|aggregate| {
+            if aggregate.document_type != "rule" {
+                return false;
+            }
+            let useful = aggregate.used.saturating_add(aggregate.helpful);
+            useful >= threshold
+                && aggregate.usefulness_rate >= 0.5
+                && aggregate.correction_rate == 0.0
+                && aggregate.harmful == 0
+        })
+    }
+
+    /// Apply negative retrieval evidence at an explicit sync boundary. The
+    /// retrieval store remains append-only and observational; only this rule
+    /// decision path changes Rule state.
+    fn refresh_retrieval_demotions(&self) -> Result<usize, McpError> {
+        let retrieval_store =
+            SqliteRetrievalStore::open(&self.cas_root).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to open retrieval feedback: {error}")),
+                data: None,
+            })?;
+        let rule_store = self.open_rule_store()?;
+        let rules = rule_store.list().map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to list rules: {error}")),
+            data: None,
+        })?;
+
+        let mut demoted = 0;
+        for mut rule in rules {
+            if rule.status != RuleStatus::Proven {
+                continue;
+            }
+            let aggregates = retrieval_store
+                .aggregate_for_result(&rule.id)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to read retrieval feedback: {error}")),
+                    data: None,
+                })?;
+            if Self::retrieval_is_negative(&aggregates) {
+                rule.status = RuleStatus::Stale;
+                rule_store.update(&rule).map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to demote rule: {error}")),
+                    data: None,
+                })?;
+                demoted += 1;
+            }
+        }
+        Ok(demoted)
+    }
 
     /// List proven rules
     pub async fn cas_rules_list(&self) -> Result<CallToolResult, McpError> {
@@ -30,6 +152,10 @@ impl CasCore {
             if !rule.paths.is_empty() {
                 output.push_str(&format!("  Paths: {}\n", rule.paths));
             }
+            output.push_str(&format!(
+                "  Impact: surfaced {} | feedback: +{} helpful, -{} harmful\n",
+                rule.surface_count, rule.helpful_count, rule.harmful_count
+            ));
         }
 
         Ok(Self::success(output))
@@ -41,6 +167,8 @@ impl CasCore {
         Parameters(req): Parameters<IdRequest>,
     ) -> Result<CallToolResult, McpError> {
         let rule_store = self.open_rule_store()?;
+        let config = self.load_config();
+        let evidence_sources = configured_promotion_evidence(&config)?;
 
         let mut rule = rule_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
@@ -48,27 +176,64 @@ impl CasCore {
             data: None,
         })?;
 
+        let retrieval_aggregates = if evidence_sources.contains(&PromotionEvidence::Retrieval)
+            || rule.status == RuleStatus::Proven
+        {
+            self.retrieval_aggregates_for_rule(&rule.id)?
+        } else {
+            Vec::new()
+        };
+        let retrieval_negative = Self::retrieval_is_negative(&retrieval_aggregates);
+
         rule.helpful_count += 1;
         rule.last_accessed = Some(chrono::Utc::now());
 
-        let promoted = matches!(rule.status, RuleStatus::Draft | RuleStatus::Stale);
+        let threshold = promotion_threshold(&config);
+        let helpful_evidence = rule.helpful_count >= threshold && rule.harmful_count == 0;
+        let retrieval_evidence =
+            Self::retrieval_meets_promotion_threshold(&retrieval_aggregates, threshold);
+        let has_evidence = evidence_sources.iter().any(|source| match source {
+            PromotionEvidence::Helpful => helpful_evidence,
+            PromotionEvidence::Retrieval => retrieval_evidence,
+        });
+        let demoted = rule.status == RuleStatus::Proven && retrieval_negative;
+        if demoted {
+            rule.status = RuleStatus::Stale;
+        }
+        let promoted = !demoted
+            && !retrieval_negative
+            && matches!(rule.status, RuleStatus::Draft | RuleStatus::Stale)
+            && has_evidence;
         if promoted {
             rule.status = RuleStatus::Proven;
         }
 
-        rule_store.update(&rule).map_err(|e| McpError {
+        rule_store
+            .update_with_metadata(&rule, None, None)
+            .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
 
-        if promoted {
+        if promoted || demoted {
             let _ = self.sync_rules();
         }
 
         let mut msg = format!("Marked {} as helpful", req.id);
         if promoted {
-            msg.push_str(" (promoted to Proven, synced to Claude Code)");
+            msg.push_str(&format!(
+                " (promoted to Proven after {threshold} evidence events, synced to Claude Code)"
+            ));
+        } else if demoted {
+            msg.push_str(
+                " (negative retrieval evidence demoted it to Stale, removed from Claude Code)",
+            );
+        } else if rule.status != RuleStatus::Proven {
+            msg.push_str(&format!(
+                " ({}/{threshold} evidence events; remains {:?})",
+                rule.helpful_count, rule.status
+            ));
         }
 
         Ok(Self::success(msg))
@@ -88,7 +253,7 @@ impl CasCore {
         })?;
 
         let output = format!(
-            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nFeedback: +{} -{}\nCreated: {}\n\nContent:\n{}",
+            "Rule: {}\n{}\n\nStatus: {:?}\nPaths: {}\nTags: {}\nSource entries: {}\nImpact: surfaced {} | feedback: +{} helpful, -{} harmful\nCreated: {}\n\nContent:\n{}",
             rule.id,
             "=".repeat(rule.id.len() + 6),
             rule.status,
@@ -102,6 +267,12 @@ impl CasCore {
             } else {
                 rule.tags.join(", ")
             },
+            if rule.source_ids.is_empty() {
+                "none".to_string()
+            } else {
+                rule.source_ids.join(", ")
+            },
+            rule.surface_count,
             rule.helpful_count,
             rule.harmful_count,
             rule.created.format("%Y-%m-%d %H:%M"),
@@ -166,7 +337,16 @@ impl CasCore {
             harmful_count: 0,
             created: chrono::Utc::now(),
             last_accessed: None,
-            source_ids: Vec::new(),
+            source_ids: req
+                .source_ids
+                .map(|ids| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
             review_after: None,
             hook_command: None,
             category: crate::types::RuleCategory::default(),
@@ -201,6 +381,10 @@ impl CasCore {
         })?;
 
         rule.harmful_count += 1;
+        let demoted = rule.status == RuleStatus::Proven;
+        if demoted {
+            rule.status = RuleStatus::Stale;
+        }
 
         rule_store.update(&rule).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -208,10 +392,20 @@ impl CasCore {
             data: None,
         })?;
 
+        if demoted {
+            let _ = self.sync_rules();
+        }
+
+        let suffix = if demoted {
+            "; demoted to Stale and removed from Claude Code"
+        } else {
+            ""
+        };
         Ok(Self::success(format!(
-            "Marked {} as harmful (score: {})",
+            "Marked {} as harmful (score: {}){}",
             req.id,
-            rule.helpful_count - rule.harmful_count
+            rule.helpful_count - rule.harmful_count,
+            suffix
         )))
     }
 
@@ -228,11 +422,15 @@ impl CasCore {
             data: None,
         })?;
 
-        Ok(Self::success(format!("Deleted rule: {}", req.id)))
+        Ok(Self::success(format!(
+            "Retired rule: {} (history retained)",
+            req.id
+        )))
     }
 
     /// Sync rules to Claude Code
     pub async fn cas_rule_sync(&self) -> Result<CallToolResult, McpError> {
+        self.refresh_retrieval_demotions()?;
         let synced = self.sync_rules()?;
         Ok(Self::success(format!(
             "Synced {synced} rules to Claude Code"
@@ -309,7 +507,13 @@ impl CasCore {
             return Ok(Self::success("No changes specified"));
         }
 
-        rule_store.update(&rule).map_err(|e| McpError {
+        rule_store
+            .update_with_metadata(
+                &rule,
+                req.changed_by.as_deref(),
+                req.change_note.as_deref(),
+            )
+            .map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
@@ -324,6 +528,70 @@ impl CasCore {
             "Updated rule {}: {}",
             req.id,
             changes.join(", ")
+        )))
+    }
+
+    /// List prior rule states, newest first.
+    pub async fn cas_rule_history(
+        &self,
+        Parameters(req): Parameters<VersionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let rule_store = self.open_rule_store()?;
+        let versions = rule_store.list_versions(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to list rule history: {e}")),
+            data: None,
+        })?;
+        if versions.is_empty() {
+            return Ok(Self::success(format!("No history for rule {}", req.id)));
+        }
+
+        let mut output = format!("Rule history for {} ({} versions):\n\n", req.id, versions.len());
+        for version in versions {
+            let preview: String = version.content.chars().take(120).collect();
+            output.push_str(&format!(
+                "- v{} [{}] {} by {} at {}\n  {}\n",
+                version.version,
+                version.status,
+                version.change_note,
+                version.changed_by.as_deref().unwrap_or("unknown actor"),
+                version.changed_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                preview,
+            ));
+        }
+        Ok(Self::success(output))
+    }
+
+    /// Restore a prior rule state, or un-retire to the newest prior state.
+    pub async fn cas_rule_restore(
+        &self,
+        Parameters(req): Parameters<VersionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let rule_store = self.open_rule_store()?;
+        let version = req.version.or(req.version_id);
+        rule_store
+            .restore_version(
+                &req.id,
+                version,
+                req.changed_by.as_deref(),
+                req.change_note.as_deref(),
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Failed to restore rule: {e}")),
+                data: None,
+            })?;
+        let restored = rule_store.get(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to read restored rule: {e}")),
+            data: None,
+        })?;
+        let _ = self.sync_rules();
+        Ok(Self::success(format!(
+            "Restored rule {}{} (status: {})",
+            req.id,
+            version.map(|v| format!(" to version {v}")).unwrap_or_default(),
+            restored.status
         )))
     }
 
@@ -352,9 +620,10 @@ impl CasCore {
         );
         for rule in rules.iter().take(limit) {
             output.push_str(&format!(
-                "- [{}] {:?} (+{} -{}) {}\n",
+                "- [{}] {:?} (surfaced: {}, feedback: +{} -{}) {}\n",
                 rule.id,
                 rule.status,
+                rule.surface_count,
                 rule.helpful_count,
                 rule.harmful_count,
                 rule.preview(60)

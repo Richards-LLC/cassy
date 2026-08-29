@@ -102,8 +102,9 @@ pub use sort::{
 };
 pub use spec::{Spec, SpecStatus, SpecType};
 pub use task::{
-    NegativeResultEvidence, PreCloseHookEvidence, Priority, Task, TaskDeliverables, TaskDepth,
-    TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget,
+    NegativeResultEvidence, PreCloseHookEvidence, Priority, TASK_EXECUTION_STATE_MAX_BYTES, Task,
+    TaskDeliverables, TaskDepth, TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget,
+    merge_task_execution_state_patch, validate_task_execution_state,
 };
 pub use verification::{
     IssueSeverity, RepositoryProofBoundary, Verification, VerificationDispatch,

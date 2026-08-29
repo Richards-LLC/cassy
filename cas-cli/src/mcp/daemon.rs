@@ -271,6 +271,7 @@ impl EmbeddedDaemonConfigExt for EmbeddedDaemonConfig {
             code_watch_paths: self.code_watch_paths.clone(),
             code_index_interval_secs: self.code_index_interval_secs,
             agent_purge_age_hours: 24, // Delete stale agents after 24 hours
+            archive_retention_days: self.archive_retention_days,
             // BM25 indexing
             index_bm25: true,
             index_batch_size: 32,

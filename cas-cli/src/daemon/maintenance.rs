@@ -216,12 +216,14 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
-    // Prune old events (30-day retention)
+    // Archive old events (30-day live retention).  The archive is written
+    // before the live rows are removed, so a failed archive leaves the rows
+    // available for the next maintenance cycle.
     if config.auto_prune {
         if let Ok(event_store) = open_event_store(&config.cas_root) {
-            match event_store.prune(30) {
+            match event_store.archive_old(&config.cas_root.join("archive"), 30) {
                 Ok(count) => events_pruned = count,
-                Err(error) => errors.push(format!("Event pruning failed: {error}")),
+                Err(error) => errors.push(format!("Event archiving failed: {error}")),
             }
         }
     }
@@ -236,13 +238,21 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
-    // Prune old recordings (30-day retention, cascades to agents/events)
+    // Archive old recordings (30-day live retention, including agents/events)
+    // before deleting their live rows.
     if config.auto_prune {
         if let Ok(recording_store) = open_recording_store(&config.cas_root) {
-            match recording_store.prune(30) {
+            match recording_store.archive_old(&config.cas_root.join("archive"), 30) {
                 Ok(count) => recordings_pruned = count,
-                Err(error) => errors.push(format!("Recording pruning failed: {error}")),
+                Err(error) => errors.push(format!("Recording archiving failed: {error}")),
             }
+        }
+    }
+
+    if config.auto_prune {
+        match cas_store::prune_trace_archives(&config.cas_root, config.archive_retention_days) {
+            Ok(_) => {}
+            Err(error) => errors.push(format!("Trace archive retention failed: {error}")),
         }
     }
 

@@ -266,6 +266,7 @@ impl CasCore {
         let branch = self.current_worktree_branch();
 
         let entry = Entry {
+            source_ids: Vec::new(),
             id: id.clone(),
             scope: Scope::default(),
             entry_type: EntryType::Observation,

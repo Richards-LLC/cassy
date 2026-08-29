@@ -186,6 +186,7 @@ async fn test_all_store_types_accessible() {
         content: "Rule store test".to_string(),
         paths: None,
         tags: None,
+        source_ids: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
     };
@@ -202,6 +203,7 @@ async fn test_all_store_types_accessible() {
         invocation: "test".to_string(),
         skill_type: "command".to_string(),
         tags: None,
+        source_ids: None,
         summary: None,
         example: None,
         preconditions: None,

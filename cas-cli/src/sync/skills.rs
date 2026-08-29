@@ -214,6 +214,22 @@ impl SkillSyncer {
             content.push_str("\n\n");
         }
 
+        if !skill.preconditions.is_empty() {
+            content.push_str("## Preconditions\n\n");
+            for precondition in &skill.preconditions {
+                content.push_str(&format!("- {precondition}\n"));
+            }
+            content.push('\n');
+        }
+
+        if !skill.postconditions.is_empty() {
+            content.push_str("## Postconditions\n\n");
+            for postcondition in &skill.postconditions {
+                content.push_str(&format!("- {postcondition}\n"));
+            }
+            content.push('\n');
+        }
+
         // Instructions (if separate from description)
         if !skill.invocation.is_empty() && skill.invocation != skill.description {
             content.push_str("## Instructions\n\n");

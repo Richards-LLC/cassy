@@ -29,7 +29,7 @@
 //!
 //! # Sync Behavior
 //!
-//! - Rules must be "proven" (helpful_count >= min_helpful, not retired)
+//! - Rules must be "proven" (status = proven and helpful_count >= min_helpful)
 //! - Stale files are automatically removed when rules become unproven
 //! - Skills are synced when enabled, removed when disabled
 
@@ -119,7 +119,7 @@ impl Syncer {
 
     /// Check if a rule should be synced to Claude Code
     pub fn is_proven(&self, rule: &Rule) -> bool {
-        rule.status != RuleStatus::Retired && rule.helpful_count >= self.min_helpful
+        rule.status == RuleStatus::Proven && rule.helpful_count >= self.min_helpful
     }
 
     /// Sync a single rule to target directory
@@ -436,10 +436,15 @@ mod tests {
 
         // Now proven (helpful_count = 2)
         rule.helpful_count = 2;
+        rule.status = RuleStatus::Proven;
         assert!(syncer.is_proven(&rule));
 
         // Retired rules are never proven
         rule.status = RuleStatus::Retired;
+        assert!(!syncer.is_proven(&rule));
+
+        // Stale rules are no longer injected after a harmful/corrected outcome
+        rule.status = RuleStatus::Stale;
         assert!(!syncer.is_proven(&rule));
     }
 
@@ -451,6 +456,7 @@ mod tests {
 
         let mut rule = Rule::new("rule-001".to_string(), "Test rule content".to_string());
         rule.helpful_count = 1;
+        rule.status = RuleStatus::Proven;
 
         // Sync the rule
         assert!(syncer.sync_rule(&rule).unwrap());
@@ -472,6 +478,7 @@ mod tests {
 
         let mut rule1 = Rule::new("rule-001".to_string(), "Rule 1".to_string());
         rule1.helpful_count = 2;
+        rule1.status = RuleStatus::Proven;
 
         let mut rule2 = Rule::new("rule-002".to_string(), "Rule 2".to_string());
         rule2.helpful_count = 0; // Not proven
@@ -510,11 +517,13 @@ mod tests {
         // Create global rules
         let mut global_rule = Rule::new("g-rule-001".to_string(), "Global rule".to_string());
         global_rule.helpful_count = 1;
+        global_rule.status = RuleStatus::Proven;
         global_rule.scope = Scope::Global;
 
         // Create project rules
         let mut project_rule = Rule::new("p-rule-001".to_string(), "Project rule".to_string());
         project_rule.helpful_count = 1;
+        project_rule.status = RuleStatus::Proven;
         project_rule.scope = Scope::Project;
 
         let report = syncer
@@ -540,6 +549,7 @@ mod tests {
         // Test global rule goes to global target
         let mut global_rule = Rule::new("g-rule-001".to_string(), "Global rule".to_string());
         global_rule.helpful_count = 1;
+        global_rule.status = RuleStatus::Proven;
         global_rule.scope = Scope::Global;
         assert!(syncer.sync_rule_with_scope(&global_rule).unwrap());
         assert!(global_target.join("g-rule-001.md").exists());
@@ -547,6 +557,7 @@ mod tests {
         // Test project rule goes to project target
         let mut project_rule = Rule::new("p-rule-001".to_string(), "Project rule".to_string());
         project_rule.helpful_count = 1;
+        project_rule.status = RuleStatus::Proven;
         project_rule.scope = Scope::Project;
         assert!(syncer.sync_rule_with_scope(&project_rule).unwrap());
         assert!(project_target.join("p-rule-001.md").exists());

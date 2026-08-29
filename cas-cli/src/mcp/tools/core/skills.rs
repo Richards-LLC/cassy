@@ -77,7 +77,7 @@ impl CasCore {
             "database"
         };
         let output = format!(
-            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
+            "Skill: {} ({})\n{}\n\nSource: {}\nType: {:?}\nStatus: {:?}\nUsage count: {}\nTags: {}\nSource entries: {}\nPreconditions: {}\nPostconditions: {}\nValidation script: {}\nCreated: {}\n\nDescription:\n{}\n\nInvocation:\n{}",
             skill.name,
             skill.id,
             "=".repeat(skill.name.len() + skill.id.len() + 4),
@@ -89,6 +89,26 @@ impl CasCore {
                 "none".to_string()
             } else {
                 skill.tags.join(", ")
+            },
+            if skill.source_ids.is_empty() {
+                "none".to_string()
+            } else {
+                skill.source_ids.join(", ")
+            },
+            if skill.preconditions.is_empty() {
+                "none".to_string()
+            } else {
+                skill.preconditions.join(", ")
+            },
+            if skill.postconditions.is_empty() {
+                "none".to_string()
+            } else {
+                skill.postconditions.join(", ")
+            },
+            if skill.validation_script.is_empty() {
+                "not configured".to_string()
+            } else {
+                skill.validation_script.clone()
             },
             skill.created_at.format("%Y-%m-%d %H:%M"),
             skill.description,
@@ -202,8 +222,24 @@ impl CasCore {
             updated_at: chrono::Utc::now(),
             last_used: None,
             team_id: None,
+            source_ids: req
+                .source_ids
+                .map(|ids| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
             share: None,
         };
+
+        crate::skill_validation::validate_skill(&skill).map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Skill validation rejected create: {error}")),
+            data: None,
+        })?;
 
         skill_store.add(&skill).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -421,6 +457,29 @@ impl CasCore {
             changes.push("tags");
         }
 
+        if let Some(preconditions) = req.preconditions {
+            skill.preconditions = preconditions
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            changes.push("preconditions");
+        }
+
+        if let Some(postconditions) = req.postconditions {
+            skill.postconditions = postconditions
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            changes.push("postconditions");
+        }
+
+        if let Some(validation_script) = req.validation_script {
+            skill.validation_script = validation_script;
+            changes.push("validation_script");
+        }
+
         if let Some(summary) = req.summary {
             skill.summary = summary;
             changes.push("summary");
@@ -436,6 +495,12 @@ impl CasCore {
         }
 
         skill.updated_at = chrono::Utc::now();
+
+        crate::skill_validation::validate_skill(&skill).map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Skill validation rejected update: {error}")),
+            data: None,
+        })?;
 
         if is_file_skill {
             // File-based skill: write back to file
@@ -459,7 +524,13 @@ impl CasCore {
             }
         } else {
             // Database skill: update in store
-            skill_store.update(&skill).map_err(|e| McpError {
+            skill_store
+                .update_with_metadata(
+                    &skill,
+                    req.changed_by.as_deref(),
+                    req.change_note.as_deref(),
+                )
+                .map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to update: {e}")),
                 data: None,
@@ -475,6 +546,70 @@ impl CasCore {
             "Updated skill {}: {}",
             req.id,
             changes.join(", ")
+        )))
+    }
+
+    /// List prior skill states, newest first.
+    pub async fn cas_skill_history(
+        &self,
+        Parameters(req): Parameters<VersionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let skill_store = self.open_skill_store()?;
+        let versions = skill_store.list_versions(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to list skill history: {e}")),
+            data: None,
+        })?;
+        if versions.is_empty() {
+            return Ok(Self::success(format!("No history for skill {}", req.id)));
+        }
+
+        let mut output = format!("Skill history for {} ({} versions):\n\n", req.id, versions.len());
+        for version in versions {
+            let preview: String = version.description.chars().take(120).collect();
+            output.push_str(&format!(
+                "- v{} [{}] {} by {} at {}\n  {}\n",
+                version.version,
+                version.status,
+                version.change_note,
+                version.changed_by.as_deref().unwrap_or("unknown actor"),
+                version.changed_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                preview,
+            ));
+        }
+        Ok(Self::success(output))
+    }
+
+    /// Restore a prior skill state, or un-retire to the newest prior state.
+    pub async fn cas_skill_restore(
+        &self,
+        Parameters(req): Parameters<VersionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let skill_store = self.open_skill_store()?;
+        let version = req.version.or(req.version_id);
+        skill_store
+            .restore_version(
+                &req.id,
+                version,
+                req.changed_by.as_deref(),
+                req.change_note.as_deref(),
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Failed to restore skill: {e}")),
+                data: None,
+            })?;
+        let restored = skill_store.get(&req.id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to read restored skill: {e}")),
+            data: None,
+        })?;
+        let _ = self.sync_skills();
+        Ok(Self::success(format!(
+            "Restored skill {}{} (status: {})",
+            req.id,
+            version.map(|v| format!(" to version {v}")).unwrap_or_default(),
+            restored.status
         )))
     }
 
@@ -494,7 +629,10 @@ impl CasCore {
         // Re-sync to remove from Claude Code
         let _ = self.sync_skills();
 
-        Ok(Self::success(format!("Deleted skill: {}", req.id)))
+        Ok(Self::success(format!(
+            "Retired skill: {} (history retained)",
+            req.id
+        )))
     }
 
     /// List all skills (including disabled)

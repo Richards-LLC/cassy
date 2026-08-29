@@ -234,6 +234,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     let (daemon, activity, _handle) = if enable_daemon {
         let cas_config = crate::config::Config::load(&cas_root).unwrap_or_default();
         let code_config = cas_config.code();
+        let daemon_config = cas_config.daemon();
         let cloud_config = cas_config.cloud.clone().unwrap_or_default();
         let project_dir = cas_root.parent().unwrap_or(&cas_root);
         let code_watch_paths: Vec<std::path::PathBuf> = code_config
@@ -252,6 +253,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
             code_exclude_patterns: code_config.exclude_patterns.clone(),
             code_index_interval_secs: code_config.index_interval_secs,
             code_debounce_ms: code_config.debounce_ms,
+            archive_retention_days: daemon_config.archive_retention_days,
             ..Default::default()
         };
         let (daemon, handle) = spawn_daemon(config);

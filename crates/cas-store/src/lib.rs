@@ -69,6 +69,8 @@ mod sqlite;
 mod sqlite_code_store;
 mod supervisor_queue_store;
 mod task_store;
+pub mod trace_archive;
+mod version_store;
 pub mod tracing;
 mod verification_store;
 mod viktor_inbound_store;
@@ -87,6 +89,11 @@ mod worktree_lease_test;
 
 // Re-export error types
 pub use error::{Result, StoreError};
+
+pub use trace_archive::{
+    RecordingArchive, RecordingFtsEntry, TraceArchiveStats, prune_trace_archives,
+    trace_archive_stats, write_jsonl_archive,
+};
 
 // Agent store for multi-agent coordination
 pub use agent_store::{AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
@@ -272,6 +279,10 @@ pub use recording_text_store::{
 pub use layered::{LayeredEntryStore, LayeredRuleStore, LayeredSkillStore};
 pub use markdown::{MarkdownRuleStore, MarkdownStore};
 pub use skill_store::{SKILL_SCHEMA, SqliteSkillStore};
+pub use version_store::{
+    RULE_AND_SKILL_VERSIONS_SCHEMA_STATEMENTS, RULE_VERSIONS_SCHEMA_STATEMENTS, RuleVersion,
+    SKILL_VERSIONS_SCHEMA_STATEMENTS, SkillVersion,
+};
 pub use spec_store::{SpecStore, SqliteSpecStore};
 pub use sqlite::{ENTRIES_RULES_SCHEMA, SqliteRuleStore, SqliteStore};
 pub use task_store::{SqliteTaskStore, TASK_SCHEMA, clear_pending_verification_with_conn};
@@ -280,6 +291,7 @@ use cas_types::{
     Dependency, DependencyType, Entity, EntityMention, EntityType, Entry, RelationType,
     Relationship, Rule, Scope, Skill, SkillStatus, Task, TaskStatus, TaskType,
 };
+use serde_json::Value;
 
 /// Trait for entry storage operations
 pub trait Store: Send + Sync {
@@ -436,8 +448,60 @@ pub trait RuleStore: Send + Sync {
     /// Update an existing rule
     fn update(&self, rule: &Rule) -> Result<()>;
 
+    /// Update a rule while recording optional actor and reason metadata.
+    fn update_with_metadata(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.update(rule)
+    }
+
+    /// Increment the number of times a rule was actually injected into
+    /// context. Implementations with an atomic write path should override
+    /// this method; the default preserves compatibility for lightweight
+    /// stores and wrappers.
+    fn increment_surface_count(&self, id: &str) -> Result<()> {
+        let mut rule = self.get(id)?;
+        rule.surface_count = rule.surface_count.saturating_add(1);
+        self.update(&rule)
+    }
+
     /// Delete a rule
     fn delete(&self, id: &str) -> Result<()>;
+
+    /// Delete a rule as a lifecycle transition while recording metadata.
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.delete(id)
+    }
+
+    /// List prior rule states, newest first.
+    fn list_versions(&self, _id: &str) -> Result<Vec<RuleVersion>> {
+        Err(StoreError::Parse(
+            "rule version history is unavailable for this store".to_string(),
+        ))
+    }
+
+    /// Restore a prior rule state, or the latest prior state when version is None.
+    fn restore_version(
+        &self,
+        _id: &str,
+        _version: Option<i64>,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse(
+            "rule version restore is unavailable for this store".to_string(),
+        ))
+    }
 
     /// List all rules
     fn list(&self) -> Result<Vec<Rule>>;
@@ -517,6 +581,14 @@ pub trait TaskStore: Send + Sync {
 
     /// Get a task by ID
     fn get(&self, id: &str) -> Result<Task>;
+
+    /// Read the compact structured execution state for a task. `None` is the
+    /// backward-compatible result for tasks that have never received state.
+    fn get_execution_state(&self, task_id: &str) -> Result<Option<Value>>;
+
+    /// Apply one validated JSON merge patch to a task's execution state and
+    /// return the resulting sparse object. Null fields are deleted.
+    fn patch_execution_state(&self, task_id: &str, patch: &Value) -> Result<Value>;
 
     /// Update an existing task.
     ///
@@ -624,8 +696,50 @@ pub trait SkillStore: Send + Sync {
     /// Update an existing skill
     fn update(&self, skill: &Skill) -> Result<()>;
 
+    /// Update a skill while recording optional actor and reason metadata.
+    fn update_with_metadata(
+        &self,
+        skill: &Skill,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.update(skill)
+    }
+
     /// Delete a skill
     fn delete(&self, id: &str) -> Result<()>;
+
+    /// Delete a skill as a lifecycle transition while recording metadata.
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let _ = (changed_by, change_note);
+        self.delete(id)
+    }
+
+    /// List prior skill states, newest first.
+    fn list_versions(&self, _id: &str) -> Result<Vec<SkillVersion>> {
+        Err(StoreError::Parse(
+            "skill version history is unavailable for this store".to_string(),
+        ))
+    }
+
+    /// Restore a prior skill state, or the latest prior state when version is None.
+    fn restore_version(
+        &self,
+        _id: &str,
+        _version: Option<i64>,
+        _changed_by: Option<&str>,
+        _change_note: Option<&str>,
+    ) -> Result<()> {
+        Err(StoreError::Parse(
+            "skill version restore is unavailable for this store".to_string(),
+        ))
+    }
 
     /// List skills with optional status filter
     fn list(&self, status: Option<SkillStatus>) -> Result<Vec<Skill>>;

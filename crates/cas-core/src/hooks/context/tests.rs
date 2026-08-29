@@ -2,7 +2,7 @@ use crate::hooks::context::{
     BasicContextScorer, ContextQuery, ContextScorer, RuleMatchCache, estimate_tokens,
     is_factory_participant, remap_tool_prefix, rule_matches_path, token_display, truncate,
 };
-use cas_types::{AgentRole, Entry, EntryType, Rule};
+use cas_types::{AgentRole, Entry, EntryType, Rule, RuleStatus};
 
 #[test]
 fn test_estimate_tokens() {
@@ -294,7 +294,8 @@ use crate::hooks::config::DefaultHooksConfig;
 use crate::hooks::context::{ContextStores, build_context_with_stores};
 use crate::hooks::types::HookInput;
 use cas_store::{
-    IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, SqliteKnowledgeStore, SqliteStore, Store,
+    IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, RuleStore, SqliteKnowledgeStore,
+    SqliteRuleStore, SqliteStore, Store,
 };
 
 /// A knowledge store in a throwaway dir, holding `pages` of (type, title,
@@ -332,6 +333,38 @@ fn session_start_input() -> HookInput {
         hook_event_name: "SessionStart".to_string(),
         ..Default::default()
     }
+}
+
+#[test]
+fn session_start_increments_surface_count_for_each_injected_rule() {
+    let mut rule = Rule::new(
+        "rule-surface".to_string(),
+        "Always test surfaced rules".to_string(),
+    );
+    rule.status = RuleStatus::Proven;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SqliteRuleStore::open(temp.path()).expect("open rule store");
+    store.init().expect("init rule store");
+    store.add(&rule).expect("add rule");
+    let stores = ContextStores {
+        project_rule_store: Some(&store),
+        ..ContextStores::empty()
+    };
+
+    let config = DefaultHooksConfig::new();
+    let (context, stats) = build_context_with_stores(
+        &session_start_input(),
+        &stores,
+        &config,
+        10,
+        None,
+        "mcp__cas__",
+    )
+    .expect("build context");
+
+    assert!(context.contains("Always test surfaced rules"));
+    assert_eq!(stats.rules_included, 1);
+    assert_eq!(store.get("rule-surface").unwrap().surface_count, 1);
 }
 
 fn build_with_knowledge(ks: &dyn KnowledgeStore, store: Option<&dyn Store>) -> String {

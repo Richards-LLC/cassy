@@ -12,6 +12,7 @@ use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::share_policy::{eligible_for_team_rule, resolve_team_id};
 use crate::store::{Result, RuleStore};
 use crate::types::Rule;
+use cas_store::RuleVersion;
 use cas_core::Syncer;
 
 /// A rule store wrapper that syncs rules to Claude Code and cloud
@@ -154,10 +155,58 @@ impl RuleStore for SyncingRuleStore {
         Ok(())
     }
 
+    fn update_with_metadata(
+        &self,
+        rule: &Rule,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .update_with_metadata(rule, changed_by, change_note)?;
+        self.try_sync(rule);
+        self.queue_upsert(rule);
+        Ok(())
+    }
+
+    fn increment_surface_count(&self, id: &str) -> Result<()> {
+        self.inner.increment_surface_count(id)
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.inner.delete(id)?;
         self.try_remove(id);
         self.queue_delete(id);
+        Ok(())
+    }
+
+    fn delete_with_metadata(
+        &self,
+        id: &str,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner.delete_with_metadata(id, changed_by, change_note)?;
+        self.try_remove(id);
+        self.queue_delete(id);
+        Ok(())
+    }
+
+    fn list_versions(&self, id: &str) -> Result<Vec<RuleVersion>> {
+        self.inner.list_versions(id)
+    }
+
+    fn restore_version(
+        &self,
+        id: &str,
+        version: Option<i64>,
+        changed_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .restore_version(id, version, changed_by, change_note)?;
+        let restored = self.inner.get(id)?;
+        self.try_sync(&restored);
+        self.queue_upsert(&restored);
         Ok(())
     }
 

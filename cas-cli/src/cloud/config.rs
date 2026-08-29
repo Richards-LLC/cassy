@@ -1709,6 +1709,37 @@ mod tests {
         assert!(!cloud_path.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_fixture_cloud_write_rejects_dangling_symlink_outside_temp_directory() {
+        use std::os::unix::fs::symlink;
+
+        let project = project_fixture_outside_system_temp();
+        let external_cloud = project.path().join(".cas/cloud.json");
+        std::fs::create_dir_all(external_cloud.parent().unwrap()).unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let link = temp.path().join("cloud.json");
+        symlink(&external_cloud, &link).unwrap();
+
+        let config = CloudConfig {
+            token: Some(TEST_FIXTURE_TOKEN.to_string()),
+            ..Default::default()
+        };
+
+        let error = config.save_to(&link).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("outside the system temp directory")
+        );
+        assert!(
+            !external_cloud.exists(),
+            "a fixture write must not follow a dangling symlink outside temp"
+        );
+    }
+
     #[test]
     fn store_login_credentials_works_outside_a_project() {
         // Ben #4 (cas-046d): `cas login --token` from $HOME died with

@@ -123,6 +123,15 @@ mod tests {
         assert!(result.is_ok(), "probe was not isolated: {result:?}");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_has_no_network_by_default() {
+        let result = validate_skill(&skill_with_script(
+            "test \"$(grep -c '^[^[:space:]]' /proc/net/route)\" -eq 1",
+        ));
+        assert!(result.is_ok(), "probe had a network route: {result:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_is_reported_and_bounded() {

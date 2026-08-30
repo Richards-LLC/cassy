@@ -1521,7 +1521,7 @@ mod tests {
         build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
         render_task_proposal_provenance,
     };
-    use crate::types::Entry;
+    use crate::types::{Entry, Task};
     use serde_json::json;
 
     #[test]
@@ -1539,6 +1539,26 @@ mod tests {
         assert!(error.contains("entry deserialize error"), "{error}");
         assert!(error.contains("id=p-malformed-created"), "{error}");
         assert!(error.contains("missing field `created`"), "{error}");
+    }
+
+    #[test]
+    fn deserialize_migrates_stringified_task_deliverables() {
+        let mut raw = serde_json::to_value(Task::new(
+            "cas-legacy-deliverables".to_string(),
+            "Moved task".to_string(),
+        ))
+        .unwrap();
+        raw["project_id"] = json!("cas-src");
+        raw["deliverables"] =
+            json!("{\"files_changed\":[\"src/lib.rs\"],\"factory_branch_anchor\":\"deadbeef\"}");
+
+        let task = deserialize_pulled_entity::<Task>(raw, "task")
+            .expect("legacy task payload should be readable");
+        assert_eq!(task.deliverables.files_changed, ["src/lib.rs"]);
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some("deadbeef")
+        );
     }
 
     #[test]

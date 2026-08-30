@@ -1,7 +1,7 @@
 use crate::support::*;
 use cas::mcp::CasService;
 use cas::mcp::tools::*;
-use cas::store::{Store, open_store, open_task_store};
+use cas::store::{open_store, open_task_store};
 use cas::types::{Entry, MemoryTier, Task};
 use cas_mcp::{SearchContextRequest, SystemRequest};
 use rmcp::handler::server::wrapper::Parameters;

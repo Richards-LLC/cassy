@@ -1,5 +1,94 @@
 use crate::mcp::tools::service::imports::*;
 
+const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
+const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
+
+fn is_external_reminder_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT
+    )
+}
+
+fn external_filter_string(
+    filter: &serde_json::Value,
+    names: &[&str],
+) -> Option<String> {
+    let object = filter.as_object()?;
+    names.iter().find_map(|name| {
+        object
+            .get(*name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+            .map(str::to_string)
+    })
+}
+
+fn validate_external_reminder(
+    event_type: &str,
+    filter: Option<&serde_json::Value>,
+    cross_session: bool,
+    ttl_secs: i64,
+) -> std::result::Result<(), String> {
+    if !is_external_reminder_event(event_type) {
+        return Ok(());
+    }
+    if !cross_session {
+        return Err(
+            "external reminders require cross_session=true so a daemon/session restart cannot lose the wake"
+                .to_string(),
+        );
+    }
+    if ttl_secs < 0 {
+        return Err("remind_ttl_secs must be zero (no expiry) or positive".to_string());
+    }
+    let filter = filter.ok_or_else(|| {
+        format!(
+            "{event_type} reminders require remind_filter JSON: {}",
+            if event_type == EXTERNAL_BRANCH_CONTAINED_EVENT {
+                "{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}"
+            } else {
+                "{\"tag\":\"<tag>\"}"
+            }
+        )
+    })?;
+    let object = filter
+        .as_object()
+        .ok_or_else(|| "external remind_filter must be a JSON object".to_string())?;
+    if object.keys().any(|key| key.starts_with('-')) {
+        return Err("external git refs must be supplied as JSON string fields".to_string());
+    }
+    match event_type {
+        EXTERNAL_BRANCH_CONTAINED_EVENT => {
+            let commit = external_filter_string(filter, &["commit", "branch_tip", "branch"]);
+            let target = external_filter_string(filter, &["target_branch", "target"]);
+            if commit.is_none() || target.is_none() {
+                return Err(
+                    "branch_contained_in remind_filter requires string fields `commit` and `target_branch`"
+                        .to_string(),
+                );
+            }
+            if commit.is_some_and(|value| value.starts_with('-'))
+                || target.is_some_and(|value| value.starts_with('-'))
+            {
+                return Err("external git refs may not start with '-'".to_string());
+            }
+        }
+        EXTERNAL_TAG_EXISTS_EVENT => {
+            let tag = external_filter_string(filter, &["tag"]);
+            if tag.is_none() {
+                return Err("tag_exists remind_filter requires string field `tag`".to_string());
+            }
+            if tag.is_some_and(|value| value.starts_with('-') || value.ends_with('/')) {
+                return Err("external tag must be a valid git ref name".to_string());
+            }
+        }
+        _ => unreachable!("checked by is_external_reminder_event"),
+    }
+    Ok(())
+}
+
 impl CasService {
     /// Resolve the `target` parameter to an agent ID.
     /// If `target` is a name (e.g. "swift-fox"), look it up in the agent store.
@@ -94,7 +183,23 @@ impl CasService {
             (None, None)
         };
 
-        let ttl_secs = req.remind_ttl_secs.unwrap_or(3600);
+        let ttl_secs = req.remind_ttl_secs.unwrap_or_else(|| {
+            if req
+                .remind_event
+                .as_deref()
+                .is_some_and(is_external_reminder_event)
+            {
+                0
+            } else {
+                3600
+            }
+        });
+        if ttl_secs < 0 {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "remind_ttl_secs must be zero (no expiry) or positive",
+            ));
+        }
         let cross_session = req.cross_session.unwrap_or(false);
         let explicit_task_id = req
             .task_id
@@ -241,6 +346,8 @@ impl CasService {
                 "agent_registered",
                 "epic_started",
                 "epic_completed",
+                EXTERNAL_BRANCH_CONTAINED_EVENT,
+                EXTERNAL_TAG_EXISTS_EVENT,
             ];
             if !valid_events.contains(&event_type.as_str()) {
                 return Err(Self::error(
@@ -270,6 +377,15 @@ impl CasService {
             } else {
                 None
             };
+
+            if let Err(error) = validate_external_reminder(
+                &event_type,
+                filter.as_ref(),
+                cross_session,
+                ttl_secs,
+            ) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, error));
+            }
 
             let id = store
                 .create_with_scope(
@@ -526,5 +642,39 @@ impl CasService {
         })?;
 
         Ok(Self::success(format!("Reminder #{remind_id} cancelled.")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_external_reminder;
+
+    #[test]
+    fn external_reminder_validation_requires_restart_safe_scope_and_filter() {
+        let filter = serde_json::json!({
+            "commit": "abc123",
+            "target_branch": "main"
+        });
+        assert!(
+            validate_external_reminder("branch_contained_in", Some(&filter), true, 0).is_ok()
+        );
+        assert!(
+            validate_external_reminder("branch_contained_in", Some(&filter), false, 0).is_err()
+        );
+        assert!(validate_external_reminder("branch_contained_in", None, true, 0).is_err());
+    }
+
+    #[test]
+    fn external_reminder_validation_accepts_tag_and_rejects_invalid_refs() {
+        let tag = serde_json::json!({"tag": "v3.6.0"});
+        assert!(validate_external_reminder("tag_exists", Some(&tag), true, 0).is_ok());
+        assert!(validate_external_reminder(
+            "tag_exists",
+            Some(&serde_json::json!({"tag": "-bad"})),
+            true,
+            0
+        )
+        .is_err());
+        assert!(validate_external_reminder("tag_exists", Some(&tag), true, -1).is_err());
     }
 }

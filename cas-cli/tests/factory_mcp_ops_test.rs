@@ -619,6 +619,33 @@ async fn remind_auto_binds_issuer_single_in_progress_task_and_close_quarantines_
     );
 }
 
+/// GH #624: an external reminder is a durable event row, not a one-hour timer
+/// tied to the registering factory session.
+#[tokio::test]
+async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() {
+    let env = FactoryTestEnv::new();
+    let mut remind = factory_req("remind");
+    remind.remind_message = Some("inspect the landed delivery".to_string());
+    remind.remind_event = Some("tag_exists".to_string());
+    remind.remind_filter = Some(r#"{"tag":"v3.6.0"}"#.to_string());
+    remind.cross_session = Some(true);
+
+    let result = env
+        .service
+        .factory(Parameters(remind))
+        .await
+        .expect("external reminder should be accepted");
+    assert!(get_text(&result).contains("event-based, fires on tag_exists"));
+
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    let pending = reminders.list_pending("test-agent-id").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].trigger_event.as_deref(), Some("tag_exists"));
+    assert_eq!(pending[0].ttl_secs, 0);
+    assert!(pending[0].cross_session);
+    assert_eq!(pending[0].trigger_filter, Some(serde_json::json!({"tag": "v3.6.0"})));
+}
+
 fn get_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content

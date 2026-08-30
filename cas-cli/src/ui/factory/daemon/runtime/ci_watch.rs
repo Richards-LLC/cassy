@@ -17,6 +17,14 @@ use crate::bounded_process::{Deadline, run_command};
 /// The GitHub Actions polling cadence.  A factory uses at most 60 list calls
 /// per hour; failed runs add one jobs call and one optional log lookup.
 pub(crate) const CI_WATCH_INTERVAL: Duration = Duration::from_secs(60);
+/// External reminder conditions use the same low-frequency cadence as the
+/// GitHub watcher. Their state is the pending reminder row, so a daemon
+/// restart simply evaluates the row again rather than losing an in-memory
+/// edge detector.
+pub(crate) const EXTERNAL_WAKE_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
+pub(crate) const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
+const EXTERNAL_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +120,162 @@ pub(crate) struct MergeQueueEjection {
 pub(crate) struct MergeQueuePoll {
     pub queued_prs: BTreeSet<u64>,
     pub ejections: Vec<MergeQueueEjection>,
+}
+
+/// A durable condition encoded in an event reminder's JSON filter. The
+/// commit form is preferred for branch containment because a merge queue may
+/// delete the source branch after landing; callers may still use a branch ref
+/// in `commit` when that ref is intentionally retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalWakeCondition {
+    BranchContained {
+        commit: String,
+        target_branch: String,
+    },
+    TagExists { tag: String },
+}
+
+impl ExternalWakeCondition {
+    pub(crate) fn event_type(&self) -> &'static str {
+        match self {
+            Self::BranchContained { .. } => EXTERNAL_BRANCH_CONTAINED_EVENT,
+            Self::TagExists { .. } => EXTERNAL_TAG_EXISTS_EVENT,
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::BranchContained {
+                commit,
+                target_branch,
+            } => serde_json::json!({
+                "commit": commit,
+                "target_branch": target_branch,
+            }),
+            Self::TagExists { tag } => serde_json::json!({"tag": tag}),
+        }
+    }
+
+    pub(crate) fn description(&self) -> String {
+        match self {
+            Self::BranchContained {
+                commit,
+                target_branch,
+            } => format!(
+                "external condition satisfied: commit {commit} is contained in {target_branch}"
+            ),
+            Self::TagExists { tag } => {
+                format!("external condition satisfied: tag {tag} exists")
+            }
+        }
+    }
+}
+
+/// Parse the stable JSON contract accepted by `coordination.remind` for an
+/// external condition. Keep this strict so a typo remains pending and visible
+/// rather than silently becoming an always-true wake.
+pub(crate) fn parse_external_wake_condition(
+    event_type: &str,
+    filter: &serde_json::Value,
+) -> Result<ExternalWakeCondition, String> {
+    let object = filter
+        .as_object()
+        .ok_or_else(|| "external remind_filter must be a JSON object".to_string())?;
+    let string_field = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+            .map(str::to_string)
+            .ok_or_else(|| format!("external remind_filter requires non-empty string field {name:?}"))
+    };
+
+    match event_type {
+        EXTERNAL_BRANCH_CONTAINED_EVENT => {
+            let commit = object
+                .get("commit")
+                .or_else(|| object.get("branch_tip"))
+                .or_else(|| object.get("branch"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    "branch_contained_in remind_filter requires string field `commit` (or `branch_tip`/`branch`)".to_string()
+                })?;
+            let target_branch = object
+                .get("target_branch")
+                .or_else(|| object.get("target"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    "branch_contained_in remind_filter requires string field `target_branch`".to_string()
+                })?;
+            if commit.starts_with('-') || target_branch.starts_with('-') {
+                return Err("external git refs may not start with '-'".to_string());
+            }
+            Ok(ExternalWakeCondition::BranchContained {
+                commit,
+                target_branch,
+            })
+        }
+        EXTERNAL_TAG_EXISTS_EVENT => {
+            let tag = string_field("tag")?;
+            if tag.starts_with('-') || tag.ends_with('/') {
+                return Err("external tag must be a valid git ref name".to_string());
+            }
+            Ok(ExternalWakeCondition::TagExists { tag })
+        }
+        _ => Err(format!("unsupported external reminder event: {event_type}")),
+    }
+}
+
+/// Evaluate one external condition using bounded, local git reads. A normal
+/// non-zero git status means the condition is false (for example the target
+/// branch or tag is not present yet); process failures/timeouts are surfaced so
+/// the daemon can retain the pending row and retry on a later cadence.
+pub(crate) fn external_wake_condition_satisfied(
+    project: &Path,
+    condition: &ExternalWakeCondition,
+) -> Result<bool, CiWatchError> {
+    let args = match condition {
+        ExternalWakeCondition::BranchContained {
+            commit,
+            target_branch,
+        } => vec![
+            "merge-base".to_string(),
+            "--is-ancestor".to_string(),
+            commit.clone(),
+            target_branch.clone(),
+        ],
+        ExternalWakeCondition::TagExists { tag } => vec![
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            "--quiet".to_string(),
+            format!("refs/tags/{tag}^{{commit}}"),
+        ],
+    };
+    let mut command = Command::new("git");
+    command.args(&args).current_dir(project);
+    let output = run_command(
+        &mut command,
+        Deadline::after(EXTERNAL_GIT_TIMEOUT),
+        EXTERNAL_GIT_TIMEOUT,
+    )
+    .map_err(|error| {
+        CiWatchError::Unavailable(match error {
+            crate::bounded_process::BoundedCommandError::TimedOut => {
+                "git external reminder probe timed out".to_string()
+            }
+            crate::bounded_process::BoundedCommandError::Io => {
+                "git is unavailable for external reminder probe".to_string()
+            }
+        })
+    })?;
+    Ok(output.status.success())
 }
 
 #[derive(Deserialize)]
@@ -818,5 +982,99 @@ mod tests {
             collect_failures(&NoAuth, &BTreeSet::new()),
             Err(CiWatchError::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn external_wake_filters_have_durable_branch_and_tag_shapes() {
+        let branch = parse_external_wake_condition(
+            EXTERNAL_BRANCH_CONTAINED_EVENT,
+            &serde_json::json!({
+                "commit": "abc123",
+                "branch": "factory/worker",
+                "target_branch": "main"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            branch,
+            ExternalWakeCondition::BranchContained {
+                commit: "abc123".to_string(),
+                target_branch: "main".to_string(),
+            }
+        );
+
+        let tag = parse_external_wake_condition(
+            EXTERNAL_TAG_EXISTS_EVENT,
+            &serde_json::json!({"tag": "v3.6.0"}),
+        )
+        .unwrap();
+        assert_eq!(
+            tag,
+            ExternalWakeCondition::TagExists {
+                tag: "v3.6.0".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn external_wake_git_probe_flips_for_ancestor_and_tag() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("file"), "first\n").unwrap();
+        git(repo, &["add", "file"]);
+        git(repo, &["commit", "-qm", "first"]);
+        let first = git_output(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["tag", "v1"]);
+        std::fs::write(repo.join("file"), "second\n").unwrap();
+        git(repo, &["commit", "-qam", "second"]);
+
+        assert!(external_wake_condition_satisfied(
+            repo,
+            &ExternalWakeCondition::BranchContained {
+                commit: first,
+                target_branch: "HEAD".to_string(),
+            }
+        )
+        .unwrap());
+        assert!(external_wake_condition_satisfied(
+            repo,
+            &ExternalWakeCondition::TagExists {
+                tag: "v1".to_string(),
+            }
+        )
+        .unwrap());
+        assert!(!external_wake_condition_satisfied(
+            repo,
+            &ExternalWakeCondition::TagExists {
+                tag: "not-created".to_string(),
+            }
+        )
+        .unwrap());
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success(),
+            "git {:?} failed",
+            args
+        );
+    }
+
+    fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {:?} failed", args);
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 }

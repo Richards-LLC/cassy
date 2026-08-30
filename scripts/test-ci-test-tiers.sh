@@ -1092,7 +1092,10 @@ require_absent "$release_publish" 'cas-ci-32core' 'the write-scoped publish job 
 
 # Adoption is fail-safe on lookup and fail-closed on publication.
 require_text "$release_lookup" './scripts/find-release-prebuild.sh' 'release looks up prebuilt artifacts for the tagged commit'
+require_text "$release_lookup" 'Fixes #603' 'release lookup pins the prebuild race fix'
 require_text "$release_lookup" 'actions: read' 'prebuilt lookup takes only read scope'
+require_text "$release_lookup" 'RELEASE_PREBUILD_WAIT_SECONDS: 900' 'prebuilt lookup bounds its race wait'
+require_text "$release_lookup" 'RELEASE_PREBUILD_POLL_SECONDS: 15' 'prebuilt lookup polls its race wait'
 require_text "$release_linux" "needs.prebuilt-lookup.outputs.found != 'true'" 'the cold Linux build remains the fallback when no prebuild exists'
 require_text "$release_macos" "needs.prebuilt-lookup.outputs.found != 'true'" 'the cold macOS build remains the fallback when no prebuild exists'
 require_text "$release_publish" "needs.prebuilt-lookup.outputs.found == 'true'" 'publication distinguishes the adopted path'

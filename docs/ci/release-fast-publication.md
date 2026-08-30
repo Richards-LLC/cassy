@@ -3,7 +3,8 @@
 How a pushed tag becomes published, verified artifacts in single-digit minutes,
 and why the pieces are shaped the way they are.
 
-Tracked by GH #449 (fast release publication) and cas-3b7c0.
+Tracked by GH #449 (fast release publication), GH #603 (the prebuild race),
+and cas-3b7c0.
 
 ## The measured problem
 
@@ -68,10 +69,13 @@ expensive lanes.
 
 `scripts/find-release-prebuild.sh` only matches a **successful** prebuild run
 whose `head_sha` is exactly the commit being published, and only when both
-artifacts are present and unexpired. Every degraded input — no run, a partial
-run, expired artifacts, an API outage — reports `found=false`, which routes the
-tag back to the pre-existing cold build path. The prebuild is an accelerator;
-it can never be the reason a release cannot ship.
+artifacts are present and unexpired. If that exact prebuild is queued or in
+progress, the lookup polls for up to 15 minutes (at 15-second intervals), then
+reports `found=false` with a prominent workflow warning if the run still has
+not produced both assets. Every other degraded input — no run, a partial run,
+expired artifacts, an API outage — also reports `found=false` with the same
+loud cold-build signal. The prebuild is an accelerator; it can never be the
+reason a release cannot ship.
 
 Publication is the opposite. `release` requires exactly one complete supply
 path: either the prebuild was adopted **and both platform builds were skipped**,
@@ -143,16 +147,19 @@ worth knowing before enabling it:
 2. Wait for its `Release prebuild summary` job. It states plainly whether a tag
    will adopt the artifacts or fall back to building them inline.
 3. Push the tag (`scripts/release.sh --publish-tag`). The script reports the
-   same thing one last time before it pushes, so a tag is never pushed blind
-   into a 15-minute path by accident.
+   same thing one last time before it pushes, and the workflow waits up to 15
+   minutes if the tag races the prebuild, so a tag is not silently pushed into
+   a cold path.
 4. Run the published-asset receipts once the release is published, then wait
    for the advisory `Install path proof` workflow to finish green on macOS ARM
    and clean Linux before calling the release installable. Its transcript and
    manual consumer-Mac limitation are documented in
    [Install path proof](install-path-proof.md).
 
-Pushing the tag before the prebuild finishes is safe — it just costs the old
-tag-time build. Nothing breaks; the release is simply slow.
+Pushing the tag before the prebuild finishes is safe. The release lookup waits
+up to 15 minutes for the exact run; only a timeout or terminal prebuild failure
+falls back to the old tag-time build, and that fallback is called out as a
+workflow warning.
 
 ## Measuring a real release
 
@@ -172,7 +179,7 @@ cannot produce a passing latency receipt has not demonstrated fast publication.
 
 `scripts/test-ci-test-tiers.sh` pins the properties above — trigger surface,
 the pending-release gate, audit and codesign parity between the prebuild and
-fallback paths, fail-safe lookup, fail-closed publication, both routing keys,
-and the publish job's hosted-only placement. `make -C cas-cli test-ci-tiers`
-runs it along with each new guard's own self-test, on the required Fast
-Validation lane.
+fallback paths, bounded race handling and loud fail-safe lookup, fail-closed
+publication, both routing keys, and the publish job's hosted-only placement.
+`make -C cas-cli test-ci-tiers` runs it along with each new guard's own
+self-test, on the required Fast Validation lane.

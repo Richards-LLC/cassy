@@ -349,9 +349,16 @@ fn execute_unlink(
                     "Cannot purge remote rows: not logged in. The local cloud link was preserved."
                 )
             })?;
+        let queue = SyncQueue::open_read_only(cas_root)?;
+        let syncer = crate::cloud::CloudSyncer::new_for_project(
+            std::sync::Arc::new(queue),
+            config.clone(),
+            crate::cloud::CloudSyncerConfig::default(),
+            project_id.clone(),
+            cas_root,
+        );
         let records = discover_unlink_remote_records(
-            &config.endpoint,
-            token,
+            &syncer,
             &project_id,
             config.active_team_id().as_deref(),
         )?;
@@ -432,17 +439,15 @@ fn execute_unlink(
 }
 
 fn discover_unlink_remote_records(
-    endpoint: &str,
-    token: &str,
+    syncer: &crate::cloud::CloudSyncer,
     project_id: &str,
     team_id: Option<&str>,
 ) -> anyhow::Result<Vec<UnlinkRemoteRecord>> {
     let mut records = BTreeSet::new();
-    let personal_url = format!(
-        "{endpoint}/api/sync/pull?types=entries,tasks,knowledge_pages&project_id={}",
-        urlencoding::encode(project_id)
-    );
-    let personal = unlink_pull_json(&personal_url, token, "personal")?;
+    let entity_types = ["entries", "tasks", "knowledge_pages"];
+    let personal = syncer
+        .pull_raw(project_id, &entity_types, None)
+        .map_err(|error| anyhow::anyhow!("personal cloud pull failed: {error}"))?;
     collect_unlink_records(
         &mut records,
         &personal,
@@ -453,64 +458,19 @@ fn discover_unlink_remote_records(
 
     if let Some(team_id) = team_id {
         let team_scope = UnlinkRemoteScope::Team(team_id.to_string());
-        let team_url = format!(
-            "{endpoint}/api/teams/{}/sync/pull?project_id={}",
-            urlencoding::encode(team_id),
-            urlencoding::encode(project_id)
-        );
-        let team = unlink_pull_json(&team_url, token, "team")?;
+        let team = syncer
+            .pull_raw(project_id, &entity_types, Some(team_id))
+            .map_err(|error| anyhow::anyhow!("team cloud pull failed: {error}"))?;
         collect_unlink_records(
             &mut records,
             &team,
             project_id,
             team_scope,
-            &["entries", "tasks"],
-        )?;
-
-        // Knowledge pages use the generic pull envelope even when team-scoped.
-        // Keep this query separate because the team pull endpoint predates the
-        // knowledge-page envelope.
-        let team_knowledge_url = format!(
-            "{endpoint}/api/sync/pull?types=knowledge_pages&team_id={}&project_id={}",
-            urlencoding::encode(team_id),
-            urlencoding::encode(project_id)
-        );
-        let team_knowledge = unlink_pull_json(&team_knowledge_url, token, "team knowledge")?;
-        collect_unlink_records(
-            &mut records,
-            &team_knowledge,
-            project_id,
-            UnlinkRemoteScope::Team(team_id.to_string()),
-            &["knowledge_pages"],
+            &entity_types,
         )?;
     }
 
     Ok(records.into_iter().collect())
-}
-
-fn unlink_pull_json(
-    url: &str,
-    token: &str,
-    scope_label: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let response = ureq::get(url)
-        .timeout(Duration::from_secs(30))
-        .set("Authorization", &format!("Bearer {token}"))
-        .call();
-    match response {
-        Ok(response) => response
-            .into_json()
-            .map_err(|error| {
-                anyhow::anyhow!("{scope_label} cloud pull response was invalid: {error}")
-            }),
-        Err(ureq::Error::Status(status, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            anyhow::bail!("{scope_label} cloud pull failed with status {status}: {body}")
-        }
-        Err(ureq::Error::Transport(error)) => {
-            anyhow::bail!("{scope_label} cloud pull failed: {error}")
-        }
-    }
 }
 
 fn collect_unlink_records(
@@ -4660,7 +4620,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 mod team_cmd_tests {
     use super::*;
     use tempfile::TempDir;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -4708,14 +4668,19 @@ mod team_cmd_tests {
 
     #[tokio::test]
     async fn unlink_remote_discovery_collects_personal_and_team_rows() {
+        use std::sync::Arc;
+
+        use crate::cloud::{CloudSyncer, CloudSyncerConfig};
+
         let server = MockServer::start().await;
         let project_id = "github.com/example/woodworking";
         let team_id = "team-1";
         let row = |id: &str| serde_json::json!({"id": id, "project_id": project_id});
 
         Mock::given(method("GET"))
-            .and(path("/api/sync/pull"))
+            .and(path("/api/sync/".to_owned() + "pull"))
             .and(query_param("types", "entries,tasks,knowledge_pages"))
+            .and(query_param_is_missing("team_id"))
             .and(query_param("project_id", project_id))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "entries": [row("personal-entry")],
@@ -4725,28 +4690,32 @@ mod team_cmd_tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/teams/team-1/sync/pull"))
+            .and(path("/api/sync/".to_owned() + "pull"))
+            .and(query_param("types", "entries,tasks,knowledge_pages"))
+            .and(query_param("team_id", team_id))
             .and(query_param("project_id", project_id))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "entries": [row("team-entry")],
                 "tasks": [row("team-task")],
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/sync/pull"))
-            .and(query_param("types", "knowledge_pages"))
-            .and(query_param("team_id", team_id))
-            .and(query_param("project_id", project_id))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "knowledge_pages": [],
             })))
             .mount(&server)
             .await;
 
+        let project = TempDir::new().unwrap();
+        let queue = Arc::new(SyncQueue::open(project.path()).unwrap());
+        let mut config = CloudConfig::default();
+        config.endpoint = server.uri();
+        config.token = Some("token".to_string());
+        let syncer = CloudSyncer::new_for_project(
+            queue,
+            config,
+            CloudSyncerConfig::default(),
+            project_id.to_string(),
+            project.path(),
+        );
         let records = discover_unlink_remote_records(
-            &server.uri(),
-            "token",
+            &syncer,
             project_id,
             Some(team_id),
         )

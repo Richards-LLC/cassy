@@ -39,6 +39,8 @@ After a release is pushed + tagged, post to **#cas-internal** (`C0B44GUKDK2`). A
 and release-note draft on a source branch; do not merge or push that commit
 directly to `main`, and do not create the release tag before the PR lands.
 
+When a release follows an epic, carry the version bump, CHANGELOG section, and release-note draft as the epic branch’s final commit and land them through its single integration PR before tagging for one tree, one queue cycle; reserve a standalone `release/vX-prepare` PR for multi-PR batch releases, because the version lives in the tree and the merge queue revalidates every new tree.
+
 1. Push the source branch: `git push -u origin <source-branch>`.
 2. Open the release PR: `PR_URL=$(gh pr create --base main --head <source-branch> --fill)`.
 3. Surface its URL and required checks to the operator/supervisor:

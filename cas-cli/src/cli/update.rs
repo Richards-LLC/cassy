@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use clap::Args;
 
 use crate::builtins::{
-    SyncResult, mark_missing_owned_references_for_replacement, prune_stale_user_skills_for_harness,
-    sync_all_builtins_for_harness,
+    SyncResult, ensure_builtin_gitignore, mark_missing_owned_references_for_replacement,
+    prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
 };
 use crate::cli::Cli;
 use crate::cli::cloud::{CloudSyncArgs, execute_sync};
@@ -588,10 +588,44 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
 
     let theme = ActiveTheme::default();
 
+    // Builtin files are generated into consumer projects and should not be
+    // committed there. The authoring checkout is exempted inside the helper
+    // because its rendered files are intentional tracked fixtures.
+    let mut builtin_harnesses = vec![cas_mux::SupervisorCli::Claude];
+    if codex_enabled {
+        builtin_harnesses.push(cas_mux::SupervisorCli::Codex);
+    }
+    if grok_enabled {
+        builtin_harnesses.push(cas_mux::SupervisorCli::Grok);
+    }
+    let builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
+
     if !cli.json {
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme.clone());
         fmt.subheading("Syncing .claude files")?;
+        if builtin_gitignore.updated {
+            fmt.write_raw("  ")?;
+            fmt.success("Updated .gitignore with Cassy-managed builtin paths")?;
+        }
+        if !builtin_gitignore.tracked_paths.is_empty() {
+            fmt.write_raw("  ")?;
+            fmt.warning(&format!(
+                "{} Cassy-managed builtin path(s) are already tracked and will not be hidden by \
+                 .gitignore:",
+                builtin_gitignore.tracked_paths.len()
+            ))?;
+            for path in &builtin_gitignore.tracked_paths {
+                fmt.write_raw(&format!("    ! {path}"))?;
+                fmt.newline()?;
+            }
+            fmt.write_raw("    ")?;
+            fmt.write_raw(
+                "To make the ignore rule effective, review and run `git rm --cached <path>` \
+                 for each path, then commit the removal.",
+            )?;
+            fmt.newline()?;
+        }
     }
 
     // Track what was updated for JSON output
@@ -818,7 +852,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             .map(|s| format!("\"{s}\""))
             .collect();
         println!(
-            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}"}}"#,
+            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
             config_json.join(","),
             builtin_result.total_updated(),
             builtin_result.modified_reference_files.len(),
@@ -831,7 +865,9 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             rule_report.removed,
             skill_report.synced,
             skill_report.removed,
-            factory_tooling_result
+            factory_tooling_result,
+            builtin_gitignore.updated,
+            serde_json::to_string(&builtin_gitignore.tracked_paths)?
         );
     } else {
         let mut out = io::stdout();

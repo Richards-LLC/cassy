@@ -159,7 +159,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn failure_includes_script_output() {
-        let result = validate_skill(&skill_with_script("printf probe-failed >&2; exit 23"));
+        let result = validate_skill_with_mode(
+            &skill_with_script("printf probe-failed >&2; exit 23"),
+            ValidationMode::Plain,
+        );
         let error = result.expect_err("failed probe should reject");
         assert!(error.contains("exit 23"));
         assert!(error.contains("probe-failed"));
@@ -168,15 +171,40 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_has_sandboxed_cwd_and_environment() {
-        let result = validate_skill(&skill_with_script(
-            "test ! -e .git && test -z \"$HOME\" && test -z \"$CAS_ROOT\"",
-        ));
+        let result = validate_skill_with_mode(
+            &skill_with_script(
+                "test ! -e .git && test -z \"$HOME\" && test -z \"$CAS_ROOT\"",
+            ),
+            ValidationMode::Plain,
+        );
         assert!(result.is_ok(), "probe was not isolated: {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_reports_missing_network_isolation() {
+        let report = validate_skill_with_mode(
+            &skill_with_script("true"),
+            ValidationMode::Plain,
+        )
+        .expect("plain fallback should execute the probe");
+        assert_eq!(report.warning.as_deref(), Some(NETWORK_ISOLATION_WARNING));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_sandbox_rejects_unavailable_fallback() {
+        let error = select_validation_mode(true, false).expect_err("required sandbox must fail");
+        assert!(error.contains("require_sandbox"));
+        assert!(error.contains("network isolation"));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn probe_has_no_network_by_default() {
+        if find_executable("bwrap").is_none() {
+            return;
+        }
         let result = validate_skill(&skill_with_script(
             "test \"$(grep -c '^[^[:space:]]' /proc/net/route)\" -eq 1",
         ));
@@ -187,7 +215,10 @@ mod tests {
     #[test]
     fn timeout_is_reported_and_bounded() {
         let started = std::time::Instant::now();
-        let result = validate_skill(&skill_with_script("sleep 30"));
+        let result = validate_skill_with_mode(
+            &skill_with_script("sleep 30"),
+            ValidationMode::Plain,
+        );
         let error = result.expect_err("long-running probe should time out");
         assert!(error.contains("timed out"));
         assert!(

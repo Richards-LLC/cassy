@@ -22,6 +22,7 @@ fn test_registry_has_all_sections() {
     assert!(sections.contains(&"coordination"));
     assert!(sections.contains(&"lease"));
     assert!(sections.contains(&"telemetry"));
+    assert!(sections.contains(&"skill_validation"));
 }
 
 #[test]
@@ -47,6 +48,8 @@ fn test_validate_bool() {
     assert!(reg.validate("sync.promotion_threshold", "1").is_err());
     assert!(reg.validate("sync.demotion_threshold", "2").is_ok());
     assert!(reg.validate("sync.demotion_threshold", "1").is_err());
+    assert!(reg.validate("skill_validation.require_sandbox", "true").is_ok());
+    assert!(reg.validate("skill_validation.require_sandbox", "maybe").is_err());
 }
 
 #[test]

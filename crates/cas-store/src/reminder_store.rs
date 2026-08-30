@@ -1,9 +1,10 @@
 //! Reminder storage for factory "Remind Me" feature
 //!
-//! Allows agents to schedule one-shot reminders that fire after a time delay
-//! or when a specific DirectorEvent occurs. The factory daemon checks pending
-//! reminders on each tick and delivers them via the prompt queue for PTY
-//! injection into the target agent's session.
+//! Allows agents to schedule one-shot reminders that fire after a time delay,
+//! when a specific DirectorEvent occurs, or when a durable external condition
+//! becomes true. The factory daemon checks pending reminders on each tick and
+//! delivers them via the prompt queue for PTY injection into the target
+//! agent's session.
 
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, params};
@@ -510,13 +511,15 @@ impl SqliteReminderStore {
 }
 
 fn expire_stale_with_conn(conn: &Connection) -> Result<usize> {
-    // Expire pending reminders where created_at + ttl_secs < now.
+    // Expire pending reminders where created_at + ttl_secs < now. A zero TTL
+    // is the durable, non-expiring form used by external-condition wakes.
     // Use datetime('now') on the RHS so both sides of the comparison use
     // SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format. Previously the RHS
     // was RFC 3339, whose 'T' separator made every reminder compare stale.
     let rows = conn.execute(
         "UPDATE reminders SET status = 'expired'
          WHERE status = 'pending'
+         AND ttl_secs > 0
          AND datetime(created_at, '+' || ttl_secs || ' seconds') < datetime('now')",
         [],
     )?;
@@ -1277,6 +1280,42 @@ mod tests {
         let pending = store.list_pending("supervisor-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message, "Will not expire");
+    }
+
+    #[test]
+    fn zero_ttl_reminder_survives_stale_expiry() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .create(
+                "supervisor-1",
+                None,
+                "wait for branch to land",
+                ReminderTriggerType::Event,
+                None,
+                Some("branch_contained_in"),
+                Some(&serde_json::json!({
+                    "commit": "abc123",
+                    "target_branch": "main"
+                })),
+                0,
+                Some("old-factory-session"),
+            )
+            .unwrap();
+        // Make the row older than any finite TTL. Zero must remain pending.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE reminders SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::days(30)).to_rfc3339(), id],
+            )
+            .unwrap();
+
+        assert_eq!(store.expire_stale().unwrap(), 0);
+        let pending = store.list_pending("supervisor-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].ttl_secs, 0);
     }
 
     #[test]

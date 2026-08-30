@@ -578,10 +578,11 @@ impl DaemonInitPhase {
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),
             last_prompt_poison_sweep: Some(Instant::now()),
-            resumed_epic_ids: std::collections::HashSet::new(),
-            spawn_started_at: None,
-            last_spawn_queue_stall_scan: None,
-            reported_stalled_spawn_requests: std::collections::HashSet::new(),
+        resumed_epic_ids: std::collections::HashSet::new(),
+        spawn_started_at: None,
+        last_spawn_queue_stall_scan: None,
+        last_external_wake_scan: None,
+        reported_stalled_spawn_requests: std::collections::HashSet::new(),
         })
     }
 

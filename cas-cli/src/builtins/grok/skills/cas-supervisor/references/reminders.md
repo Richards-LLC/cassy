@@ -52,7 +52,28 @@ cas__coordination action=remind remind_event=task_completed remind_ttl_secs=1800
 ```
 
 `task_completed` is a real event; vague hopes such as "when CI is ready" are
-not. External CI/release systems therefore use the time checkpoint above.
+not. For a parked delivery whose completion is an externally observable git
+condition, use the durable external triggers below instead of a finite timer.
+
+### Durable external checkpoint: branch or tag
+
+External conditions survive daemon/session restart and do not expire when
+`remind_ttl_secs` is omitted (`0` means no expiry). They require
+`cross_session=true` and a JSON filter:
+
+```
+cas__coordination action=remind remind_event=branch_contained_in \
+  remind_filter='{"commit":"<delivered-sha>","target_branch":"main"}' \
+  cross_session=true remind_message="Delivery landed; inspect task and close"
+
+cas__coordination action=remind remind_event=tag_exists \
+  remind_filter='{"tag":"v<release>"}' \
+  cross_session=true remind_message="Release tag exists; inspect the authoritative receipt"
+```
+
+The daemon checks these local git conditions on a bounded one-minute cadence
+and marks the reminder fired once the condition becomes true, delivering the
+existing supervisor notification and prompt-queue wake.
 
 ## Role patterns
 

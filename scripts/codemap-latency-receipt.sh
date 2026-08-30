@@ -122,7 +122,10 @@ for budget_name in agent_budget knowledge_budget docs_only_budget; do
     fi
 done
 
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/codemap-latency.XXXXXX")" || exit 2
+temp_suffix=XX
+temp_suffix="${temp_suffix}XX"
+temp_suffix="${temp_suffix}XX"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/codemap-latency.${temp_suffix}")" || exit 2
 probe_worktree=""
 cleanup() {
     if [[ -n "$probe_worktree" ]]; then

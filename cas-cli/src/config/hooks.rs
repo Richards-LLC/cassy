@@ -688,4 +688,15 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn rule_review_defaults_enabled_even_when_nested_config_is_omitted() {
+        assert!(StopHookConfig::default().rule_review_enabled);
+        let config: crate::config::Config = toml::from_str(
+            "[hooks.stop]\nrule_review_threshold = 7\n",
+        )
+        .expect("partial hook config should deserialize");
+        assert!(config.hooks().stop.rule_review_enabled);
+        assert_eq!(config.hooks().stop.rule_review_threshold, 7);
+    }
 }

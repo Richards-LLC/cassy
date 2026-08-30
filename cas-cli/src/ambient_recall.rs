@@ -3033,12 +3033,12 @@ mod tests {
 
     use super::*;
     use crate::test_support::TestEnvGuard;
-    use crate::types::{Entry, Task, TaskStatus};
+    use crate::types::{Entry, Rule, Task, TaskStatus};
     use cas_code::{CodeFile, CodeSymbol, Language, SymbolKind};
     use cas_store::{
         CodeStore, HistoryCommit, HistoryStore, IngestBatch, KnowledgePage, KnowledgeStore,
-        PageWrite, SOURCE_EMBEDDINGS, SqliteCodeStore, SqliteCodeVectorStore, SqliteHistoryStore,
-        SqliteKnowledgeStore,
+        PageWrite, RuleStore, SOURCE_EMBEDDINGS, SqliteCodeStore, SqliteCodeVectorStore,
+        SqliteHistoryStore, SqliteKnowledgeStore, SqliteSurfacedArtifactStore,
     };
 
     fn identity(role: RecallRole) -> RecallIdentity {
@@ -3469,6 +3469,51 @@ mod tests {
         );
         let ledger = RecallLedger::load(&ledger_path(&cas_root, &identity.session_id));
         assert!(ledger.seen.iter().all(|seen| seen.outcome_recorded));
+    }
+
+    #[test]
+    fn ambient_rule_surface_is_recorded_in_the_shared_ledger() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let rule_store = crate::store::open_rule_store_local(&cas_root).unwrap();
+        rule_store
+            .add(&Rule::new(
+                "ambient-rule".into(),
+                "Always surface the rule flywheel".into(),
+            ))
+            .unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "ambient-rule-session".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+
+        let packet = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("Please surface the rule flywheel"),
+            true,
+        )
+        .expect("the matching draft rule should be surfaced");
+        assert!(packet.full.contains("ambient-rule"));
+
+        let surfaced = SqliteSurfacedArtifactStore::open(&cas_root).unwrap();
+        assert_eq!(surfaced.count_for_session(&input.session_id).unwrap(), 1);
+        assert_eq!(
+            rule_store.get("ambient-rule").unwrap().surface_count,
+            1
+        );
+        let impact = surfaced.aggregate(10).unwrap();
+        assert_eq!(impact.len(), 1);
+        assert_eq!(impact[0].artifact_id, "ambient-rule");
+        assert_eq!(impact[0].surfaced_count, 1);
     }
 
     #[test]

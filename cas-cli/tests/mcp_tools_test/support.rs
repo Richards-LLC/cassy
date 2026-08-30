@@ -232,3 +232,15 @@ pub(crate) fn extract_skill_id(text: &str) -> Option<String> {
                 .map(ToString::to_string)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_skill_id;
+
+    #[test]
+    fn extract_skill_id_stops_before_degraded_validation_warning() {
+        let response = "Created skill: cas-skf7\nWARNING: network isolation is unavailable; bubblewrap was not found, so validation ran in degraded plain-shell mode";
+
+        assert_eq!(extract_skill_id(response).as_deref(), Some("cas-skf7"));
+    }
+}

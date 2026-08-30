@@ -397,9 +397,9 @@ fn section_is_allowed(rel: &str, flavor: &str, heading: &str) -> bool {
 const CODEMAP_SKILL_REL: &str = "skills/codemap/SKILL.md";
 
 /// Return the missing semantic requirements for the codemap knowledge-build
-/// workflow. This intentionally checks behavior (a kill-enforced <=90-second
-/// command, captured status, continuation, and explicit prohibitions) rather
-/// than requiring one exact prose spelling.
+/// workflow. This intentionally checks behavior (a Rust-enforced <=90-second
+/// command, portable status capture, continuation, and explicit
+/// prohibitions) rather than requiring one exact prose spelling.
 fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
     let lower = content.to_ascii_lowercase();
     let mut violations = Vec::new();
@@ -408,63 +408,41 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
         return vec!["knowledge-build command"];
     };
 
-    let build_start = build_line
-        .find("cas knowledge build")
-        .expect("build line was selected by its command marker");
-    let command_prefix = &build_line[..build_start];
-    let command_tokens: Vec<&str> = command_prefix.split_whitespace().collect();
-    let timeout_index = command_tokens.iter().position(|token| *token == "timeout");
-
-    let Some(timeout_index) = timeout_index else {
-        violations.push("hard timeout");
-        // The remaining checks are still useful for reporting all missing
-        // contract pieces in one assertion.
-        if !build_line.contains("--max-sources 5") {
-            violations.push("max-sources limit");
-        }
-        if build_line.trim_end().ends_with('&') {
-            violations.push("no detached/background command");
-        }
+    let build_tokens: Vec<&str> = build_line
+        .split(|character: char| character.is_whitespace() || matches!(character, ';' | '`'))
+        .filter(|token| !token.is_empty())
+        .collect();
+    let Some(cas_index) = build_tokens.iter().position(|token| *token == "cas") else {
+        violations.push("knowledge-build command");
         return violations;
     };
+    let command_tokens = &build_tokens[cas_index..];
+
+    if build_tokens[..cas_index]
+        .iter()
+        .any(|token| matches!(*token, "timeout" | "/usr/bin/timeout" | "gtimeout"))
+    {
+        violations.push("portable Rust timeout");
+    }
 
     let mut bound_seconds = None;
-    let mut kill_signal = false;
-    let mut expect_signal_value = false;
-    for token in command_tokens.iter().skip(timeout_index + 1) {
-        if expect_signal_value {
-            kill_signal = matches!(*token, "kill" | "9");
-            expect_signal_value = false;
-            continue;
-        }
-        if *token == "--signal=kill" || *token == "-skill" {
-            kill_signal = true;
-            continue;
-        }
-        if *token == "--signal" || *token == "-s" {
-            expect_signal_value = true;
-            continue;
-        }
-        if let Some(seconds) = token.strip_suffix('s')
-            && !seconds.is_empty()
-            && seconds.chars().all(|c| c.is_ascii_digit())
-        {
-            bound_seconds = seconds.parse::<u64>().ok();
+    for (index, token) in command_tokens.iter().enumerate() {
+        if *token == "--timeout-secs" {
+            bound_seconds = command_tokens.get(index + 1).and_then(|value| value.parse().ok());
+        } else if let Some(value) = token.strip_prefix("--timeout-secs=") {
+            bound_seconds = value.parse().ok();
         }
     }
-
     match bound_seconds {
         Some(seconds) if (1..=90).contains(&seconds) => {}
-        Some(_) => violations.push("<=90-second bound"),
-        None => violations.push("explicit seconds bound"),
-    }
-    if !kill_signal {
-        violations.push("hard kill at timeout");
+        Some(_) => violations.push("<=90-second Rust timeout bound"),
+        None => violations.push("--timeout-secs bound"),
     }
     if !build_line.contains("--max-sources 5") {
         violations.push("max-sources limit");
     }
-    if build_line.trim_end().ends_with('&')
+    if build_tokens[cas_index..].iter().any(|token| *token == "&")
+        || build_line.trim_end().ends_with('&')
         || build_line.contains("nohup")
         || build_line.contains("setsid")
         || build_line.contains("disown")
@@ -493,7 +471,13 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
     {
         violations.push("durable exit receipt");
     }
-    if !lower.contains("set +e") || !lower.contains("build_exit_status") {
+    if lower.contains("set +e") || lower.contains("set -e") {
+        violations.push("no caller-shell errexit mutation");
+    }
+    if !lower.contains("if cas knowledge build")
+        || !lower.contains("else")
+        || !lower.contains("build_exit_status=$?")
+    {
         violations.push("failure-tolerant status capture");
     }
     if !has_negated_directive(&["detach", "background", "build"])
@@ -523,19 +507,20 @@ fn codemap_build_contract_is_bounded_non_blocking_and_non_detached() {
     }
 }
 
-/// The semantic guard must reject the two regressions that motivated it even
+/// The semantic guard must reject the portability and lifecycle regressions that motivated it even
 /// when all three flavors would otherwise remain textually synchronized.
 #[test]
-fn codemap_build_contract_rejects_unbounded_and_detached_variants() {
+fn codemap_build_contract_rejects_portability_and_lifecycle_variants() {
     let valid = r#"
 ```bash
-set +e
-timeout --preserve-status --signal=KILL 90s cas knowledge build --max-sources 5
-build_exit_status=$?
-set -e
+if cas knowledge build --timeout-secs 90 --max-sources 5; then
+  build_exit_status=0
+else
+  build_exit_status=$?
+fi
 ```
 
-If the command returns a non-zero exit status, record the durable receipt in task notes and continue with the CODEMAP commit and cas codemap status proof; this is non-blocking.
+If the command returns a non-zero exit status, record the durable receipt in task notes and continue with the CODEMAP commit and cas codemap status proof; this is non-blocking. Rust terminates the process group so a stalled build leaves no orphan descendant.
 Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound.
 "#;
     assert!(
@@ -543,16 +528,38 @@ Do not detach or background the build, run a manual polling loop, or wait beyond
         "the checker must accept equivalent valid contract prose"
     );
 
-    let unbounded = valid.replace("timeout --preserve-status --signal=KILL 90s ", "");
+    let unbounded = valid.replace("--timeout-secs 90", "");
     assert!(
-        codemap_build_contract_violations(&unbounded).contains(&"hard timeout"),
+        codemap_build_contract_violations(&unbounded).contains(&"--timeout-secs bound"),
         "an unbounded knowledge build must be rejected"
     );
 
-    let detached = valid.replace("cas knowledge build --max-sources 5", "cas knowledge build --max-sources 5 &");
+    let detached = valid.replace(
+        "cas knowledge build --timeout-secs 90 --max-sources 5",
+        "cas knowledge build --timeout-secs 90 --max-sources 5 &",
+    );
     assert!(
         codemap_build_contract_violations(&detached).contains(&"no detached/background command"),
         "a detached/background knowledge build must be rejected"
+    );
+
+    let gnu_timeout = valid.replace(
+        "if cas knowledge build",
+        "if timeout 90s cas knowledge build",
+    );
+    assert!(
+        codemap_build_contract_violations(&gnu_timeout).contains(&"portable Rust timeout"),
+        "a GNU timeout wrapper must be rejected"
+    );
+
+    let shell_mutation = valid.replace(
+        "if cas knowledge build --timeout-secs 90 --max-sources 5; then",
+        "set +e\ncas knowledge build --timeout-secs 90 --max-sources 5\nset -e\nif true; then",
+    );
+    assert!(
+        codemap_build_contract_violations(&shell_mutation)
+            .contains(&"no caller-shell errexit mutation"),
+        "status capture must not mutate the caller shell's errexit mode"
     );
 }
 

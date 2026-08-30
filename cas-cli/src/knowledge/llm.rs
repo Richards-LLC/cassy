@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
 
+use crate::bounded_process::{configure_process_group, terminate_process_group};
+
 /// Why a distillation call could not produce text.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -131,6 +133,13 @@ impl LlmRunner for ClaudeCliRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
+        // Put the provider and all ordinary descendants in a private process
+        // group. A direct `Child::kill` leaves a stalled provider descendant
+        // holding our capture files (and possibly stdin) open on Unix/macOS.
+        // The shared bounded-process primitive kills the group and reaps the
+        // direct child at the deadline; non-Unix targets retain direct-child
+        // cleanup through the same API.
+        configure_process_group(&mut command);
         if let Some(model) = &self.model {
             command.arg("--model").arg(model);
         }
@@ -154,13 +163,13 @@ impl LlmRunner for ClaudeCliRunner {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_process_group(&mut child);
                         break None;
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => {
+                    terminate_process_group(&mut child);
                     return Err(LlmError::Failed(format!("wait failed: {error}")));
                 }
             }
@@ -369,6 +378,41 @@ mod tests {
         }
         assert!(started.elapsed() < Duration::from_secs(10), "deadline not enforced");
         assert_eq!(runner.calls(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_provider_group_leaves_no_stalled_descendant() {
+        let stub_dir = tempfile::tempdir().expect("stub dir");
+        let child_pid_file = stub_dir.path().join("child.pid");
+        let script = format!(
+            "(sleep 30) & child_pid=$!; echo $child_pid > '{}'; wait",
+            child_pid_file.display()
+        );
+        let (_provider_dir, binary) = stub(&script);
+        let runner = runner_for(&binary, Duration::from_millis(300));
+        let started = Instant::now();
+        let result = runner.complete("hi");
+        assert!(matches!(result, Err(LlmError::Failed(message)) if message.contains("timed out")));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "stalled provider must be bounded, took {:?}",
+            started.elapsed()
+        );
+
+        let child_pid = std::fs::read_to_string(&child_pid_file)
+            .expect("provider must start its descendant before the deadline")
+            .trim()
+            .parse::<u32>()
+            .expect("child pid");
+        // Give the kernel a short opportunity to reap the group member, then
+        // make one liveness probe. The codemap workflow itself never polls.
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = unsafe { libc::kill(child_pid as i32, 0) == 0 };
+        assert!(
+            !alive,
+            "timed-out provider descendant {child_pid} is still alive"
+        );
     }
 
     #[cfg(unix)]

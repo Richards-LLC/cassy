@@ -141,13 +141,14 @@ If a pointer already exists with the same name, update it. Do not create duplica
 `.claude/CODEMAP.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
 
 ```bash
-set +e
-timeout --preserve-status --signal=KILL 90s cas knowledge build --max-sources 5
-build_exit_status=$?
-set -e
+if cas knowledge build --timeout-secs 90 --max-sources 5; then
+  build_exit_status=0
+else
+  build_exit_status=$?
+fi
 ```
 
-The command is deliberately best effort. If it times out (exit status 137) or returns any other non-zero exit status, record the durable receipt in task notes with the command and exit status, then continue with the CODEMAP commit and `cas codemap status` proof; a failed build is non-blocking and may leave the knowledge page stale or missing.
+The command is deliberately best effort. If it returns a non-zero exit status, record the durable receipt in task notes with the command and exit status, then continue with the CODEMAP commit and `cas codemap status` proof; a failed build is non-blocking and may leave the knowledge page stale or missing. Rust enforces the 90-second provider bound and terminates its process group, so a stalled build leaves no orphan descendant.
 
 Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound. This is one bounded invocation observed once. Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
 

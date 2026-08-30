@@ -1,9 +1,19 @@
 use crate::hooks::handlers::*;
 
+fn source_ids_for_session(store: &dyn Store, session_id: &str) -> Result<Vec<String>, MemError> {
+    Ok(store
+        .list_by_session(session_id)?
+        .into_iter()
+        .filter(|entry| entry.entry_type == EntryType::Observation)
+        .map(|entry| entry.id)
+        .collect())
+}
+
 pub fn synthesize_with_ai_sync(
     cas_root: &std::path::Path,
     buffered: &[crate::tracing::BufferedObservation],
     session_id: &str,
+    source_ids: &[String],
 ) -> Result<usize, MemError> {
     use std::time::Duration;
     use tokio::runtime::Runtime;
@@ -15,7 +25,7 @@ pub fn synthesize_with_ai_sync(
     rt.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(5),
-            synthesize_with_ai_async(cas_root, buffered, session_id),
+            synthesize_with_ai_async(cas_root, buffered, session_id, source_ids),
         )
         .await
         .map_err(|_| MemError::Other("AI buffer synthesis timed out after 5s".to_string()))?
@@ -30,6 +40,7 @@ async fn synthesize_with_ai_async(
     cas_root: &std::path::Path,
     buffered: &[crate::tracing::BufferedObservation],
     session_id: &str,
+    source_ids: &[String],
 ) -> Result<usize, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
     use crate::types::EntryType;
@@ -120,6 +131,7 @@ Respond with JSON only:
             content: learning.content,
             tags,
             session_id: Some(session_id.to_string()),
+            source_ids: source_ids.to_vec(),
             importance: learning.importance.unwrap_or(0.5),
             ..Default::default()
         };
@@ -144,6 +156,19 @@ pub fn synthesize_buffered_observations(
     buffered: &[crate::tracing::BufferedObservation],
     session_id: &str,
 ) -> Result<usize, MemError> {
+    let store = open_store(cas_root)?;
+    let source_ids = source_ids_for_session(store.as_ref(), session_id)?;
+    synthesize_buffered_observations_with_sources(cas_root, buffered, session_id, &source_ids)
+}
+
+/// Synthesize buffered observations while retaining the raw observation IDs
+/// captured by the caller before session cleanup archives older observations.
+pub fn synthesize_buffered_observations_with_sources(
+    cas_root: &std::path::Path,
+    buffered: &[crate::tracing::BufferedObservation],
+    session_id: &str,
+    source_ids: &[String],
+) -> Result<usize, MemError> {
     use crate::types::EntryType;
 
     // Try AI synthesis first if enabled and we have enough observations
@@ -156,7 +181,7 @@ pub fn synthesize_buffered_observations(
             .unwrap_or(false);
 
         if use_ai && buffered.len() >= 3 {
-            match synthesize_with_ai_sync(cas_root, buffered, session_id) {
+            match synthesize_with_ai_sync(cas_root, buffered, session_id, source_ids) {
                 Ok(count) if count > 0 => return Ok(count),
                 Ok(_) => {} // Fall through to rule-based
                 Err(e) => eprintln!("cas: AI synthesis failed, using rule-based: {e}"),
@@ -199,6 +224,7 @@ pub fn synthesize_buffered_observations(
             content,
             tags: vec!["session-errors".to_string(), "synthesized".to_string()],
             session_id: Some(session_id.to_string()),
+            source_ids: source_ids.to_vec(),
             importance: 0.7, // Errors are valuable learnings
             ..Default::default()
         };
@@ -234,6 +260,7 @@ pub fn synthesize_buffered_observations(
                 content,
                 tags: vec!["files-created".to_string(), "synthesized".to_string()],
                 session_id: Some(session_id.to_string()),
+                source_ids: source_ids.to_vec(),
                 importance: 0.5,
                 ..Default::default()
             };
@@ -269,6 +296,7 @@ pub fn synthesize_buffered_observations(
             content,
             tags: vec!["significant-edits".to_string(), "synthesized".to_string()],
             session_id: Some(session_id.to_string()),
+            source_ids: source_ids.to_vec(),
             importance: 0.4,
             ..Default::default()
         };
@@ -305,6 +333,7 @@ pub fn synthesize_buffered_observations(
             content,
             tags: vec!["build-success".to_string(), "synthesized".to_string()],
             session_id: Some(session_id.to_string()),
+            source_ids: source_ids.to_vec(),
             importance: 0.3,
             ..Default::default()
         };

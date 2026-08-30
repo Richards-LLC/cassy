@@ -72,6 +72,12 @@ impl SkillSyncer {
             "description: {}\n",
             escape_yaml(&frontmatter_desc)
         ));
+        if !skill.source_ids.is_empty() {
+            content.push_str("source_ids:\n");
+            for source_id in &skill.source_ids {
+                content.push_str(&format!("  - {}\n", escape_yaml(source_id)));
+            }
+        }
         // Add user-invocable: false if skill should not appear in slash menu
         // (Claude Code now shows skills in slash menu by default)
         if !skill.invokable {
@@ -520,6 +526,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, CasError> {
 
     let allowed_tools = extract_yaml_list(&frontmatter, "allowed-tools");
     let disallowed_tools = extract_yaml_list(&frontmatter, "disallowed-tools");
+    let source_ids = extract_yaml_list(&frontmatter, "source_ids");
 
     let disable_model_invocation = extract_yaml_value(&frontmatter, "disable-model-invocation")
         .map(|v| v == "true")
@@ -545,6 +552,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, CasError> {
     skill.agent_type = agent_type;
     skill.allowed_tools = allowed_tools;
     skill.disallowed_tools = disallowed_tools;
+    skill.source_ids = source_ids;
     skill.disable_model_invocation = disable_model_invocation;
     skill.status = SkillStatus::Enabled;
     skill.skill_type = if managed_by_cas {
@@ -614,6 +622,18 @@ fn extract_yaml_list(frontmatter: &str, key: &str) -> Vec<String> {
         let trimmed = line.trim();
 
         if trimmed.starts_with(key) && trimmed.contains(':') {
+            let value = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim())
+                .unwrap_or_default();
+            if value.starts_with('[') && value.ends_with(']') {
+                return value[1..value.len() - 1]
+                    .split(',')
+                    .map(|item| item.trim().trim_matches('"').trim_matches('\''))
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
             in_list = true;
             continue;
         }

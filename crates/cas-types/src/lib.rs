@@ -45,6 +45,7 @@ mod lease;
 mod loop_state;
 mod preview;
 mod prompt;
+pub mod provenance;
 mod public_identifier;
 mod recording;
 mod rule;
@@ -81,6 +82,7 @@ pub use file_change::{ChangeType, FileChange};
 pub use lease::{ClaimResult, LeaseStatus, TaskLease, WorktreeClaimResult, WorktreeLease};
 pub use loop_state::{Loop, LoopStatus};
 pub use prompt::{AgentInfo, Message, MessageRole, Prompt};
+pub use provenance::merge_source_ids;
 pub use public_identifier::{
     PublicUpstreamIdResolution, is_generated_public_upstream_id, public_tool_id, public_tool_ids,
     public_upstream_id, public_upstream_ids, resolve_public_upstream_id,

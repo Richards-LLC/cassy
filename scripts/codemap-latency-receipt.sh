@@ -163,6 +163,7 @@ knowledge_seconds=0
 knowledge_status=0
 readiness_seconds=0
 readiness_status=0
+readiness_mode=unknown
 docs_local_seconds=0
 docs_local_status=0
 
@@ -215,7 +216,14 @@ phase_readiness() {
     git -C "$repo_root" diff --check || return 1
     git -C "$repo_root" diff --cached --check || return 1
     git -C "$repo_root" rev-parse --verify HEAD >/dev/null || return 1
-    git -C "$repo_root" symbolic-ref --quiet --short HEAD >/dev/null || return 1
+    if git -C "$repo_root" symbolic-ref --quiet --short HEAD >/dev/null; then
+        readiness_mode=local-named-branch
+    elif [[ "$github_verification_context" == true ]]; then
+        readiness_mode=github-actions-verification-detached
+    else
+        readiness_mode=detached-rejected
+        return 1
+    fi
     git -C "$repo_root" remote get-url origin >/dev/null || return 1
     test -f "$codemap_path"
 }
@@ -257,6 +265,26 @@ elif grep -qF 'CODEMAP.md: not found' "$tmp/static.log"; then
     freshness_status=missing
 fi
 run_phase knowledge phase_knowledge
+github_verification_context=false
+verification_ref=false
+case "${GITHUB_EVENT_NAME:-}" in
+    merge_group)
+        [[ "${GITHUB_REF:-}" =~ ^refs/heads/gh-readonly-queue/[^/]+/pr-[^/]+$ ]] && verification_ref=true
+        ;;
+    schedule|workflow_dispatch)
+        [[ "${GITHUB_REF:-}" =~ ^refs/heads/.+$ ]] && verification_ref=true
+        ;;
+    push)
+        [[ "${GITHUB_REF:-}" == refs/heads/main || "${GITHUB_REF:-}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] && verification_ref=true
+        ;;
+esac
+if [[ "${GITHUB_ACTIONS:-}" == true \
+    && "${GITHUB_WORKFLOW:-}" == CI \
+    && "${GITHUB_JOB:-}" == fast-validation-preflight \
+    && "${GITHUB_REPOSITORY:-}" == Richards-LLC/cassy \
+    && "$verification_ref" == true ]]; then
+    github_verification_context=true
+fi
 run_phase readiness phase_readiness
 run_phase docs phase_docs_only
 
@@ -373,6 +401,7 @@ receipt="$tmp/receipt.env"
     printf 'KNOWLEDGE_BUILD_WITHIN_BUDGET=%s\n' "$knowledge_within_budget"
     printf 'LOCAL_COMMIT_PUSH_READINESS_SECONDS=%s\n' "$readiness_seconds"
     printf 'LOCAL_COMMIT_PUSH_READINESS_EXIT_STATUS=%s\n' "$readiness_status"
+    printf 'READINESS_MODE=%s\n' "$readiness_mode"
     printf 'AGENT_CONTROLLED_TOTAL_SECONDS=%s\n' "$agent_total"
     printf 'AGENT_CONTROLLED_CANONICAL_BUDGET_SECONDS=%s\n' "$canonical_agent_budget"
     printf 'AGENT_CONTROLLED_BUDGET_SECONDS=%s\n' "$agent_budget"

@@ -5,7 +5,18 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 receipt="$script_dir/codemap-latency-receipt.sh"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+named_worktree=""
+detached_worktree=""
+cleanup() {
+    if [[ -n "$detached_worktree" ]]; then
+        git worktree remove --force "$detached_worktree" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$named_worktree" ]]; then
+        git worktree remove --force "$named_worktree" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
 
 pass=0
 fail=0
@@ -89,16 +100,20 @@ fi
 EOF
 chmod +x "$tmp/fake-gh"
 
+named_worktree="$tmp/named-worktree"
+git worktree add --quiet -b "codemap-latency-self-test-$$" "$named_worktree" HEAD
+
 export CAS_BIN="$tmp/fake-cas"
 export GH_BIN="$tmp/fake-gh"
 export CLOCK_STATE="$tmp/clock-state"
 export CODEMAP_LATENCY_CLOCK="$tmp/fake-clock"
 
 artifact="$tmp/receipt.env"
-out="$(CLOCK_STEP=1 "$receipt" --artifact "$artifact" --github-run-id 123 --github-repo example/repo)"
+out="$(CLOCK_STEP=1 "$receipt" --repo-root "$named_worktree" --artifact "$artifact" --github-run-id 123 --github-repo example/repo)"
 expect_field "$out" CODEMAP_RENDER_STATUS identical 'a no-op render is recognized as identical'
 expect_field "$out" NO_CONTENT_CHANGE_PRESERVED true 'identical render preserves the no-content rule'
 expect_field "$out" CODEMAP_FRESHNESS_STATUS up-to-date 'up-to-date freshness is recorded'
+expect_field "$out" READINESS_MODE local-named-branch 'named-branch local readiness is labeled'
 expect_field "$out" KNOWLEDGE_BUILD_BUDGET_SECONDS 90 'knowledge build defaults to a 90-second bound'
 expect_field "$out" KNOWLEDGE_BUILD_WITHIN_BUDGET true 'knowledge build is within its bound'
 expect_field "$out" AGENT_CONTROLLED_TOTAL_SECONDS 4 'agent-controlled phases exclude docs and queue time'
@@ -118,7 +133,7 @@ fi
 printf '%s\n' 'changed render' >"$tmp/changed-CODEMAP.md"
 before_hash="$(shasum -a 256 .claude/CODEMAP.md)"
 set +e
-CLOCK_STATE="$tmp/changed-clock-state" CLOCK_STEP=1 "$receipt" --rendered-path "$tmp/changed-CODEMAP.md" >"$tmp/changed.out" 2>&1
+CLOCK_STATE="$tmp/changed-clock-state" CLOCK_STEP=1 "$receipt" --repo-root "$named_worktree" --rendered-path "$tmp/changed-CODEMAP.md" >"$tmp/changed.out" 2>&1
 changed_status=$?
 set -e
 after_hash="$(shasum -a 256 .claude/CODEMAP.md)"
@@ -128,7 +143,7 @@ if [[ "$before_hash" == "$after_hash" ]]; then ok 'changed render never modifies
 # Four local agent phases at 76 seconds each exceed 300 seconds while the
 # bounded knowledge phase itself remains under 90 seconds.
 set +e
-CLOCK_STATE="$tmp/slow-clock-state" CLOCK_STEP=76 "$receipt" --github-run-id 123 --github-repo example/repo >"$tmp/slow.out" 2>&1
+CLOCK_STATE="$tmp/slow-clock-state" CLOCK_STEP=76 "$receipt" --repo-root "$named_worktree" --github-run-id 123 --github-repo example/repo >"$tmp/slow.out" 2>&1
 slow_status=$?
 set -e
 slow_output="$(<"$tmp/slow.out")"
@@ -138,7 +153,7 @@ expect_field "$slow_output" AGENT_CONTROLLED_WITHIN_BUDGET false 'agent budget f
 expect_field "$slow_output" KNOWLEDGE_BUILD_WITHIN_BUDGET true 'knowledge bound remains independent of agent total'
 
 set +e
-CODEMAP_AGENT_BUDGET_SECONDS=0 "$receipt" >/dev/null 2>&1
+CODEMAP_AGENT_BUDGET_SECONDS=0 "$receipt" --repo-root "$named_worktree" >/dev/null 2>&1
 invalid_status=$?
 set -e
 if [[ "$invalid_status" -eq 2 ]]; then ok 'invalid budget is rejected'; else bad "invalid budget exited $invalid_status"; fi
@@ -149,7 +164,7 @@ for budget_case in \
     'CODEMAP_DOCS_ONLY_BUDGET_SECONDS 61 docs-only budget above canonical maximum'; do
     read -r budget_name budget_value budget_label <<<"$budget_case"
     set +e
-    env "$budget_name=$budget_value" "$receipt" >/dev/null 2>&1
+    env "$budget_name=$budget_value" "$receipt" --repo-root "$named_worktree" >/dev/null 2>&1
     budget_status=$?
     set -e
     if [[ "$budget_status" -eq 2 ]]; then ok "$budget_label is rejected"; else bad "$budget_label exited $budget_status"; fi
@@ -162,7 +177,7 @@ lower_output="$(
     CODEMAP_KNOWLEDGE_BUDGET_SECONDS=1 \
     CODEMAP_DOCS_ONLY_BUDGET_SECONDS=1 \
     CLOCK_STATE="$tmp/lower-clock-state" CLOCK_STEP=0 \
-    "$receipt"
+    "$receipt" --repo-root "$named_worktree"
 )"
 lower_status=$?
 set -e
@@ -176,7 +191,7 @@ for freshness_case in stale missing; do
     freshness_output="$(
         FAKE_CODEMAP_STATUS="$freshness_case" \
         CLOCK_STATE="$tmp/$freshness_case-clock-state" CLOCK_STEP=0 \
-        "$receipt"
+        "$receipt" --repo-root "$named_worktree"
     )"
     freshness_status=$?
     set -e
@@ -189,13 +204,44 @@ set +e
 exact_output="$(
     FAKE_REQUIRED_SECONDS=60 \
     CLOCK_STATE="$tmp/exact-clock-state" CLOCK_STEP=0 \
-    "$receipt" --github-run-id 123 --github-repo example/repo
+    "$receipt" --repo-root "$named_worktree" --github-run-id 123 --github-repo example/repo
 )"
 exact_status=$?
 set -e
 if [[ "$exact_status" -ne 0 ]]; then ok 'exactly 60 seconds required compute exits non-zero'; else bad 'exactly 60 seconds required compute exited zero'; fi
 expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_SECONDS 60 'exact-bound required compute is measured'
 expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_WITHIN_BUDGET false 'exact-bound required compute fails strict docs contract'
+
+# A detached checkout remains invalid for an ordinary local rehearsal.
+detached_worktree="$tmp/detached-worktree"
+git worktree add --quiet --detach "$detached_worktree" HEAD
+set +e
+detached_local_output="$(
+    CLOCK_STATE="$tmp/detached-local-clock-state" CLOCK_STEP=0 \
+    "$receipt" --repo-root "$detached_worktree"
+)"
+detached_local_status=$?
+set -e
+if [[ "$detached_local_status" -ne 0 ]]; then ok 'local detached checkout exits non-zero'; else bad 'local detached checkout exited zero'; fi
+expect_field "$detached_local_output" READINESS_MODE detached-rejected 'local detached readiness is labeled as rejected'
+
+# The exact CI preflight identity is the only detached-checkout exception.
+set +e
+detached_ci_output="$(
+    GITHUB_ACTIONS=true \
+    GITHUB_WORKFLOW=CI \
+    GITHUB_JOB=fast-validation-preflight \
+    GITHUB_REPOSITORY=Richards-LLC/cassy \
+    GITHUB_EVENT_NAME=merge_group \
+    GITHUB_REF=refs/heads/gh-readonly-queue/main/pr-123-abc \
+    CLOCK_STATE="$tmp/detached-ci-clock-state" CLOCK_STEP=0 \
+    "$receipt" --repo-root "$detached_worktree"
+)"
+detached_ci_status=$?
+set -e
+if [[ "$detached_ci_status" -eq 0 ]]; then ok 'exact CI detached checkout passes'; else bad "exact CI detached checkout exited $detached_ci_status"; fi
+expect_field "$detached_ci_output" READINESS_MODE github-actions-verification-detached 'CI detached readiness is labeled separately'
+expect_field "$detached_ci_output" LOCAL_COMMIT_PUSH_READINESS_EXIT_STATUS 0 'CI detached readiness completes the verification checks'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

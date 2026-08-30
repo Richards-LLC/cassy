@@ -250,14 +250,19 @@ fn test_stop_not_blocked_below_rule_threshold() {
     }
 }
 
-/// Test that Stop is not blocked when rule_review is disabled (default)
+/// Test that Stop is not blocked when rule_review is explicitly disabled.
 #[test]
 #[ignore = "CLI commands removed - tests need MCP fixtures"]
-fn test_stop_not_blocked_without_rule_review_config() {
+fn test_stop_not_blocked_with_rule_review_disabled() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Don't enable rule_review (use default config)
+    // Preserve the explicit opt-out contract while the default is enabled.
+    let config_path = temp.path().join(".cas/config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n[hooks.stop]\nrule_review_enabled = false\n");
+    std::fs::write(&config_path, config).unwrap();
+
     let session_id = "no-rule-review-session";
 
     // Add several draft rules
@@ -275,7 +280,7 @@ fn test_stop_not_blocked_without_rule_review_config() {
             .or(json["stop_reason"].as_str())
             .unwrap_or("");
 
-        // Should not be blocked for rule review
+        // Should not be blocked for rule review when explicitly disabled.
         assert!(
             !stop_reason.contains("rule-review"),
             "Should not be blocked for rule review when disabled. Got: {}",

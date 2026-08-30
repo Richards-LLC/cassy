@@ -478,16 +478,16 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
             key: "hooks.stop.rule_review_enabled",
             section: "hooks.stop",
             name: "Rule Review Enabled",
-            description: "Block stop to review draft rules. When enabled and draft rules exceed the threshold, spawns a rule-reviewer subagent.",
+            description: "Block stop to review draft rules by default. Factory workers are exempt; when enabled and draft rules exceed the threshold, spawns a rule-reviewer subagent.",
             value_type: ConfigType::Bool,
-            default: "false",
+            default: "true",
             constraint: Constraint::None,
             advanced: false,
             requires_feature: None,
             keywords: &["rule", "review", "stop", "block", "draft", "subagent"],
             use_cases: &[
-                "Enable to ensure draft rules are promoted or archived",
-                "Enable to maintain rule quality over time",
+                "Leave enabled to ensure draft rules are promoted or archived",
+                "Disable when rule review should be handled by scheduled maintenance",
             ],
         });
 

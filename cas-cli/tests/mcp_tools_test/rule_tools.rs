@@ -325,6 +325,38 @@ async fn test_rule_helpful_requires_evidence_threshold() {
 }
 
 #[tokio::test]
+async fn test_rule_helpful_promotes_draft_to_proven_at_default_threshold() {
+    let (_temp, service) = setup_cas();
+
+    let result = service
+        .cas_rule_create(Parameters(RuleCreateRequest {
+            scope: "project".to_string(),
+            content: "End-to-end helpful promotion rule".to_string(),
+            paths: None,
+            tags: None,
+            source_ids: None,
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+        }))
+        .await
+        .unwrap();
+    let id = extract_rule_id(&extract_text(result)).expect("rule ID");
+
+    for expected_status in [RuleStatus::Draft, RuleStatus::Proven] {
+        let feedback = service
+            .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+        assert!(extract_text(feedback).contains("helpful"));
+        let rule = open_rule_store(&_temp.path().join(".cas"))
+            .unwrap()
+            .get(&id)
+            .unwrap();
+        assert_eq!(rule.status, expected_status);
+    }
+}
+
+#[tokio::test]
 async fn test_rule_helpful_promotes_at_configured_threshold() {
     let (_temp, service) = setup_cas();
     std::fs::write(

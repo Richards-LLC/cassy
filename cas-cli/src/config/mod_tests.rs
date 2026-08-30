@@ -27,6 +27,12 @@ fn test_config_defaults() {
             .get("skill_validation.require_sandbox")
             .is_some()
     );
+    assert!(config.hooks().stop.rule_review_enabled);
+    let rule_review = meta::registry()
+        .get("hooks.stop.rule_review_enabled")
+        .expect("rule review config metadata");
+    assert_eq!(rule_review.default, "true");
+    assert!(rule_review.description.contains("Factory workers are exempt"));
 }
 
 #[test]

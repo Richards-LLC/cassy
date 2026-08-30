@@ -217,18 +217,32 @@ if [[ "$exact_status" -ne 0 ]]; then ok 'exactly 60 seconds required compute exi
 expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_SECONDS 60 'exact-bound required compute is measured'
 expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_WITHIN_BUDGET false 'exact-bound required compute fails strict docs contract'
 
-# A detached checkout remains invalid for an ordinary local rehearsal.
+# A detached checkout remains invalid for an ordinary local rehearsal, even
+# when the test process itself has inherited the complete CI identity.
 detached_worktree="$tmp/detached-worktree"
 git worktree add --quiet --detach "$detached_worktree" HEAD
 set +e
 detached_local_output="$(
-    CLOCK_STATE="$tmp/detached-local-clock-state" CLOCK_STEP=0 \
-    "$receipt" --repo-root "$detached_worktree"
+    env \
+        GITHUB_ACTIONS=true \
+        GITHUB_WORKFLOW=CI \
+        GITHUB_JOB=fast-validation-preflight \
+        GITHUB_REPOSITORY=Richards-LLC/cassy \
+        GITHUB_EVENT_NAME=merge_group \
+        GITHUB_REF=refs/heads/gh-readonly-queue/main/pr-123-abc \
+        env -u GITHUB_ACTIONS \
+        -u GITHUB_WORKFLOW \
+        -u GITHUB_JOB \
+        -u GITHUB_REPOSITORY \
+        -u GITHUB_EVENT_NAME \
+        -u GITHUB_REF \
+        CLOCK_STATE="$tmp/detached-local-clock-state" CLOCK_STEP=0 \
+        "$receipt" --repo-root "$detached_worktree"
 )"
 detached_local_status=$?
 set -e
-if [[ "$detached_local_status" -ne 0 ]]; then ok 'local detached checkout exits non-zero'; else bad 'local detached checkout exited zero'; fi
-expect_field "$detached_local_output" READINESS_MODE detached-rejected 'local detached readiness is labeled as rejected'
+if [[ "$detached_local_status" -ne 0 ]]; then ok 'ambient CI cannot contaminate local detached checkout'; else bad 'ambient CI contaminated local detached checkout'; fi
+expect_field "$detached_local_output" READINESS_MODE detached-rejected 'ambient-CI local detached readiness is labeled as rejected'
 
 # The exact CI preflight identity is the only detached-checkout exception.
 set +e

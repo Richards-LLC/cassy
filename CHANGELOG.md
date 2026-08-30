@@ -7,6 +7,35 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-08-30
+
+### Added
+- Refreshed the generated `.claude/CODEMAP.md` navigation map and added a
+  bounded codemap-latency receipt that proves no content change, freshness,
+  local commit/push readiness, and the required protected-PR compute budget.
+- Added `cas knowledge build --timeout-secs <seconds>` with a 90-second default
+  and a single deadline covering the complete build, including source
+  processing, model calls, merges, and post-commit repair.
+- Added process-group cleanup for knowledge providers so a timed-out provider
+  and its ordinary descendants are terminated and reaped, plus regression
+  tests for the timeout, receipt, freshness, and no-write contracts.
+
+### Changed
+- Protected pull requests now run only the required Fast Validation and macOS
+  Check paths; heavy compile lanes remain on main, scheduled, or explicitly
+  dispatched runs. First branch pushes use the protected default branch as a
+  trusted comparison base, while merge-queue jobs use their event base SHA.
+- Updated the Claude, Codex, and Grok codemap skills to invoke the bounded
+  knowledge build as best effort, record its exit status, and continue with
+  codemap status proof when knowledge distillation is unavailable or times out.
+
+### Fixed
+- Codemap latency validation now labels detached GitHub Actions readiness
+  separately from ordinary local readiness and rejects stale or missing
+  freshness proofs without touching `CODEMAP.md`.
+- Added regression coverage for review fixes that intentionally delete content
+  after a task parks, preserving the final-tree merge proof contract.
+
 ## [3.7.0] - 2026-08-30
 
 ### Added
@@ -1496,7 +1525,9 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ### Added
 - Initial stable release with core functionality.
 
-[Unreleased]: https://github.com/pippenz/cas/compare/v2.12.0...HEAD
+[Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.1...HEAD
+[3.7.1]: https://github.com/Richards-LLC/cassy/compare/v3.7.0...v3.7.1
+[3.7.0]: https://github.com/Richards-LLC/cassy/compare/v3.6.0...v3.7.0
 [2.13.0]: https://github.com/pippenz/cas/compare/v2.12.0...v2.13.0
 [2.12.0]: https://github.com/pippenz/cas/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/pippenz/cas/compare/v2.10.1...v2.11.0

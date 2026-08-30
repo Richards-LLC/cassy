@@ -7,6 +7,51 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-08-30
+
+### Added
+- `cas cloud unlink [--purge-remote]`: sever a project's cloud link locally
+  and, with the flag, remove that project's remote records (entries, tasks,
+  knowledge pages) — scoped discovery through the single `CloudSyncer` pull
+  builder, dry-run support, fail-closed handling for record types the server
+  cannot delete, and the local database left byte-untouched.
+- Cassy-managed `.gitignore` blocks: consumer-project skill sync now maintains
+  an idempotent managed block covering the distributed builtin files
+  (`.claude`/`.codex`/`.grok`), preserving user entries, skipping the cas-src
+  authoring tree, and surfacing `git rm --cached` remediation when a managed
+  file is already tracked.
+- Durable external-condition wake triggers for parked work:
+  `branch_contained_in` and `tag_exists` reminders persist across sessions,
+  are probed by the daemon with bounded git commands, and deliver a
+  supervisor notification once on the false→true transition (GH #624).
+- Trace archives: bounded, range-readable archive retention in the daemon,
+  with archive readers exposed through the CLI store.
+- Versioned rule and skill creates with create-history snapshots (m242), rule
+  lifecycle gated on measured outcomes, and surfaced-artifact impact tracking
+  (m243).
+- `cas-supervisor` epic-driving playbook reference: one-integration-PR
+  discipline, target pinning, merge sweep, and spawn conventions in a 1.1KB
+  imperative reference mirrored to all three harness flavors.
+
+### Fixed
+- Team-sync deserialization: `TaskDeliverables` tolerates the legacy
+  JSON-string encoding on pull and canonicalizes on serialization, and the
+  cross-DB relocation writers normalize payloads before push — ends the
+  "Team pull encountered N error(s)" partial pulls (98 cloud rows were
+  repaired server-side alongside this release).
+- Release workflow: a tag pushed before its Release Prebuild completes now
+  waits (bounded, exact-SHA) instead of silently falling back to cold builds,
+  and any cold fallback is loudly reported (GH #603).
+- Factory: a child task whose WorkTarget equals the parent epic's default no
+  longer silently delivers to trunk — it inherits the live epic lane with a
+  durable decision note; explicit non-default targets remain authoritative
+  (GH #625).
+- Skill validation runs network-isolated with a degraded-validation fallback,
+  and skill-id parsing tolerates warning-suffixed ids.
+- Sync scoping: personal deletes and legacy team task upserts are
+  project-scoped; dangling cloud fixture symlinks are rejected.
+- Knowledge loop preserves provenance across sync, including synced skills.
+
 ## [3.6.0] - 2026-08-29
 
 ### Added

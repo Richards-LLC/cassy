@@ -576,6 +576,38 @@ mod large_artifact_staging_tests {
     }
 
     #[test]
+    fn session_start_honors_configured_context_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[hooks]\ncontext_limit = 3\n",
+        )
+        .unwrap();
+
+        let store = crate::store::SqliteStore::open(tmp.path()).unwrap();
+        store.init().unwrap();
+        for index in 0..5 {
+            store
+                .add(&crate::types::Entry::new(
+                    format!("context-limit-{index}"),
+                    format!("context limit candidate {index}"),
+                ))
+                .unwrap();
+        }
+
+        let _env = staging_env("worker");
+        let input = session_input(tmp.path().to_str().unwrap());
+        let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+
+        assert!(
+            context.contains("## Helpful Memories (3/5 shown, +2 more"),
+            "configured context_limit must cap Helpful Memories at three: {context}"
+        );
+        assert!(!context.contains("context limit candidate 3"));
+        assert!(!context.contains("context limit candidate 4"));
+    }
+
+    #[test]
     fn supervisor_session_start_warns_and_repairs_registered_role_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         let agent_store = crate::store::open_agent_store(tmp.path()).unwrap();

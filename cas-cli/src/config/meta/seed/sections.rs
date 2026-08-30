@@ -72,4 +72,8 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "factory",
         "Factory worker lifecycle, durable artifacts, and workspace guardrails",
     );
+    registry.section_descriptions.insert(
+        "skill_validation",
+        "Sandbox policy for skill validation scripts",
+    );
 }

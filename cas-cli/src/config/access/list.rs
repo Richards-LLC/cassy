@@ -10,6 +10,7 @@ impl Config {
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
+        let skill_validation = self.skill_validation.clone().unwrap_or_default();
         vec![
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
@@ -29,6 +30,10 @@ impl Config {
             (
                 "sync.promotion_evidence".to_string(),
                 self.sync.promotion_evidence.join(","),
+            ),
+            (
+                "skill_validation.require_sandbox".to_string(),
+                skill_validation.require_sandbox.to_string(),
             ),
             // Cloud section
             ("cloud.auto_sync".to_string(), cloud.auto_sync.to_string()),
@@ -569,6 +574,11 @@ impl Config {
     /// Get notification config with defaults
     pub fn notifications(&self) -> NotificationConfig {
         self.notifications.clone().unwrap_or_default()
+    }
+
+    /// Get skill validation sandbox policy with defaults.
+    pub fn skill_validation(&self) -> SkillValidationConfig {
+        self.skill_validation.clone().unwrap_or_default()
     }
 
     /// Check if notifications are enabled

@@ -312,6 +312,7 @@ impl WizardConfig {
 
         Config {
             sync,
+            skill_validation: None,
             hooks: Some(HookConfig {
                 capture_enabled: true,
                 capture_tools: vec!["Write".to_string(), "Edit".to_string(), "Bash".to_string()],

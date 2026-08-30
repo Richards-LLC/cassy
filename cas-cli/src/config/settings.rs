@@ -66,6 +66,23 @@ pub struct SyncConfig {
     pub promotion_evidence: Vec<String>,
 }
 
+/// Skill validation sandbox policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillValidationConfig {
+    /// Require bubblewrap on platforms where it is supported instead of
+    /// allowing the env-scrubbed plain-shell fallback.
+    #[serde(default)]
+    pub require_sandbox: bool,
+}
+
+impl Default for SkillValidationConfig {
+    fn default() -> Self {
+        Self {
+            require_sandbox: false,
+        }
+    }
+}
+
 /// Task configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TasksConfig {

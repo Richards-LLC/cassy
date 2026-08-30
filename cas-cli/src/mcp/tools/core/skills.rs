@@ -235,7 +235,11 @@ impl CasCore {
             share: None,
         };
 
-        crate::skill_validation::validate_skill(&skill).map_err(|error| McpError {
+        let validation = crate::skill_validation::validate_skill_with_policy(
+            &skill,
+            self.load_config().skill_validation().require_sandbox,
+        )
+        .map_err(|error| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Skill validation rejected create: {error}")),
             data: None,
@@ -250,7 +254,11 @@ impl CasCore {
         // Sync to Claude Code
         let _ = self.sync_skills();
 
-        Ok(Self::success(format!("Created skill: {id}")))
+        let warning = validation
+            .warning
+            .map(|warning| format!("\n{warning}"))
+            .unwrap_or_default();
+        Ok(Self::success(format!("Created skill: {id}{warning}")))
     }
 
     /// Enable a skill
@@ -496,7 +504,11 @@ impl CasCore {
 
         skill.updated_at = chrono::Utc::now();
 
-        crate::skill_validation::validate_skill(&skill).map_err(|error| McpError {
+        let validation = crate::skill_validation::validate_skill_with_policy(
+            &skill,
+            self.load_config().skill_validation().require_sandbox,
+        )
+        .map_err(|error| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Skill validation rejected update: {error}")),
             data: None,
@@ -542,10 +554,15 @@ impl CasCore {
             }
         }
 
+        let warning = validation
+            .warning
+            .map(|warning| format!("\n{warning}"))
+            .unwrap_or_default();
         Ok(Self::success(format!(
-            "Updated skill {}: {}",
+            "Updated skill {}: {}{}",
             req.id,
-            changes.join(", ")
+            changes.join(", "),
+            warning
         )))
     }
 

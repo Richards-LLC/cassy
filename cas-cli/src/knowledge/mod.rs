@@ -22,7 +22,8 @@ use std::path::Path;
 pub use chunk::{Chunk, ChunkOptions, chunk_markdown};
 pub use llm::{ClaudeCliRunner, LlmError, LlmRunner, ScriptedLlm};
 pub use merge::{MergeTier, StripOutcome};
-pub use pipeline::{DistillConfig, DistillReport, run_distillation};
+pub use pipeline::{DistillConfig, DistillReport, run_distillation, run_distillation_with_timeout};
+pub(crate) use pipeline::run_distillation_until;
 pub use sources::{LoadedSource, SourceKind, SymbolLite, collect_file_sources};
 
 /// Environment gate for automatic distillation inside the daemon.

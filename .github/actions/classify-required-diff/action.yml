@@ -4,6 +4,10 @@ inputs:
   base-sha:
     description: Commit on the base side of the comparison.
     required: true
+  zero-base-ref:
+    description: Trusted comparison ref for branch-creation pushes whose before SHA is all-zero.
+    required: false
+    default: ""
 outputs:
   class:
     description: The conservative CI diff classification.
@@ -24,15 +28,26 @@ runs:
       shell: bash
       env:
         BASE_SHA: ${{ inputs.base-sha }}
+        ZERO_BASE_REF: ${{ inputs.zero-base-ref }}
       run: |
         # checkout fetch-depth: 0 makes this a true merge-base comparison,
         # including an ancestry-only merge with no content changes.
         class=rust-touched
-        if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+        comparison_base="$BASE_SHA"
+        if [[ "$comparison_base" =~ ^0+$ && -n "$ZERO_BASE_REF" ]]; then
+          if git rev-parse --verify --quiet "$ZERO_BASE_REF^{commit}" >/dev/null; then
+            comparison_base="$ZERO_BASE_REF"
+            echo "::notice title=CI diff base::All-zero event base replaced with trusted ref '$ZERO_BASE_REF'"
+          else
+            echo "::warning title=CI diff base::Trusted fallback ref '$ZERO_BASE_REF' is unavailable; running Rust tier"
+          fi
+        fi
+
+        if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
           # Schedules, manual dispatches, and tag pushes without a predecessor
           # do not have a comparison event, so uncertainty runs the full tier.
           echo "::notice title=CI diff class::No comparable base; running Rust tier"
-        elif ! merge_base="$(git merge-base "$BASE_SHA" HEAD)"; then
+        elif ! merge_base="$(git merge-base "$comparison_base" HEAD)"; then
           echo "::warning title=CI diff class::Could not find merge base; running Rust tier"
         elif ! class="$(scripts/classify-ci-diff.sh "$merge_base" HEAD)"; then
           echo "::warning title=CI diff class::Classifier failed; running Rust tier"

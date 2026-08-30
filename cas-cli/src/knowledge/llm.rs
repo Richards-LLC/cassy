@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
 
+use crate::bounded_process::{configure_process_group, terminate_process_group};
+
 /// Why a distillation call could not produce text.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -22,12 +24,36 @@ pub enum LlmError {
     /// The provider ran but failed, timed out, or returned nothing usable.
     #[error("llm call failed: {0}")]
     Failed(String),
+    /// The enclosing knowledge build deadline expired while this call was
+    /// active or before it could be started.
+    #[error("llm call timed out after {0:?}")]
+    TimedOut(Duration),
 }
 
 /// A one-shot text completion provider.
 pub trait LlmRunner: Send + Sync {
     /// Run `prompt` and return the raw response text.
     fn complete(&self, prompt: &str) -> Result<String, LlmError>;
+
+    /// Run a completion without starting it after an enclosing build deadline.
+    /// Implementations that own a subprocess should also enforce the deadline
+    /// while the call is active; the default preserves existing test doubles
+    /// and non-process runners.
+    fn complete_with_deadline(
+        &self,
+        prompt: &str,
+        deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LlmError::TimedOut(Duration::ZERO));
+        }
+        let result = self.complete(prompt);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Err(LlmError::TimedOut(Duration::ZERO))
+        } else {
+            result
+        }
+    }
 
     /// How many completions this runner has performed. Used by the pipeline
     /// report (and by tests asserting the zero-call short-circuit).
@@ -111,6 +137,35 @@ fn spawn_with_retry(command: &mut Command) -> std::io::Result<std::process::Chil
 
 impl LlmRunner for ClaudeCliRunner {
     fn complete(&self, prompt: &str) -> Result<String, LlmError> {
+        self.complete_with_deadline(prompt, None)
+    }
+
+    fn complete_with_deadline(
+        &self,
+        prompt: &str,
+        deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
+        self.complete_inner(prompt, deadline)
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    fn label(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{} ({model})", self.binary),
+            None => self.binary.clone(),
+        }
+    }
+}
+
+impl ClaudeCliRunner {
+    fn complete_inner(
+        &self,
+        prompt: &str,
+        enclosing_deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
         // Both captures are owned by `NamedTempFile`, so every early return —
         // including the `?` on the second create — unlinks what was created.
         let stdout_capture = Self::capture_file("out")?;
@@ -131,8 +186,20 @@ impl LlmRunner for ClaudeCliRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
+        // Put the provider and all ordinary descendants in a private process
+        // group. A direct `Child::kill` leaves a stalled provider descendant
+        // holding our capture files (and possibly stdin) open on Unix/macOS.
+        // The shared bounded-process primitive kills the group and reaps the
+        // direct child at the deadline; non-Unix targets retain direct-child
+        // cleanup through the same API.
+        configure_process_group(&mut command);
         if let Some(model) = &self.model {
             command.arg("--model").arg(model);
+        }
+
+        let call_deadline = Instant::now() + self.timeout;
+        if enclosing_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LlmError::TimedOut(self.timeout));
         }
 
         let mut child = spawn_with_retry(&mut command)
@@ -148,19 +215,19 @@ impl LlmRunner for ClaudeCliRunner {
             std::thread::spawn(move || stdin.write_all(payload.as_bytes()))
         });
 
-        let deadline = Instant::now() + self.timeout;
+        let deadline = enclosing_deadline.map_or(call_deadline, |global| global.min(call_deadline));
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_process_group(&mut child);
                         break None;
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => {
+                    terminate_process_group(&mut child);
                     return Err(LlmError::Failed(format!("wait failed: {error}")));
                 }
             }
@@ -177,6 +244,9 @@ impl LlmRunner for ClaudeCliRunner {
         let stderr = std::fs::read_to_string(stderr_capture.path()).unwrap_or_default();
 
         let Some(status) = status else {
+            if enclosing_deadline.is_some_and(|global| Instant::now() >= global) {
+                return Err(LlmError::TimedOut(self.timeout));
+            }
             return Err(LlmError::Failed(format!(
                 "timed out after {}s",
                 self.timeout.as_secs()
@@ -193,17 +263,6 @@ impl LlmRunner for ClaudeCliRunner {
             return Err(LlmError::Failed("empty response".to_string()));
         }
         Ok(stdout)
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::Relaxed)
-    }
-
-    fn label(&self) -> String {
-        match &self.model {
-            Some(model) => format!("{} ({model})", self.binary),
-            None => self.binary.clone(),
-        }
     }
 }
 
@@ -369,6 +428,41 @@ mod tests {
         }
         assert!(started.elapsed() < Duration::from_secs(10), "deadline not enforced");
         assert_eq!(runner.calls(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_provider_group_leaves_no_stalled_descendant() {
+        let stub_dir = tempfile::tempdir().expect("stub dir");
+        let child_pid_file = stub_dir.path().join("child.pid");
+        let script = format!(
+            "(sleep 30) & child_pid=$!; echo $child_pid > '{}'; wait",
+            child_pid_file.display()
+        );
+        let (_provider_dir, binary) = stub(&script);
+        let runner = runner_for(&binary, Duration::from_millis(300));
+        let started = Instant::now();
+        let result = runner.complete("hi");
+        assert!(matches!(result, Err(LlmError::Failed(message)) if message.contains("timed out")));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "stalled provider must be bounded, took {:?}",
+            started.elapsed()
+        );
+
+        let child_pid = std::fs::read_to_string(&child_pid_file)
+            .expect("provider must start its descendant before the deadline")
+            .trim()
+            .parse::<u32>()
+            .expect("child pid");
+        // Give the kernel a short opportunity to reap the group member, then
+        // make one liveness probe. The codemap workflow itself never polls.
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = unsafe { libc::kill(child_pid as i32, 0) == 0 };
+        assert!(
+            !alive,
+            "timed-out provider descendant {child_pid} is still alive"
+        );
     }
 
     #[cfg(unix)]

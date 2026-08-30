@@ -83,7 +83,7 @@ pub(crate) fn run_command(
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+pub(crate) fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     // SAFETY: setpgid is async-signal-safe and the closure touches no shared
     // Rust state between fork and exec.
@@ -99,10 +99,10 @@ fn configure_process_group(command: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+pub(crate) fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-fn terminate_process_group(child: &mut std::process::Child) {
+pub(crate) fn terminate_process_group(child: &mut std::process::Child) {
     // A negative pid targets only the process group created above.
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
@@ -111,7 +111,7 @@ fn terminate_process_group(child: &mut std::process::Child) {
 }
 
 #[cfg(not(unix))]
-fn terminate_process_group(child: &mut std::process::Child) {
+pub(crate) fn terminate_process_group(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
 }

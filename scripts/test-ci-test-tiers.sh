@@ -344,7 +344,8 @@ require_text "$scoped" 'id: classify-diff' 'scoped lane classifies before expens
 require_text "$scoped" './.github/actions/classify-required-diff' 'scoped lane uses the shared classifier'
 require_text "$scoped" 'fetch-depth: 0' 'scoped lane computes a real merge base'
 require_text "$scoped" 'github.event.pull_request.head.sha || github.sha' 'scoped lane classifies the PR head rather than its synthetic merge commit'
-require_text "$scoped" 'github.event.pull_request.base.sha || github.event.before' 'scoped lane compares against its own event base'
+require_text "$scoped" 'github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before' 'scoped lane selects the event-specific comparison base'
+require_text "$scoped" 'zero-base-ref: origin/${{ github.event.repository.default_branch }}' 'first factory push compares against the protected branch when before is all-zero'
 require_text "$scoped" "steps.classify-diff.outputs.rust-unaffected != 'true'" 'scoped lane gates Rust work only after a safe classification'
 require_text "$scoped" 'id: pr-dedupe' 'scoped lane checks for a PR event on the same head SHA'
 require_text "$scoped" 'scripts/check-ci-pr-event-coverage.sh' 'scoped lane uses the shared fail-closed PR coverage guard'
@@ -468,6 +469,7 @@ for job in fast-validation-preflight fast-validation-suite-build fast-validation
     require_text "$block" './.github/actions/classify-required-diff' "$job uses the shared classifier"
     require_text "$block" 'fetch-depth: 0' "$job computes a real merge base"
     require_text "$block" 'github.event.pull_request.head.sha || github.sha' "$job classifies the PR head rather than its synthetic merge commit"
+    require_text "$block" 'github.event.merge_group.base_sha' "$job compares merge-queue trees against the event base SHA"
     require_text "$block" "steps.classify-diff.outputs.rust-unaffected" "$job gates Rust work only after a safe classification"
 done
 
@@ -478,6 +480,7 @@ if [[ -x "$classifier" ]]; then
     # classes are Rust-unaffected, while every code or mixed change is full.
     require_text "$("$classifier" 967e85c7^ 967e85c7)" 'empty' 'empty ancestry merge fast-passes'
     require_text "$("$classifier" c6c4122f^ c6c4122f)" 'docs-only' 'docs-only change fast-passes'
+    require_text "$("$classifier" 49b434bf^ 49b434bf)" 'docs-only' 'PR 630 CODEMAP-only change fast-passes'
     require_text "$("$classifier" 7c233bef^ 7c233bef)" 'hub-web-only' 'hub-web-only change skips Rust work'
     require_text "$("$classifier" 15edf2ef^ 15edf2ef)" 'version-bump' 'two-file package version bump fast-passes'
     require_text "$("$classifier" 15edf2ef^ eab3901c)" 'version-bump' 'workspace-wide seven-file version bump fast-passes'
@@ -524,6 +527,26 @@ else
     fail=$((fail + 1))
 fi
 rm -f "$tag_push_output"
+
+# A branch-creation push also carries an all-zero `before`, but unlike a tag it
+# has a protected-default comparison ref. The shared action must use that ref;
+# an identical tree is the minimal empty-diff event fixture and must fast-pass.
+first_branch_output="$(mktemp)"
+if BASE_SHA="0000000000000000000000000000000000000000" \
+    ZERO_BASE_REF="HEAD" \
+    GITHUB_OUTPUT="$first_branch_output" \
+    bash < <(awk '
+        /^      run: \|$/ { in_run = 1; next }
+        in_run { sub(/^        /, ""); print }
+    ' "$classify_action"); then
+    require_text "$(<"$first_branch_output")" 'class=empty' 'first branch push uses its protected-base fallback'
+    require_text "$(<"$first_branch_output")" 'fast-pass=true' 'empty first branch push fast-passes without Rust'
+    require_text "$(<"$first_branch_output")" 'rust-unaffected=true' 'empty first branch push skips Cargo'
+else
+    printf 'FAIL first branch push runs the shared classifier action\n'
+    fail=$((fail + 1))
+fi
+rm -f "$first_branch_output"
 
 # A non-zero-but-unresolvable base is another uncertainty case. The composite
 # action must not fail a required check before deciding to run the Rust tier.
@@ -655,16 +678,15 @@ for job in fast-validation-preflight fast-validation-suite-build fast-validation
     require_text "$(job_block "$job")" "github.event_name == 'merge_group'" "$job runs on merge-queue merged trees"
 done
 
-# Main PRs validate the reusable compile surfaces while the release-profile
-# panic probes and cold benchmark remain schedule/manual workloads.
+# Protected PRs emit only the required admission contexts. Compiling heavy
+# lanes stay on integration pushes and supervisor-controlled runs.
 require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane skips main PRs'
 for job in clippy test-compile-guard; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"
     require_text "$block" "github.event_name == 'schedule'" "$job runs on schedule"
     require_text "$block" "github.event_name == 'workflow_dispatch'" "$job supports supervisor dispatch"
-    require_text "$block" "github.event_name == 'pull_request'" "$job validates protected PR trees"
-    require_text "$block" 'github.base_ref == github.event.repository.default_branch' "$job targets the protected PR base"
+    require_absent "$block" "github.event_name == 'pull_request'" "$job never compiles protected PR heads"
     require_absent "$block" 'refs/heads/epic/' "$job cannot run on epic pushes"
     require_absent "$block" 'refs/heads/factory/' "$job cannot run on factory pushes"
     require_absent "$block" 'refs/tags/' "$job cannot run on tag pushes"

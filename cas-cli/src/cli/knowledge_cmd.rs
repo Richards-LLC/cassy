@@ -2,12 +2,13 @@
 //! (EPIC cas-7d31 / cas-c9be).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 
 use crate::knowledge::{
     ClaudeCliRunner, DistillConfig, LlmRunner, ScriptedLlm, SymbolLite, collect_sources,
-    run_distillation,
+    run_distillation_until,
 };
 use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
 
@@ -42,6 +43,10 @@ pub struct BuildArgs {
     /// Maximum indexed symbols loaded when seeding code module summaries
     #[arg(long, default_value_t = DEFAULT_MAX_SYMBOLS)]
     pub max_symbols: usize,
+
+    /// Maximum wall-clock time for the complete knowledge build
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_parser = parse_timeout_secs)]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -96,6 +101,23 @@ const SYMBOL_PAGE: usize = 2_000;
 
 /// Default ceiling on symbols loaded to seed `code://` module sources.
 pub const DEFAULT_MAX_SYMBOLS: usize = 5_000;
+
+/// Hard ceiling for a complete knowledge build. This is a CLI contract rather
+/// than a shell convention, so every platform gets the same bound and
+/// process-group cleanup implemented by the Rust runner.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 90;
+
+fn parse_timeout_secs(value: &str) -> Result<u64, String> {
+    let seconds = value.parse::<u64>().map_err(|_| {
+        format!("timeout must be an integer from 1 to {DEFAULT_TIMEOUT_SECS} seconds")
+    })?;
+    if seconds == 0 || seconds > DEFAULT_TIMEOUT_SECS {
+        return Err(format!(
+            "timeout must be between 1 and {DEFAULT_TIMEOUT_SECS} seconds"
+        ));
+    }
+    Ok(seconds)
+}
 
 /// What a symbol load produced, and whether it saw the whole index.
 pub struct SymbolLoad {
@@ -157,6 +179,7 @@ pub fn load_symbols(cas_root: &Path, limit: usize) -> SymbolLoad {
 }
 
 fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let build_deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
     let project_root = project_root_of(cas_root)?;
     let store = SqliteKnowledgeStore::open(cas_root)?;
     let load = load_symbols(cas_root, args.max_symbols);
@@ -188,10 +211,14 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
     let runner: Box<dyn LlmRunner> = if args.dry_run {
         Box::new(ScriptedLlm::new(Vec::new()))
     } else {
-        Box::new(ClaudeCliRunner::new(args.model.clone()))
+        Box::new(
+            ClaudeCliRunner::new(args.model.clone())
+                .with_timeout(Duration::from_secs(args.timeout_secs)),
+        )
     };
 
-    let report = run_distillation(&store, runner.as_ref(), &sources, &config)?;
+    let report =
+        run_distillation_until(&store, runner.as_ref(), &sources, &config, build_deadline)?;
 
     if args.dry_run {
         println!("Knowledge distillation (dry run — nothing was written)");
@@ -369,5 +396,41 @@ mod tests {
         let load = load_symbols(&dir.path().join("nonexistent"), 10);
         assert!(load.symbols.is_empty());
         assert!(!load.truncated, "an absent index is complete, not truncated");
+    }
+
+    #[test]
+    fn knowledge_build_cli_accepts_only_a_positive_timeout_at_or_below_ninety() {
+        for value in ["0", "91", "18446744073709551615", "not-a-duration"] {
+            assert!(
+                crate::cli::try_parse_from_with_wordmark([
+                    "cas",
+                    "knowledge",
+                    "build",
+                    "--timeout-secs",
+                    value,
+                ])
+                .is_err(),
+                "invalid timeout {value} must be rejected by clap"
+            );
+        }
+        assert!(
+            crate::cli::try_parse_from_with_wordmark([
+                "cas",
+                "knowledge",
+                "build",
+                "--timeout-secs",
+                "90",
+            ])
+            .is_ok()
+        );
+
+        let parsed = crate::cli::try_parse_from_with_wordmark(["cas", "knowledge", "build"])
+            .expect("the default timeout must be valid");
+        match parsed.command {
+            Some(crate::cli::Commands::Knowledge(KnowledgeCommands::Build(args))) => {
+                assert_eq!(args.timeout_secs, DEFAULT_TIMEOUT_SECS);
+            }
+            _ => panic!("expected knowledge build command"),
+        }
     }
 }

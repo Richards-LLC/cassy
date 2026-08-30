@@ -157,6 +157,56 @@ fn reminder_discipline_reference_is_complete_and_flavor_normalized() {
 }
 
 #[test]
+fn supervisor_epic_driving_reference_is_compact_and_three_way_mirrored() {
+    let root = repo_root();
+    let paths = [
+        root.join("cas-cli/src/builtins/skills/cas-supervisor/references/epic-driving.md"),
+        root.join("cas-cli/src/builtins/codex/skills/cas-supervisor/references/epic-driving.md"),
+        root.join("cas-cli/src/builtins/grok/skills/cas-supervisor/references/epic-driving.md"),
+    ];
+    let contents: Vec<String> = paths.iter().map(|path| load(path)).collect();
+
+    for (path, content) in paths.iter().zip(&contents) {
+        assert!(
+            content.len() < 2 * 1024,
+            "{} exceeds the 2KB operator budget ({} bytes)",
+            path.display(),
+            content.len()
+        );
+        for required in [
+            "target_branch",
+            "WorkTarget",
+            "awaiting_merge",
+            "task_id",
+            "confirm_warning=true",
+            "proof_scope_fix=true",
+            "known-repos",
+            "Release Prebuild",
+        ] {
+            assert!(
+                content.contains(required),
+                "{} missing epic-driving marker {required:?}",
+                path.display()
+            );
+        }
+    }
+
+    assert_eq!(contents[0], contents[1]);
+    assert_eq!(contents[0], contents[2]);
+
+    for body_path in [
+        "cas-cli/src/builtins/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/codex/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/grok/skills/cas-supervisor.md",
+    ] {
+        assert!(
+            load(&root.join(body_path)).contains("epic-driving.md"),
+            "{body_path} must breadcrumb the epic-driving reference"
+        );
+    }
+}
+
+#[test]
 fn supervisor_skill_mirrors_include_implementation_unit_template() {
     // After cas-61af split cas-supervisor.md into a main file + references,
     // the Implementation Unit Template moved to planning.md. The guardrail

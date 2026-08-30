@@ -491,6 +491,32 @@ async fn test_rule_retrieval_evidence_requires_distinct_sessions() {
             .unwrap();
     }
 
+    retrieval
+        .record_query(
+            "query-unresolved-session",
+            "unresolved evidence",
+            "rule_validation",
+            "test-policy",
+            Some("session-unresolved-only"),
+            &[RetrievalHitIdentity {
+                result_id: id.clone(),
+                document_type: "rule".to_string(),
+                rank: 0,
+            }],
+        )
+        .unwrap();
+    retrieval
+        .record_outcome(
+            "outcome-unresolved-session",
+            "query-unresolved-session",
+            &id,
+            RetrievalOutcome::Unresolved,
+            "actor-unresolved",
+            "session-unresolved-only",
+            None,
+        )
+        .unwrap();
+
     service
         .cas_rule_helpful(Parameters(IdRequest { id: id.clone() }))
         .await
@@ -649,7 +675,10 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
         .get(&id)
         .unwrap();
     assert_eq!(rule.status, RuleStatus::Proven);
-    assert!(injected.is_file(), "one correction must not remove the rule");
+    assert!(
+        injected.is_file(),
+        "one correction must not remove the rule"
+    );
 
     retrieval
         .record_query(
@@ -683,7 +712,10 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
         .get(&id)
         .unwrap();
     assert_eq!(rule.status, RuleStatus::Stale);
-    assert!(!injected.exists(), "corrected rule must stop being injected");
+    assert!(
+        !injected.exists(),
+        "corrected rule must stop being injected"
+    );
 
     let history = service
         .cas_rule_history(Parameters(VersionRequest {

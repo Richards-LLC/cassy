@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS retrieval_outcomes (
     query_id TEXT NOT NULL,
     result_id TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK (
-        outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful')
+        outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful', 'unresolved')
     ),
     actor_hash TEXT NOT NULL,
     session_hash TEXT NOT NULL,
@@ -92,7 +92,7 @@ pub const RETRIEVAL_SCHEMA_STATEMENTS: &[&str] = &[
         query_id TEXT NOT NULL,
         result_id TEXT NOT NULL,
         outcome TEXT NOT NULL CHECK (
-            outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful')
+            outcome IN ('used', 'helpful', 'ignored', 'corrected', 'harmful', 'unresolved')
         ),
         actor_hash TEXT NOT NULL,
         session_hash TEXT NOT NULL,
@@ -120,6 +120,9 @@ pub enum RetrievalOutcome {
     Ignored,
     Corrected,
     Harmful,
+    /// No evidence of either use or non-use was observed before the session
+    /// ended. This is telemetry absence, not negative retrieval evidence.
+    Unresolved,
 }
 
 impl RetrievalOutcome {
@@ -130,6 +133,7 @@ impl RetrievalOutcome {
             Self::Ignored => "ignored",
             Self::Corrected => "corrected",
             Self::Harmful => "harmful",
+            Self::Unresolved => "unresolved",
         }
     }
 }
@@ -144,8 +148,9 @@ impl FromStr for RetrievalOutcome {
             "ignored" => Ok(Self::Ignored),
             "corrected" => Ok(Self::Corrected),
             "harmful" => Ok(Self::Harmful),
+            "unresolved" => Ok(Self::Unresolved),
             other => Err(StoreError::Parse(format!(
-                "invalid retrieval outcome '{other}'; expected used, helpful, ignored, corrected, or harmful"
+                "invalid retrieval outcome '{other}'; expected used, helpful, ignored, corrected, harmful, or unresolved"
             ))),
         }
     }
@@ -180,15 +185,19 @@ pub struct RetrievalOutcomeEvent {
     pub created_at: DateTime<Utc>,
 }
 
-/// Offline quality aggregate. Rates use all explicit outcomes as denominator.
+/// Offline quality aggregate. Usefulness and negative rates use only resolved
+/// outcomes as their denominator; unresolved events report instrumentation
+/// coverage without influencing quality or promotion decisions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalAggregate {
     pub document_type: String,
     pub query_family: String,
     pub ranking_policy: String,
     pub total: u64,
-    /// Number of distinct privacy-preserving sessions contributing outcomes.
-    /// Consumers can require independent sessions without storing raw IDs.
+    pub resolved: u64,
+    pub unresolved: u64,
+    /// Number of distinct privacy-preserving sessions contributing resolved
+    /// outcomes. Unresolved-only sessions cannot satisfy promotion diversity.
     pub distinct_sessions: u64,
     pub used: u64,
     pub helpful: u64,
@@ -282,12 +291,16 @@ impl SqliteRetrievalStore {
         let ignored = row.get::<_, i64>(7)?.max(0) as u64;
         let corrected = row.get::<_, i64>(8)?.max(0) as u64;
         let harmful = row.get::<_, i64>(9)?.max(0) as u64;
-        let denominator = total.max(1) as f64;
+        let resolved = row.get::<_, i64>(10)?.max(0) as u64;
+        let unresolved = row.get::<_, i64>(11)?.max(0) as u64;
+        let denominator = resolved.max(1) as f64;
         Ok(RetrievalAggregate {
             document_type: row.get(0)?,
             query_family: row.get(1)?,
             ranking_policy: row.get(2)?,
             total,
+            resolved,
+            unresolved,
             distinct_sessions,
             used,
             helpful,
@@ -333,12 +346,15 @@ impl SqliteRetrievalStore {
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(*) AS total,
-                    COUNT(DISTINCT o.session_hash) AS distinct_sessions,
+                    COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
+                        AS distinct_sessions,
                     SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END)
              FROM retrieval_outcomes o
              JOIN retrieval_queries q ON q.id = o.query_id
              JOIN retrieval_query_results r
@@ -483,12 +499,15 @@ impl RetrievalStore for SqliteRetrievalStore {
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
                     COUNT(*) AS total,
-                    COUNT(DISTINCT o.session_hash) AS distinct_sessions,
+                    COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
+                        AS distinct_sessions,
                     SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'ignored' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END)
              FROM retrieval_outcomes o
              JOIN retrieval_queries q ON q.id = o.query_id
              JOIN retrieval_query_results r
@@ -513,6 +532,11 @@ mod tests {
             document_type: document_type.to_string(),
             rank,
         }
+    }
+
+    #[test]
+    fn unresolved_is_a_supported_retrieval_outcome() {
+        assert!(RetrievalOutcome::from_str("unresolved").is_ok());
     }
 
     #[test]
@@ -637,6 +661,7 @@ mod tests {
                 RetrievalOutcome::Corrected,
                 Some("entry-3"),
             ),
+            ("out-5", "entry-2", RetrievalOutcome::Unresolved, None),
         ] {
             store
                 .record_outcome(id, "qry-1", result, outcome, "actor", "session", correction)
@@ -660,7 +685,9 @@ mod tests {
         assert_eq!(aggregates.len(), 1);
         let aggregate = &aggregates[0];
         assert_eq!(aggregate.ranking_policy, DEFAULT_RETRIEVAL_POLICY);
-        assert_eq!(aggregate.total, 4);
+        assert_eq!(aggregate.total, 5);
+        assert_eq!(aggregate.resolved, 4);
+        assert_eq!(aggregate.unresolved, 1);
         assert_eq!(aggregate.distinct_sessions, 1);
         assert_eq!(aggregate.used, 1);
         assert_eq!(aggregate.helpful, 1);

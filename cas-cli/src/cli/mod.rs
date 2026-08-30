@@ -407,6 +407,11 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
 
         Commands::Serve => AuthRequirement::NotRequired,
 
+        // Local unlink only removes the project link file and is useful when
+        // taking a project offline; remote purge remains auth-gated.
+        Commands::Cloud(cloud::CloudCommands::Unlink(args)) if !args.purge_remote => {
+            AuthRequirement::NotRequired
+        }
         Commands::Cloud(_) => AuthRequirement::Required,
 
         Commands::Device(_) => AuthRequirement::Required,

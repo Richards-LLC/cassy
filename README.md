@@ -372,7 +372,18 @@ cas login                             # single-team users are auto-scoped
 cas cloud team default <team-slug>    # multi-team: pick a user-wide default
 cas cloud team set <uuid>             # per-project override
 cas cloud team-memories               # pull the team's memories for this project
+cas cloud unlink                       # detach this project locally; keep local data
+cas cloud unlink --purge-remote       # detach and remove owned cloud rows first
 ```
+
+`cas cloud unlink` removes only the project's `.cas/cloud.json` link file; the
+local database and other `.cas` data remain untouched. `--purge-remote` first
+discovers the project's personal and active-team entries, tasks, and knowledge
+rows through project-scoped pulls and uses the existing per-owner DELETE paths.
+It fails closed (and preserves the local link) when discovery is incomplete,
+the cloud cannot delete a row, or knowledge-page rows are present on a server
+that does not support their DELETE endpoint. Use `--dry-run` to inspect the
+scoped purge plan without changing local or remote state.
 
 Project-scoped, non-preference memories then dual-enqueue to the team queue automatically. Preference-typed and global-scoped entries always stay personal. Backfill existing entries with `cas memory share --dry-run --all` (then without `--dry-run`), `--since 7d`, or one id at a time; `cas memory unshare <id>` reverses it. Set `team_auto_promote: false` in `~/.cas/cloud.json` to pause promotion without clearing the team.
 

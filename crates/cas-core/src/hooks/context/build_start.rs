@@ -700,10 +700,15 @@ pub fn build_context_with_stores(
             recent_files: stores.recent_files.clone(),
         };
 
-        // Filter entries first
+        // Helpful Memories is a live, curated corpus. Cold/archive entries
+        // remain available through explicit memory search/get, while raw
+        // context captures must earn a positive feedback signal before they
+        // can compete with curated memories for SessionStart space.
         let filtered_entries: Vec<Entry> = merged_entries
             .iter()
             .filter(|e| e.entry_type != EntryType::Observation || e.feedback_score() > 0)
+            .filter(|e| e.entry_type != EntryType::Context || e.feedback_score() > 0)
+            .filter(|e| e.memory_tier.is_active())
             .filter(|e| !e.is_expired())
             .cloned()
             .collect();

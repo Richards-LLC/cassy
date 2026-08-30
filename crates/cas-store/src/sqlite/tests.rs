@@ -1,6 +1,6 @@
 use crate::Store;
 use crate::sqlite::SqliteStore;
-use cas_types::{Entry, Scope, ShareScope};
+use cas_types::{Entry, MemoryTier, Scope, ShareScope};
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
@@ -56,6 +56,43 @@ fn test_sqlite_store_crud() {
     // Delete entry
     store.delete(&id).unwrap();
     assert!(store.get(&id).is_err());
+}
+
+#[test]
+fn test_list_decayable_excludes_in_context_and_archive_tiers() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let entries = [
+        Entry {
+            id: "pinned".to_string(),
+            memory_tier: MemoryTier::InContext,
+            ..Entry::new("unused-pinned".to_string(), "pinned".to_string())
+        },
+        Entry {
+            id: "working".to_string(),
+            memory_tier: MemoryTier::Working,
+            ..Entry::new("unused-working".to_string(), "working".to_string())
+        },
+        Entry {
+            id: "cold".to_string(),
+            memory_tier: MemoryTier::Cold,
+            ..Entry::new("unused-cold".to_string(), "cold".to_string())
+        },
+        Entry {
+            id: "archive".to_string(),
+            memory_tier: MemoryTier::Archive,
+            ..Entry::new("unused-archive".to_string(), "archive".to_string())
+        },
+    ];
+    for entry in &entries {
+        store.add(entry).unwrap();
+    }
+
+    let decayable = store.list_decayable().unwrap();
+    let ids: Vec<_> = decayable.iter().map(|entry| entry.id.as_str()).collect();
+    assert_eq!(ids, vec!["cold", "working"]);
 }
 
 /// A cloud-synced row can be present without the local daily sequence having

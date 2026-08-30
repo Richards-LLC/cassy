@@ -1,4 +1,50 @@
 use crate::mcp::tools::core::imports::*;
+use cas_types::{Entry, MemoryTier};
+
+#[derive(Debug, Default)]
+struct EntryCorpusStats {
+    /// Counts indexed by tier, then archived flag (`archived = 0`, `archived = 1`).
+    by_tier: [(usize, usize); 4],
+    total: usize,
+    archived: usize,
+    /// Entries in working/in-context tiers with `archived = 0`.
+    live: usize,
+}
+
+impl EntryCorpusStats {
+    fn record(&mut self, entry: &Entry) {
+        let tier_index = match entry.memory_tier {
+            MemoryTier::InContext => 0,
+            MemoryTier::Working => 1,
+            MemoryTier::Cold => 2,
+            MemoryTier::Archive => 3,
+        };
+        let counts = &mut self.by_tier[tier_index];
+        if entry.archived {
+            counts.1 += 1;
+            self.archived += 1;
+        } else {
+            counts.0 += 1;
+            if entry.memory_tier.is_active() {
+                self.live += 1;
+            }
+        }
+        self.total += 1;
+    }
+
+    fn from_store_lists(entries: &[Entry], archived_entries: &[Entry]) -> Self {
+        let mut stats = Self::default();
+        for entry in entries.iter().chain(archived_entries) {
+            stats.record(entry);
+        }
+        stats
+    }
+
+    fn tier_line(&self, tier: MemoryTier, tier_index: usize) -> String {
+        let (unarchived, archived) = self.by_tier[tier_index];
+        format!("  {tier}: {unarchived} archived=0, {archived} archived=1")
+    }
+}
 
 #[derive(Debug, Default)]
 struct StoreBackedIndexCounts {
@@ -190,7 +236,7 @@ impl CasCore {
         let tasks = task_store.list(None).unwrap_or_default();
         let skills = skill_store.list(None).unwrap_or_default();
 
-        let total_entries = entries.len() + archived.len();
+        let corpus = EntryCorpusStats::from_store_lists(&entries, &archived);
         let proven_rules = rules
             .iter()
             .filter(|r| r.status == RuleStatus::Proven)
@@ -211,13 +257,22 @@ impl CasCore {
         let output = format!(
             "Cassy Statistics\n\
              ==============\n\n\
-             Entries: {} ({} active, {} archived)\n\
+             Entries: {} ({} live, {} archived)\n\
+             Tier breakdown (archived flag):\n\
+             {}\n\
+             {}\n\
+             {}\n\
+             {}\n\
              Rules: {} ({} proven)\n\
              Tasks: {} ({} open, {} in progress)\n\
              Skills: {} ({} enabled)",
-            total_entries,
-            entries.len(),
-            archived.len(),
+            corpus.total,
+            corpus.live,
+            corpus.archived,
+            corpus.tier_line(MemoryTier::InContext, 0),
+            corpus.tier_line(MemoryTier::Working, 1),
+            corpus.tier_line(MemoryTier::Cold, 2),
+            corpus.tier_line(MemoryTier::Archive, 3),
             rules.len(),
             proven_rules,
             tasks.len(),

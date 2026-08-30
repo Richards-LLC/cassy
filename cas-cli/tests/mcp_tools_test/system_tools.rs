@@ -1,8 +1,8 @@
 use crate::support::*;
 use cas::mcp::CasService;
 use cas::mcp::tools::*;
-use cas::store::open_task_store;
-use cas::types::Task;
+use cas::store::{open_store, open_task_store};
+use cas::types::{Entry, MemoryTier, Task};
 use cas_mcp::{SearchContextRequest, SystemRequest};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
@@ -204,6 +204,55 @@ async fn test_stats() {
 
     let text = extract_text(result);
     assert!(text.contains("CAS Statistics") || text.contains("entries") || text.contains("0"));
+}
+
+#[tokio::test]
+async fn stats_reports_live_entries_by_tier_and_archived_flag() {
+    let (temp, service) = setup_cas();
+    let cas_root = temp.path().join(".cas");
+    let store = open_store(&cas_root).expect("entry store should open");
+
+    for entry in [
+        Entry {
+            id: "stats-working-live".to_string(),
+            memory_tier: MemoryTier::Working,
+            ..Entry::new("unused-working-live".to_string(), "working live".to_string())
+        },
+        Entry {
+            id: "stats-pinned-live".to_string(),
+            memory_tier: MemoryTier::InContext,
+            ..Entry::new("unused-pinned-live".to_string(), "pinned live".to_string())
+        },
+        Entry {
+            id: "stats-cold-live".to_string(),
+            memory_tier: MemoryTier::Cold,
+            ..Entry::new("unused-cold-live".to_string(), "cold live".to_string())
+        },
+        Entry {
+            id: "stats-archive-live".to_string(),
+            memory_tier: MemoryTier::Archive,
+            ..Entry::new("unused-archive-live".to_string(), "archive live".to_string())
+        },
+        Entry {
+            id: "stats-working-archived".to_string(),
+            memory_tier: MemoryTier::Working,
+            ..Entry::new(
+                "unused-working-archived".to_string(),
+                "working archived".to_string(),
+            )
+        },
+    ] {
+        store.add(&entry).unwrap();
+    }
+    store.archive("stats-working-archived").unwrap();
+
+    let result = service.cas_stats().await.expect("stats should succeed");
+    let text = extract_text(result);
+    assert!(text.contains("Entries: 5 (2 live, 1 archived)"), "{text}");
+    assert!(text.contains("in-context: 1 archived=0, 0 archived=1"), "{text}");
+    assert!(text.contains("working: 1 archived=0, 1 archived=1"), "{text}");
+    assert!(text.contains("cold: 1 archived=0, 0 archived=1"), "{text}");
+    assert!(text.contains("archive: 1 archived=0, 0 archived=1"), "{text}");
 }
 
 #[tokio::test]

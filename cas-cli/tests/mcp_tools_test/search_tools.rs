@@ -617,6 +617,20 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         serde_json::from_str(&extract_text(feedback)).expect("feedback response should be JSON");
     assert_eq!(feedback_json["outcome"], "helpful");
 
+    let unresolved_req: SearchContextRequest = serde_json::from_value(serde_json::json!({
+        "action": "retrieval_feedback",
+        "query_id": feedback_json["query_id"],
+        "result_id": feedback_json["result_id"],
+        "outcome": "unresolved",
+        "actor_id": "private-integration-actor",
+        "session_id": "private-integration-session"
+    }))
+    .unwrap();
+    service
+        .search(Parameters(unresolved_req))
+        .await
+        .expect("unresolved telemetry should persist independently of resolved feedback");
+
     let metrics_req: SearchContextRequest =
         serde_json::from_value(serde_json::json!({"action": "retrieval_metrics"})).unwrap();
     let metrics = service
@@ -630,7 +644,10 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         metrics_json["groups"][0]["ranking_policy"],
         "current-default-v1"
     );
+    assert_eq!(metrics_json["groups"][0]["total"], 2);
     assert_eq!(metrics_json["groups"][0]["helpful"], 1);
+    assert_eq!(metrics_json["groups"][0]["resolved"], 1);
+    assert_eq!(metrics_json["groups"][0]["unresolved"], 1);
     assert_eq!(metrics_json["groups"][0]["usefulness_rate"], 1.0);
 
     let db = std::fs::read(temp.path().join(".cas/cas.db")).unwrap();

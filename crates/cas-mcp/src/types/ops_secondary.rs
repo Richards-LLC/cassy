@@ -32,8 +32,11 @@ pub struct SearchContextRequest {
     #[serde(default)]
     pub result_id: Option<String>,
 
-    /// Explicit retrieval outcome.
-    #[schemars(description = "Outcome: 'used', 'helpful', 'ignored', 'corrected', or 'harmful'")]
+    /// Explicit retrieval outcome. `ignored` means observed non-use;
+    /// `unresolved` means no use/non-use evidence was available.
+    #[schemars(
+        description = "Outcome: 'used', 'helpful', 'ignored' (observed non-use), 'corrected', 'harmful', or 'unresolved' (no evidence)"
+    )]
     #[serde(default)]
     pub outcome: Option<String>,
 

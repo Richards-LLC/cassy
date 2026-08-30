@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Is CAS memory useful in practice? — independent audit, 2026-08-30</title>
+<style>
+:root{
+  --bg:#ffffff; --fg:#1a1d21; --muted:#5a6470; --line:#d7dce2; --panel:#f5f7f9;
+  --accent:#1f5fbf; --good:#1d7a3e; --warn:#9a6700;
+  --bad:#b42020; --chip:#eef2f6;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#14171a; --fg:#e6e9ec; --muted:#9aa4af; --line:#3a4149; --panel:#1d2126;
+    --accent:#6ba3f0; --good:#5fc07e; --warn:#d9a441; --bad:#e07070; --chip:#252b32;
+  }
+}
+*{box-sizing:border-box}
+html{font-size:16px}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  line-height:1.55}
+main{max-width:64rem;margin:0 auto;padding:0 1.25rem 4rem}
+header.page{border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}
+h1{font-size:1.6rem;line-height:1.25;margin:.2rem 0 .4rem}
+h2{font-size:1.25rem;margin:2.2rem 0 .6rem;border-bottom:1px solid var(--line);padding-bottom:.25rem}
+h3{font-size:1.05rem;margin:1.4rem 0 .4rem}
+p{margin:.6rem 0}
+.meta{color:var(--muted);font-size:.9rem}
+.skip{position:absolute;left:-999px;top:0;background:var(--accent);color:#fff;padding:.4rem .8rem}
+.skip:focus{left:.5rem;top:.5rem;z-index:10}
+a{color:var(--accent)}
+a:focus,button:focus,summary:focus{outline:2px solid var(--accent);outline-offset:2px}
+.verdict{background:var(--panel);border-left:.35rem solid var(--accent);padding:1rem 1.2rem;border-radius:0 .4rem .4rem 0;margin:1rem 0}
+.verdict p{margin:.5rem 0}
+.badges{display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0 0;padding:0;list-style:none}
+.badges li{background:var(--chip);border:1px solid var(--line);border-radius:1rem;padding:.15rem .7rem;font-size:.82rem}
+table{border-collapse:collapse;width:100%;margin:.8rem 0 1.4rem;font-size:.92rem}
+caption{text-align:left;font-weight:600;padding:.3rem 0;caption-side:top}
+th,td{border:1px solid var(--line);padding:.45rem .6rem;text-align:left;vertical-align:top}
+thead th{background:var(--panel)}
+tbody th[scope=row]{background:var(--panel);font-weight:600;white-space:nowrap}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}
+code{background:var(--chip);padding:.06rem .3rem;border-radius:.25rem}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:.4rem;padding:.8rem;overflow-x:auto}
+pre code{background:none;padding:0}
+.tag{font-weight:700;font-size:.78rem;letter-spacing:.02em;padding:.1rem .45rem;border-radius:.25rem;border:1px solid;white-space:nowrap}
+.t-ok{color:var(--good);border-color:var(--good)}
+.t-warn{color:var(--warn);border-color:var(--warn)}
+.t-bad{color:var(--bad);border-color:var(--bad)}
+figure{margin:1.2rem 0;border:1px solid var(--line);border-radius:.4rem;padding:1rem;background:var(--panel)}
+figcaption{font-size:.85rem;color:var(--muted);margin-top:.6rem}
+ol.chain{padding-left:1.4rem}
+ol.chain>li{margin:.55rem 0}
+details{border:1px solid var(--line);border-radius:.4rem;padding:.5rem .8rem;margin:.8rem 0;background:var(--panel)}
+summary{cursor:pointer;font-weight:600}
+footer.prov{border-top:1px solid var(--line);margin-top:3rem;padding-top:1rem;font-size:.88rem;color:var(--muted)}
+footer.prov code{font-size:.85em}
+.svgwrap svg{width:100%;height:auto;max-width:56rem;display:block}
+@media print{
+  :root{--bg:#fff;--fg:#000;--muted:#333;--line:#999;--panel:#f2f2f2;--accent:#003d99;--good:#0a5c2d;--warn:#7a5200;--bad:#8f1a1a;--chip:#eee}
+  body{font-size:11pt}
+  details{border:none;padding:0}
+  details:not([open]){display:block}
+  a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}
+  table,figure,.verdict{break-inside:avoid}
+  thead{display:table-header-group}
+  .skip{display:none}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main">
+<header class="page">
+<h1>Is CAS memory useful in practice? An independent audit</h1>
+<p class="meta"><strong>Date:</strong> 2026-08-30 · <strong>Author:</strong> independent Fable audit (task cas-5726) · <strong>Code examined:</strong> origin/main <code>47707f3c</code> · <strong>Data:</strong> cas-src project store (<code>.cas/cas.db</code>, read-only) as of 2026-08-30T22:30Z · <strong>Source:</strong> <a href="2026-08-30-memory-system-effectiveness-review.md">2026-08-30-memory-system-effectiveness-review.md</a></p>
+</header>
+
+<section aria-labelledby="verdict-h">
+<h2 id="verdict-h">Verdict</h2>
+<div class="verdict">
+<p><strong>The supervisor's conclusion survives review in direction but not in mechanism, and several of its numbers were measuring the wrong thing.</strong> CAS memory today works as a manually-queried archive and fails as a self-improving ambient system — but the dominant cause is not poor retrieval quality. It is that <strong>the learning loop is structurally disconnected at four separate seams</strong>:</p>
+<ol>
+<li>the "Helpful Memories" injection channel is not telemetered at all, so the cited usefulness numbers never measured it;</li>
+<li>outcome attribution defaults every unresolved injection to <code>ignored</code> and grants <code>used</code> only on a ≥4-char substring match, so "2 used / 593 ignored" is an artifact of instrumentation, not a measurement of value;</li>
+<li>the rule lifecycle is deadlocked — only Proven rules are injected, promotion requires feedback that only a disabled-by-default reviewer path generates, therefore all 175 rules are Draft with <code>surface_count=0</code> by construction;</li>
+<li>feedback and importance signals are dead in search ranking (<code>boost_*</code> flags never enabled in production).</li>
+</ol>
+<p>The supervisor's "≈3/10" is a fair score for <em>the system as a closed loop</em>; the archive layer alone is materially better (≈6/10), and the ambient layer is currently <strong>unmeasurable, not proven useless</strong>. Confidence: high on every mechanism claim (each is reproduced against code or data below); moderate on the aggregate rating, which is inherently judgment.</p>
+<ul class="badges">
+<li>Loop as shipped: ≈3/10 sustained</li>
+<li>Archive layer: ≈6/10</li>
+<li>Ambient layer: unmeasurable with current telemetry</li>
+<li>4 structural disconnects root-caused</li>
+</ul>
+</div>
+</section>
+
+<section aria-labelledby="overview-h">
+<h2 id="overview-h">Overview</h2>
+<table>
+<caption>Audit overview</caption>
+<tbody>
+<tr><th scope="row">Question</th><td>Is CAS memory useful in practice, and was the supervisor's 3/10 review correct?</td></tr>
+<tr><th scope="row">Verdict</th><td>Direction confirmed, mechanism corrected: loop broken by instrumentation + lifecycle deadlocks, not (provably) by retrieval quality</td></tr>
+<tr><th scope="row">Confidence</th><td>High (mechanisms), moderate (score)</td></tr>
+<tr><th scope="row">Scope examined</th><td><code>entries</code>/<code>rules</code>/<code>retrieval_*</code> tables in the cas-src project DB; ambient + context-injection + feedback + rules + search code paths at <code>47707f3c</code>; 87 ambient queries, 987 logged results, 595 outcomes (2026-08-08 → 2026-08-30)</td></tr>
+<tr><th scope="row">Not examined</th><td>Global store (<code>~/.cas/cas.db</code>), other projects' stores, cloud semantic channel behavior, session transcripts</td></tr>
+<tr><th scope="row">Method</th><td>Read-only SQL against the live DB; two independent code-mapping passes; live MCP reproduction of the <code>session_id</code> claim</td></tr>
+</tbody>
+</table>
+</section>
+
+<section aria-labelledby="scorecard-h">
+<h2 id="scorecard-h">Scorecard: the supervisor's claims, independently checked</h2>
+<table>
+<caption>Each supervisor claim from session cas-src-vivid-wolf-17 (as quoted in task cas-5726), with independent verdict</caption>
+<thead><tr><th scope="col">#</th><th scope="col">Supervisor claim</th><th scope="col">Verdict</th><th scope="col">What the evidence actually shows</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>System stats: 2,657 entries; 1,510 active / 1,147 archived</td><td><span class="tag t-warn">Confirmed, but misleading</span></td><td>Counts reproduce exactly. "Active" means <code>archived=0</code> only. By tier, the live corpus is <strong>26 working-tier entries</strong>; 1,483 of the 1,510 "active" rows are <code>memory_tier='archive'</code> with <code>archived=0</code>. The two lifecycle mechanisms (tier demotion vs archive flag) disagree and neither is what retrieval filters on.</td></tr>
+<tr><td>2</td><td>175 rules, 0 proven</td><td><span class="tag t-ok">Confirmed and explained</span></td><td>All 175 rules Draft, <code>surface_count=0</code>, <code>helpful_count=0</code> — for every rule ever created. This is structural: only Proven rules are injected (<code>build_start.rs:479-483</code>), promotion needs <code>helpful_count ≥ 2</code> (<code>rules.rs:235-256</code>), the only production driver of helpful marks is the rule-reviewer Stop blocker, and that is <strong>off by default</strong> (<code>session_stop/mod.rs:249</code>, <code>rule_review_enabled</code> → <code>unwrap_or(false)</code>). Draft → Proven is unreachable in a default install.</td></tr>
+<tr><td>3</td><td>retrieval_metrics: 595 ambient results, only 2 <code>used</code></td><td><span class="tag t-warn">Confirmed numerically, wrong denominator and interpretation</span></td><td>595 is the count of <em>outcome rows</em>, not results: 987 results were logged, 392 (39.7%) have no outcome at all. Of the 595, 593 <code>ignored</code> / 2 <code>used</code>. Both <code>used</code> rows are <code>document_type='task'</code> (cas-e0c9, cas-c505) — <strong>zero memory entries were ever marked used</strong>. Only 20 entry-outcomes exist, all <code>ignored</code>. And <code>ignored</code> is written automatically at session Stop for every unresolved card (<code>ambient_recall.rs:2582-2597</code>), while <code>used</code> requires the evidence id/locator to appear as a substring in later tool input (<code>:2339-2347</code>). The metric therefore lower-bounds use so aggressively it cannot distinguish "ignored" from "read and applied without citing the id".</td></tr>
+<tr><td>4</td><td><code>session_id</code> did not narrow the aggregates</td><td><span class="tag t-ok">Confirmed, root-caused</span></td><td>Reproduced live: identical output with and without <code>session_id</code>. Cause: the dispatch arm drops the request (<code>mcp/tools/service/mod.rs:811</code> calls <code>retrieval_metrics_impl()</code> with no arguments; <code>search_context.rs:77-94</code> takes none; <code>RetrievalStore::aggregate</code> at <code>retrieval_store.rs:481-502</code> has no WHERE clause). The schema even mislabels the field ("Filter blame by session ID", <code>ops_secondary.rs:195</code>). Silent no-op, untested in either direction.</td></tr>
+<tr><td>5</td><td>Context injected five Helpful Memories; embargo memory materially useful; release-completion preference only created after operator correction</td><td><span class="tag t-warn">Consistent; the count is a hard-coded 5</span></td><td>Every production caller passes <code>limit=5</code> literally (<code>handlers_session.rs:171,179</code>; <code>system.rs:67</code>); the <code>context_limit</code> config knob is dead (<code>config/hooks.rs:497</code>). The embargo entry (<code>2026-08-25-2</code>) carries <code>helpful_count=1</code>, last accessed 2026-08-30T21:57Z. The release-completion preference (<code>2026-08-30-8</code>) and rule-175 were both created after the correction — a genuine <strong>miss</strong> case. Critically: this injection channel writes <code>ContextInjectionTrace</code> and <code>surfaced_artifacts</code>, <strong>not</strong> <code>retrieval_queries</code> — the 595-row telemetry the supervisor scored never covered the five memories they were looking at.</td></tr>
+<tr><td>6</td><td>rule-175 remained Draft with surfaced=0</td><td><span class="tag t-ok">Confirmed; guaranteed by claim-2 mechanism</span></td><td>True for rule-175 and for all 174 others, permanently, until the promotion path is turned on.</td></tr>
+<tr><td>7</td><td>Overall ≈3/10; archive good, ambient poor</td><td><span class="tag t-warn">Directionally supported, mechanism corrected</span></td><td>Archive/manual-lookup layer is real and better than 3 (schema, dedupe, budgeting, privacy discipline are solid). The <em>ambient</em> layer's usefulness is currently <strong>unmeasurable</strong> with this telemetry; what is provable is that its learning loop cannot close. Scoring "the loop": ≈3/10 is defensible.</td></tr>
+</tbody>
+</table>
+</section>
+
+<section aria-labelledby="funnel-h">
+<h2 id="funnel-h">The telemetry funnel at a glance</h2>
+<figure class="svgwrap">
+<svg viewBox="0 0 860 240" role="img" aria-label="Bar chart of the retrieval telemetry funnel: 987 results logged, 595 outcomes recorded, 593 auto-ignored, 2 used (both task documents), 0 memory entries used.">
+<title>Retrieval telemetry funnel, 2026-08-08 to 2026-08-30</title>
+<g font-family="system-ui,sans-serif" font-size="14" fill="currentColor">
+<!-- bars: scale 987 -> 640px -->
+<rect x="180" y="20"  width="640" height="26" fill="#6ba3f0" opacity="0.85"/>
+<rect x="180" y="60"  width="386" height="26" fill="#6ba3f0" opacity="0.6"/>
+<rect x="180" y="100" width="385" height="26" fill="#d9a441" opacity="0.75"/>
+<rect x="180" y="140" width="4"   height="26" fill="#5fc07e"/>
+<rect x="180" y="180" width="2"   height="26" fill="#e07070"/>
+<text x="172" y="38"  text-anchor="end">Results logged</text>
+<text x="172" y="78"  text-anchor="end">Outcomes recorded</text>
+<text x="172" y="118" text-anchor="end">Auto-ignored</text>
+<text x="172" y="158" text-anchor="end">Used (tasks only)</text>
+<text x="172" y="198" text-anchor="end">Entries used</text>
+<text x="828" y="38"  text-anchor="start">987</text>
+<text x="574" y="78"  text-anchor="start">595 (60.3%)</text>
+<text x="573" y="118" text-anchor="start">593</text>
+<text x="192" y="158" text-anchor="start">2 — substring matches on task ids</text>
+<text x="190" y="198" text-anchor="start">0 — and the Helpful-Memories channel is not in this funnel at all</text>
+</g>
+</svg>
+<figcaption>One row per funnel stage; bar length proportional to count (987 = full width). "Auto-ignored" is a Stop-time default, not an observation of non-use. Source: <code>retrieval_query_results</code>/<code>retrieval_outcomes</code>, queries Q10–Q13 in the provenance artifact, window 2026-08-08 → 2026-08-30.</figcaption>
+</figure>
+<details open>
+<summary>Chart data as a table</summary>
+<table>
+<caption>Telemetry funnel counts</caption>
+<thead><tr><th scope="col">Stage</th><th scope="col" class="num">Count</th><th scope="col">Note</th></tr></thead>
+<tbody>
+<tr><td>Results logged</td><td class="num">987</td><td>ambient packet + provenance-enabled searches</td></tr>
+<tr><td>Outcomes recorded</td><td class="num">595</td><td>60.3% of results; 392 results never resolved</td></tr>
+<tr><td>Auto-ignored</td><td class="num">593</td><td>Stop-time default for unresolved cards</td></tr>
+<tr><td>Used</td><td class="num">2</td><td>both <code>document_type='task'</code> (cas-e0c9, cas-c505), substring attribution</td></tr>
+<tr><td>Memory entries used</td><td class="num">0</td><td>20 entry-outcomes exist, all ignored</td></tr>
+</tbody>
+</table>
+</details>
+</section>
+
+<section aria-labelledby="evdata-h">
+<h2 id="evdata-h">Evidence table — data</h2>
+<p>All queries in <code>evidence-queries.txt</code> (artifacts root) and reproduced in Provenance.</p>
+<table>
+<caption>Data evidence (cas-src project store, read-only, 2026-08-30T22:26–22:45Z)</caption>
+<thead><tr><th scope="col">Observation</th><th scope="col">Value</th><th scope="col">Source</th><th scope="col">What it proves</th></tr></thead>
+<tbody>
+<tr><td>Entries total / archived-flag split</td><td class="num">2,657 / 1,510 / 1,147</td><td><code>entries</code> Q1</td><td>Supervisor stats reproduce</td></tr>
+<tr><td>Tier × archived cross-tab</td><td>working∩active = <strong>26</strong>; archive-tier∩active = 1,483; archived=1∩working-tier = 1,147</td><td>Q2</td><td>Tier and archive mechanisms disagree; "active" overstates live corpus 58×</td></tr>
+<tr><td>Corpus composition</td><td><code>context</code> 1,349 (avg 28.2 KB, max 130 KB); <code>learning</code> 1,238 (avg 529 B); <code>preference</code> 48; <code>observation</code> 22</td><td>Q3, Q6</td><td>Corpus is majority auto-captured session-context blobs, not curated memories</td></tr>
+<tr><td>August composition</td><td>1,215 of 1,401 new entries are auto <code>context</code> (86.7%)</td><td>Q7</td><td>Auto-capture dominates growth</td></tr>
+<tr><td>Feedback ever recorded</td><td>helpful on 6/2,657 entries (0.23%); harmful 0; ever-accessed 175 (6.6%)</td><td>Q4, Q17</td><td>Manual feedback loop essentially unused</td></tr>
+<tr><td>Embeddings</td><td><code>pending_embedding=1</code> for all 2,657</td><td>Q5</td><td>Local semantic pipeline inactive; local ranking is lexical + heuristics</td></tr>
+<tr><td>Rules</td><td>175 draft / 0 proven / <code>surface_count</code> sum 0 / helpful sum 0</td><td>Q8</td><td>Rule flywheel has never turned once</td></tr>
+<tr><td>Retrieval queries</td><td>119 total: 87 ambient (70 transition + 17 session_start), 32 explicit-search</td><td>Q9</td><td>Telemetry window 2026-08-08 → 2026-08-30</td></tr>
+<tr><td>Results vs outcomes</td><td>987 results; 595 outcomes (593 ignored, 2 used); 392 results no outcome</td><td>Q10–Q11, Q14</td><td>39.7% of injections never resolved; supervisor's 595 = outcomes, not results</td></tr>
+<tr><td>Outcomes by type</td><td>entry: 20 ignored, 0 used; history: 465 ignored; task: 35 ignored + <strong>2 used</strong></td><td>Q12–Q13</td><td>The only "used" signals are task ids matched by substring; entries scored zero — but see attribution mechanism</td></tr>
+<tr><td>Distinct entries ever ambiently surfaced</td><td>24 (5 context, 13 learning, 6 preference); 20 of 24 archive-tier</td><td>Q15–Q16</td><td>Ambient path touches ~0.9% of corpus; tier ignored in selection</td></tr>
+<tr><td><code>retrieval_metrics</code> with vs without <code>session_id</code></td><td>byte-identical JSON</td><td>live MCP call, this session</td><td>Filter silently ignored</td></tr>
+<tr><td>This session's own session-start bundle</td><td>3 entries injected (2 archive-tier release-discipline preferences, 1 codemap note); 0 relevant to this audit task</td><td><code>qry-ambient-38942f8a…</code></td><td>n=1 live probe of ambient relevance for a worker session</td></tr>
+</tbody>
+</table>
+</section>
+
+<section aria-labelledby="evcode-h">
+<h2 id="evcode-h">Evidence table — code</h2>
+<p>All paths relative to repo root at <code>47707f3c</code>.</p>
+<table>
+<caption>Code evidence with exact seams</caption>
+<thead><tr><th scope="col">Mechanism</th><th scope="col">Location</th><th scope="col">Finding</th></tr></thead>
+<tbody>
+<tr><td>"Helpful Memories" builder</td><td><code>crates/cas-core/src/hooks/context/build_start.rs:686-809</code></td><td>Selects from <code>store.list()</code> (<code>archived=0 LIMIT 10000</code>), filters only type/expiry — <strong><code>memory_tier</code> never consulted</strong>; Cold/Archive-tier entries fully eligible</td></tr>
+<tr><td>Injection count</td><td><code>cas-cli/src/hooks/handlers/handlers_session.rs:171,179</code> etc.</td><td><code>5</code> hard-coded at every call site; <code>hooks.context_limit</code> config dead (<code>cas-cli/src/config/hooks.rs:497</code>)</td></tr>
+<tr><td>Scoring formula</td><td><code>crates/cas-core/src/hooks/context/mod.rs:144-189</code>; blended 70/30 with hybrid in <code>cas-cli/src/hooks/scorer.rs:145-157</code></td><td>type-weight (Preference 2.5, Learning 1.5, Context 1.3, Observation 0.3) × feedback × age-decay (floor 0.5 at 25 days) × importance × stability × access boosts</td></tr>
+<tr><td>Feedback boosts in search</td><td><code>cas-cli/src/hybrid_search/mod.rs:262-264</code></td><td><code>boost_feedback/recency/importance</code> default false and <strong>no production caller sets them true</strong> — helpful/harmful/importance never affect BM25 ranking; only the 30% basic-scorer blend sees them</td></tr>
+<tr><td>Telemetry writers</td><td>ambient packet: <code>cas-cli/src/ambient_recall.rs:2259-2294</code>; explicit search (only with <code>provenance_version=1</code>): <code>mcp/tools/core/search.rs:612-648</code></td><td>The Helpful Memories channel writes <strong>no</strong> <code>retrieval_queries</code> rows — the audited metric never measured it</td></tr>
+<tr><td>Automatic <code>used</code></td><td><code>ambient_recall.rs:2339-2347</code>, wired at <code>handlers_middle/post_tool.rs:36</code></td><td>Substring match of evidence id/locator (≥4 chars) in lowercased tool name+input</td></tr>
+<tr><td>Automatic <code>ignored</code></td><td><code>ambient_recall.rs:2582-2597</code>, wired at <code>session_stop/stop_flow.rs:699</code></td><td>Every still-unresolved card marked ignored at un-blocked Stop; <code>None</code> activity = blanket default</td></tr>
+<tr><td>Outcome → ranking feedback</td><td><code>ambient_recall.rs:2178-2191, 2196-2257</code></td><td><code>(0.35·used + helpful − 0.25·ignored − 0.75·corrected − 1.25·harmful)/(n+4)·0.2</code>, clamped [−0.20, +0.15] — auto-ignored entries acquire a <em>negative</em> ranking prior from the attribution default</td></tr>
+<tr><td>Rule injection filter</td><td><code>crates/cas-core/src/hooks/context/build_start.rs:479-483</code></td><td><code>status == Proven</code> required; Draft rules never injected, never synced (<code>sync/mod.rs:118</code>), only softly recallable via ambient (<code>ambient_recall.rs:1158-1171</code>)</td></tr>
+<tr><td>Rule promotion</td><td><code>cas-cli/src/mcp/tools/core/rules.rs:235-256</code>; threshold floor 2</td><td>Only driver is <code>cas_rule_helpful</code>; intended caller is rule-reviewer, summoned by a Stop blocker gated on <code>rule_review_enabled</code> default <strong>false</strong> (<code>session_stop/mod.rs:249</code>)</td></tr>
+<tr><td><code>surface_count</code> increments</td><td><code>build_start.rs:46-57, 510, 589</code>; <code>surfaced_artifact_store.rs:136-143</code></td><td>Correctly implemented — but only reachable for injected (= Proven) rules; ambient rule cards bypass it. Two unreconciled surfacing ledgers</td></tr>
+<tr><td><code>retrieval_metrics</code> param handling</td><td><code>mcp/tools/service/mod.rs:811</code> → <code>search_context.rs:77-94</code> → <code>retrieval_store.rs:481-502</code></td><td>Request dropped at dispatch; no filter parameters exist; <code>aggregate_for_result</code> (<code>:331</code>) proves the scoped-read pattern exists but no session variant was written</td></tr>
+<tr><td>Mid-session ambient recall</td><td><code>handlers_middle/prompt_capture.rs:72,86</code></td><td>Factory-agents-only; ordinary sessions get ambient recall once, at SessionStart</td></tr>
+<tr><td>Decay/tier job</td><td><code>cas-cli/src/daemon/decay.rs:22-108</code></td><td>Demotes tiers that retrieval then ignores (see build_start finding); <code>auto_prune</code> → <code>archived=1</code> is the only transition retrieval respects</td></tr>
+<tr><td>Hard-policy boundary</td><td><code>handlers_events/pre_tool.rs</code> (deny/allow); <code>crates/cas-types/src/rule.rs:247-311</code></td><td>Enforcement is hardcoded Rust; the only data-driven enforcement is Proven-rule auto-approval of safe read-only tools. No memory or rule body can create a deny. Rules' <code>hook_command</code> field is stored but never executed (dead capability)</td></tr>
+</tbody>
+</table>
+</section>
+
+<section aria-labelledby="chain-h">
+<h2 id="chain-h">Reasoning chain</h2>
+<ol class="chain">
+<li><strong>The supervisor's numbers are real</strong> — every count reproduced exactly against the live store (claims 1–3, 6). Nothing was fabricated or misread at the data layer.</li>
+<li><strong>But the headline metric measured a channel that doesn't carry the product.</strong> The five Helpful Memories the supervisor evaluated come from <code>build_start.rs</code>; the 595-outcome telemetry comes exclusively from the separate ambient-recall packet and provenance-enabled explicit searches. Judging "ambient memory usefulness" from <code>retrieval_metrics</code> is judging the wrong pipe.</li>
+<li><strong>Within the telemetered pipe, the outcome labels are defaults, not observations.</strong> <code>ignored</code> is assigned en masse at Stop; <code>used</code> needs a literal id/locator substring in tool input. An agent that reads an injected memory and follows its advice without re-typing its id is recorded as <code>ignored</code>. Therefore "0 of 20 entry-results used" is compatible with both "useless" and "quietly useful" — the instrument cannot tell. This resolves the actual-use-vs-attribution question the task posed: <strong>the ambiguity is real and currently unresolvable from stored telemetry; the data lower-bounds use only.</strong></li>
+<li><strong>The one place outcomes do have teeth is quietly harmful:</strong> auto-<code>ignored</code> feeds a negative ranking adjustment (−0.25 weight) and rule promotion counts <code>used+helpful</code> — so the attribution defaults actively depress ranking of injected-but-unmatched items and block retrieval-evidence promotion.</li>
+<li><strong>The rule layer cannot learn in a default install.</strong> Injection requires Proven; promotion requires feedback; feedback generation is disabled by default; ambient surfacing of Draft rules doesn't count toward <code>surface_count</code>. Four locks on one door. The observed 175/0/0 is not underperformance, it is the fixed point of the design as shipped.</li>
+<li><strong>The corpus composition undermines ambient precision independently of ranking.</strong> 86.7% of August growth is 28 KB auto-context blobs; the scorer's Context type-weight (1.3) is close to Learning's (1.5), the semantic channel is inactive locally (all 2,657 entries pending embedding), and tier demotion — the mechanism meant to age noise out — is invisible to selection. The 26-entry curated working set the operator actually relies on competes with 1,484 stale-but-"active" rows.</li>
+<li><strong>What memory demonstrably did this cycle:</strong> helped once (Slack-embargo preference surfaced and honored; also the only working-tier preference with fresh access + helpful mark); missed once (release-completion requirement had to come from operator correction — the prior handoff entries contained adjacent context but no retrievable statement of the requirement); and was unaffected for the bulk (465 history-card injections all auto-ignored; this audit session's own 3-entry bundle was 0-relevant to its task). One hit, one miss, high chaff volume — consistent with "archive good, ambient weak", but on an n too small to rate retrieval quality; what it does rate is the absence of any mechanism that would have <em>told us</em> the answer at scale.</li>
+<li><strong>Therefore:</strong> overturn the supervisor's implicit mechanism ("retrieval is poor"), sustain the direction ("the system doesn't function as autonomous memory"), and re-target the fix program at instrumentation and lifecycle seams before touching ranking math — improving a ranker you cannot measure is unfalsifiable work.</li>
+</ol>
+</section>
+
+<section aria-labelledby="falsify-h">
+<h2 id="falsify-h">What would falsify this</h2>
+<ul>
+<li><strong>The channel-coverage claim</strong> dies if <code>build_context_with_stores</code> or its CLI wrapper is shown writing <code>retrieval_queries</code> rows for Helpful Memories items (it writes <code>ContextInjectionTrace</code> + <code>surfaced_artifacts</code> only; grep <code>record_ambient_query</code> callers).</li>
+<li><strong>The attribution claim</strong> dies if any code path marks <code>used</code> other than the substring matcher and explicit <code>retrieval_feedback</code> (both writers enumerated at <code>retrieval_store.rs</code> callers), or if <code>ignored</code> requires evidence of non-use.</li>
+<li><strong>The rule-deadlock claim</strong> dies if any production path promotes a rule without <code>cas_rule_helpful</code>, or if <code>rule_review_enabled</code> defaults true anywhere reachable, or if a Draft rule is shown in a SessionStart "Active Rules" block.</li>
+<li><strong>The dead-boost claim</strong> dies if a production (non-test) call site sets any <code>boost_*</code> flag true.</li>
+<li><strong>The tier-invisibility claim</strong> dies if any retrieval candidate query filters on <code>memory_tier</code> (only <code>archived=0</code> appears in <code>store_list</code>).</li>
+<li><strong>The overall verdict</strong> softens if a labeled evaluation (below) shows ≥50% of injected memories rated relevant by the receiving agent — that would restore "retrieval is fine, only measurement is broken" and raise the score.</li>
+</ul>
+</section>
+
+<section aria-labelledby="program-h">
+<h2 id="program-h">Prioritized improvement program</h2>
+<p>Owner legend: <strong>S</strong> = supervisor-filed factory task (Rust change in this repo), <strong>O</strong> = operator/config decision.</p>
+<table>
+<caption>Improvement program, highest priority first</caption>
+<thead><tr><th scope="col">P</th><th scope="col">Change</th><th scope="col">Seam (file:line)</th><th scope="col">Acceptance metric</th><th scope="col">Tests/evals</th><th scope="col">Risk</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><strong>Telemeter the real injection channel.</strong> Log every Helpful-Memories item as a <code>retrieval_queries</code>/<code>retrieval_query_results</code> row (family <code>context_session_start</code>, distinct policy tag), or route the section through ambient recall. (S)</td><td><code>cas-cli/src/hooks/context.rs:150-229</code> (where <code>ContextInjectionTrace</code> is already assembled); reuse <code>record_ambient_query</code> shape from <code>ambient_recall.rs:2259</code></td><td>100% of injected memory items appear in telemetry; denominator documented in <code>retrieval_metrics</code> output</td><td>Unit: injection writes N rows for N items; parity with trace. Update <code>search_tools.rs</code> metrics flow test</td><td>Low; write-path only. Watch hook latency budget (5s timeout)</td></tr>
+<tr><td>2</td><td><strong>Make outcomes honest.</strong> Split <code>ignored</code> into <code>unresolved</code> (Stop default) vs true negatives; stop feeding <code>unresolved</code> into <code>outcome_adjustment</code> and promotion denominators; add a positive signal cheaper than substring — e.g. count <code>memory action=get/list</code> pulls of an injected id, which the packet already invites ("bodies=tool-pull-only"). (S)</td><td><code>ambient_recall.rs:2582-2597</code> (finalize), <code>:2178-2191</code> (adjustment), <code>retrieval_store.rs:24-66</code> CHECK constraint + migration</td><td><code>usefulness_rate</code> computed only over resolved outcomes; body-pull events recorded as <code>used</code>; no ranking penalty from defaults</td><td>Extend <code>automatic_hook_feedback_populates_metrics_with_plausible_attribution</code> (<code>ambient_recall.rs:3419</code>); new test: body-pull → used</td><td>Medium: outcome enum change touches CHECK constraint; keep <code>INSERT OR IGNORE</code> idempotence</td></tr>
+<tr><td>3</td><td><strong>Unjam the rule flywheel.</strong> (a) Decide the promotion driver: enable <code>rule_review_enabled</code> by default <em>or</em> schedule rule-reviewer from daemon maintenance; (b) count ambient rule surfacing into <code>surface_count</code>/<code>surfaced_artifacts</code> so the reviewer sees real exposure; (c) reconcile the two surfacing ledgers. (S + O for the default)</td><td><code>session_stop/mod.rs:249</code>; <code>ambient_recall.rs:1158-1171</code> rule surface; <code>surfaced_artifact_store.rs:136-143</code></td><td>≥1 rule reaches Proven within 20 sessions of enablement; <code>sum(surface_count) &gt; 0</code>; one ledger or a documented join</td><td><code>rule_tools.rs</code> promotion suite already exists; add ambient-surface→counter test</td><td>Reviewer cost per Stop; mitigate with threshold + worker exemption (already present)</td></tr>
+<tr><td>4</td><td><strong>Fix <code>retrieval_metrics</code> scoping.</strong> Honor <code>session_id</code> (derive <code>session_hash</code>, add WHERE) and <strong>error on unsupported filters</strong> instead of ignoring them; fix the <code>session_id</code> schema description. (S)</td><td><code>mcp/tools/service/mod.rs:811</code>; <code>search_context.rs:77-94</code>; add <code>aggregate_for_session</code> beside <code>retrieval_store.rs:331</code>; <code>ops_secondary.rs:195,198</code></td><td>Filtered call returns strict subset; unsupported param → explicit error</td><td>New test beside <code>search_tools.rs:501</code> asserting narrowing (currently untested in both directions)</td><td>Low</td></tr>
+<tr><td>5</td><td><strong>Corpus hygiene + tier truth.</strong> Exclude <code>type='context'</code> blobs from Helpful-Memories candidacy (or cap preview + require feedback&gt;0); make selection respect <code>memory_tier</code>; reconcile <code>archived</code> flag vs tier semantics in <code>system stats</code> so "active" means live. (S)</td><td><code>build_start.rs:704-709</code> filter; <code>store_entry_crud.rs:388-403</code>; stats reporter</td><td>Working-set candidates = working/in-context tiers; stats report tier truth; injected-item relevance (P7 harness) improves</td><td>Add both-direction tier-eligibility tests (none exist today); decay-job tests already cover transitions</td><td>Medium: could hide a genuinely useful archived entry; mitigate with explicit <code>memory action=search</code> escape hatch (already exists)</td></tr>
+<tr><td>6</td><td><strong>Decide the dead controls.</strong> Either enable feedback/recency/importance boosts in production search defaults or delete <code>apply_boosts</code>; wire <code>hooks.context_limit</code> or delete it; delete diverged duplicates (<code>crates/cas-core/src/search/{scorer,query_ops}.rs</code>, <code>crates/cas-core/src/migration/</code>), the broken <code>store_list_decayable</code> tier string (<code>'in_context'</code> vs <code>'in-context'</code>, <code>store_entry_crud.rs:401</code>), and the never-executed <code>hook_command</code>. (S)</td><td>listed inline</td><td>No config knob that silently does nothing; one implementation per subsystem</td><td><code>cargo check</code> + existing suites; add a config-honored test for <code>context_limit</code></td><td>Low-medium (ranking change if boosts enabled — gate behind P7 harness first)</td></tr>
+<tr><td>7</td><td><strong>Evaluation harness</strong> (prerequisite for any ranking work) — see below. (S)</td><td>new <code>cas-cli/tests/</code> + daemon job</td><td>harness exists, baseline captured, gate wired</td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+</section>
+
+<section aria-labelledby="harness-h">
+<h2 id="harness-h">Proposed evaluation harness</h2>
+<p>Three layers, cheapest first; all offline-runnable against a store snapshot:</p>
+<ol>
+<li><strong>Deterministic replay (exists, extend).</strong> <code>cas-cli/tests/retrieval_parity_test.rs</code> already replays captured queries with rank-drop tolerance. Extend with a <em>labeled</em> fixture set: ~50 (prompt-context → expected-relevant entry ids) pairs mined from real session-start bundles and judged once by hand. Metric: precision@5 and recall@5 for the Helpful-Memories selector and the ambient packet, tracked per commit. Gate: no silent regression &gt;10% relative.</li>
+<li><strong>Injected-relevance sampling (new, cheap).</strong> After P1, a weekly daemon job samples N injected bundles and asks the <em>receiving</em> agent (or a scheduled judge run) for a 0/1 relevance label per item, written as explicit <code>retrieval_feedback</code>. Metric: rolling injected-precision; this is the number that would falsify or confirm "ambient retrieval is poor" — which today is unknowable. Target to beat: 50%.</li>
+<li><strong>Outcome-funnel dashboard (new).</strong> From honest outcomes (P2): injections → resolved → used/body-pulled → helpful, per document_type and per query_family, with the denominator (results, not outcomes) stated. Publish in <code>system stats</code> so the next audit doesn't re-derive it by hand.</li>
+</ol>
+</section>
+
+<section aria-labelledby="outside-h">
+<h2 id="outside-h">What should be enforced outside memory</h2>
+<p>The audit confirms the codebase already draws the right hard/soft line — enforcement lives in Rust PreToolUse guards and Stop blockers, and <strong>no memory or rule body can create a deny</strong> (<code>pre_tool.rs</code>; auto-approval capped to read-only tools, <code>rule.rs:247-311</code>). Keep it that way, and move three things across the line rather than hoping recall catches them:</p>
+<ul>
+<li><strong>Standing operator prohibitions with dates</strong> (Slack embargo, release-completion contract): these are exactly the "must not miss" class. Encode as Proven rules with <code>valid_until</code>, or as explicit hook checks; ambient recall as backup, never primary.</li>
+<li><strong>Session handoffs</strong>: the operator's real continuity mechanism is the harness <code>MEMORY.md</code> flat file, which is versioned, always-loaded, and curated — CAS <code>context</code> blobs duplicate it poorly at 28 KB each. Stop auto-competing with it; capture less, link more.</li>
+<li><strong>Anything with a deadline or a count</strong> (worker caps, embargo windows): memory recall is probabilistic; policy must not be.</li>
+</ul>
+</section>
+
+<section aria-labelledby="threats-h">
+<h2 id="threats-h">Threats to validity</h2>
+<ul>
+<li><strong>Single project, single store.</strong> Only the cas-src project DB was examined; global-store and other-project dynamics may differ. The supervisor's numbers matched this store exactly, so the review and this audit at least examined the same data.</li>
+<li><strong>Small live-relevance sample.</strong> The helped/missed/unaffected assessment rests on the supervisor's attested session plus one live probe (this session's 3-item bundle, n=1). It is presented as illustration, not measurement; the measurement gap is itself finding #1.</li>
+<li><strong>Supervisor review known only via the task description.</strong> The full text from session cas-src-vivid-wolf-17 was not persisted as an artifact; claims were audited as quoted in cas-5726. If the original review contained additional caveats, the scorecard's "wrong interpretation" cells may be unfair to it.</li>
+<li><strong>Telemetry window is short and sparse</strong> (2026-08-08→08-30, 119 queries, 11 sessions with outcomes, none after 08-27 except un-outcomed queries). All rates carry wide intervals; that is why no precision claims are made from them.</li>
+<li><strong><code>last_accessed</code>/<code>access_count</code> conflate admin listing with useful recall</strong> — the 6.6% ever-accessed figure is an upper bound on deliberate lookup.</li>
+<li><strong>This session ran under the audited system</strong> (its hooks injected ambient context into this audit), a mild observer effect; no memory writes were made to the store during evidence collection beyond the telemetry rows the system itself logs for any session.</li>
+</ul>
+</section>
+
+<footer class="prov" aria-labelledby="prov-h">
+<h2 id="prov-h">Provenance</h2>
+<ul>
+<li><strong>Code:</strong> repo <code>Richards-LLC/cassy</code> worktree at origin/main <code>47707f3c</code> (merge of release v3.7.1). All file:line citations refer to this tree.</li>
+<li><strong>Data:</strong> <code>/home/pippenz/Petrastella/cas-src/.cas/cas.db</code> opened read-only (<code>file:...?mode=ro</code>) via sqlite3, 2026-08-30 22:26–22:45 UTC. Full query set + raw outputs: <code>/home/pippenz/.cas/artifacts/cas-5726/evidence-queries.txt</code> (Q1–Q17 referenced above, in file order).</li>
+<li><strong>Live reproduction:</strong> <code>mcp__cas__search action=retrieval_metrics</code> called twice this session (with and without <code>session_id=sha256:3a65…da1</code>); outputs byte-identical.</li>
+<li><strong>Code mapping:</strong> two independent Explore passes over <code>cas-cli/src/</code> and <code>crates/</code> (memory/context/ambient/decay; feedback/rules/search/policy), findings cross-checked against this auditor's own reads of the cited lines.</li>
+<li><strong>Key row-level evidence:</strong> used-outcome rows (<code>cas-e0c9</code>, <code>cas-c505</code>, both <code>document_type='task'</code>); session-start query <code>qry-ambient-38942f8ad9e641aea2fb7f2a63a93b7c</code> (this session, 3 entry results); helpful-marked entries listed in Q17.</li>
+<li><strong>Markdown source:</strong> <a href="2026-08-30-memory-system-effectiveness-review.md">docs/analysis/2026-08-30-memory-system-effectiveness-review.md</a>; this HTML is generated from it in the same commit.</li>
+</ul>
+</footer>
+</main>
+</body>
+</html>

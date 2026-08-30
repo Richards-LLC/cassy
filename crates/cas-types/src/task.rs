@@ -851,6 +851,23 @@ mod tests {
     }
 
     #[test]
+    fn stringified_deliverables_json_migrates_to_structured_task_data() {
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id": "cas-legacy-deliverables",
+            "title": "Moved task",
+            "deliverables": "{\"files_changed\":[\"src/lib.rs\"],\"factory_branch_anchor\":\"deadbeef\"}"
+        }))
+        .expect("stringified deliverables should remain readable");
+
+        assert_eq!(task.deliverables.files_changed, ["src/lib.rs"]);
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some("deadbeef")
+        );
+        assert!(serde_json::to_value(task).unwrap()["deliverables"].is_object());
+    }
+
+    #[test]
     fn task_origin_project_is_optional_for_legacy_json() {
         let task = Task::new("cas-origin".to_string(), "Origin test".to_string());
         assert_eq!(task.origin_project, None);

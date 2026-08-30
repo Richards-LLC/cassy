@@ -18987,6 +18987,73 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-2598: review can require deleting content that was present when a
+    /// task first parked. Once that descendant lane tip is merged, content
+    /// proof must evaluate the final tip (whose effect is the deletion), not
+    /// the historical parked anchor (whose addition is now intentionally
+    /// absent from both the lane and target trees).
+    #[test]
+    fn post_park_review_fix_deletion_closes_cas_2598() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        std::fs::write(p.join("generated.pyc"), b"review must remove this artifact\n").unwrap();
+        git(p, &["add", "generated.pyc"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat(cas-2598): accidentally add generated artifact",
+            ],
+        );
+        let parked_anchor = rev_parse_local(p, "HEAD");
+
+        std::fs::remove_file(p.join("generated.pyc")).unwrap();
+        git(p, &["add", "generated.pyc"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fix(cas-2598): apply review deletion",
+            ],
+        );
+        let reviewed_tip = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+
+        assert_eq!(
+            delivery_content_presence_on_target(p, &parked_anchor, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["generated.pyc".to_string()]
+            },
+            "precondition: the stale park-time anchor misreads the reviewed deletion as dropped"
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(p, &reviewed_tip, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["generated.pyc".to_string()]
+            },
+            "precondition: the merged lane tip proves the intentional deletion"
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor);
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "an integrated post-park review deletion must not be reported as dropped delivery"
+        );
+    }
+
     /// cas-b278 / GH #324: ancestry survives a later conflicting merge even
     /// when that merge's resolution removes the delivery. Both the task close
     /// gate and epic_status must inspect the current target tree, refuse the

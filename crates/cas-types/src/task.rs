@@ -297,7 +297,7 @@ pub struct NegativeResultEvidence {
 }
 
 /// Deliverables and durable lifecycle evidence for a task.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
     /// Portable repository/branch binding used by close, verification, and
     /// worktree mutations. Legacy JSON defaults to no explicit binding.
@@ -371,6 +371,73 @@ pub struct TaskDeliverables {
     /// used to be indistinguishable in task status output.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_conflicted: bool,
+}
+
+/// The object-shaped representation used by current task payloads.
+///
+/// This stays separate from [`TaskDeliverables`] so its custom deserializer
+/// can decode the legacy JSON-string representation without recursively
+/// invoking itself.
+#[derive(Debug, Deserialize)]
+struct TaskDeliverablesObject {
+    #[serde(default)]
+    work_target: Option<WorkTarget>,
+    #[serde(default)]
+    pre_close_hook: Option<PreCloseHookEvidence>,
+    #[serde(default)]
+    negative_result: Option<NegativeResultEvidence>,
+    #[serde(default)]
+    files_changed: Vec<String>,
+    #[serde(default)]
+    commit_hash: Option<String>,
+    #[serde(default)]
+    merge_commit: Option<String>,
+    #[serde(default)]
+    review_envelope: Option<String>,
+    #[serde(default)]
+    factory_branch_anchor: Option<String>,
+    #[serde(default)]
+    parked_branch: Option<String>,
+    #[serde(default)]
+    merge_conflicted: bool,
+}
+
+impl From<TaskDeliverablesObject> for TaskDeliverables {
+    fn from(value: TaskDeliverablesObject) -> Self {
+        Self {
+            work_target: value.work_target,
+            pre_close_hook: value.pre_close_hook,
+            negative_result: value.negative_result,
+            files_changed: value.files_changed,
+            commit_hash: value.commit_hash,
+            merge_commit: value.merge_commit,
+            review_envelope: value.review_envelope,
+            factory_branch_anchor: value.factory_branch_anchor,
+            parked_branch: value.parked_branch,
+            merge_conflicted: value.merge_conflicted,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskDeliverables {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let value = match value {
+            // cas-6980: Phase-2 row copies encoded the SQLite JSON text as a
+            // JSON string. Decode that one legacy layer, then continue
+            // through the same strict object parser as current payloads.
+            Value::String(encoded) => serde_json::from_str(&encoded).map_err(|error| {
+                serde::de::Error::custom(format!("invalid stringified deliverables: {error}"))
+            })?,
+            value => value,
+        };
+        serde_json::from_value::<TaskDeliverablesObject>(value)
+            .map(Into::into)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Maximum serialized size of the structured task execution state. The state
@@ -848,6 +915,27 @@ mod tests {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(deliverables.work_target.is_none());
         assert!(deliverables.pre_close_hook.is_none());
+    }
+
+    #[test]
+    fn stringified_deliverables_json_migrates_to_structured_task_data() {
+        let mut encoded = serde_json::to_value(Task::new(
+            "cas-legacy-deliverables".to_string(),
+            "Moved task".to_string(),
+        ))
+        .unwrap();
+        encoded["deliverables"] = serde_json::json!(
+            "{\"files_changed\":[\"src/lib.rs\"],\"factory_branch_anchor\":\"deadbeef\"}"
+        );
+        let task: Task = serde_json::from_value(encoded)
+            .expect("stringified deliverables should remain readable");
+
+        assert_eq!(task.deliverables.files_changed, ["src/lib.rs"]);
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some("deadbeef")
+        );
+        assert!(serde_json::to_value(task).unwrap()["deliverables"].is_object());
     }
 
     #[test]

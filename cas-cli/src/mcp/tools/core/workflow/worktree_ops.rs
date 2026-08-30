@@ -850,7 +850,18 @@ fn declared_system_b_merge_target(
         .work_target
         .as_ref()
         .filter(|target| !target.target_branch.trim().is_empty());
-    if let Some(target) = target {
+    // cas-d22d (GH #625): task creation historically stamped the repository's
+    // default branch onto a child even when it was created under an epic. If
+    // that target is exactly the parent epic's own default, it is implicit
+    // epic scope rather than a deliberate task lane. The live epic branch
+    // must therefore win for merge just as it does for task creation/spawn.
+    let target_is_epic_default = epic.is_some_and(|epic| {
+        crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
+            task, epic,
+        )
+        .is_some()
+    });
+    if let Some(target) = target.filter(|_| !target_is_epic_default) {
         return Some(ResolvedSystemBMergeTarget {
             branch: target.target_branch.clone(),
             reason: format!(
@@ -993,17 +1004,6 @@ fn resolve_system_b_merge_target(
         if !assignee_task_is_merge_relevant(task.status) {
             continue;
         }
-        // A task-level WorkTarget outranks every parent-epic signal. This is
-        // the same explicit contract the task_id path and spawn base use.
-        if let Some(target) = declared_system_b_merge_target(task, None, &task.id) {
-            assignee_epic_branches.push((
-                "task WorkTarget".to_string(),
-                target.branch,
-                task.id.clone(),
-            ));
-            continue;
-        }
-
         // P2: surface get_parent_epic errors; reject branchless parents —
         // never silently fall through to trunk/focus (cas-0b32 review).
         let parent = if task.task_type == cas_types::TaskType::Epic {
@@ -1028,7 +1028,20 @@ fn resolve_system_b_merge_target(
                     branchless_parent_epics.push(epic.id.clone());
                 }
             }
-            Ok(None) => standalone_tasks.push(task.id.clone()),
+            Ok(None) => {
+                // A standalone task has no parent against which its target
+                // could be an implicit epic default, so its declared target
+                // remains authoritative.
+                if let Some(target) = declared_system_b_merge_target(task, None, &task.id) {
+                    assignee_epic_branches.push((
+                        "task WorkTarget".to_string(),
+                        target.branch,
+                        task.id.clone(),
+                    ));
+                } else {
+                    standalone_tasks.push(task.id.clone());
+                }
+            }
             Err(e) => {
                 return Err(McpError {
                     code: ErrorCode::INTERNAL_ERROR,
@@ -3514,5 +3527,37 @@ mod tests {
             .expect("branchless epic WorkTarget must replace the legacy field");
         assert_eq!(resolved.branch, "epic/declared-lane");
         assert!(resolved.reason.contains("legacy epic.branch absent"));
+    }
+
+    #[test]
+    fn declared_merge_target_moves_duplicate_child_default_to_live_epic_lane_cas_d22d() {
+        let mut epic = cas_types::Task::new("cas-d22d-epic".into(), "epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/live-lane".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+
+        let mut child = cas_types::Task::new("cas-d22d-child".into(), "child".into());
+        child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        let resolved = declared_system_b_merge_target(&child, Some(&epic), &child.id)
+            .expect("duplicate epic default must resolve through the live epic lane");
+        assert_eq!(resolved.branch, "epic/live-lane");
+        assert!(!resolved.trunk_fallback);
+
+        child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "release/operator-selected".into(),
+        });
+        assert_eq!(
+            declared_system_b_merge_target(&child, Some(&epic), &child.id)
+                .expect("distinct child target remains authoritative")
+                .branch,
+            "release/operator-selected"
+        );
     }
 }

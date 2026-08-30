@@ -3,7 +3,8 @@
 //! Enables syncing Cassy data with Cassy Cloud service.
 
 use clap::{Parser, Subcommand};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -47,6 +48,8 @@ pub enum CloudCommands {
     Projects(CloudProjectsArgs),
     /// Pull team memories for the current project
     TeamMemories(CloudTeamMemoriesArgs),
+    /// Remove this project's local cloud link, optionally purging owned cloud rows
+    Unlink(CloudUnlinkArgs),
     /// Remove foreign-project entities from local DB and re-pull
     PurgeForeign(CloudPurgeForeignArgs),
 }
@@ -224,6 +227,20 @@ pub struct CloudPurgeForeignArgs {
 }
 
 #[derive(Parser)]
+pub struct CloudUnlinkArgs {
+    /// Also remove this project's entries, tasks, and knowledge rows from cloud.
+    ///
+    /// The remote purge is deliberately explicit. It uses only the existing
+    /// per-owner DELETE endpoints and leaves the local database untouched.
+    #[arg(long)]
+    pub purge_remote: bool,
+
+    /// Show the scoped remote rows that would be deleted without changing state.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Parser)]
 pub struct CloudQueueArgs {
     /// Show detailed list of queued items
     #[arg(long, short)]
@@ -269,8 +286,373 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
         CloudCommands::Project(cmd) => execute_project(cmd, cli, cas_root),
         CloudCommands::Projects(args) => execute_projects(args, cli),
         CloudCommands::TeamMemories(args) => execute_team_memories(args, cli, cas_root),
+        CloudCommands::Unlink(args) => execute_unlink(args, cli, cas_root),
         CloudCommands::PurgeForeign(args) => execute_purge_foreign(args, cli, cas_root),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct UnlinkRemoteRecord {
+    scope: UnlinkRemoteScope,
+    entity_type: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum UnlinkRemoteScope {
+    Personal,
+    Team(String),
+}
+
+/// Remove the current project's cloud link without touching any other local
+/// `.cas` state. Remote deletion is a separate, explicit phase: all scoped
+/// rows are discovered first, unsupported knowledge deletion fails closed, and
+/// the local link is removed only after every DELETE succeeds.
+fn execute_unlink(
+    args: &CloudUnlinkArgs,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<()> {
+    let cloud_path = cas_root.join("cloud.json");
+    if !cloud_path.exists() {
+        return render_unlink_result(
+            cli,
+            cas_root,
+            None,
+            args,
+            0,
+            0,
+            false,
+            "not cloud-linked",
+        );
+    }
+
+    let mut config = CloudConfig::load_from_cas_dir(cas_root)?;
+    // Login credentials are user-scoped. Inherit them in memory only: this
+    // command must not rewrite cloud.json before the remote purge succeeds.
+    if !config.is_logged_in() {
+        if let Ok(user_config) = CloudConfig::load_user() {
+            config.inherit_credentials_from(&user_config);
+        }
+    }
+    let project_id = crate::cloud::resolve_canonical_id(cas_root).ok_or_else(|| {
+        anyhow::anyhow!("Cannot unlink: project canonical id could not be resolved")
+    })?;
+
+    if args.purge_remote {
+        let token = config
+            .token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot purge remote rows: not logged in. The local cloud link was preserved."
+                )
+            })?;
+        let queue = SyncQueue::open_read_only(cas_root)?;
+        let syncer = crate::cloud::CloudSyncer::new_for_project(
+            std::sync::Arc::new(queue),
+            config.clone(),
+            crate::cloud::CloudSyncerConfig::default(),
+            project_id.clone(),
+            cas_root,
+        );
+        let records = discover_unlink_remote_records(
+            &syncer,
+            &project_id,
+            config.active_team_id().as_deref(),
+        )?;
+        let knowledge_records = records
+            .iter()
+            .filter(|record| record.entity_type == "knowledge_page")
+            .collect::<Vec<_>>();
+        if !knowledge_records.is_empty() {
+            let ids = knowledge_records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "Cannot purge remote knowledge pages: the cloud API does not support knowledge_page DELETE ({} row(s): {ids}). The local cloud link was preserved.",
+                knowledge_records.len()
+            );
+        }
+        if args.dry_run {
+            return render_unlink_result(
+                cli,
+                cas_root,
+                Some(&project_id),
+                args,
+                records.len(),
+                0,
+                false,
+                "dry run",
+            );
+        }
+        let deleted = delete_unlink_remote_records(
+            &config.endpoint,
+            token,
+            &project_id,
+            &records,
+        )?;
+        fs::remove_file(&cloud_path).map_err(|error| {
+            anyhow::anyhow!(
+                "Remote purge completed ({deleted} row(s)), but removing {} failed: {error}",
+                cloud_path.display()
+            )
+        })?;
+        return render_unlink_result(
+            cli,
+            cas_root,
+            Some(&project_id),
+            args,
+            records.len(),
+            deleted,
+            true,
+            "cloud link removed; local data preserved",
+        );
+    }
+
+    if args.dry_run {
+        return render_unlink_result(
+            cli,
+            cas_root,
+            Some(&project_id),
+            args,
+            0,
+            0,
+            false,
+            "dry run; remote rows retained",
+        );
+    }
+    fs::remove_file(&cloud_path)?;
+    render_unlink_result(
+        cli,
+        cas_root,
+        Some(&project_id),
+        args,
+        0,
+        0,
+        true,
+        "cloud link removed; remote rows retained",
+    )
+}
+
+fn discover_unlink_remote_records(
+    syncer: &crate::cloud::CloudSyncer,
+    project_id: &str,
+    team_id: Option<&str>,
+) -> anyhow::Result<Vec<UnlinkRemoteRecord>> {
+    let mut records = BTreeSet::new();
+    let entity_types = ["entries", "tasks", "knowledge_pages"];
+    let personal = syncer
+        .pull_raw(project_id, &entity_types, None)
+        .map_err(|error| anyhow::anyhow!("personal cloud pull failed: {error}"))?;
+    collect_unlink_records(
+        &mut records,
+        &personal,
+        project_id,
+        UnlinkRemoteScope::Personal,
+        &["entries", "tasks", "knowledge_pages"],
+    )?;
+
+    if let Some(team_id) = team_id {
+        let team_scope = UnlinkRemoteScope::Team(team_id.to_string());
+        let team = syncer
+            .pull_raw(project_id, &entity_types, Some(team_id))
+            .map_err(|error| anyhow::anyhow!("team cloud pull failed: {error}"))?;
+        collect_unlink_records(
+            &mut records,
+            &team,
+            project_id,
+            team_scope,
+            &entity_types,
+        )?;
+    }
+
+    Ok(records.into_iter().collect())
+}
+
+fn collect_unlink_records(
+    records: &mut BTreeSet<UnlinkRemoteRecord>,
+    body: &serde_json::Value,
+    project_id: &str,
+    scope: UnlinkRemoteScope,
+    keys: &[&str],
+) -> anyhow::Result<()> {
+    for key in keys {
+        let rows = body
+            .get(*key)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "scoped cloud pull omitted required `{key}` array; refusing unlink"
+                )
+            })?;
+        for row in rows {
+            let row_project_id = row
+                .get("project_canonical_id")
+                .or_else(|| row.get("project_id"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "scoped cloud pull returned `{key}` row without project_id; refusing unlink"
+                    )
+                })?;
+            if row_project_id != project_id {
+                anyhow::bail!(
+                    "scoped cloud pull returned `{key}` row for foreign project `{row_project_id}`; refusing unlink"
+                );
+            }
+            let id = row
+                .get("id")
+                .or_else(|| row.get("entity_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "scoped cloud pull returned `{key}` row without id; refusing unlink"
+                    )
+                })?;
+            let entity_type = match *key {
+                "entries" => "entry",
+                "tasks" => "task",
+                "knowledge_pages" => "knowledge_page",
+                _ => unreachable!("unlink only collects explicitly supported entity types"),
+            };
+            records.insert(UnlinkRemoteRecord {
+                scope: scope.clone(),
+                entity_type: entity_type.to_string(),
+                id: id.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn delete_unlink_remote_records(
+    endpoint: &str,
+    token: &str,
+    project_id: &str,
+    records: &[UnlinkRemoteRecord],
+) -> anyhow::Result<usize> {
+    let mut deleted = 0;
+    for record in records {
+        let (path, scope_label) = match &record.scope {
+            UnlinkRemoteScope::Personal => (
+                format!(
+                    "{endpoint}/api/sync/{}/{}?project_id={}",
+                    record.entity_type,
+                    urlencoding::encode(&record.id),
+                    urlencoding::encode(project_id)
+                ),
+                "personal",
+            ),
+            UnlinkRemoteScope::Team(team_id) => (
+                format!(
+                    "{endpoint}/api/teams/{}/sync/{}/{}?project_id={}",
+                    urlencoding::encode(team_id),
+                    record.entity_type,
+                    urlencoding::encode(&record.id),
+                    urlencoding::encode(project_id)
+                ),
+                "team",
+            ),
+        };
+        match ureq::delete(&path)
+            .timeout(Duration::from_secs(30))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call()
+        {
+            Ok(response) if (200..300).contains(&response.status()) => deleted += 1,
+            Err(ureq::Error::Status(404, _)) => {
+                // Already absent is the desired final state for an idempotent
+                // unlink and matches the existing sync delete semantics.
+                deleted += 1;
+            }
+            Ok(response) => {
+                let status = response.status();
+                let body = response.into_string().unwrap_or_default();
+                anyhow::bail!(
+                    "{scope_label} delete of {} {} failed with status {status}: {body}; local cloud link preserved",
+                    record.entity_type,
+                    record.id
+                )
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                anyhow::bail!(
+                    "{scope_label} delete of {} {} failed with status {status}: {body}; local cloud link preserved",
+                    record.entity_type,
+                    record.id
+                )
+            }
+            Err(ureq::Error::Transport(error)) => anyhow::bail!(
+                "{scope_label} delete of {} {} failed: {error}; local cloud link preserved",
+                record.entity_type,
+                record.id
+            ),
+        }
+    }
+    Ok(deleted)
+}
+
+fn render_unlink_result(
+    cli: &Cli,
+    cas_root: &Path,
+    project_id: Option<&str>,
+    args: &CloudUnlinkArgs,
+    discovered: usize,
+    deleted: usize,
+    local_unlinked: bool,
+    detail: &str,
+) -> anyhow::Result<()> {
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": if args.dry_run {
+                    "dry_run"
+                } else if local_unlinked {
+                    "ok"
+                } else {
+                    "skipped"
+                },
+                "root": cas_root,
+                "project_canonical_id": project_id,
+                "purge_remote": args.purge_remote,
+                "dry_run": args.dry_run,
+                "remote_records_discovered": discovered,
+                "remote_records_deleted": deleted,
+                "local_unlinked": local_unlinked,
+                "detail": detail,
+            })
+        );
+        return Ok(());
+    }
+    let mut out = io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    if local_unlinked {
+        fmt.success("Cloud unlink complete")?;
+    } else if detail == "dry run" || detail.starts_with("dry run") {
+        fmt.write_accent("Cloud unlink dry run")?;
+    } else {
+        fmt.success("Cloud unlink skipped")?;
+    }
+    fmt.newline()?;
+    if let Some(project_id) = project_id {
+        fmt.write_raw(&format!("    project: {project_id}"))?;
+        fmt.newline()?;
+    }
+    if args.purge_remote {
+        fmt.write_raw(&format!("    remote records discovered: {discovered}"))?;
+        fmt.newline()?;
+        fmt.write_raw(&format!("    remote records deleted: {deleted}"))?;
+        fmt.newline()?;
+    }
+    fmt.write_raw(&format!("    {detail}"))?;
+    fmt.newline()?;
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4238,8 +4620,116 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 mod team_cmd_tests {
     use super::*;
     use tempfile::TempDir;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn local_unlink_removes_only_the_project_cloud_link() {
+        let project = TempDir::new().unwrap();
+        let cas_root = project.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let config = CloudConfig::default();
+        config.save_to_cas_dir(&cas_root).unwrap();
+        let db_path = cas_root.join("cas.db");
+        std::fs::write(&db_path, b"local database bytes").unwrap();
+
+        let cli = cli_json();
+        execute_unlink(
+            &CloudUnlinkArgs {
+                purge_remote: false,
+                dry_run: false,
+            },
+            &cli,
+            &cas_root,
+        )
+        .unwrap();
+
+        assert!(!cas_root.join("cloud.json").exists());
+        assert_eq!(std::fs::read(&db_path).unwrap(), b"local database bytes");
+    }
+
+    #[test]
+    fn unlink_remote_discovery_rejects_unscoped_rows() {
+        let mut records = BTreeSet::new();
+        let error = collect_unlink_records(
+            &mut records,
+            &serde_json::json!({
+                "entries": [{"id": "entry-1"}],
+            }),
+            "woodworking",
+            UnlinkRemoteScope::Personal,
+            &["entries"],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("without project_id"));
+        assert!(records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unlink_remote_discovery_collects_personal_and_team_rows() {
+        use std::sync::Arc;
+
+        use crate::cloud::{CloudSyncer, CloudSyncerConfig};
+
+        let server = MockServer::start().await;
+        let project_id = "github.com/example/woodworking";
+        let team_id = "team-1";
+        let row = |id: &str| serde_json::json!({"id": id, "project_id": project_id});
+
+        Mock::given(method("GET"))
+            .and(path("/api/sync/".to_owned() + "pull"))
+            .and(query_param("types", "entries,tasks,knowledge_pages"))
+            .and(query_param_is_missing("team_id"))
+            .and(query_param("project_id", project_id))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [row("personal-entry")],
+                "tasks": [row("personal-task")],
+                "knowledge_pages": [],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/sync/".to_owned() + "pull"))
+            .and(query_param("types", "entries,tasks,knowledge_pages"))
+            .and(query_param("team_id", team_id))
+            .and(query_param("project_id", project_id))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [row("team-entry")],
+                "tasks": [row("team-task")],
+                "knowledge_pages": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let project = TempDir::new().unwrap();
+        let queue = Arc::new(SyncQueue::open(project.path()).unwrap());
+        let mut config = CloudConfig::default();
+        config.endpoint = server.uri();
+        config.token = Some("token".to_string());
+        let syncer = CloudSyncer::new_for_project(
+            queue,
+            config,
+            CloudSyncerConfig::default(),
+            project_id.to_string(),
+            project.path(),
+        );
+        let records = discover_unlink_remote_records(
+            &syncer,
+            project_id,
+            Some(team_id),
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 4);
+        assert!(records.iter().any(|record| {
+            record.scope == UnlinkRemoteScope::Personal && record.id == "personal-entry"
+        }));
+        assert!(records.iter().any(|record| {
+            record.scope == UnlinkRemoteScope::Team(team_id.to_string())
+                && record.id == "team-task"
+        }));
+    }
 
     #[test]
     fn personal_pull_summary_names_up_to_date_with_team() {

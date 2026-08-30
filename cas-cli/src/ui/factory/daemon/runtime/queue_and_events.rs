@@ -5495,14 +5495,19 @@ impl FactoryDaemon {
         }
     }
 
-    /// Process pending reminders (time-based and event-based)
+    /// Process pending reminders (time-based, DirectorEvent, and external)
     ///
     /// Called during the 2-second refresh cycle with the events detected in this tick.
     /// Time-based reminders fire when trigger_at <= now.
     /// Event-based reminders fire when a matching DirectorEvent is detected.
+    /// External conditions are checked at a bounded low-frequency cadence;
+    /// their pending row is the durable false-to-true edge state.
     /// Delivery uses both the supervisor notification queue (for structured data / web UI)
     /// and the prompt queue (for PTY injection into the supervisor's session).
-    pub(super) fn process_reminders(&self, events: &[crate::ui::factory::director::DirectorEvent]) {
+    pub(super) fn process_reminders(
+        &mut self,
+        events: &[crate::ui::factory::director::DirectorEvent],
+    ) {
         use crate::store::{
             open_prompt_queue_store, open_reminder_store, open_supervisor_queue_store,
         };
@@ -5531,14 +5536,95 @@ impl FactoryDaemon {
             }
         };
 
-        let supervisor_queue = if !due_reminders.is_empty() || !events.is_empty() {
+        // External conditions are deliberately polled less often than the
+        // normal two-second refresh. The reminder row remains pending until
+        // this probe observes true, so a daemon restart cannot lose the edge.
+        let external_ready = if self.last_external_wake_scan.is_none_or(|last| {
+            last.elapsed() >= super::ci_watch::EXTERNAL_WAKE_INTERVAL
+        }) {
+            self.last_external_wake_scan = Some(std::time::Instant::now());
+            let mut ready = Vec::new();
+            for event_type in [
+                super::ci_watch::EXTERNAL_BRANCH_CONTAINED_EVENT,
+                super::ci_watch::EXTERNAL_TAG_EXISTS_EVENT,
+            ] {
+                let candidates = match reminder_store.get_event_reminders(event_type) {
+                    Ok(reminders) => reminders,
+                    Err(error) => {
+                        tracing::warn!(
+                            event_type,
+                            %error,
+                            "failed to load external reminder candidates"
+                        );
+                        continue;
+                    }
+                };
+                for reminder in candidates {
+                    if !reminder_matches_factory_session(
+                        reminder.session_id.as_deref(),
+                        reminder.cross_session,
+                        &self.session_name,
+                    ) {
+                        continue;
+                    }
+                    let Some(filter) = reminder.trigger_filter.as_ref() else {
+                        tracing::warn!(
+                            reminder_id = reminder.id,
+                            event_type,
+                            "external reminder has no condition filter"
+                        );
+                        continue;
+                    };
+                    let condition = match super::ci_watch::parse_external_wake_condition(
+                        event_type, filter,
+                    ) {
+                        Ok(condition) => condition,
+                        Err(error) => {
+                            tracing::warn!(
+                                reminder_id = reminder.id,
+                                event_type,
+                                %error,
+                                "external reminder has invalid condition filter"
+                            );
+                            continue;
+                        }
+                    };
+                    match super::ci_watch::external_wake_condition_satisfied(
+                        self.app.project_path(),
+                        &condition,
+                    ) {
+                        Ok(true) => {
+                            ready.push((reminder, ReminderTriggerContext::external(&condition)))
+                        }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            reminder_id = reminder.id,
+                            event_type,
+                            %error,
+                            "external reminder probe unavailable; retaining pending row"
+                        ),
+                    }
+                }
+            }
+            ready
+        } else {
+            Vec::new()
+        };
+
+        let supervisor_queue = if !due_reminders.is_empty()
+            || !events.is_empty()
+            || !external_ready.is_empty()
+        {
             open_supervisor_queue_store(self.app.cas_dir()).ok()
         } else {
             None
         };
 
         // Open prompt queue for PTY injection of fired reminders
-        let prompt_queue = if !due_reminders.is_empty() || !events.is_empty() {
+        let prompt_queue = if !due_reminders.is_empty()
+            || !events.is_empty()
+            || !external_ready.is_empty()
+        {
             open_prompt_queue_store(self.app.cas_dir()).ok()
         } else {
             None
@@ -5566,6 +5652,19 @@ impl FactoryDaemon {
             );
         }
 
+        for (reminder, context) in &external_ready {
+            fire_reminder(
+                reminder,
+                &reminder_store,
+                &supervisor_queue,
+                &prompt_queue,
+                &self.session_name,
+                agent_id_to_name,
+                Some(context),
+                self.app.cas_dir(),
+            );
+        }
+
         // Check event-based reminders against detected events
         for event in events {
             let event_type = event.event_type();
@@ -5585,6 +5684,7 @@ impl FactoryDaemon {
                     continue;
                 }
                 if matches_event_filter(reminder, event) {
+                    let context = ReminderTriggerContext::director(event);
                     fire_reminder(
                         reminder,
                         &reminder_store,
@@ -5592,7 +5692,7 @@ impl FactoryDaemon {
                         &prompt_queue,
                         &self.session_name,
                         agent_id_to_name,
-                        Some(event),
+                        Some(&context),
                         self.app.cas_dir(),
                     );
                 }
@@ -5712,9 +5812,33 @@ impl FactoryDaemon {
 /// can route to. Falls back to `"supervisor"` when the target agent ID is
 /// not found in the map.
 ///
-/// `triggering_event` is the DirectorEvent that caused this reminder to fire
-/// (only set for event-based reminders). Its context is included in the
+/// `triggering_event` is the event or external condition that caused this
+/// reminder to fire. Its context is included in the durable payload and
 /// delivered prompt so the recipient knows what happened.
+struct ReminderTriggerContext {
+    event_type: String,
+    data: serde_json::Value,
+    description: String,
+}
+
+impl ReminderTriggerContext {
+    fn director(event: &crate::ui::factory::director::DirectorEvent) -> Self {
+        Self {
+            event_type: event.event_type().to_string(),
+            data: event.to_json(),
+            description: event.description(),
+        }
+    }
+
+    fn external(condition: &super::ci_watch::ExternalWakeCondition) -> Self {
+        Self {
+            event_type: condition.event_type().to_string(),
+            data: condition.to_json(),
+            description: condition.description(),
+        }
+    }
+}
+
 fn fire_reminder(
     reminder: &cas_store::Reminder,
     reminder_store: &std::sync::Arc<dyn cas_store::ReminderStore>,
@@ -5722,15 +5846,15 @@ fn fire_reminder(
     prompt_queue: &Option<std::sync::Arc<dyn cas_store::PromptQueueStore>>,
     session_name: &str,
     agent_id_to_name: &std::collections::HashMap<String, String>,
-    triggering_event: Option<&crate::ui::factory::director::DirectorEvent>,
+    triggering_event: Option<&ReminderTriggerContext>,
     cas_dir: &std::path::Path,
 ) {
     // Build event JSON for persistence
-    let event_json = triggering_event.map(|e| {
+    let event_json = triggering_event.map(|event| {
         serde_json::json!({
-            "event_type": e.event_type(),
-            "data": e.to_json(),
-            "description": e.description(),
+            "event_type": event.event_type,
+            "data": event.data,
+            "description": event.description,
         })
     });
 
@@ -5747,8 +5871,8 @@ fn fire_reminder(
         "trigger_type": reminder.trigger_type.to_string(),
     });
     if let Some(event) = triggering_event {
-        payload["event_type"] = serde_json::Value::String(event.event_type().to_string());
-        payload["event"] = event.to_json();
+        payload["event_type"] = serde_json::Value::String(event.event_type.clone());
+        payload["event"] = event.data.clone();
     }
     let payload = payload.to_string();
 
@@ -5781,7 +5905,7 @@ fn fire_reminder(
         // `worker_status`, which must tell a reminder delivery apart from real
         // mail to avoid accusing a healthy waiting worker of being wedged,
         // parses exactly what is written here.
-        let event_context = triggering_event.map(|event| event.description());
+        let event_context = triggering_event.map(|event| event.description.clone());
         let task_status = reminder.task_id.as_deref().and_then(|task_id| {
             crate::store::open_task_store(cas_dir)
                 .ok()
@@ -5897,6 +6021,90 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn external_wake_delivery_is_durable_and_not_repeated_after_restart() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let reminder_store: Arc<dyn cas_store::ReminderStore> = Arc::new(
+            cas_store::SqliteReminderStore::open(temp.path()).unwrap(),
+        );
+        reminder_store.init().unwrap();
+        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> = Arc::new(
+            cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap(),
+        );
+        supervisor_store.init().unwrap();
+        let prompt_store: Arc<dyn cas_store::PromptQueueStore> = Arc::new(
+            cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap(),
+        );
+        prompt_store.init().unwrap();
+
+        let id = reminder_store
+            .create_with_scope(
+                "supervisor-1",
+                None,
+                "inspect the landed delivery",
+                cas_store::ReminderTriggerType::Event,
+                None,
+                Some(super::super::ci_watch::EXTERNAL_TAG_EXISTS_EVENT),
+                Some(&serde_json::json!({"tag": "v3.6.0"})),
+                0,
+                Some("old-factory-session"),
+                Some("old-origin-session"),
+                true,
+                None,
+            )
+            .unwrap();
+        let reminder = reminder_store.list_pending("supervisor-1").unwrap().pop().unwrap();
+        let condition = super::super::ci_watch::ExternalWakeCondition::TagExists {
+            tag: "v3.6.0".to_string(),
+        };
+        let context = super::ReminderTriggerContext::external(&condition);
+        let supervisor = Some(Arc::clone(&supervisor_store));
+        let prompt = Some(Arc::clone(&prompt_store));
+
+        assert!(super::reminder_matches_factory_session(
+            reminder.session_id.as_deref(),
+            reminder.cross_session,
+            "new-factory-session"
+        ));
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &supervisor,
+            &prompt,
+            "new-factory-session",
+            &HashMap::new(),
+            Some(&context),
+            temp.path(),
+        );
+
+        let fired = reminder_store.list_recently_fired(60).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].id, id);
+        assert_eq!(fired[0].fired_event.as_ref().unwrap()["event_type"], "tag_exists");
+        let notifications = supervisor_store.peek("supervisor-1", 10).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].event_type, "reminder_fired");
+        assert!(notifications[0].payload.contains("tag_exists"));
+        let prompts = prompt_store.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].prompt.contains("external condition satisfied"));
+
+        // A stale pre-restart snapshot cannot create a second delivery: the
+        // durable pending→fired transition is the false-to-true edge.
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &supervisor,
+            &prompt,
+            "new-factory-session",
+            &HashMap::new(),
+            Some(&context),
+            temp.path(),
+        );
+        assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
+        assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
+    }
 
     #[test]
     fn casb123_delivery_stalled_threshold_clamps_before_i64_store_boundary() {

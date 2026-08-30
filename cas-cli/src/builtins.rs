@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
+use std::process::Command;
 use std::sync::OnceLock;
 
 /// Factory supervisor guide - embedded at compile time (source of truth)
@@ -209,6 +210,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reminders.md",
         content: include_str!("builtins/skills/cas-supervisor/references/reminders.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-driving.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
@@ -626,6 +631,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-driving.md",
+        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-driving.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-codex-supervisor-checklist/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-codex-supervisor-checklist.md"),
     },
@@ -1038,6 +1047,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reminders.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/reminders.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-driving.md",
+        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
@@ -2246,6 +2259,198 @@ pub fn sync_all_builtins_for_harness(
     }
 }
 
+/// Markers for the block that excludes distributed builtin files from a
+/// consumer project's Git worktree. The block is deliberately generated from
+/// the catalogs below so adding a builtin automatically updates the ignore
+/// contract on the next project sync.
+pub const BUILTIN_GITIGNORE_BEGIN: &str = "# >>> Cassy-managed builtin files >>>";
+pub const BUILTIN_GITIGNORE_END: &str = "# <<< Cassy-managed builtin files <<<";
+
+/// Result of maintaining a project's Cassy builtin ignore block.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BuiltinGitignoreReport {
+    /// Whether `.gitignore` was created or changed.
+    pub updated: bool,
+    /// Whether this was skipped because the project contains Cassy's builtin
+    /// authoring source tree.
+    pub authoring_repo_skipped: bool,
+    /// Distributed builtin paths already tracked by Git. Ignore rules do not
+    /// affect tracked files, so callers must surface these to the operator.
+    pub tracked_paths: Vec<String>,
+}
+
+/// Return the exact paths written by the selected builtin catalogs.
+///
+/// Paths are rooted at the project root (`/.claude/...`, `/.codex/...`, or
+/// `/.grok/...`) and are intentionally file-specific. Configuration files,
+/// database-backed skills, and user-authored files are not included.
+pub fn builtin_gitignore_entries(harnesses: &[SupervisorCli]) -> Vec<String> {
+    let mut entries = BTreeSet::new();
+
+    for harness in harnesses {
+        let (directory, agents, skills, workflows) = match harness {
+            SupervisorCli::Claude => (
+                ".claude",
+                BUILTIN_AGENTS,
+                BUILTIN_SKILLS,
+                Some(BUILTIN_WORKFLOWS),
+            ),
+            SupervisorCli::Codex => (".codex", CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, None),
+            SupervisorCli::Grok => (".grok", GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, None),
+            // OpenCode has no project-level builtin filesystem tree.
+            SupervisorCli::OpenCode => continue,
+        };
+
+        for builtin in agents.iter().chain(skills.iter()) {
+            entries.insert(format!("/{directory}/{}", builtin.path));
+        }
+        if let Some(workflows) = workflows {
+            for builtin in workflows {
+                entries.insert(format!("/{directory}/{}", builtin.path));
+            }
+        }
+    }
+
+    entries.into_iter().collect()
+}
+
+/// Ensure a consumer project ignores every builtin file that its selected
+/// harness sync will write. Existing user entries and unrelated text remain
+/// byte-for-byte untouched; only the marked Cassy block is replaced.
+///
+/// The authoring checkout is recognized by its source-of-truth marker
+/// (`cas-cli/src/builtins.rs` plus the workspace `Cargo.toml`). It is exempted
+/// because its rendered harness files are intentional tracked fixtures. A
+/// consumer that already tracks a rendered path still receives the block, and
+/// the returned paths let the caller issue an explicit `git rm --cached`
+/// warning rather than implying that `.gitignore` can untrack it.
+pub fn ensure_builtin_gitignore(
+    project_root: &Path,
+    harnesses: &[SupervisorCli],
+) -> std::io::Result<BuiltinGitignoreReport> {
+    let entries = builtin_gitignore_entries(harnesses);
+    if entries.is_empty() {
+        return Ok(BuiltinGitignoreReport::default());
+    }
+
+    if is_cas_authoring_repo(project_root) {
+        return Ok(BuiltinGitignoreReport {
+            authoring_repo_skipped: true,
+            ..BuiltinGitignoreReport::default()
+        });
+    }
+
+    let gitignore_path = project_root.join(".gitignore");
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let block = render_builtin_gitignore_block(&entries);
+    let updated = replace_builtin_gitignore_block(&existing, &block)?;
+    let changed = updated != existing;
+    if changed {
+        std::fs::write(&gitignore_path, updated)?;
+    }
+
+    Ok(BuiltinGitignoreReport {
+        updated: changed,
+        authoring_repo_skipped: false,
+        tracked_paths: tracked_builtin_paths(project_root, &entries),
+    })
+}
+
+fn is_cas_authoring_repo(project_root: &Path) -> bool {
+    project_root.join("Cargo.toml").is_file()
+        && project_root.join("cas-cli/src/builtins.rs").is_file()
+}
+
+fn render_builtin_gitignore_block(entries: &[String]) -> String {
+    let mut block = String::new();
+    block.push_str(BUILTIN_GITIGNORE_BEGIN);
+    block.push('\n');
+    for entry in entries {
+        block.push_str(entry);
+        block.push('\n');
+    }
+    block.push_str(BUILTIN_GITIGNORE_END);
+    block.push('\n');
+    block
+}
+
+/// Find a marker line and return its byte range, including its newline when
+/// present. Marker matching ignores indentation and CRLF line endings.
+fn marker_line_range(content: &str, marker: &str, search_from: usize) -> Option<(usize, usize)> {
+    let suffix = &content[search_from..];
+    let mut offset = search_from;
+    for line in suffix.split_inclusive('\n') {
+        let line_end = offset + line.len();
+        let without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let without_cr = without_newline.strip_suffix('\r').unwrap_or(without_newline);
+        if without_cr.trim() == marker {
+            return Some((offset, line_end));
+        }
+        offset = line_end;
+    }
+    None
+}
+
+fn replace_builtin_gitignore_block(existing: &str, block: &str) -> std::io::Result<String> {
+    let Some((begin_start, begin_end)) = marker_line_range(existing, BUILTIN_GITIGNORE_BEGIN, 0)
+    else {
+        let mut updated = existing.to_string();
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        if !updated.is_empty() && !updated.ends_with("\n\n") {
+            updated.push('\n');
+        }
+        updated.push_str(block);
+        return Ok(updated);
+    };
+
+    let Some((_, end_end)) = marker_line_range(existing, BUILTIN_GITIGNORE_END, begin_end) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Cassy builtin .gitignore block has a begin marker but no end marker",
+        ));
+    };
+
+    let mut updated = String::with_capacity(existing.len() + block.len());
+    updated.push_str(&existing[..begin_start]);
+    updated.push_str(block);
+    updated.push_str(&existing[end_end..]);
+    Ok(updated)
+}
+
+fn tracked_builtin_paths(project_root: &Path, entries: &[String]) -> Vec<String> {
+    let relative: Vec<&str> = entries.iter().map(|entry| &entry[1..]).collect();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["ls-files", "--cached", "--"])
+        .args(&relative)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let tracked: HashSet<&str> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .filter(|line| !line.is_empty())
+        .collect();
+    entries
+        .iter()
+        .filter(|entry| tracked.contains(&entry[1..]))
+        .cloned()
+        .collect()
+}
+
 /// Collect the set of skill directory names (`cas-foo`) owned by a builtins
 /// slice. Builtin skill paths look like `skills/<dir>/SKILL.md` (or a nested
 /// `references/...`); we extract `<dir>` so the prune below can recognize the
@@ -2559,6 +2764,100 @@ pub fn worker_guidance() -> String {
 mod tests {
     use crate::builtins::*;
     use cas_factory::{embedded_registry, render_route_table, render_spawn_recipes};
+    use std::process::Command;
+
+    #[test]
+    fn builtin_gitignore_block_preserves_user_entries_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let gitignore = temp.path().join(".gitignore");
+        let user_entries = "# Keep this project rule\n/.claude/settings.json\n";
+        std::fs::write(&gitignore, user_entries).unwrap();
+
+        let first = ensure_builtin_gitignore(temp.path(), &[SupervisorCli::Claude]).unwrap();
+        assert!(first.updated);
+        assert!(!first.authoring_repo_skipped);
+        let content = std::fs::read_to_string(&gitignore).unwrap();
+        assert!(content.starts_with(user_entries));
+        assert!(content.contains(BUILTIN_GITIGNORE_BEGIN));
+        assert!(content.contains("/.claude/agents/task-verifier.md"));
+        assert!(content.contains("/.claude/skills/cas-worker/SKILL.md"));
+        assert!(content.contains("/.claude/workflows/cas-code-review.js"));
+        assert!(content.contains(BUILTIN_GITIGNORE_END));
+        assert_eq!(content.matches(BUILTIN_GITIGNORE_BEGIN).count(), 1);
+        assert_eq!(content.matches(BUILTIN_GITIGNORE_END).count(), 1);
+
+        let second = ensure_builtin_gitignore(temp.path(), &[SupervisorCli::Claude]).unwrap();
+        assert!(!second.updated);
+        assert_eq!(content, std::fs::read_to_string(&gitignore).unwrap());
+    }
+
+    #[test]
+    fn builtin_gitignore_block_replaces_only_its_owned_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let gitignore = temp.path().join(".gitignore");
+        let old_block = format!(
+            "project-rule\n{BUILTIN_GITIGNORE_BEGIN}\n/stale-rendered-file\n{BUILTIN_GITIGNORE_END}\nother-rule\n"
+        );
+        std::fs::write(&gitignore, old_block).unwrap();
+
+        ensure_builtin_gitignore(temp.path(), &[SupervisorCli::Codex]).unwrap();
+        let content = std::fs::read_to_string(&gitignore).unwrap();
+        assert!(content.starts_with("project-rule\n"));
+        assert!(content.ends_with("other-rule\n"));
+        assert!(!content.contains("/stale-rendered-file"));
+        assert!(content.contains("/.codex/agents/task-verifier.md"));
+        assert!(!content.contains("/.claude/agents/task-verifier.md"));
+    }
+
+    #[test]
+    fn builtin_gitignore_skips_the_authoring_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("cas-cli/src")).unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(temp.path().join("cas-cli/src/builtins.rs"), "// source\n").unwrap();
+        let gitignore = temp.path().join(".gitignore");
+        std::fs::write(&gitignore, "source-fixture\n").unwrap();
+
+        let report = ensure_builtin_gitignore(temp.path(), &[SupervisorCli::Claude]).unwrap();
+        assert!(report.authoring_repo_skipped);
+        assert!(!report.updated);
+        assert!(report.tracked_paths.is_empty());
+        assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "source-fixture\n");
+    }
+
+    #[test]
+    fn builtin_gitignore_reports_paths_already_tracked_by_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let tracked = temp.path().join(".claude/agents/task-verifier.md");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "locally tracked fixture\n").unwrap();
+
+        assert!(
+            Command::new("git")
+                .args(["-C"])
+                .arg(temp.path())
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["-C"])
+                .arg(temp.path())
+                .args(["add", ".claude/agents/task-verifier.md"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let report = ensure_builtin_gitignore(temp.path(), &[SupervisorCli::Claude]).unwrap();
+        assert!(report.updated);
+        assert_eq!(
+            report.tracked_paths,
+            vec!["/.claude/agents/task-verifier.md".to_string()]
+        );
+    }
 
     thread_local! {
         /// Test-only stand-in for the embedded shipped-version history

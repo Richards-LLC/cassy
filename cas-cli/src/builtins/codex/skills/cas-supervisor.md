@@ -52,7 +52,7 @@ Match controls via [model-selection.md](cas-supervisor/references/model-selectio
 
 ## References
 
-Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), worker-recovery, reference, code-review-queue, or filing-cas-bugs.
+Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), [epic-driving.md](cas-supervisor/references/epic-driving.md), worker-recovery, reference, code-review-queue, or filing-cas-bugs.
 
 ## Cross-team routing
 

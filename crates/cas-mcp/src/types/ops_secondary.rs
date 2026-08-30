@@ -620,14 +620,19 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_delay_secs: Option<i64>,
 
-    /// Event type that triggers the reminder (event-based trigger)
+    /// Event type that triggers the reminder (event-based trigger). External
+    /// durable conditions are `branch_contained_in` with filter
+    /// `{"commit":"<sha-or-ref>","target_branch":"main"}` and
+    /// `tag_exists` with filter `{"tag":"<tag>"}`; external conditions
+    /// require `cross_session=true` and default to no expiry.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', etc."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', or 'tag_exists'. External conditions require cross_session=true; use JSON filters {commit,target_branch} or {tag}."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
 
-    /// JSON filter for event matching
+    /// JSON filter for event matching. External branch/tag conditions use the
+    /// schemas documented on `remind_event`.
     #[schemars(
         description = "JSON filter for event matching, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'"
     )]
@@ -639,9 +644,9 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// TTL in seconds for the reminder (default: 3600)
+    /// TTL in seconds for the reminder (default: 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds for the reminder before auto-expiry (default: 3600)"
+        description = "Time-to-live in seconds for the reminder before auto-expiry (default: 3600; zero means no expiry)"
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -1018,14 +1023,18 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_delay_secs: Option<i64>,
 
-    /// Event type that triggers reminder
+    /// Event type that triggers reminder. External durable conditions are
+    /// `branch_contained_in` with `{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}`
+    /// and `tag_exists` with `{\"tag\":\"<tag>\"}`; both require
+    /// `cross_session=true` and default to no expiry.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', etc."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', or 'tag_exists'. External conditions require cross_session=true; use JSON filters {commit,target_branch} or {tag}."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
 
-    /// JSON filter for event matching
+    /// JSON filter for event matching. External branch/tag conditions use the
+    /// schemas documented on `remind_event`.
     #[schemars(
         description = "JSON filter for event matching, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'"
     )]
@@ -1037,9 +1046,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// Time-to-live in seconds for the reminder (default: 3600)
+    /// Time-to-live in seconds for the reminder (default: 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds for the reminder before auto-expiry (default: 3600)"
+        description = "Time-to-live in seconds for the reminder before auto-expiry (default: 3600; zero means no expiry)"
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,

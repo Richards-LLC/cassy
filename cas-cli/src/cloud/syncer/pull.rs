@@ -488,6 +488,70 @@ impl CloudSyncer {
         Ok(())
     }
 
+    /// Fetch a project-scoped pull envelope without applying it to local
+    /// stores or advancing a pull watermark.
+    ///
+    /// This is the read-only counterpart used by commands that need to inspect
+    /// remote ownership before making a separate mutation, such as
+    /// `cas cloud unlink --purge-remote`. The request still goes through the
+    /// same scoped URL builder as [`Self::pull`], so adding a query filter
+    /// cannot accidentally create an unscoped production pull path.
+    pub(crate) fn pull_raw(
+        &self,
+        project_id: &str,
+        entity_types: &[&str],
+        team_id: Option<&str>,
+    ) -> Result<serde_json::Value, CasError> {
+        let mut params = Vec::new();
+        if !entity_types.is_empty() {
+            params.push(format!("types={}", entity_types.join(",")));
+        }
+        if let Some(team_id) = team_id {
+            params.push(format!("team_id={}", urlencoding::encode(team_id)));
+        }
+        let (body, _) = self.fetch_pull_json(Some(project_id), &params)?;
+        Ok(body)
+    }
+
+    fn fetch_pull_json(
+        &self,
+        project_id: Option<&str>,
+        params: &[String],
+    ) -> Result<(serde_json::Value, String), CasError> {
+        let (pull_url, project_id) = match project_id {
+            Some(project_id) => build_scoped_pull_url_with(
+                &self.cloud_config.endpoint,
+                params,
+                || Some(project_id.to_owned()),
+            )?,
+            None => build_scoped_pull_url(&self.cloud_config.endpoint, params)?,
+        };
+        let token = self
+            .cloud_config
+            .token
+            .as_ref()
+            .ok_or_else(|| CasError::Other("Not logged in".to_string()))?;
+        let response = ureq::get(&pull_url)
+            .timeout(self.config.timeout)
+            .set("Authorization", &format!("Bearer {token}"))
+            .call();
+        let body = match response {
+            Ok(resp) => resp
+                .into_json()
+                .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?,
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                return Err(CasError::Other(format!(
+                    "Pull failed with status {code}: {body}"
+                )));
+            }
+            Err(ureq::Error::Transport(e)) => {
+                return Err(CasError::Other(format!("Network error: {e}")));
+            }
+        };
+        Ok((body, project_id))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn pull(
         &self,
@@ -508,12 +572,6 @@ impl CloudSyncer {
             return Ok(result);
         }
 
-        let token = self
-            .cloud_config
-            .token
-            .as_ref()
-            .ok_or_else(|| CasError::Other("Not logged in".to_string()))?;
-
         // Get last pull timestamp
         let since = self.queue.get_metadata("last_pull_at")?;
         let had_prior_watermark = since.is_some();
@@ -522,27 +580,9 @@ impl CloudSyncer {
         if let Some(since) = &since {
             params.push(format!("since={since}"));
         }
-        let (pull_url, project_id) = build_scoped_pull_url(&self.cloud_config.endpoint, &params)?;
-
-        let response = ureq::get(&pull_url)
-            .timeout(self.config.timeout)
-            .set("Authorization", &format!("Bearer {token}"))
-            .call();
-
-        let body: PullResponse = match response {
-            Ok(resp) => resp
-                .into_json()
-                .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?,
-            Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                return Err(CasError::Other(format!(
-                    "Pull failed with status {code}: {body}"
-                )));
-            }
-            Err(ureq::Error::Transport(e)) => {
-                return Err(CasError::Other(format!("Network error: {e}")));
-            }
-        };
+        let (raw_body, project_id) = self.fetch_pull_json(None, &params)?;
+        let body: PullResponse = serde_json::from_value(raw_body)
+            .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
 
         // Use the already-resolved project ID for client-side entity validation
         let current_project_id = &project_id;
@@ -1521,7 +1561,7 @@ mod tests {
         build_scoped_pull_url_with, deserialize_pulled_entity, entity_matches_project,
         render_task_proposal_provenance,
     };
-    use crate::types::Entry;
+    use crate::types::{Entry, Task};
     use serde_json::json;
 
     #[test]
@@ -1539,6 +1579,26 @@ mod tests {
         assert!(error.contains("entry deserialize error"), "{error}");
         assert!(error.contains("id=p-malformed-created"), "{error}");
         assert!(error.contains("missing field `created`"), "{error}");
+    }
+
+    #[test]
+    fn deserialize_migrates_stringified_task_deliverables() {
+        let mut raw = serde_json::to_value(Task::new(
+            "cas-legacy-deliverables".to_string(),
+            "Moved task".to_string(),
+        ))
+        .unwrap();
+        raw["project_id"] = json!("cas-src");
+        raw["deliverables"] =
+            json!("{\"files_changed\":[\"src/lib.rs\"],\"factory_branch_anchor\":\"deadbeef\"}");
+
+        let task = deserialize_pulled_entity::<Task>(raw, "task")
+            .expect("legacy task payload should be readable");
+        assert_eq!(task.deliverables.files_changed, ["src/lib.rs"]);
+        assert_eq!(
+            task.deliverables.factory_branch_anchor.as_deref(),
+            Some("deadbeef")
+        );
     }
 
     #[test]

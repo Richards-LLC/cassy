@@ -350,6 +350,7 @@ pub async fn run_daemon_after_fork(
         resumed_epic_ids: std::collections::HashSet::new(),
         spawn_started_at: None,
         last_spawn_queue_stall_scan: None,
+        last_external_wake_scan: None,
         reported_stalled_spawn_requests: std::collections::HashSet::new(),
     };
 

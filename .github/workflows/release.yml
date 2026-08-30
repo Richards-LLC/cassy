@@ -27,10 +27,14 @@ jobs:
   #
   # release-prebuild.yml builds them when the version-bump PR merges, so the
   # tag usually only has to publish bytes that already exist. This lookup is
-  # deliberately FAIL-SAFE: any miss, partial prebuild, expired artifact or API
-  # failure reports found=false and the tag builds inline exactly as before.
+  # Fixes #603: tagging while that run is still in flight now waits for it.
+  # deliberately FAIL-SAFE: it waits briefly for a matching queued/in-progress
+  # prebuild, then makes any miss, partial prebuild, expired artifact or API
+  # failure loud before the tag falls back to inline builds.
   prebuilt-lookup:
     name: Look up prebuilt release artifacts
+    # Fixes #603: tagging while the matching prebuild is still in flight waits
+    # for its receipt instead of silently selecting the cold-build path.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -49,6 +53,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_PREBUILD_WAIT_SECONDS: 900
+          RELEASE_PREBUILD_POLL_SECONDS: 15
         run: ./scripts/find-release-prebuild.sh | tee -a "$GITHUB_OUTPUT"
 
   # GitHub Actions cannot fall back after assigning an offline self-hosted

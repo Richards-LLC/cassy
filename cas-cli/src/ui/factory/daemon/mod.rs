@@ -318,6 +318,8 @@ pub struct FactoryDaemon {
     spawn_started_at: Option<Instant>,
     /// cas-2702: last scan for queue rows this daemon never drained (GH #58).
     last_spawn_queue_stall_scan: Option<Instant>,
+    /// Last bounded probe for durable external reminder conditions.
+    last_external_wake_scan: Option<Instant>,
     /// cas-2702: spawn queue request ids already reported as stalled, so the
     /// warning is emitted once per request rather than every scan.
     reported_stalled_spawn_requests: std::collections::HashSet<i64>,

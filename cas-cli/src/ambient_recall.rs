@@ -1665,6 +1665,41 @@ pub(crate) fn build_ambient_recall_context_for_factory_launch(
     )
 }
 
+/// Record rule and skill cards selected by ambient recall in the same durable
+/// surface ledger used by the normal SessionStart context builder. Other
+/// ambient evidence remains in retrieval telemetry; surfaced_artifacts is
+/// intentionally limited to artifacts with impact counters.
+fn record_ambient_artifact_surfaces(
+    cas_root: &Path,
+    session_id: &str,
+    injected: &[EvidenceCandidate],
+) {
+    use cas_store::{SqliteSurfacedArtifactStore, SurfacedArtifact};
+
+    let artifacts: Vec<SurfacedArtifact> = injected
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.surface,
+                EvidenceSurface::Rule | EvidenceSurface::Skill
+            )
+        })
+        .map(|candidate| SurfacedArtifact {
+            artifact_id: candidate.evidence_id.clone(),
+            artifact_type: candidate.surface.as_str().to_string(),
+            preview: Some(candidate.snippet.clone()),
+        })
+        .collect();
+    if artifacts.is_empty() {
+        return;
+    }
+    if let Ok(store) = SqliteSurfacedArtifactStore::open(cas_root) {
+        // Impact bookkeeping is observational and must never make ambient
+        // recall fail after the packet has already been rendered.
+        let _ = store.record_batch(session_id, &artifacts);
+    }
+}
+
 fn build_ambient_recall_context_with_factory_identity(
     input: &cas_core::hooks::types::HookInput,
     cas_root: &Path,
@@ -1813,6 +1848,7 @@ fn build_ambient_recall_context_with_factory_identity(
             );
             let query_id =
                 record_ambient_query(cas_root, &identity, &query, &injected, session_start);
+            record_ambient_artifact_surfaces(cas_root, &identity.session_id, &injected);
             ledger.record(packet.query_hash.clone(), query_id, &injected);
             ledger.save(&ledger_file);
             eprintln!(
@@ -3037,8 +3073,8 @@ mod tests {
     use cas_code::{CodeFile, CodeSymbol, Language, SymbolKind};
     use cas_store::{
         CodeStore, HistoryCommit, HistoryStore, IngestBatch, KnowledgePage, KnowledgeStore,
-        PageWrite, RuleStore, SOURCE_EMBEDDINGS, SqliteCodeStore, SqliteCodeVectorStore,
-        SqliteHistoryStore, SqliteKnowledgeStore, SqliteSurfacedArtifactStore,
+        PageWrite, SOURCE_EMBEDDINGS, SqliteCodeStore, SqliteCodeVectorStore, SqliteHistoryStore,
+        SqliteKnowledgeStore, SqliteSurfacedArtifactStore,
     };
 
     fn identity(role: RecallRole) -> RecallIdentity {
@@ -3506,10 +3542,7 @@ mod tests {
 
         let surfaced = SqliteSurfacedArtifactStore::open(&cas_root).unwrap();
         assert_eq!(surfaced.count_for_session(&input.session_id).unwrap(), 1);
-        assert_eq!(
-            rule_store.get("ambient-rule").unwrap().surface_count,
-            1
-        );
+        assert_eq!(rule_store.get("ambient-rule").unwrap().surface_count, 1);
         let impact = surfaced.aggregate(10).unwrap();
         assert_eq!(impact.len(), 1);
         assert_eq!(impact[0].artifact_id, "ambient-rule");

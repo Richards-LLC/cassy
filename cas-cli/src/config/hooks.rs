@@ -292,8 +292,9 @@ pub struct StopHookConfig {
     #[serde(default = "default_learning_review_threshold")]
     pub learning_review_threshold: usize,
 
-    /// Enable rule review at session end (blocks stop if draft rules exceed threshold)
-    #[serde(default)]
+    /// Enable rule review at session end (default: true; factory workers are
+    /// exempt, and the draft threshold still gates the Stop blocker).
+    #[serde(default = "default_true")]
     pub rule_review_enabled: bool,
 
     /// Number of draft rules required to trigger review (default: 5)
@@ -346,7 +347,7 @@ impl Default for StopHookConfig {
             generate_summary: false,
             learning_review_enabled: false,
             learning_review_threshold: default_learning_review_threshold(),
-            rule_review_enabled: false,
+            rule_review_enabled: true,
             rule_review_threshold: default_rule_review_threshold(),
             duplicate_detection_enabled: false,
             duplicate_detection_threshold: default_duplicate_detection_threshold(),

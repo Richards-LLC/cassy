@@ -66,6 +66,14 @@ impl Config {
                 self.sync.promotion_evidence =
                     parse_promotion_evidence(value).map_err(MemError::Parse)?;
             }
+            "skill_validation.require_sandbox" => {
+                let skill_validation = self
+                    .skill_validation
+                    .get_or_insert_with(SkillValidationConfig::default);
+                skill_validation.require_sandbox = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             // Cloud section
             "cloud.auto_sync" => {
                 let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);

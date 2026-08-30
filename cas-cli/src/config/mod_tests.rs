@@ -17,6 +17,16 @@ fn test_config_defaults() {
     assert_eq!(config.sync.promotion_threshold, 2);
     assert_eq!(config.sync.demotion_threshold, 2);
     assert_eq!(config.sync.promotion_evidence, vec!["helpful"]);
+    assert!(!config.skill_validation().require_sandbox);
+    assert_eq!(
+        config.get("skill_validation.require_sandbox"),
+        Some("false".to_string())
+    );
+    assert!(
+        meta::registry()
+            .get("skill_validation.require_sandbox")
+            .is_some()
+    );
 }
 
 #[test]
@@ -77,6 +87,9 @@ fn test_config_save_load() {
     config.sync.promotion_threshold = 4;
     config.sync.demotion_threshold = 3;
     config.sync.promotion_evidence = vec!["retrieval".to_string()];
+    config
+        .set("skill_validation.require_sandbox", "true")
+        .unwrap();
 
     config.save(temp.path()).unwrap();
     let loaded = Config::load(temp.path()).unwrap();
@@ -85,6 +98,7 @@ fn test_config_save_load() {
     assert_eq!(loaded.sync.promotion_threshold, 4);
     assert_eq!(loaded.sync.demotion_threshold, 3);
     assert_eq!(loaded.sync.promotion_evidence, vec!["retrieval"]);
+    assert!(loaded.skill_validation().require_sandbox);
 }
 
 #[test]

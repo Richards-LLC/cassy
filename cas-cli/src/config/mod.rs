@@ -26,6 +26,11 @@ pub struct Config {
     #[serde(default)]
     pub sync: SyncConfig,
 
+    /// Optional skill validation sandbox policy. When omitted, validation
+    /// uses the degraded fallback if bubblewrap is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_validation: Option<SkillValidationConfig>,
+
     /// Cloud sync configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudSyncConfig>,
@@ -150,6 +155,7 @@ impl Config {
             };
         }
         merge_option!(cloud);
+        merge_option!(skill_validation);
         merge_option!(hooks);
         merge_option!(tasks);
         merge_option!(dev);

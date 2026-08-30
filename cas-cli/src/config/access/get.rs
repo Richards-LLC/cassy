@@ -10,6 +10,7 @@ impl Config {
         let staging = self.staging.clone().unwrap_or_default();
         let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
+        let skill_validation = self.skill_validation.clone().unwrap_or_default();
         match key {
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
@@ -18,6 +19,9 @@ impl Config {
             "sync.promotion_threshold" => Some(self.sync.promotion_threshold.to_string()),
             "sync.demotion_threshold" => Some(self.sync.demotion_threshold.to_string()),
             "sync.promotion_evidence" => Some(self.sync.promotion_evidence.join(",")),
+            "skill_validation.require_sandbox" => {
+                Some(skill_validation.require_sandbox.to_string())
+            }
             // Cloud section
             "cloud.auto_sync" => Some(cloud.auto_sync.to_string()),
             "cloud.interval_secs" => Some(cloud.interval_secs.to_string()),

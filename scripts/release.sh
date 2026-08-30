@@ -204,9 +204,10 @@ if ! "$PUBLISH_TAG"; then
 fi
 
 # Tell the operator, before the tag exists, which publication path the tag will
-# take (cas-3b7c0). A missing prebuild is not an error — the tag still ships via
-# the cold build path — but it is the difference between a ~2 minute and a
-# ~15 minute publication, and that is worth knowing before pushing, not after.
+# take (cas-3b7c0). The lookup waits for a matching in-flight prebuild for its
+# bounded production timeout, then reports a loud cold-build fallback. The
+# difference between a ~2 minute and a ~15 minute publication is worth knowing
+# before pushing, not after.
 prebuild_status="$(GITHUB_REPOSITORY="${RELEASE_REPO:-Richards-LLC/cassy}" \
     GITHUB_SHA="$(git rev-parse HEAD)" \
     ./scripts/find-release-prebuild.sh 2>/dev/null || true)"

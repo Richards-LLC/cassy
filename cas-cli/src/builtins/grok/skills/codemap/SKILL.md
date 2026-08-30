@@ -148,7 +148,7 @@ else
 fi
 ```
 
-The command is deliberately best effort. If it returns a non-zero exit status, record the durable receipt in task notes with the command and exit status, then continue with the CODEMAP commit and `cas codemap status` proof; a failed build is non-blocking and may leave the knowledge page stale or missing. Rust enforces the 90-second provider bound and terminates its process group, so a stalled build leaves no orphan descendant.
+The command is deliberately best effort. If it returns a non-zero exit status, record the durable receipt in task notes with the command and exit status, then continue with the CODEMAP commit and `cas codemap status` proof; a failed build is non-blocking and may leave the knowledge page stale or missing. Rust enforces one 90-second wall-clock deadline across the complete build, stops later completions after exhaustion, and terminates/reaps the active provider process group, so a stalled build leaves no ordinary orphan descendant.
 
 Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound. This is one bounded invocation observed once. Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
 

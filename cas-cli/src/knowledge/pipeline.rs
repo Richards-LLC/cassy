@@ -9,6 +9,7 @@
 //! page that already states the incoming material merges for free (tier a).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -19,7 +20,7 @@ use cas_store::{
 };
 
 use super::chunk::{ChunkOptions, chunk_markdown};
-use super::llm::LlmRunner;
+use super::llm::{LlmError, LlmRunner};
 use super::merge::{
     self, DEFAULT_SMALL_PAGE_CHARS, Fragment, Frontmatter, MergeTier, StripOutcome,
 };
@@ -122,6 +123,53 @@ pub fn run_distillation(
     sources: &[LoadedSource],
     config: &DistillConfig,
 ) -> Result<DistillReport> {
+    Ok(run_distillation_inner(store, runner, sources, config, None)?.report)
+}
+
+/// Run one pass with a single wall-clock deadline shared by every source,
+/// chunk, model stage, merge rewrite, and post-commit repair operation.
+///
+/// A timeout commits any already-staged source outcomes and returns an error so
+/// the CLI can record a nonzero build status instead of reporting a successful
+/// pass after abandoning unfinished work.
+pub fn run_distillation_with_timeout(
+    store: &dyn KnowledgeStore,
+    runner: &dyn LlmRunner,
+    sources: &[LoadedSource],
+    config: &DistillConfig,
+    timeout: Duration,
+) -> Result<DistillReport> {
+    let deadline = Instant::now() + timeout;
+    run_distillation_until(store, runner, sources, config, deadline)
+}
+
+/// Run one pass until an absolute wall-clock deadline.
+pub(crate) fn run_distillation_until(
+    store: &dyn KnowledgeStore,
+    runner: &dyn LlmRunner,
+    sources: &[LoadedSource],
+    config: &DistillConfig,
+    deadline: Instant,
+) -> Result<DistillReport> {
+    let outcome = run_distillation_inner(store, runner, sources, config, Some(deadline))?;
+    if outcome.timed_out {
+        anyhow::bail!("knowledge build timed out before completion");
+    }
+    Ok(outcome.report)
+}
+
+struct DistillOutcome {
+    report: DistillReport,
+    timed_out: bool,
+}
+
+fn run_distillation_inner(
+    store: &dyn KnowledgeStore,
+    runner: &dyn LlmRunner,
+    sources: &[LoadedSource],
+    config: &DistillConfig,
+    deadline: Option<Instant>,
+) -> Result<DistillOutcome> {
     let calls_before = runner.calls();
     let mut report = DistillReport {
         sources_scanned: sources.len(),
@@ -155,7 +203,10 @@ pub fn run_distillation(
     // Nothing moved and nothing died: return before a single prompt is built.
     // This is the zero-cost path for an unchanged repo.
     if classification.to_ingest.is_empty() && classification.deleted.is_empty() {
-        return Ok(report);
+        return Ok(DistillOutcome {
+            report,
+            timed_out: false,
+        });
     }
 
     // A dry run stops here: it has classified everything (which is the useful
@@ -167,7 +218,10 @@ pub fn run_distillation(
                 .iter()
                 .map(|path| format!("dry run: {path} is gone from disk and would be tombstoned")),
         );
-        return Ok(report);
+        return Ok(DistillOutcome {
+            report,
+            timed_out: false,
+        });
     }
 
     let by_path: HashMap<&str, &LoadedSource> = sources
@@ -194,18 +248,33 @@ pub fn run_distillation(
 
     let mut writes: BTreeMap<String, PageWrite> = BTreeMap::new();
     let mut outcomes: Vec<SourceOutcome> = Vec::new();
+    let mut timed_out = false;
 
     for candidate in &pending {
+        if deadline_expired(deadline) {
+            timed_out = true;
+            break;
+        }
         let path = candidate.source.file_path.as_str();
         let Some(loaded) = by_path.get(path).copied() else {
             continue;
         };
 
-        let (pages, mut failure) = distill_source(runner, loaded, config, &mut report);
+        let (pages, mut failure, source_timed_out) =
+            distill_source(runner, loaded, config, &mut report, deadline);
         report.sources_attempted += 1;
+        timed_out |= source_timed_out;
+        if source_timed_out {
+            failure.get_or_insert_with(|| "knowledge build deadline exhausted".to_string());
+        }
 
         for page in pages {
-            if let Err(error) = stage_page(
+            if deadline_expired(deadline) {
+                timed_out = true;
+                failure.get_or_insert_with(|| "knowledge build deadline exhausted".to_string());
+                break;
+            }
+            match stage_page(
                 store,
                 runner,
                 &mut writes,
@@ -213,15 +282,32 @@ pub fn run_distillation(
                 page,
                 config,
                 &mut report,
+                deadline,
             ) {
-                // A page that could not be staged means this source is NOT
-                // fully ingested. Folding the error into `failure` keeps the
-                // ledger honest: marking it Ingested here would make
-                // `classify_sources` skip it forever at this content hash, so
-                // the knowledge would be lost until the file's bytes changed.
-                report.errors.push(format!("{path}: {error}"));
-                failure.get_or_insert(format!("stage page: {error}"));
+                Ok(stage_timed_out) => {
+                    if stage_timed_out {
+                        timed_out = true;
+                        failure.get_or_insert_with(|| {
+                            "knowledge build deadline exhausted".to_string()
+                        });
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // A page that could not be staged means this source is NOT
+                    // fully ingested. Folding the error into `failure` keeps the
+                    // ledger honest: marking it Ingested here would make
+                    // `classify_sources` skip it forever at this content hash, so
+                    // the knowledge would be lost until the file's bytes changed.
+                    report.errors.push(format!("{path}: {error}"));
+                    failure.get_or_insert(format!("stage page: {error}"));
+                }
             }
+        }
+
+        timed_out |= deadline_expired(deadline);
+        if timed_out {
+            failure.get_or_insert_with(|| "knowledge build deadline exhausted".to_string());
         }
 
         let status = if failure.is_some() {
@@ -238,6 +324,9 @@ pub fn run_distillation(
             status,
             ingest_error: failure,
         });
+        if timed_out {
+            break;
+        }
     }
 
     // ── Commit ──────────────────────────────────────────────────────────
@@ -254,10 +343,24 @@ pub fn run_distillation(
 
     // ── Post-commit repair ──────────────────────────────────────────────
     let deleted_ids: BTreeSet<&String> = commit.cascade_deleted_page_ids.iter().collect();
-    repair_after_deletions(store, &cascade_watch, &deleted_ids, &mut report)?;
+    timed_out |= deadline_expired(deadline);
+    if !timed_out {
+        timed_out = repair_after_deletions(
+            store,
+            &cascade_watch,
+            &deleted_ids,
+            &mut report,
+            deadline,
+        )?;
+    }
 
     report.llm_calls = runner.calls().saturating_sub(calls_before);
-    Ok(report)
+    timed_out |= deadline_expired(deadline);
+    Ok(DistillOutcome { report, timed_out })
+}
+
+fn deadline_expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 /// Two-stage distillation of one source, degrading to single-stage when the
@@ -267,27 +370,42 @@ fn distill_source(
     source: &LoadedSource,
     config: &DistillConfig,
     report: &mut DistillReport,
-) -> (Vec<prompt::DistilledPage>, Option<String>) {
+    deadline: Option<Instant>,
+) -> (Vec<prompt::DistilledPage>, Option<String>, bool) {
     let hint = source.kind.page_type_hint();
     let mut pages = Vec::new();
     let mut failure: Option<String> = None;
+    let mut timed_out = false;
 
     let chunks = chunk_markdown(&source.content, &config.chunk);
     for chunk in chunks.iter().take(config.max_chunks_per_source) {
+        if deadline_expired(deadline) {
+            timed_out = true;
+            break;
+        }
         // Stage A — extraction plan.
-        let plan = match runner.complete(&prompt::stage_a_prompt(
+        let plan = match runner.complete_with_deadline(&prompt::stage_a_prompt(
             &source.path,
             &chunk.heading,
             &chunk.text,
-        )) {
+        ), deadline) {
             Ok(response) => prompt::parse_plan(&response),
             Err(error) => {
                 let message = format!("stage A: {error}");
                 report.errors.push(format!("{}: {message}", source.path));
                 failure.get_or_insert(message);
+                if is_timeout(&error, deadline) {
+                    timed_out = true;
+                    break;
+                }
                 prompt::ExtractionPlan::default()
             }
         };
+
+        if deadline_expired(deadline) {
+            timed_out = true;
+            break;
+        }
 
         // Stage B — page generation, or the single-stage degrade path.
         let stage_b_prompt_text = if plan.is_empty() {
@@ -297,17 +415,25 @@ fn distill_source(
             prompt::stage_b_prompt(&source.path, hint, &plan_json, &chunk.text)
         };
 
-        match runner.complete(&stage_b_prompt_text) {
+        match runner.complete_with_deadline(&stage_b_prompt_text, deadline) {
             Ok(response) => pages.extend(prompt::parse_pages(&response)),
             Err(error) => {
                 let message = format!("stage B: {error}");
                 report.errors.push(format!("{}: {message}", source.path));
                 failure.get_or_insert(message);
+                if is_timeout(&error, deadline) {
+                    timed_out = true;
+                    break;
+                }
             }
         }
     }
 
-    (pages, failure)
+    (pages, failure, timed_out)
+}
+
+fn is_timeout(error: &LlmError, deadline: Option<Instant>) -> bool {
+    matches!(error, LlmError::TimedOut(_)) || deadline_expired(deadline)
 }
 
 /// The single definition of "the user owns this page".
@@ -345,7 +471,8 @@ fn stage_page(
     distilled: prompt::DistilledPage,
     config: &DistillConfig,
     report: &mut DistillReport,
-) -> Result<()> {
+    deadline: Option<Instant>,
+) -> Result<bool> {
     let page_type = if distilled.page_type.is_empty() {
         source.kind.page_type_hint().to_string()
     } else {
@@ -411,11 +538,12 @@ fn stage_page(
     // the skip is reported rather than swallowed.
     if is_locked(&page, &existing_body) {
         report.pages_locked_skipped += 1;
-        return Ok(());
+        return Ok(false);
     }
 
     let sources = merge::union_sources(&page.sources, &[source.path.clone()]);
     let mut rewrite_snippet: Option<String> = None;
+    let mut rewrite_timed_out = false;
 
     let fragments: Vec<Fragment> = if existing_body.trim().is_empty() {
         vec![Fragment::new(
@@ -449,9 +577,19 @@ fn stage_page(
                 } else {
                     page.title.clone()
                 };
-                let (fragments, snippet) =
-                    rewrite_small_page(runner, &title, &existing_body, &distilled, source, report);
+                let (fragments, snippet, timed_out) = rewrite_small_page(
+                    runner,
+                    &title,
+                    &existing_body,
+                    &distilled,
+                    source,
+                    report,
+                    deadline,
+                );
                 rewrite_snippet = snippet;
+                if timed_out {
+                    rewrite_timed_out = true;
+                }
                 fragments
             }
             MergeTier::AppendDelta => {
@@ -486,7 +624,7 @@ fn stage_page(
     let body = merge::compose_body(&meta, &fragments);
 
     writes.insert(rel_path, PageWrite { page, body });
-    Ok(())
+    Ok(rewrite_timed_out)
 }
 
 /// Tier (b): one LLM call restates the distilled prose as a single voice.
@@ -505,7 +643,8 @@ fn rewrite_small_page(
     distilled: &prompt::DistilledPage,
     source: &LoadedSource,
     report: &mut DistillReport,
-) -> (Vec<Fragment>, Option<String>) {
+    deadline: Option<Instant>,
+) -> (Vec<Fragment>, Option<String>, bool) {
     let existing_fragments = merge::split_fragments(existing_body);
     let (preamble, distilled_fragments): (Vec<Fragment>, Vec<Fragment>) = existing_fragments
         .into_iter()
@@ -517,19 +656,19 @@ fn rewrite_small_page(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let response = runner.complete(&prompt::rewrite_prompt(
+    let response = runner.complete_with_deadline(&prompt::rewrite_prompt(
         title,
         &existing_text,
         &distilled.body,
-    ));
+    ), deadline);
 
-    let rewritten = match response {
-        Ok(text) => prompt::parse_rewrite(&text),
+    let (rewritten, timed_out) = match response {
+        Ok(text) => (prompt::parse_rewrite(&text), false),
         Err(error) => {
             report
                 .errors
                 .push(format!("{}: merge rewrite: {error}", source.path));
-            None
+            (None, is_timeout(&error, deadline))
         }
     };
 
@@ -540,6 +679,7 @@ fn rewrite_small_page(
         return (
             merge::append_delta(existing_body, &distilled.body, &source.path, Utc::now()),
             None,
+            timed_out,
         );
     };
 
@@ -558,7 +698,7 @@ fn rewrite_small_page(
     ));
 
     let snippet = (!rewritten.snippet.trim().is_empty()).then(|| rewritten.snippet.clone());
-    (fragments, snippet)
+    (fragments, snippet, false)
 }
 
 /// After a commit that tombstoned sources: cut dead provenance out of surviving
@@ -568,9 +708,10 @@ fn repair_after_deletions(
     cascade_watch: &[(String, Vec<KnowledgePage>)],
     deleted_ids: &BTreeSet<&String>,
     report: &mut DistillReport,
-) -> Result<()> {
+    deadline: Option<Instant>,
+) -> Result<bool> {
     if cascade_watch.is_empty() {
-        return Ok(());
+        return Ok(deadline_expired(deadline));
     }
 
     let mut bodies: BTreeMap<String, (KnowledgePage, String)> = BTreeMap::new();
@@ -592,7 +733,13 @@ fn repair_after_deletions(
     }
 
     for (dead_source, pages) in cascade_watch {
+        if deadline_expired(deadline) {
+            return Ok(true);
+        }
         for watched in pages {
+            if deadline_expired(deadline) {
+                return Ok(true);
+            }
             if deleted_ids.contains(&watched.id) {
                 continue; // page went with its last source
             }
@@ -624,6 +771,9 @@ fn repair_after_deletions(
     // so a reader never follows a link into a page that no longer exists.
     if !dead_targets.is_empty() {
         for page in store.list_pages()? {
+            if deadline_expired(deadline) {
+                return Ok(true);
+            }
             let Some(body) = load_body(store, &bodies, &page) else {
                 continue;
             };
@@ -639,7 +789,7 @@ fn repair_after_deletions(
     }
 
     if bodies.is_empty() {
-        return Ok(());
+        return Ok(deadline_expired(deadline));
     }
 
     // Sources whose page prose may still describe a dead sibling are demoted to
@@ -670,8 +820,11 @@ fn repair_after_deletions(
         sources: demotions,
         tombstones: Vec::new(),
     };
+    if deadline_expired(deadline) {
+        return Ok(true);
+    }
     store.commit_ingest(&batch)?;
-    Ok(())
+    Ok(deadline_expired(deadline))
 }
 
 /// Body of a page during the repair pass: the in-flight edit if there is one,

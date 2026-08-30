@@ -441,6 +441,25 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
     if !build_line.contains("--max-sources 5") {
         violations.push("max-sources limit");
     }
+    if !lower.contains("wall-clock")
+        || !(lower.contains("complete build")
+            || lower.contains("entire build")
+            || lower.contains("whole build"))
+    {
+        violations.push("single wall-clock deadline for the complete build");
+    }
+    if !lower.contains("stops later completions")
+        && !lower.contains("stop later completions")
+        && !lower.contains("no later completions")
+    {
+        violations.push("stop scheduling after deadline exhaustion");
+    }
+    if !lower.contains("process group")
+        || !(lower.contains("terminate") || lower.contains("kill"))
+        || !lower.contains("reap")
+    {
+        violations.push("terminate and reap the active provider group");
+    }
     if build_tokens[cas_index..].iter().any(|token| *token == "&")
         || build_line.trim_end().ends_with('&')
         || build_line.contains("nohup")
@@ -520,7 +539,7 @@ else
 fi
 ```
 
-If the command returns a non-zero exit status, record the durable receipt in task notes and continue with the CODEMAP commit and cas codemap status proof; this is non-blocking. Rust terminates the process group so a stalled build leaves no orphan descendant.
+If the command returns a non-zero exit status, record the durable receipt in task notes and continue with the CODEMAP commit and cas codemap status proof; this is non-blocking. Rust enforces one 90-second wall-clock deadline across the complete build, stops later completions after exhaustion, and terminates/reaps the active provider process group so a stalled build leaves no ordinary orphan descendant.
 Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound.
 "#;
     assert!(
@@ -532,6 +551,16 @@ Do not detach or background the build, run a manual polling loop, or wait beyond
     assert!(
         codemap_build_contract_violations(&unbounded).contains(&"--timeout-secs bound"),
         "an unbounded knowledge build must be rejected"
+    );
+
+    let per_completion_only = valid.replace(
+        "one 90-second wall-clock deadline across the complete build",
+        "a 90-second wall-clock deadline for each provider completion",
+    );
+    assert!(
+        codemap_build_contract_violations(&per_completion_only)
+            .contains(&"single wall-clock deadline for the complete build"),
+        "a per-completion-only bound must not satisfy the whole-build contract"
     );
 
     let detached = valid.replace(

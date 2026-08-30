@@ -7,8 +7,13 @@
 
 use cas::knowledge::merge;
 use cas::knowledge::sources::{LoadedSource, SourceKind};
-use cas::knowledge::{DistillConfig, LlmRunner, ScriptedLlm, run_distillation};
+use cas::knowledge::{
+    DistillConfig, LlmError, LlmRunner, ScriptedLlm, run_distillation,
+    run_distillation_with_timeout,
+};
 use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// A stage-A response that always yields a usable plan.
@@ -82,6 +87,45 @@ impl LlmRunner for TwoStageMock {
     }
 }
 
+/// A provider that notices the shared deadline after a short in-flight wait.
+/// The call counter makes a deadline failure observable: no later chunk or
+/// source may be scheduled after this one exhausts the build budget.
+struct DeadlineMock {
+    calls: AtomicUsize,
+}
+
+impl DeadlineMock {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl LlmRunner for DeadlineMock {
+    fn complete(&self, _prompt: &str) -> Result<String, LlmError> {
+        panic!("the bounded pipeline must pass its deadline to the runner");
+    }
+
+    fn complete_with_deadline(
+        &self,
+        _prompt: &str,
+        deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(100));
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Err(LlmError::TimedOut(Duration::from_millis(50)))
+        } else {
+            Ok(page_response("guide", "Unexpected", "not timed out"))
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
 #[test]
 fn unchanged_repo_costs_zero_llm_calls() {
     let (_dir, store) = store();
@@ -102,6 +146,44 @@ fn unchanged_repo_costs_zero_llm_calls() {
     assert_eq!(second.sources_skipped, 1);
     assert_eq!(second.pages_written, 0);
     assert!(second.is_noop());
+}
+
+#[test]
+fn a_build_deadline_covers_multiple_sources_and_stops_later_completions() {
+    let (_dir, store) = store();
+    let sources = vec![
+        doc("README.md", &format!("# First\n\n{}", "a ".repeat(400))),
+        doc(
+            "docs/second.md",
+            &format!("# Second\n\n{}", "b ".repeat(400)),
+        ),
+    ];
+    let config = DistillConfig {
+        max_sources_per_pass: 2,
+        ..DistillConfig::default()
+    };
+    let runner = DeadlineMock::new();
+    let started = Instant::now();
+    let result = run_distillation_with_timeout(
+        &store,
+        &runner,
+        &sources,
+        &config,
+        Duration::from_millis(50),
+    );
+
+    let error = result.expect_err("deadline exhaustion must be a build error");
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the full build deadline was not enforced: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        runner.calls(),
+        1,
+        "no later chunk or source completion may start after exhaustion"
+    );
 }
 
 #[test]

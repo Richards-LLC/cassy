@@ -24,12 +24,36 @@ pub enum LlmError {
     /// The provider ran but failed, timed out, or returned nothing usable.
     #[error("llm call failed: {0}")]
     Failed(String),
+    /// The enclosing knowledge build deadline expired while this call was
+    /// active or before it could be started.
+    #[error("llm call timed out after {0:?}")]
+    TimedOut(Duration),
 }
 
 /// A one-shot text completion provider.
 pub trait LlmRunner: Send + Sync {
     /// Run `prompt` and return the raw response text.
     fn complete(&self, prompt: &str) -> Result<String, LlmError>;
+
+    /// Run a completion without starting it after an enclosing build deadline.
+    /// Implementations that own a subprocess should also enforce the deadline
+    /// while the call is active; the default preserves existing test doubles
+    /// and non-process runners.
+    fn complete_with_deadline(
+        &self,
+        prompt: &str,
+        deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LlmError::TimedOut(Duration::ZERO));
+        }
+        let result = self.complete(prompt);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Err(LlmError::TimedOut(Duration::ZERO))
+        } else {
+            result
+        }
+    }
 
     /// How many completions this runner has performed. Used by the pipeline
     /// report (and by tests asserting the zero-call short-circuit).
@@ -113,6 +137,35 @@ fn spawn_with_retry(command: &mut Command) -> std::io::Result<std::process::Chil
 
 impl LlmRunner for ClaudeCliRunner {
     fn complete(&self, prompt: &str) -> Result<String, LlmError> {
+        self.complete_with_deadline(prompt, None)
+    }
+
+    fn complete_with_deadline(
+        &self,
+        prompt: &str,
+        deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
+        self.complete_inner(prompt, deadline)
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    fn label(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{} ({model})", self.binary),
+            None => self.binary.clone(),
+        }
+    }
+}
+
+impl ClaudeCliRunner {
+    fn complete_inner(
+        &self,
+        prompt: &str,
+        enclosing_deadline: Option<Instant>,
+    ) -> Result<String, LlmError> {
         // Both captures are owned by `NamedTempFile`, so every early return —
         // including the `?` on the second create — unlinks what was created.
         let stdout_capture = Self::capture_file("out")?;
@@ -144,6 +197,11 @@ impl LlmRunner for ClaudeCliRunner {
             command.arg("--model").arg(model);
         }
 
+        let call_deadline = Instant::now() + self.timeout;
+        if enclosing_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LlmError::TimedOut(self.timeout));
+        }
+
         let mut child = spawn_with_retry(&mut command)
             .map_err(|error| LlmError::Unavailable(format!("{}: {error}", self.binary)))?;
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -157,7 +215,7 @@ impl LlmRunner for ClaudeCliRunner {
             std::thread::spawn(move || stdin.write_all(payload.as_bytes()))
         });
 
-        let deadline = Instant::now() + self.timeout;
+        let deadline = enclosing_deadline.map_or(call_deadline, |global| global.min(call_deadline));
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
@@ -186,6 +244,9 @@ impl LlmRunner for ClaudeCliRunner {
         let stderr = std::fs::read_to_string(stderr_capture.path()).unwrap_or_default();
 
         let Some(status) = status else {
+            if enclosing_deadline.is_some_and(|global| Instant::now() >= global) {
+                return Err(LlmError::TimedOut(self.timeout));
+            }
             return Err(LlmError::Failed(format!(
                 "timed out after {}s",
                 self.timeout.as_secs()
@@ -202,17 +263,6 @@ impl LlmRunner for ClaudeCliRunner {
             return Err(LlmError::Failed("empty response".to_string()));
         }
         Ok(stdout)
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::Relaxed)
-    }
-
-    fn label(&self) -> String {
-        match &self.model {
-            Some(model) => format!("{} ({model})", self.binary),
-            None => self.binary.clone(),
-        }
     }
 }
 

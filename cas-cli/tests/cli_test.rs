@@ -1114,6 +1114,57 @@ fn test_knowledge_search_and_read_round_trip() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn knowledge_build_timeout_returns_nonzero_and_does_not_start_another_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    std::fs::write(temp.path().join("README.md"), "# Slow source\n\ncontent\n").unwrap();
+    let provider = temp.path().join("provider");
+    let calls = temp.path().join("provider-calls");
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\nprintf call >> '{}'\nsleep 30\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env("CAS_KNOWLEDGE_LLM_BIN", &provider)
+        .args([
+            "knowledge",
+            "build",
+            "--timeout-secs",
+            "1",
+            "--max-sources",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "timeout must be a nonzero CLI result"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap().lines().count(),
+        1,
+        "the command deadline must prevent later stage/source calls"
+    );
+}
+
 /// cas-461a, through the shipped command rather than the store API.
 ///
 /// `fts_query` joined tokens with a space, which FTS5 reads as an implicit

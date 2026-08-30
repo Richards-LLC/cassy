@@ -2,13 +2,13 @@
 //! (EPIC cas-7d31 / cas-c9be).
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 
 use crate::knowledge::{
     ClaudeCliRunner, DistillConfig, LlmRunner, ScriptedLlm, SymbolLite, collect_sources,
-    run_distillation,
+    run_distillation_until,
 };
 use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
 
@@ -44,7 +44,7 @@ pub struct BuildArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_SYMBOLS)]
     pub max_symbols: usize,
 
-    /// Maximum wall-clock time for each provider completion
+    /// Maximum wall-clock time for the complete knowledge build
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_parser = parse_timeout_secs)]
     pub timeout_secs: u64,
 }
@@ -102,9 +102,9 @@ const SYMBOL_PAGE: usize = 2_000;
 /// Default ceiling on symbols loaded to seed `code://` module sources.
 pub const DEFAULT_MAX_SYMBOLS: usize = 5_000;
 
-/// Hard ceiling for a knowledge-build provider completion. This is a CLI
-/// contract rather than a shell convention, so every platform gets the same
-/// bound and process-group cleanup implemented by the Rust runner.
+/// Hard ceiling for a complete knowledge build. This is a CLI contract rather
+/// than a shell convention, so every platform gets the same bound and
+/// process-group cleanup implemented by the Rust runner.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 90;
 
 fn parse_timeout_secs(value: &str) -> Result<u64, String> {
@@ -179,6 +179,7 @@ pub fn load_symbols(cas_root: &Path, limit: usize) -> SymbolLoad {
 }
 
 fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let build_deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
     let project_root = project_root_of(cas_root)?;
     let store = SqliteKnowledgeStore::open(cas_root)?;
     let load = load_symbols(cas_root, args.max_symbols);
@@ -216,7 +217,8 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
         )
     };
 
-    let report = run_distillation(&store, runner.as_ref(), &sources, &config)?;
+    let report =
+        run_distillation_until(&store, runner.as_ref(), &sources, &config, build_deadline)?;
 
     if args.dry_run {
         println!("Knowledge distillation (dry run — nothing was written)");

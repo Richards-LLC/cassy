@@ -398,7 +398,7 @@ impl SqliteStore {
              pending_extraction, observation_type, stability, access_count,
              raw_content, compressed, memory_tier, importance, valid_from, valid_until, review_after, last_reviewed, pending_embedding,
              belief_type, confidence, domain, branch, scope, team_id, share, source_ids
-             FROM entries WHERE archived = 0 AND memory_tier NOT IN ('in_context', 'archive')
+             FROM entries WHERE archived = 0 AND memory_tier NOT IN ('in-context', 'archive')
              ORDER BY created DESC LIMIT 10000",
         )?;
 

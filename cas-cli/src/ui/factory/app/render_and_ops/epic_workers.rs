@@ -474,8 +474,9 @@ pub(crate) fn task_epic_base(
                 WorkTargetOwner::Task
             },
         });
-    let epic = if task.task_type == cas_types::TaskType::Epic {
-        task
+    let task_is_epic = task.task_type == cas_types::TaskType::Epic;
+    let epic = if task_is_epic {
+        task.clone()
     } else {
         match store.get_parent_epic(task_id) {
             Ok(Some(epic)) => epic,
@@ -513,24 +514,37 @@ pub(crate) fn task_epic_base(
         );
     }
 
+    // cas-d22d (GH #625): a child created before the task-create inheritance
+    // fix can still carry the parent's default target (usually `main`). That
+    // is implicit epic scope, not an explicit task lane; let the live epic
+    // branch win while preserving distinct task targets below.
+    let child_target_is_epic_default = !task_is_epic
+        && crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
+            &task, &epic,
+        )
+        .is_some();
+
     TaskBase::Epic(TaskEpicBase {
         task_id: task_id.to_string(),
         epic_id: epic.id.clone(),
         branch,
         branch_exists,
         branch_is_title_slug_fallback,
-        work_target: task_work_target.or_else(|| {
-            epic.deliverables
-                .work_target
-                .as_ref()
-                .map(|target| SpawnWorkTarget {
-                    task_id: task_id.to_string(),
-                    target_branch: target.target_branch.clone(),
-                    owner: WorkTargetOwner::Epic {
-                        epic_id: epic.id.clone(),
-                    },
-                })
-        }),
+        work_target: (!child_target_is_epic_default)
+            .then_some(task_work_target)
+            .flatten()
+            .or_else(|| {
+                epic.deliverables
+                    .work_target
+                    .as_ref()
+                    .map(|target| SpawnWorkTarget {
+                        task_id: task_id.to_string(),
+                        target_branch: target.target_branch.clone(),
+                        owner: WorkTargetOwner::Epic {
+                            epic_id: epic.id.clone(),
+                        },
+                    })
+            }),
     })
 }
 
@@ -2703,6 +2717,112 @@ mod spawn_base_tests {
             "epic/staging-target",
             "a live epic branch must retain its child integration history"
         );
+    }
+
+    /// GH #625: a legacy child may already have the repository default in its
+    /// WorkTarget even though that value merely repeated the parent epic's
+    /// default. Spawn must treat it as implicit epic scope and cut from the
+    /// live integration branch; a distinct task lane remains authoritative.
+    #[test]
+    fn child_default_work_target_uses_live_epic_branch_cas_d22d() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "epic/live-delivery", "main");
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-d22d-epic".into(), "delivery epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/live-delivery".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let mut child = cas_types::Task::new("cas-d22d-child".into(), "default child".into());
+        child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id.clone(),
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+
+        let task_base = task_epic_base(&cas_dir, &repo, &child.id);
+        assert!(
+            task_base.work_target().is_some_and(|target| matches!(
+                target.owner,
+                WorkTargetOwner::Epic { .. }
+            )),
+            "the duplicate default target must not remain task authority"
+        );
+        let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
+        assert_eq!(base, "epic/live-delivery");
+        assert!(matches!(source, SpawnBaseSource::TaskEpic { .. }));
+        let receipt = spawn_base_provenance_notice(&base, &source, Some("epic/unrelated"));
+        assert!(receipt.contains("epic/live-delivery"), "{receipt}");
+        assert!(receipt.contains("cas-d22d-epic"), "{receipt}");
+    }
+
+    #[test]
+    fn child_explicit_work_target_still_wins_over_live_epic_branch_cas_d22d() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "epic/live-delivery", "main");
+        branch_at(&repo, "release/operator-selected", "main");
+
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut epic = cas_types::Task::new("cas-d22d-explicit-epic".into(), "delivery epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/live-delivery".into());
+        epic.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).unwrap();
+
+        let mut child = cas_types::Task::new(
+            "cas-d22d-explicit-child".into(),
+            "explicit child lane".into(),
+        );
+        child.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "release/operator-selected".into(),
+        });
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: child.id.clone(),
+                to_id: epic.id,
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+
+        let task_base = task_epic_base(&cas_dir, &repo, &child.id);
+        let (base, source) = resolve_spawn_base(&task_base, Some("epic/unrelated"), "main");
+        assert_eq!(base, "release/operator-selected");
+        assert!(matches!(
+            source,
+            SpawnBaseSource::WorkTarget {
+                owner: WorkTargetOwner::Task,
+                ..
+            }
+        ));
     }
 
     #[test]

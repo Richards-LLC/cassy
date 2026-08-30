@@ -379,34 +379,60 @@ impl CasCore {
                     data: None,
                 })?;
         // A child created under an epic follows that epic's live delivery lane
-        // unless the caller explicitly selected a branch.  The stored target
-        // is what close reads later, so persisting the inheritance here keeps
-        // create, worktree merge, and close in agreement.
-        let work_target = if target_branch.is_none() {
-            epic_id
-                .as_deref()
-                .map(|epic_id| {
-                    task_store.get(epic_id).map_err(|error| McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!("Epic not found: {error}")),
-                        data: None,
-                    })
+        // unless the caller explicitly selected a *different* target.  The
+        // default branch resolver stamps `main` (or the repository default)
+        // when a caller supplies only the repository, so checking only
+        // `target_branch.is_none()` lets an otherwise bare trunk target defeat
+        // the epic lane (GH #625). Treat a target equal to the epic's own
+        // WorkTarget as the implicit default too; a distinct target remains
+        // task-owned authority.
+        let mut inherited_default_note = None;
+        let work_target = epic_id
+            .as_deref()
+            .map(|epic_id| {
+                task_store.get(epic_id).map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Epic not found: {error}")),
+                    data: None,
                 })
-                .transpose()?
-                .filter(|epic| epic.task_type == TaskType::Epic)
-                .and_then(|epic| {
-                    let inherited = super::repo_context::inherited_work_target_from_epic(&epic)?;
-                    // An explicitly different repository binding is task-owned
-                    // authority even if its branch was omitted.
-                    declared_work_target
+            })
+            .transpose()?
+            .filter(|epic| epic.task_type == TaskType::Epic)
+            .and_then(|epic| {
+                let inherited = super::repo_context::inherited_work_target_from_epic(&epic)?;
+                let matches_epic_default = declared_work_target.as_ref().is_some_and(|target| {
+                    epic.deliverables
+                        .work_target
                         .as_ref()
-                        .is_none_or(|target| target.repo_selector == inherited.repo_selector)
-                        .then_some(inherited)
-                })
-                .or(declared_work_target)
-        } else {
-            declared_work_target
-        };
+                        .is_some_and(|epic_target| {
+                            target.repo_selector == epic_target.repo_selector
+                                && (target_branch.is_none()
+                                    || target.target_branch == epic_target.target_branch)
+                        })
+                });
+                // An explicitly different repository binding is task-owned
+                // authority even if its branch was omitted.
+                if declared_work_target.is_none() || matches_epic_default {
+                    if matches_epic_default {
+                        inherited_default_note = Some(format!(
+                            "decision: child WorkTarget matched parent epic {}'s default target; inherited live delivery lane {}.",
+                            epic.id, inherited.target_branch
+                        ));
+                    }
+                    Some(inherited)
+                } else {
+                    None
+                }
+            })
+            .or(declared_work_target);
+
+        let mut task_notes = req.notes.unwrap_or_default();
+        if let Some(note) = inherited_default_note {
+            if !task_notes.is_empty() {
+                task_notes.push('\n');
+            }
+            task_notes.push_str(&note);
+        }
 
         let now = chrono::Utc::now();
         // cas-9fff: in factory mode, stamp the creating agent as
@@ -445,7 +471,7 @@ impl CasCore {
             acceptance_criteria: req.acceptance_criteria.unwrap_or_default(),
             demo_statement: req.demo_statement.unwrap_or_default(),
             execution_note,
-            notes: req.notes.unwrap_or_default(),
+            notes: task_notes,
             status,
             priority: Priority(req.priority.min(4) as i32),
             task_type,
@@ -1693,6 +1719,90 @@ mod related_recall_response_tests {
                 .target_branch,
             "epic/live-target",
             "a later close must check the branch the child will merge into"
+        );
+    }
+
+    /// GH #625: `target_branch=main` is often the resolver's default, not a
+    /// deliberate request to bypass the focused epic. Persisting the live
+    /// epic lane at create time keeps spawn, merge, and close on one target and
+    /// records the normalization for supervisors.
+    #[tokio::test]
+    async fn child_create_normalizes_explicit_epic_default_cas_d22d() {
+        use std::process::Command;
+
+        use cas_types::WorkTarget;
+
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("initialize isolated host registry");
+        let temp = TempDir::new().expect("temporary project");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo");
+        std::fs::create_dir(repo.join(".cas")).expect("create repo metadata");
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-d22d\"\n",
+        )
+        .expect("write repo metadata");
+
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@cas.test"]);
+        git(&["config", "user.name", "Cassy Test"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").expect("seed repo");
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["branch", "epic/live-target"]);
+
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+        let mut epic = Task::new("cas-d22d-epic".into(), "target epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/live-target".into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-d22d".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&epic).expect("add epic");
+
+        core.cas_task_create_with_target(
+            child_request("explicit default child", epic.id.clone()),
+            Some(repo.to_str().expect("repo path")),
+            Some("main"),
+            false,
+        )
+        .await
+        .expect("create child under epic");
+        let child = store
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "explicit default child")
+            .expect("created child");
+        assert_eq!(
+            child
+                .deliverables
+                .work_target
+                .expect("child target")
+                .target_branch,
+            "epic/live-target"
+        );
+        assert!(
+            child.notes.contains("matched parent epic")
+                && child.notes.contains("epic/live-target"),
+            "normalization must be durable and visible: {}",
+            child.notes
         );
     }
 

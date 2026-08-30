@@ -15,7 +15,9 @@ The script uses the checked-in `CODEMAP.md` as the no-op render candidate. It
 scans the current top-level structure, compares the candidate byte-for-byte,
 proves that `CODEMAP_FRESHNESS_STATUS=up-to-date`, invokes the already-bounded
 `cas knowledge build --timeout-secs 90 --max-sources 5`, and checks local
-commit/push readiness. It
+commit/push readiness. Named-branch local rehearsals require a symbolic branch;
+the only detached-checkout exception is the GitHub Actions `CI` workflow's
+`fast-validation-preflight` job in the `Richards-LLC/cassy` repository. It
 never writes `.claude/CODEMAP.md`; a different render exits non-zero, so a
 content-changing codemap commit cannot be created by a no-op rehearsal.
 
@@ -44,6 +46,12 @@ missing, or otherwise unrecognized codemap status fails the final gate even if
 first non-skipped job `startedAt`. It is external scheduling time, never part
 of `AGENT_CONTROLLED_TOTAL_SECONDS` or codemap work. A missing or unavailable
 run is reported as `not-requested` or `unavailable`, not as zero.
+
+`READINESS_MODE` labels the receipt's readiness evidence: local named branches
+emit `local-named-branch`, while the detached GitHub verification exception
+emits `github-actions-verification-detached`. A detached checkout without that
+exact CI identity emits `detached-rejected` and fails the receipt; CI evidence
+therefore cannot be mistaken for local push readiness.
 
 When `--artifact` is supplied, the command also copies each phase's captured
 output to the sibling directory named by `PHASE_LOG_DIR`; this keeps a

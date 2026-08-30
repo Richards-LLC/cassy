@@ -198,7 +198,11 @@ jobs:
         if: steps.pr-dedupe.outputs.covered != 'true'
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          # A branch's first push carries before=000... even when it is based on
+          # main. Compare the complete branch diff against the protected base;
+          # tags and every other uncertain event still fail closed.
+          zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
       - name: Test portable installer fixtures
         if: steps.pr-dedupe.outputs.covered != 'true'
@@ -288,7 +292,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
         if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
@@ -412,7 +416,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
         if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
@@ -557,7 +561,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
@@ -615,7 +619,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
@@ -652,7 +656,7 @@ jobs:
       - id: classify-diff
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Verify merge-queue self-hosted trust boundary
         if: needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
@@ -821,8 +825,6 @@ jobs:
     name: Clippy (advisory, compiles only — no test suite)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || github.ref == 'refs/heads/staging'))
@@ -926,7 +928,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: ./.github/actions/classify-required-diff
         with:
-          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
 
       - name: Report Rust short-circuit
         if: >-
@@ -1064,8 +1066,6 @@ jobs:
     name: Test Compile Guard (compile-only, executes nothing)
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'pull_request'
-      && github.base_ref == github.event.repository.default_branch)
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || github.ref == 'refs/heads/staging'))

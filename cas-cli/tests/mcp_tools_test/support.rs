@@ -223,6 +223,7 @@ pub(crate) fn extract_skill_id(text: &str) -> Option<String> {
     text.split("Created skill: ")
         .nth(1)
         .and_then(|part| part.split(" - ").next())
+        .and_then(|part| part.split_whitespace().next())
         .filter(|id| id.starts_with("cas-"))
         .map(ToString::to_string)
         .or_else(|| {

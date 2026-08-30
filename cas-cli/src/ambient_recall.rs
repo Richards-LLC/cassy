@@ -3465,10 +3465,55 @@ mod tests {
         assert_eq!(groups[0].ranking_policy, AMBIENT_RETRIEVAL_POLICY);
         assert_eq!(
             (groups[0].total, groups[0].used, groups[0].ignored),
-            (2, 1, 1)
+            (2, 1, 0)
         );
         let ledger = RecallLedger::load(&ledger_path(&cas_root, &identity.session_id));
         assert!(ledger.seen.iter().all(|seen| seen.outcome_recorded));
+    }
+
+    #[test]
+    fn memory_get_marks_a_short_injected_id_used() {
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let candidates = RecallCandidates {
+            candidates: vec![candidate("m1", EvidenceScope::Global)],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        let query_id = record_ambient_query(&cas_root, &identity, &query, &injected, false);
+        ledger.record(packet.query_hash, query_id, &injected);
+        ledger.save(&ledger_path(&cas_root, &identity.session_id));
+
+        let tool = cas_core::hooks::types::HookInput {
+            session_id: identity.session_id.clone(),
+            tool_name: Some("mcp__cs__memory".into()),
+            tool_input: Some(serde_json::json!({"action": "get", "id": "m1"})),
+            tool_response: Some(serde_json::json!({"id": "m1", "content": "body"})),
+            ..Default::default()
+        };
+        record_ambient_tool_usage(&tool, &cas_root);
+        finalize_ambient_recall_feedback(&tool, &cas_root);
+
+        let groups = SqliteRetrievalStore::open(&cas_root)
+            .unwrap()
+            .aggregate()
+            .unwrap();
+        assert_eq!((groups[0].total, groups[0].used), (1, 1));
     }
 
     #[test]

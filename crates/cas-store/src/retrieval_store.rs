@@ -516,6 +516,11 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_is_a_supported_retrieval_outcome() {
+        assert!(RetrievalOutcome::from_str("unresolved").is_ok());
+    }
+
+    #[test]
     fn persists_hashed_query_and_identity_without_raw_payloads() {
         let temp = TempDir::new().unwrap();
         let store = SqliteRetrievalStore::open(temp.path()).unwrap();

@@ -101,7 +101,23 @@ fn cli_session_start_telemeters_helpful_memories_with_trace_parity() {
         ..Default::default()
     };
     let context = build_context_with_token_budget(&input, ids.len(), &cas_root, None).unwrap();
-    assert!(context.contains("## Helpful Memories (3 memories"), "{context}");
+    assert!(
+        context.contains("## Helpful Memories (3 memories"),
+        "{context}"
+    );
+    let mut expected_order: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            (
+                context
+                    .find(&format!("- {id} ["))
+                    .expect("injected memory should be rendered"),
+                id.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected_order.sort_by_key(|(position, _)| *position);
+    let expected_order: Vec<String> = expected_order.into_iter().map(|(_, id)| id).collect();
 
     let db = Connection::open(cas_root.join("cas.db")).unwrap();
     let (query_id, family, policy): (String, String, String) = db
@@ -132,10 +148,31 @@ fn cli_session_start_telemeters_helpful_memories_with_trace_parity() {
         .collect();
     assert_eq!(
         rows,
-        ids.into_iter()
+        expected_order
+            .into_iter()
             .enumerate()
             .map(|(rank, id)| (id.to_string(), "entry".to_string(), rank))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn cli_session_start_telemetry_failure_does_not_fail_context_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    fs::create_dir_all(cas_root.join("cas.db")).unwrap();
+
+    let input = HookInput {
+        session_id: "context-session-start-telemetry-failure".to_string(),
+        cwd: "/project".to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    let result = build_context_with_token_budget(&input, 5, &cas_root, None);
+
+    assert!(
+        result.is_ok(),
+        "telemetry failure leaked into hook: {result:?}"
     );
 }
 

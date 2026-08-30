@@ -194,6 +194,8 @@ pub struct RetrievalAggregate {
     pub query_family: String,
     pub ranking_policy: String,
     pub total: u64,
+    /// Number of retrieved result rows represented by this group.
+    pub results: u64,
     pub resolved: u64,
     pub unresolved: u64,
     /// Number of distinct privacy-preserving sessions contributing resolved
@@ -207,6 +209,10 @@ pub struct RetrievalAggregate {
     pub usefulness_rate: f64,
     pub ignore_rate: f64,
     pub correction_rate: f64,
+    /// Name of the denominator used for all aggregate rates.
+    pub denominator: String,
+    /// Resolved outcome rows divided by all retrieved result rows.
+    pub coverage_rate: f64,
 }
 
 pub trait RetrievalStore: Send + Sync {
@@ -293,12 +299,14 @@ impl SqliteRetrievalStore {
         let harmful = row.get::<_, i64>(9)?.max(0) as u64;
         let resolved = row.get::<_, i64>(10)?.max(0) as u64;
         let unresolved = row.get::<_, i64>(11)?.max(0) as u64;
+        let results = row.get::<_, i64>(12)?.max(0) as u64;
         let denominator = resolved.max(1) as f64;
         Ok(RetrievalAggregate {
             document_type: row.get(0)?,
             query_family: row.get(1)?,
             ranking_policy: row.get(2)?,
             total,
+            results,
             resolved,
             unresolved,
             distinct_sessions,
@@ -310,6 +318,12 @@ impl SqliteRetrievalStore {
             usefulness_rate: (used + helpful) as f64 / denominator,
             ignore_rate: ignored as f64 / denominator,
             correction_rate: corrected as f64 / denominator,
+            denominator: "resolved".to_string(),
+            coverage_rate: if results == 0 {
+                0.0
+            } else {
+                resolved as f64 / results as f64
+            },
         })
     }
 
@@ -345,7 +359,7 @@ impl SqliteRetrievalStore {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
-                    COUNT(*) AS total,
+                    COUNT(o.id) AS total,
                     COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
                         AS distinct_sessions,
                     SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
@@ -354,12 +368,13 @@ impl SqliteRetrievalStore {
                     SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END)
-             FROM retrieval_outcomes o
-             JOIN retrieval_queries q ON q.id = o.query_id
-             JOIN retrieval_query_results r
-               ON r.query_id = o.query_id AND r.result_id = o.result_id
-             WHERE o.result_id = ?1
+                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END),
+                    COUNT(DISTINCT r.query_id || char(0) || r.result_id) AS results
+             FROM retrieval_query_results r
+             JOIN retrieval_queries q ON q.id = r.query_id
+             LEFT JOIN retrieval_outcomes o
+               ON o.query_id = r.query_id AND o.result_id = r.result_id
+             WHERE r.result_id = ?1
              GROUP BY r.document_type, q.query_family, q.ranking_policy
              ORDER BY r.document_type, q.query_family, q.ranking_policy",
         )?;
@@ -498,7 +513,7 @@ impl RetrievalStore for SqliteRetrievalStore {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT r.document_type, q.query_family, q.ranking_policy,
-                    COUNT(*) AS total,
+                    COUNT(o.id) AS total,
                     COUNT(DISTINCT CASE WHEN o.outcome != 'unresolved' THEN o.session_hash END)
                         AS distinct_sessions,
                     SUM(CASE WHEN o.outcome = 'used' THEN 1 ELSE 0 END),
@@ -507,11 +522,12 @@ impl RetrievalStore for SqliteRetrievalStore {
                     SUM(CASE WHEN o.outcome = 'corrected' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN o.outcome != 'unresolved' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END)
-             FROM retrieval_outcomes o
-             JOIN retrieval_queries q ON q.id = o.query_id
-             JOIN retrieval_query_results r
-               ON r.query_id = o.query_id AND r.result_id = o.result_id
+                    SUM(CASE WHEN o.outcome = 'unresolved' THEN 1 ELSE 0 END),
+                    COUNT(DISTINCT r.query_id || char(0) || r.result_id) AS results
+             FROM retrieval_query_results r
+             JOIN retrieval_queries q ON q.id = r.query_id
+             LEFT JOIN retrieval_outcomes o
+               ON o.query_id = r.query_id AND o.result_id = r.result_id
              GROUP BY r.document_type, q.query_family, q.ranking_policy
              ORDER BY r.document_type, q.query_family, q.ranking_policy",
         )?;
@@ -686,16 +702,19 @@ mod tests {
         let aggregate = &aggregates[0];
         assert_eq!(aggregate.ranking_policy, DEFAULT_RETRIEVAL_POLICY);
         assert_eq!(aggregate.total, 5);
+        assert_eq!(aggregate.results, 2);
         assert_eq!(aggregate.resolved, 4);
         assert_eq!(aggregate.unresolved, 1);
+        assert_eq!(aggregate.denominator, "resolved");
+        assert_eq!(aggregate.coverage_rate, 2.0);
         assert_eq!(aggregate.distinct_sessions, 1);
         assert_eq!(aggregate.used, 1);
         assert_eq!(aggregate.helpful, 1);
         assert_eq!(aggregate.ignored, 1);
         assert_eq!(aggregate.corrected, 1);
-        assert_eq!(aggregate.usefulness_rate, 0.5);
-        assert_eq!(aggregate.ignore_rate, 0.25);
-        assert_eq!(aggregate.correction_rate, 0.25);
+        assert_eq!(aggregate.usefulness_rate, 1.0);
+        assert_eq!(aggregate.ignore_rate, 0.5);
+        assert_eq!(aggregate.correction_rate, 0.5);
     }
 
     #[test]

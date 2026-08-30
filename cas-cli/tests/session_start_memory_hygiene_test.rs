@@ -8,7 +8,7 @@ use cas_store::{
     RuleStore, SkillStore, SqliteRuleStore, SqliteSkillStore, SqliteStore,
     SqliteSurfacedArtifactStore, Store,
 };
-use cas_types::{Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
+use cas_types::{MemoryTier, Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
 use std::fs;
 
 fn session_start_input() -> HookInput {
@@ -113,6 +113,62 @@ fn high_importance_preference_injects_its_full_first_line() {
         context.contains(first_line),
         "high-importance preference was truncated in SessionStart:\n{context}"
     );
+}
+
+#[test]
+fn helpful_memories_only_surface_active_feedback_eligible_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let working = Entry::new(
+        "helpful-working".to_string(),
+        "working memory eligible for helpful memories".to_string(),
+    );
+    let archived_tier = Entry {
+        id: "helpful-archive-tier".to_string(),
+        memory_tier: MemoryTier::Archive,
+        content: "archive tier must stay out of helpful memories".to_string(),
+        ..Entry::new("unused-archive-tier".to_string(), String::new())
+    };
+    let raw_context = Entry {
+        id: "raw-context".to_string(),
+        entry_type: EntryType::Context,
+        content: "raw context blob without feedback must stay out".to_string(),
+        ..Entry::new("unused-raw-context".to_string(), String::new())
+    };
+    let feedback_context = Entry {
+        id: "feedback-context".to_string(),
+        entry_type: EntryType::Context,
+        helpful_count: 1,
+        content: "context with helpful feedback remains eligible".to_string(),
+        ..Entry::new("unused-feedback-context".to_string(), String::new())
+    };
+
+    for entry in [working, archived_tier, raw_context, feedback_context] {
+        store.add(&entry).unwrap();
+    }
+
+    let config = DefaultHooksConfig::new().with_token_budget(2_000);
+    let stores = ContextStores {
+        project_store: Some(&store),
+        ..ContextStores::empty()
+    };
+    let (context, stats) = build_context_with_stores(
+        &session_start_input(),
+        &stores,
+        &config,
+        10,
+        None,
+        "mcp__cas__",
+    )
+    .unwrap();
+
+    assert_eq!(stats.memories_included, 2);
+    assert!(context.contains("helpful-working"));
+    assert!(context.contains("feedback-context"));
+    assert!(!context.contains("helpful-archive-tier"));
+    assert!(!context.contains("raw-context"));
 }
 
 #[test]

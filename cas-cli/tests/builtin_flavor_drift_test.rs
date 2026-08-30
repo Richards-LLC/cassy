@@ -394,6 +394,168 @@ fn section_is_allowed(rel: &str, flavor: &str, heading: &str) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
+const CODEMAP_SKILL_REL: &str = "skills/codemap/SKILL.md";
+
+/// Return the missing semantic requirements for the codemap knowledge-build
+/// workflow. This intentionally checks behavior (a kill-enforced <=90-second
+/// command, captured status, continuation, and explicit prohibitions) rather
+/// than requiring one exact prose spelling.
+fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
+    let lower = content.to_ascii_lowercase();
+    let mut violations = Vec::new();
+
+    let Some(build_line) = lower.lines().find(|line| line.contains("cas knowledge build")) else {
+        return vec!["knowledge-build command"];
+    };
+
+    let build_start = build_line
+        .find("cas knowledge build")
+        .expect("build line was selected by its command marker");
+    let command_prefix = &build_line[..build_start];
+    let command_tokens: Vec<&str> = command_prefix.split_whitespace().collect();
+    let timeout_index = command_tokens.iter().position(|token| *token == "timeout");
+
+    let Some(timeout_index) = timeout_index else {
+        violations.push("hard timeout");
+        // The remaining checks are still useful for reporting all missing
+        // contract pieces in one assertion.
+        if !build_line.contains("--max-sources 5") {
+            violations.push("max-sources limit");
+        }
+        if build_line.trim_end().ends_with('&') {
+            violations.push("no detached/background command");
+        }
+        return violations;
+    };
+
+    let mut bound_seconds = None;
+    let mut kill_signal = false;
+    let mut expect_signal_value = false;
+    for token in command_tokens.iter().skip(timeout_index + 1) {
+        if expect_signal_value {
+            kill_signal = matches!(*token, "kill" | "9");
+            expect_signal_value = false;
+            continue;
+        }
+        if *token == "--signal=kill" || *token == "-skill" {
+            kill_signal = true;
+            continue;
+        }
+        if *token == "--signal" || *token == "-s" {
+            expect_signal_value = true;
+            continue;
+        }
+        if let Some(seconds) = token.strip_suffix('s')
+            && !seconds.is_empty()
+            && seconds.chars().all(|c| c.is_ascii_digit())
+        {
+            bound_seconds = seconds.parse::<u64>().ok();
+        }
+    }
+
+    match bound_seconds {
+        Some(seconds) if (1..=90).contains(&seconds) => {}
+        Some(_) => violations.push("<=90-second bound"),
+        None => violations.push("explicit seconds bound"),
+    }
+    if !kill_signal {
+        violations.push("hard kill at timeout");
+    }
+    if !build_line.contains("--max-sources 5") {
+        violations.push("max-sources limit");
+    }
+    if build_line.trim_end().ends_with('&')
+        || build_line.contains("nohup")
+        || build_line.contains("setsid")
+        || build_line.contains("disown")
+    {
+        violations.push("no detached/background command");
+    }
+
+    let has_negated_directive = |terms: &[&str]| {
+        lower.lines().any(|line| {
+            let negated = ["do not", "never", "must not", "prohibit", "forbid"]
+                .iter()
+                .any(|marker| line.contains(marker));
+            negated && terms.iter().all(|term| line.contains(term))
+        })
+    };
+
+    if !(lower.contains("non-zero") || lower.contains("nonzero"))
+        || !(lower.contains("non-blocking") || lower.contains("must not block"))
+        || !lower.contains("continue")
+    {
+        violations.push("non-zero failure is non-blocking and continues");
+    }
+    if !(lower.contains("record") || lower.contains("capture"))
+        || !(lower.contains("durable receipt") || lower.contains("task notes"))
+        || !(lower.contains("exit status") || lower.contains("exit code") || lower.contains("$?"))
+    {
+        violations.push("durable exit receipt");
+    }
+    if !lower.contains("set +e") || !lower.contains("build_exit_status") {
+        violations.push("failure-tolerant status capture");
+    }
+    if !has_negated_directive(&["detach", "background", "build"])
+        || !has_negated_directive(&["poll"])
+        || !has_negated_directive(&["wait", "90-second"])
+    {
+        violations.push("explicit no-detach/no-poll/no-unbounded-wait directives");
+    }
+
+    violations
+}
+
+/// The codemap skill must make knowledge distillation best-effort without
+/// allowing a model/upstream stall to hold the commit and status proof.
+#[test]
+fn codemap_build_contract_is_bounded_non_blocking_and_non_detached() {
+    for flavor in [&CLAUDE, &CODEX, &GROK] {
+        let rel = CODEMAP_SKILL_REL;
+        let content = fs::read_to_string(flavor_path(rel, flavor))
+            .unwrap_or_else(|e| panic!("{} {rel} missing: {e}", flavor.name));
+        let violations = codemap_build_contract_violations(&content);
+        assert!(
+            violations.is_empty(),
+            "{} {rel} violates codemap build contract: {violations:?}",
+            flavor.name
+        );
+    }
+}
+
+/// The semantic guard must reject the two regressions that motivated it even
+/// when all three flavors would otherwise remain textually synchronized.
+#[test]
+fn codemap_build_contract_rejects_unbounded_and_detached_variants() {
+    let valid = r#"
+```bash
+set +e
+timeout --preserve-status --signal=KILL 90s cas knowledge build --max-sources 5
+build_exit_status=$?
+set -e
+```
+
+If the command returns a non-zero exit status, record the durable receipt in task notes and continue with the CODEMAP commit and cas codemap status proof; this is non-blocking.
+Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound.
+"#;
+    assert!(
+        codemap_build_contract_violations(valid).is_empty(),
+        "the checker must accept equivalent valid contract prose"
+    );
+
+    let unbounded = valid.replace("timeout --preserve-status --signal=KILL 90s ", "");
+    assert!(
+        codemap_build_contract_violations(&unbounded).contains(&"hard timeout"),
+        "an unbounded knowledge build must be rejected"
+    );
+
+    let detached = valid.replace("cas knowledge build --max-sources 5", "cas knowledge build --max-sources 5 &");
+    assert!(
+        codemap_build_contract_violations(&detached).contains(&"no detached/background command"),
+        "a detached/background knowledge build must be rejected"
+    );
+}
+
 /// The guard: normalized three-way content comparison across all filesystem
 /// flavor triples. OpenCode's process-local catalog is checked below.
 #[test]

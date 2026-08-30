@@ -9,6 +9,7 @@ use cas_store::{
     SqliteSurfacedArtifactStore, Store,
 };
 use cas_types::{MemoryTier, Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
+use rusqlite::Connection;
 use std::fs;
 
 fn session_start_input() -> HookInput {
@@ -72,6 +73,69 @@ fn cli_session_start_persists_surface_ledger_for_injected_rules_and_skills() {
             .unwrap()
             .outcome_counts["tasks_completed"],
         1
+    );
+}
+
+#[test]
+fn cli_session_start_telemeters_helpful_memories_with_trace_parity() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join(".cas");
+    fs::create_dir_all(&cas_root).unwrap();
+
+    let entry_store = SqliteStore::open(&cas_root).unwrap();
+    entry_store.init().unwrap();
+    let ids = ["session-memory-a", "session-memory-b", "session-memory-c"];
+    for id in ids {
+        entry_store
+            .add(&Entry::new(
+                id.to_string(),
+                format!("Helpful SessionStart memory {id}"),
+            ))
+            .unwrap();
+    }
+
+    let input = HookInput {
+        session_id: "context-session-start-test".to_string(),
+        cwd: "/project".to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    };
+    let context = build_context_with_token_budget(&input, ids.len(), &cas_root, None).unwrap();
+    assert!(context.contains("## Helpful Memories (3 memories"), "{context}");
+
+    let db = Connection::open(cas_root.join("cas.db")).unwrap();
+    let (query_id, family, policy): (String, String, String) = db
+        .query_row(
+            "SELECT id, query_family, ranking_policy
+             FROM retrieval_queries",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(family, "context_session_start");
+    assert_eq!(policy, "context-session-start-v1");
+
+    let mut statement = db
+        .prepare(
+            "SELECT result_id, document_type, rank
+             FROM retrieval_query_results
+             WHERE query_id = ?1
+             ORDER BY rank",
+        )
+        .unwrap();
+    let rows: Vec<(String, String, usize)> = statement
+        .query_map([&query_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as usize))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        ids.into_iter()
+            .enumerate()
+            .map(|(rank, id)| (id.to_string(), "entry".to_string(), rank))
+            .collect::<Vec<_>>()
     );
 }
 

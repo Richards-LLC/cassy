@@ -13,8 +13,9 @@ scripts/codemap-latency-receipt.sh \
 
 The script uses the checked-in `CODEMAP.md` as the no-op render candidate. It
 scans the current top-level structure, compares the candidate byte-for-byte,
-proves freshness, invokes the already-bounded `cas knowledge build
---timeout-secs 90 --max-sources 5`, and checks local commit/push readiness. It
+proves that `CODEMAP_FRESHNESS_STATUS=up-to-date`, invokes the already-bounded
+`cas knowledge build --timeout-secs 90 --max-sources 5`, and checks local
+commit/push readiness. It
 never writes `.claude/CODEMAP.md`; a different render exits non-zero, so a
 content-changing codemap commit cannot be created by a no-op rehearsal.
 
@@ -33,6 +34,12 @@ deterministic proxy when no Actions run is supplied. Passing
 the two required contexts. The script reports the local proxy separately as
 `DOCS_ONLY_LOCAL_CONTRACT_SECONDS`.
 
+Probe overrides may tighten these limits, but cannot relax the canonical
+maximums: agent `300`, knowledge `90`, and docs-only `60` seconds. The required
+docs-only compute check is strict, so exactly `60` seconds fails. A stale,
+missing, or otherwise unrecognized codemap status fails the final gate even if
+`cas codemap status` exits zero.
+
 `GITHUB_QUEUE_SECONDS` is measured from the Actions workflow `createdAt` to the
 first non-skipped job `startedAt`. It is external scheduling time, never part
 of `AGENT_CONTROLLED_TOTAL_SECONDS` or codemap work. A missing or unavailable
@@ -50,6 +57,7 @@ scripts/test-codemap-latency-receipt.sh
 ```
 
 It covers identical and changed render candidates, the no-write invariant,
-independent knowledge and agent budgets, required-job timing, and separate
-GitHub queue timing. `make -C cas-cli test-ci-tiers` runs this self-test with
-the other deterministic CI-tier contracts.
+independent knowledge and agent budgets, canonical budget override rejection,
+lower-bound overrides, stale/missing freshness, strict required-job timing,
+and separate GitHub queue timing. `make -C cas-cli test-ci-tiers` runs this
+self-test with the other deterministic CI-tier contracts.

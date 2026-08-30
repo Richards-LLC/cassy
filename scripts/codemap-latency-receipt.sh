@@ -20,9 +20,9 @@ Options:
   --help                   Show this help
 
 Budgets are configurable for controlled probes with:
-  CODEMAP_AGENT_BUDGET_SECONDS (default 300)
-  CODEMAP_KNOWLEDGE_BUDGET_SECONDS (default 90)
-  CODEMAP_DOCS_ONLY_BUDGET_SECONDS (default 60)
+  CODEMAP_AGENT_BUDGET_SECONDS (default/canonical maximum 300)
+  CODEMAP_KNOWLEDGE_BUDGET_SECONDS (default/canonical maximum 90)
+  CODEMAP_DOCS_ONLY_BUDGET_SECONDS (default/canonical maximum 60; required compute is strict <60)
 EOF
 }
 
@@ -111,16 +111,28 @@ if [[ "$cas_bin" == */* && "$cas_bin" != /* ]]; then
     cas_bin="$repo_root/$cas_bin"
 fi
 
-agent_budget="${CODEMAP_AGENT_BUDGET_SECONDS:-300}"
-knowledge_budget="${CODEMAP_KNOWLEDGE_BUDGET_SECONDS:-90}"
-docs_only_budget="${CODEMAP_DOCS_ONLY_BUDGET_SECONDS:-60}"
-for budget_name in agent_budget knowledge_budget docs_only_budget; do
-    budget_value="${!budget_name}"
+canonical_agent_budget=300
+canonical_knowledge_budget=90
+canonical_docs_only_budget=60
+agent_budget="${CODEMAP_AGENT_BUDGET_SECONDS:-$canonical_agent_budget}"
+knowledge_budget="${CODEMAP_KNOWLEDGE_BUDGET_SECONDS:-$canonical_knowledge_budget}"
+docs_only_budget="${CODEMAP_DOCS_ONLY_BUDGET_SECONDS:-$canonical_docs_only_budget}"
+validate_budget() {
+    budget_name="$1"
+    budget_value="$2"
+    canonical_budget="$3"
     if [[ ! "$budget_value" =~ ^[0-9]+$ ]] || (( budget_value == 0 )); then
         echo "error: ${budget_name} must be a positive integer" >&2
         exit 2
     fi
-done
+    if (( budget_value > canonical_budget )); then
+        echo "error: ${budget_name} cannot exceed canonical limit ${canonical_budget}s" >&2
+        exit 2
+    fi
+}
+validate_budget CODEMAP_AGENT_BUDGET_SECONDS "$agent_budget" "$canonical_agent_budget"
+validate_budget CODEMAP_KNOWLEDGE_BUDGET_SECONDS "$knowledge_budget" "$canonical_knowledge_budget"
+validate_budget CODEMAP_DOCS_ONLY_BUDGET_SECONDS "$docs_only_budget" "$canonical_docs_only_budget"
 
 temp_suffix=XX
 temp_suffix="${temp_suffix}XX"
@@ -336,7 +348,7 @@ no_content_change=true
 if [[ "$structure_status" -ne 0 ]]; then no_content_change=false; fi
 if (( agent_total > agent_budget )); then agent_within_budget=false; fi
 if (( knowledge_seconds > knowledge_budget )); then knowledge_within_budget=false; fi
-if (( github_required_seconds > docs_only_budget )); then docs_only_within_budget=false; fi
+if (( github_required_seconds >= docs_only_budget )); then docs_only_within_budget=false; fi
 
 head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)"
 generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -356,17 +368,20 @@ receipt="$tmp/receipt.env"
     printf 'CODEMAP_FRESHNESS_STATUS=%s\n' "$freshness_status"
     printf 'KNOWLEDGE_BUILD_SECONDS=%s\n' "$knowledge_seconds"
     printf 'KNOWLEDGE_BUILD_EXIT_STATUS=%s\n' "$knowledge_status"
+    printf 'KNOWLEDGE_BUILD_CANONICAL_BUDGET_SECONDS=%s\n' "$canonical_knowledge_budget"
     printf 'KNOWLEDGE_BUILD_BUDGET_SECONDS=%s\n' "$knowledge_budget"
     printf 'KNOWLEDGE_BUILD_WITHIN_BUDGET=%s\n' "$knowledge_within_budget"
     printf 'LOCAL_COMMIT_PUSH_READINESS_SECONDS=%s\n' "$readiness_seconds"
     printf 'LOCAL_COMMIT_PUSH_READINESS_EXIT_STATUS=%s\n' "$readiness_status"
     printf 'AGENT_CONTROLLED_TOTAL_SECONDS=%s\n' "$agent_total"
+    printf 'AGENT_CONTROLLED_CANONICAL_BUDGET_SECONDS=%s\n' "$canonical_agent_budget"
     printf 'AGENT_CONTROLLED_BUDGET_SECONDS=%s\n' "$agent_budget"
     printf 'AGENT_CONTROLLED_WITHIN_BUDGET=%s\n' "$agent_within_budget"
     printf 'DOCS_ONLY_LOCAL_CONTRACT_SECONDS=%s\n' "$docs_local_seconds"
     printf 'DOCS_ONLY_LOCAL_CONTRACT_EXIT_STATUS=%s\n' "$docs_local_status"
     printf 'DOCS_ONLY_REQUIRED_COMPUTE_SECONDS=%s\n' "$github_required_seconds"
     printf 'DOCS_ONLY_REQUIRED_COMPUTE_SOURCE=%s\n' "$github_required_source"
+    printf 'DOCS_ONLY_REQUIRED_COMPUTE_CANONICAL_BUDGET_SECONDS=%s\n' "$canonical_docs_only_budget"
     printf 'DOCS_ONLY_REQUIRED_COMPUTE_BUDGET_SECONDS=%s\n' "$docs_only_budget"
     printf 'DOCS_ONLY_REQUIRED_COMPUTE_WITHIN_BUDGET=%s\n' "$docs_only_within_budget"
     printf 'GITHUB_RUN_ID=%s\n' "${github_run_id:-not-requested}"
@@ -388,6 +403,7 @@ fi
 
 if [[ "$no_content_change" != true \
     || "$static_status" -ne 0 \
+    || "$freshness_status" != up-to-date \
     || "$readiness_status" -ne 0 \
     || "$docs_local_status" -ne 0 \
     || "$agent_within_budget" != true \

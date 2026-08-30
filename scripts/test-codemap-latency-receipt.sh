@@ -41,7 +41,21 @@ cat >"$tmp/fake-cas" <<'EOF'
 #!/usr/bin/env bash
 case "$1 $2" in
   "codemap status")
-    printf '%s\n' 'CODEMAP.md: /tmp/project/.claude/CODEMAP.md' '  Status: up to date'
+    case "${FAKE_CODEMAP_STATUS:-up-to-date}" in
+      up-to-date)
+        printf '%s\n' 'CODEMAP.md: /tmp/project/.claude/CODEMAP.md' '  Status: up to date'
+        ;;
+      stale)
+        printf '%s\n' 'CODEMAP.md: /tmp/project/.claude/CODEMAP.md' '  Status: stale'
+        ;;
+      missing)
+        printf '%s\n' 'CODEMAP.md: not found'
+        ;;
+      *)
+        echo "unexpected fake codemap status: ${FAKE_CODEMAP_STATUS}" >&2
+        exit 2
+        ;;
+    esac
     ;;
   "knowledge build")
     printf '%s\n' 'knowledge build completed'
@@ -57,10 +71,14 @@ chmod +x "$tmp/fake-cas"
 cat >"$tmp/fake-gh" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1 $2" == 'run view' ]]; then
-    cat <<'JSON'
+    mac_end='2026-08-30T12:00:09Z'
+    if [[ "${FAKE_REQUIRED_SECONDS:-5}" == 60 ]]; then
+        mac_end='2026-08-30T12:01:04Z'
+    fi
+    cat <<JSON
 {"createdAt":"2026-08-30T12:00:00Z","url":"https://github.com/example/repo/actions/runs/123","jobs":[
   {"name":"Fast Validation","startedAt":"2026-08-30T12:00:03Z","completedAt":"2026-08-30T12:00:05Z","conclusion":"success"},
-  {"name":"macOS Check","startedAt":"2026-08-30T12:00:04Z","completedAt":"2026-08-30T12:00:09Z","conclusion":"success"},
+  {"name":"macOS Check","startedAt":"2026-08-30T12:00:04Z","completedAt":"$mac_end","conclusion":"success"},
   {"name":"Clippy (advisory)","startedAt":"2026-08-30T12:00:03Z","completedAt":"2026-08-30T12:01:00Z","conclusion":"skipped"}
 ]}
 JSON
@@ -80,6 +98,7 @@ artifact="$tmp/receipt.env"
 out="$(CLOCK_STEP=1 "$receipt" --artifact "$artifact" --github-run-id 123 --github-repo example/repo)"
 expect_field "$out" CODEMAP_RENDER_STATUS identical 'a no-op render is recognized as identical'
 expect_field "$out" NO_CONTENT_CHANGE_PRESERVED true 'identical render preserves the no-content rule'
+expect_field "$out" CODEMAP_FRESHNESS_STATUS up-to-date 'up-to-date freshness is recorded'
 expect_field "$out" KNOWLEDGE_BUILD_BUDGET_SECONDS 90 'knowledge build defaults to a 90-second bound'
 expect_field "$out" KNOWLEDGE_BUILD_WITHIN_BUDGET true 'knowledge build is within its bound'
 expect_field "$out" AGENT_CONTROLLED_TOTAL_SECONDS 4 'agent-controlled phases exclude docs and queue time'
@@ -123,6 +142,60 @@ CODEMAP_AGENT_BUDGET_SECONDS=0 "$receipt" >/dev/null 2>&1
 invalid_status=$?
 set -e
 if [[ "$invalid_status" -eq 2 ]]; then ok 'invalid budget is rejected'; else bad "invalid budget exited $invalid_status"; fi
+
+for budget_case in \
+    'CODEMAP_AGENT_BUDGET_SECONDS 301 agent budget above canonical maximum' \
+    'CODEMAP_KNOWLEDGE_BUDGET_SECONDS 91 knowledge budget above canonical maximum' \
+    'CODEMAP_DOCS_ONLY_BUDGET_SECONDS 61 docs-only budget above canonical maximum'; do
+    read -r budget_name budget_value budget_label <<<"$budget_case"
+    set +e
+    env "$budget_name=$budget_value" "$receipt" >/dev/null 2>&1
+    budget_status=$?
+    set -e
+    if [[ "$budget_status" -eq 2 ]]; then ok "$budget_label is rejected"; else bad "$budget_label exited $budget_status"; fi
+done
+
+# Canonical lower bounds remain usable when all measured phases are zero.
+set +e
+lower_output="$(
+    CODEMAP_AGENT_BUDGET_SECONDS=1 \
+    CODEMAP_KNOWLEDGE_BUDGET_SECONDS=1 \
+    CODEMAP_DOCS_ONLY_BUDGET_SECONDS=1 \
+    CLOCK_STATE="$tmp/lower-clock-state" CLOCK_STEP=0 \
+    "$receipt"
+)"
+lower_status=$?
+set -e
+if [[ "$lower_status" -eq 0 ]]; then ok 'positive lower-bound overrides are accepted'; else bad "positive lower-bound overrides exited $lower_status"; fi
+expect_field "$lower_output" AGENT_CONTROLLED_BUDGET_SECONDS 1 'agent lower-bound override is retained'
+expect_field "$lower_output" KNOWLEDGE_BUILD_BUDGET_SECONDS 1 'knowledge lower-bound override is retained'
+expect_field "$lower_output" DOCS_ONLY_REQUIRED_COMPUTE_BUDGET_SECONDS 1 'docs-only lower-bound override is retained'
+
+for freshness_case in stale missing; do
+    set +e
+    freshness_output="$(
+        FAKE_CODEMAP_STATUS="$freshness_case" \
+        CLOCK_STATE="$tmp/$freshness_case-clock-state" CLOCK_STEP=0 \
+        "$receipt"
+    )"
+    freshness_status=$?
+    set -e
+    if [[ "$freshness_status" -ne 0 ]]; then ok "$freshness_case freshness exits non-zero"; else bad "$freshness_case freshness exited zero"; fi
+    expect_field "$freshness_output" CODEMAP_FRESHNESS_STATUS "$freshness_case" "$freshness_case freshness is recorded"
+done
+
+# The required docs compute contract is strict: exactly 60 seconds fails.
+set +e
+exact_output="$(
+    FAKE_REQUIRED_SECONDS=60 \
+    CLOCK_STATE="$tmp/exact-clock-state" CLOCK_STEP=0 \
+    "$receipt" --github-run-id 123 --github-repo example/repo
+)"
+exact_status=$?
+set -e
+if [[ "$exact_status" -ne 0 ]]; then ok 'exactly 60 seconds required compute exits non-zero'; else bad 'exactly 60 seconds required compute exited zero'; fi
+expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_SECONDS 60 'exact-bound required compute is measured'
+expect_field "$exact_output" DOCS_ONLY_REQUIRED_COMPUTE_WITHIN_BUDGET false 'exact-bound required compute fails strict docs contract'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

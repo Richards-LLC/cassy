@@ -6,6 +6,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 receipt="$script_dir/codemap-latency-receipt.sh"
 tmp="$(mktemp -d)"
 named_worktree=""
+named_branch=""
 detached_worktree=""
 cleanup() {
     if [[ -n "$detached_worktree" ]]; then
@@ -13,6 +14,9 @@ cleanup() {
     fi
     if [[ -n "$named_worktree" ]]; then
         git worktree remove --force "$named_worktree" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$named_branch" ]]; then
+        git branch -D "$named_branch" >/dev/null 2>&1 || true
     fi
     rm -rf "$tmp"
 }
@@ -101,7 +105,8 @@ EOF
 chmod +x "$tmp/fake-gh"
 
 named_worktree="$tmp/named-worktree"
-git worktree add --quiet -b "codemap-latency-self-test-$$" "$named_worktree" HEAD
+named_branch="codemap-latency-self-test-$$"
+git worktree add --quiet -b "$named_branch" "$named_worktree" HEAD
 
 export CAS_BIN="$tmp/fake-cas"
 export GH_BIN="$tmp/fake-gh"
@@ -131,14 +136,14 @@ fi
 
 # A changed candidate must fail before CODEMAP.md can be touched.
 printf '%s\n' 'changed render' >"$tmp/changed-CODEMAP.md"
-before_hash="$(shasum -a 256 .claude/CODEMAP.md)"
+before_hash="$(git -C "$named_worktree" hash-object .claude/CODEMAP.md)"
 set +e
 CLOCK_STATE="$tmp/changed-clock-state" CLOCK_STEP=1 "$receipt" --repo-root "$named_worktree" --rendered-path "$tmp/changed-CODEMAP.md" >"$tmp/changed.out" 2>&1
 changed_status=$?
 set -e
-after_hash="$(shasum -a 256 .claude/CODEMAP.md)"
+after_hash="$(git -C "$named_worktree" hash-object .claude/CODEMAP.md)"
 if [[ "$changed_status" -ne 0 ]]; then ok 'changed render exits non-zero'; else bad 'changed render exited zero'; fi
-if [[ "$before_hash" == "$after_hash" ]]; then ok 'changed render never modifies CODEMAP.md'; else bad 'changed render modified CODEMAP.md'; fi
+if [[ "$before_hash" == "$after_hash" ]]; then ok 'changed render never modifies fixture CODEMAP.md'; else bad 'changed render modified fixture CODEMAP.md'; fi
 
 # Four local agent phases at 76 seconds each exceed 300 seconds while the
 # bounded knowledge phase itself remains under 90 seconds.
@@ -242,6 +247,22 @@ set -e
 if [[ "$detached_ci_status" -eq 0 ]]; then ok 'exact CI detached checkout passes'; else bad "exact CI detached checkout exited $detached_ci_status"; fi
 expect_field "$detached_ci_output" READINESS_MODE github-actions-verification-detached 'CI detached readiness is labeled separately'
 expect_field "$detached_ci_output" LOCAL_COMMIT_PUSH_READINESS_EXIT_STATUS 0 'CI detached readiness completes the verification checks'
+
+# Remove the exact validated temporary branch and prove its ref is gone. The
+# EXIT trap retains the same cleanup for failures before this assertion.
+validated_branch="$named_branch"
+git worktree remove --force "$named_worktree" >/dev/null
+named_worktree=""
+if git branch -D "$validated_branch" >/dev/null 2>&1; then
+    named_branch=""
+else
+    bad 'temporary named branch cleanup failed'
+fi
+if git show-ref --verify --quiet "refs/heads/$validated_branch"; then
+    bad 'temporary named branch ref leaked'
+else
+    ok 'temporary named branch ref is removed'
+fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

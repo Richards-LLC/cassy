@@ -1,12 +1,33 @@
 use crate::hooks::handlers::handlers_middle::capture_transcript_for_prompts;
 use crate::hooks::handlers::handlers_middle::session_stop::{
     build_duplicate_detection_context, build_learning_review_context, build_rule_review_context,
-    build_session_summary_context, handle_loop_iteration, synthesize_buffered_observations,
+    build_session_summary_context, handle_loop_iteration,
+    synthesize_buffered_observations_with_sources,
 };
 use crate::hooks::handlers::handlers_middle::utils::{
     find_similar_entry, find_similar_rule, is_architectural_file, truncate_list, truncate_str,
 };
 use crate::hooks::handlers::*;
+
+fn session_observation_source_ids(entries: &[&Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.entry_type == EntryType::Observation)
+        .map(|entry| entry.id.clone())
+        .collect()
+}
+
+fn rule_from_extracted_learning(
+    rule_id: String,
+    learning: ExtractedLearning,
+    source_ids: &[String],
+) -> Rule {
+    let mut rule = Rule::new(rule_id, learning.content);
+    rule.paths = learning.path_pattern.unwrap_or_default();
+    rule.tags = learning.tags;
+    rule.source_ids = source_ids.to_vec();
+    rule
+}
 
 pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOutput, MemError> {
     let timer = TraceTimer::new();
@@ -125,6 +146,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // Limit processing to prevent slow hooks on very active sessions
     const MAX_OBSERVATIONS: usize = 50;
     let session_observations: Vec<&Entry> = session_entries.iter().take(MAX_OBSERVATIONS).collect();
+    let session_observation_source_ids = session_observation_source_ids(&session_observations);
     let total_obs_count = session_entries.len();
     let obs_count = session_observations.len();
 
@@ -283,6 +305,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                     content,
                     tags: vec!["session-summary".to_string(), "ai-generated".to_string()],
                     session_id: Some(input.session_id.clone()),
+                    source_ids: session_observation_source_ids.clone(),
                     importance: 0.7, // Session summaries are valuable
                     ..Default::default()
                 };
@@ -339,16 +362,18 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                                     Err(_) => continue,
                                 };
 
-                                let mut rule = Rule::new(rule_id.clone(), learning.content.clone());
-                                rule.paths = learning.path_pattern.unwrap_or_default();
-                                rule.tags = learning.tags;
+                                let rule = rule_from_extracted_learning(
+                                    rule_id.clone(),
+                                    learning,
+                                    &session_observation_source_ids,
+                                );
                                 // Rule starts as Draft - needs user validation via mcp__cas__rule action=helpful
 
                                 if rule_store.add(&rule).is_ok() {
                                     eprintln!(
                                         "cas: Created rule {}: {}",
                                         rule_id,
-                                        truncate_str(&learning.content, 60)
+                                        truncate_str(&rule.content, 60)
                                     );
                                 }
                             }
@@ -437,6 +462,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                                 content: draft.content.clone(),
                                 tags: draft.tags.clone(),
                                 session_id: Some(input.session_id.clone()),
+                                source_ids: session_observation_source_ids.clone(),
                                 importance: draft.confidence,
                                 ..Default::default()
                             };
@@ -486,6 +512,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                 content,
                 tags: vec!["session-activity".to_string(), "compacted".to_string()],
                 session_id: Some(input.session_id.clone()),
+                source_ids: session_observation_source_ids.clone(),
                 importance: 0.5, // Activity summaries have moderate importance
                 ..Default::default()
             };
@@ -535,8 +562,12 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
 
             if !buffered.is_empty() {
                 // Synthesize buffered observations into learnings
-                let synthesis_result =
-                    synthesize_buffered_observations(cas_root, &buffered, &input.session_id);
+                let synthesis_result = synthesize_buffered_observations_with_sources(
+                    cas_root,
+                    &buffered,
+                    &input.session_id,
+                    &session_observation_source_ids,
+                );
 
                 match synthesis_result {
                     Ok(learnings_created) => {
@@ -684,5 +715,28 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         )))
     } else {
         Ok(HookOutput::empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rule_from_extracted_learning;
+    use crate::hooks::handlers::ExtractedLearning;
+
+    #[test]
+    fn transcript_learning_promotion_carries_observation_ids() {
+        let rule = rule_from_extracted_learning(
+            "rule-derived".to_string(),
+            ExtractedLearning {
+                content: "Keep provenance on derived rules".to_string(),
+                path_pattern: Some("**/*.rs".to_string()),
+                confidence: 0.9,
+                tags: vec!["from_learning".to_string()],
+            },
+            &["observation-1".to_string(), "observation-2".to_string()],
+        );
+
+        assert_eq!(rule.source_ids, ["observation-1", "observation-2"]);
+        assert_eq!(rule.paths, "**/*.rs");
     }
 }

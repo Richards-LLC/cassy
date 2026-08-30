@@ -7,6 +7,17 @@ use crate::daemon::DaemonConfig;
 use crate::error::CasError;
 use crate::store::Store;
 
+fn consolidated_source_ids(source_ids: &[String], entries: &[crate::types::Entry]) -> Vec<String> {
+    crate::types::merge_source_ids(
+        std::iter::once(source_ids.to_vec()).chain(
+            entries
+                .iter()
+                .filter(|entry| source_ids.iter().any(|id| id == &entry.id))
+                .map(|entry| entry.source_ids.clone()),
+        ),
+    )
+}
+
 /// Apply memory decay to entries based on time and access patterns.
 pub(crate) fn apply_memory_decay(store: &Arc<dyn Store>) -> Result<usize, CasError> {
     use crate::types::{EntryType, MemoryTier};
@@ -126,13 +137,15 @@ pub(crate) fn run_consolidation(
                 let _ = store.archive(id);
             }
 
+            let merged_source_ids = consolidated_source_ids(&suggestion.source_ids, &entries);
+
             let id = store.generate_id()?;
             let entry = Entry {
                 id,
                 scope: Scope::default(),
                 entry_type: EntryType::Learning,
                 observation_type: None,
-                source_ids: suggestion.source_ids.clone(),
+                source_ids: merged_source_ids,
                 tags: suggestion.merged_tags,
                 created: Utc::now(),
                 content: suggestion.merged_content,
@@ -169,6 +182,28 @@ pub(crate) fn run_consolidation(
     }
 
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consolidated_source_ids;
+    use cas_types::Entry;
+
+    #[test]
+    fn consolidation_provenance_includes_input_entries_and_their_sources() {
+        let mut first = Entry::new("learning-1".to_string(), "first".to_string());
+        first.source_ids = vec!["observation-1".to_string()];
+        let mut second = Entry::new("learning-2".to_string(), "second".to_string());
+        second.source_ids = vec!["observation-2".to_string(), "observation-1".to_string()];
+
+        let source_ids =
+            consolidated_source_ids(&[first.id.clone(), second.id.clone()], &[first, second]);
+
+        assert_eq!(
+            source_ids,
+            ["learning-1", "learning-2", "observation-1", "observation-2"]
+        );
+    }
 }
 
 /// Auto-prune stale entries.

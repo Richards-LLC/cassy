@@ -617,7 +617,9 @@ mod stop_flow;
 mod synthesis;
 
 pub use stop_flow::handle_stop;
-pub use synthesis::synthesize_buffered_observations;
+pub use synthesis::{
+    synthesize_buffered_observations, synthesize_buffered_observations_with_sources,
+};
 
 // =============================================================================
 // B3 tests

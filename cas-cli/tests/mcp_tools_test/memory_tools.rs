@@ -219,6 +219,7 @@ async fn cas_4caa_remember_derives_valid_until_from_until_deadline() {
 #[tokio::test]
 async fn test_get_entry() {
     let (_temp, service) = setup_cas();
+    let cas_dir = service.project_path().to_path_buf();
 
     // First create an entry
     let req = RememberRequest {
@@ -245,6 +246,11 @@ async fn test_get_entry() {
     let text = extract_text(result);
     let id = extract_entry_id(&text).expect("should have ID");
 
+    let store = open_store(&cas_dir).expect("open store");
+    let mut entry = store.get(id).expect("stored entry");
+    entry.source_ids = vec!["observation-1".to_string(), "learning-1".to_string()];
+    store.update(&entry).expect("update provenance");
+
     // Now get the entry
     let get_req = IdRequest { id: id.to_string() };
 
@@ -256,6 +262,7 @@ async fn test_get_entry() {
     let text = extract_text(result);
     assert!(text.contains("Test get content"));
     assert!(text.contains("Learning"));
+    assert!(text.contains("Source entries: observation-1, learning-1"));
 }
 
 #[tokio::test]

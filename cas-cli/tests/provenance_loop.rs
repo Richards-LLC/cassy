@@ -1,5 +1,6 @@
-use cas::sync::{SkillSyncer, read_skill_from_file};
-use cas::types::{Scope, Skill, SkillStatus, SkillType};
+use cas::sync::SkillSyncer;
+use cas::sync::skills::read_skill_from_file;
+use cas::types::{Scope, Skill, SkillStatus, SkillType, merge_source_ids};
 use tempfile::TempDir;
 
 #[test]
@@ -47,4 +48,14 @@ fn synced_skill_file_round_trips_provenance() {
         .expect("synced skill should be readable");
 
     assert_eq!(parsed.source_ids, skill.source_ids);
+}
+
+#[test]
+fn provenance_union_keeps_learning_and_observation_links() {
+    let merged = merge_source_ids(vec![
+        vec!["learning-1".to_string(), "learning-2".to_string()],
+        vec!["observation-1".to_string(), "learning-1".to_string()],
+    ]);
+
+    assert_eq!(merged, ["learning-1", "learning-2", "observation-1"]);
 }

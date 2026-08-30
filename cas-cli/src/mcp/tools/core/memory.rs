@@ -784,13 +784,18 @@ impl CasCore {
         let _ = store.update(&entry);
 
         let output = format!(
-            "ID: {}\nType: {:?}\nTags: {}\nCreated: {}\nImportance: {:.2}\nStability: {:.2}\nFeedback: +{} -{}\n\n{}",
+            "ID: {}\nType: {:?}\nTags: {}\nSource entries: {}\nCreated: {}\nImportance: {:.2}\nStability: {:.2}\nFeedback: +{} -{}\n\n{}",
             entry.id,
             entry.entry_type,
             if entry.tags.is_empty() {
                 "none".to_string()
             } else {
                 entry.tags.join(", ")
+            },
+            if entry.source_ids.is_empty() {
+                "none".to_string()
+            } else {
+                entry.source_ids.join(", ")
             },
             entry.created.format("%Y-%m-%d %H:%M"),
             entry.importance,
